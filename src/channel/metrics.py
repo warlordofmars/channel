@@ -9,7 +9,7 @@ In local dev / unit tests the EMF library detects a non-Lambda environment
 and writes metrics to stdout instead (no-op from a CloudWatch perspective).
 
 Usage:
-    from starter.metrics import emit_metric
+    from channel.metrics import emit_metric
 
     await emit_metric("ToolInvocations", operation="remember")
     await emit_metric("ToolErrors", operation="remember")
@@ -22,7 +22,7 @@ import os
 
 from aws_embedded_metrics.logger.metrics_logger_factory import create_metrics_logger
 
-NAMESPACE = "AgentCoreStarter"
+NAMESPACE = "Channel"
 ENVIRONMENT = os.environ.get("STARTER_ENV", os.environ.get("ENV", "local"))
 
 

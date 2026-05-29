@@ -1,6 +1,6 @@
 # Security and secrets
 
-This page documents the operational secret contracts that AgentCore Starter
+This page documents the operational secret contracts that Channel
 relies on at runtime: which environment variables and SSM parameters
 they map to, which file in the codebase consumes them, how to rotate
 them safely, and what the startup-time fail-closed posture looks like.
@@ -9,8 +9,8 @@ All SSM parameters use a per-environment path so non-prod and prod never
 share secrets:
 
 ```text
-prod   → /agentcore-starter/<name>
-others → /agentcore-starter/<env_name>/<name>
+prod   → /channel/<name>
+others → /channel/<env_name>/<name>
 ```
 
 The CDK stack in `infra/stacks/starter_stack.py` provisions most
@@ -43,7 +43,7 @@ geo-restrictions, and CSP headers.
 | --- | --- |
 | Env var (override) | `STARTER_ORIGIN_VERIFY_SECRET` |
 | Env var (SSM path) | `STARTER_ORIGIN_VERIFY_PARAM` |
-| SSM parameter path | `/agentcore-starter/origin-verify-secret` (prod) or `/agentcore-starter/<env_name>/origin-verify-secret` |
+| SSM parameter path | `/channel/origin-verify-secret` (prod) or `/channel/<env_name>/origin-verify-secret` |
 | Header name | `X-Origin-Verify` |
 | Consumer (Lambda) | `src/starter/auth/tokens.py` (`_origin_verify_secret()`) |
 | Consumer (middleware) | `src/starter/api/main.py` (`_verify_origin_secret`) |
@@ -100,11 +100,11 @@ middleware.
    `--type String` and `--overwrite`):
    ```bash
    aws ssm put-parameter \
-     --name /agentcore-starter/<env>/origin-verify-secret \
+     --name /channel/<env>/origin-verify-secret \
      --value "$NEW_SECRET" --type String --overwrite
    ```
    For prod, the parameter path drops the `<env>/` segment:
-   `/agentcore-starter/origin-verify-secret`.
+   `/channel/origin-verify-secret`.
 3. Re-deploy the stack. **By itself this is not enough** — see the
    WARNING immediately below. CDK synthesizes the
    `CfnDynamicReference` in `origin_verify_header` into the
@@ -121,7 +121,7 @@ middleware.
    > value to CloudFront.** The CloudFront origin custom-header for
    > `X-Origin-Verify` is wired with `CfnDynamicReferenceService.SSM`,
    > which renders into the CloudFormation template as a fixed
-   > literal string of the form <code v-pre>{{resolve:ssm:/agentcore-starter/&lt;env&gt;/origin-verify-secret}}</code>.
+   > literal string of the form <code v-pre>{{resolve:ssm:/channel/&lt;env&gt;/origin-verify-secret}}</code>.
    > That template string is identical across SSM rotations, so
    > CloudFormation sees no diff on the `UiDistribution` resource
    > and CloudFront's stored distribution config is never updated.
@@ -161,20 +161,20 @@ middleware.
    > # 1. Resolve the distribution ID for this environment. The
    > #    CloudFront alternate domain name is the full FQDN — for dev /
    > #    jc / non-prod environments,
-   > #    `agentcore-starter-<env>.<hosted-zone>`; for prod,
-   > #    `agentcore-starter.<hosted-zone>` (no env suffix). The
+   > #    `channel-<env>.<hosted-zone>`; for prod,
+   > #    `channel.<hosted-zone>` (no env suffix). The
    > #    JMESPath uses exact-match (`@ == ...`) on the full FQDN to
    > #    avoid matching unrelated distributions whose alias happens to
-   > #    share the `agentcore-starter-<env>` prefix (e.g. `dev` vs
+   > #    share the `channel-<env>` prefix (e.g. `dev` vs
    > #    `dev2`) — `contains(@, ...)` would silently return multiple
    > #    IDs and break the get-distribution-config call below.
    > # Non-prod (replace <env> and <hosted-zone>):
    > DIST_ID=$(aws cloudfront list-distributions \
-   >   --query "DistributionList.Items[?Aliases.Items[?@ == 'agentcore-starter-<env>.<hosted-zone>']].Id" \
+   >   --query "DistributionList.Items[?Aliases.Items[?@ == 'channel-<env>.<hosted-zone>']].Id" \
    >   --output text)
    > # Prod equivalent (uncomment for prod, comment out the form above):
    > # DIST_ID=$(aws cloudfront list-distributions \
-   > #   --query "DistributionList.Items[?Aliases.Items[?@ == 'agentcore-starter.<hosted-zone>']].Id" \
+   > #   --query "DistributionList.Items[?Aliases.Items[?@ == 'channel.<hosted-zone>']].Id" \
    > #   --output text)
    >
    > # 2. Fetch the current distribution config + ETag. The response
@@ -226,7 +226,7 @@ middleware.
    > # /health via CloudFront → 200 with status:ok ONLY after
    > # rotation step 4 has refreshed Lambda's cached SSM secret to
    > # match CloudFront's injected header value.
-   > curl -sS "https://agentcore-starter-<env>.<hosted-zone>/health"
+   > curl -sS "https://channel-<env>.<hosted-zone>/health"
    > # Expect after rotation step 4: {"status":"ok","version":"..."}
    > ```
    >
@@ -299,7 +299,7 @@ yet.
 | --- | --- |
 | Env var (override) | `STARTER_JWT_SECRET` |
 | Env var (SSM path) | `STARTER_JWT_SECRET_PARAM` |
-| SSM parameter path | `/agentcore-starter/jwt-secret` (prod) or `/agentcore-starter/<env_name>/jwt-secret` |
+| SSM parameter path | `/channel/jwt-secret` (prod) or `/channel/<env_name>/jwt-secret` |
 | Algorithm | HS256 (symmetric) |
 | Issuer claim (`iss`) | `https://<custom_domain>` (set via `STARTER_ISSUER`) |
 | Consumer | `src/starter/auth/tokens.py` (`_jwt_secret()`, `decode_jwt`, `decode_mgmt_jwt`) |
@@ -333,7 +333,7 @@ accordingly.
 2. Update SSM:
    ```bash
    aws ssm put-parameter \
-     --name /agentcore-starter/jwt-secret \
+     --name /channel/jwt-secret \
      --value "$NEW_SECRET" --type String --overwrite
    ```
 3. Force a Lambda cold start so `lru_cache` re-reads (publish a new
@@ -350,13 +350,13 @@ doubles as the admin-role grant list.
 | --- | --- |
 | Client ID env var | `GOOGLE_CLIENT_ID` |
 | Client ID SSM env var | `GOOGLE_CLIENT_ID_PARAM` |
-| Client ID SSM path | `/agentcore-starter/google-client-id` (prod) or `/agentcore-starter/<env_name>/google-client-id` |
+| Client ID SSM path | `/channel/google-client-id` (prod) or `/channel/<env_name>/google-client-id` |
 | Client secret env var | `GOOGLE_CLIENT_SECRET` |
 | Client secret SSM env var | `GOOGLE_CLIENT_SECRET_PARAM` |
-| Client secret SSM path | `/agentcore-starter/google-client-secret` (prod) or `/agentcore-starter/<env_name>/google-client-secret` |
+| Client secret SSM path | `/channel/google-client-secret` (prod) or `/channel/<env_name>/google-client-secret` |
 | Allowlist env var | `ALLOWED_EMAILS` (JSON array literal) |
 | Allowlist SSM env var | `ALLOWED_EMAILS_PARAM` |
-| Allowlist SSM path | `/agentcore-starter/allowed-emails` (prod) or `/agentcore-starter/<env_name>/allowed-emails` |
+| Allowlist SSM path | `/channel/allowed-emails` (prod) or `/channel/<env_name>/allowed-emails` |
 | Allowlist default | `"[]"` — empty list, denies all |
 | Redirect URI | `https://<custom_domain>/auth/callback` |
 | Consumer | `src/starter/auth/google.py`; login flow in `src/starter/auth/mgmt_auth.py` |
@@ -385,8 +385,8 @@ doubles as the admin-role grant list.
 The redirect URI registered in the Google Cloud Console must match
 the application's issuer exactly. The issuer is computed as
 `https://<custom_domain>` from the CDK stack, where `custom_domain`
-is `agentcore-starter.<HOSTED_ZONE_NAME>` in prod or
-`agentcore-starter-<env_name>.<HOSTED_ZONE_NAME>` otherwise.
+is `channel.<HOSTED_ZONE_NAME>` in prod or
+`channel-<env_name>.<HOSTED_ZONE_NAME>` otherwise.
 
 ### Rotation procedure
 
@@ -397,7 +397,7 @@ is `agentcore-starter.<HOSTED_ZONE_NAME>` in prod or
 2. Update SSM:
    ```bash
    aws ssm put-parameter \
-     --name /agentcore-starter/google-client-secret \
+     --name /channel/google-client-secret \
      --value "$NEW_SECRET" --type String --overwrite
    ```
 3. Bounce the Lambda so the `lru_cache` re-reads.
@@ -407,7 +407,7 @@ is `agentcore-starter.<HOSTED_ZONE_NAME>` in prod or
 
 ```bash
 aws ssm put-parameter \
-  --name /agentcore-starter/allowed-emails \
+  --name /channel/allowed-emails \
   --value '["alice@example.com","bob@example.com"]' \
   --type String --overwrite
 ```

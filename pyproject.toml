@@ -1,7 +1,7 @@
 [project]
-name = "agentcore-starter"
+name = "channel"
 dynamic = ["version"]
-description = "Starter template for AWS + AgentCore projects (Lambda, React, CDK)"
+description = "AI agent chat backend on AWS (Lambda, React, CDK)"
 requires-python = ">=3.10"
 dependencies = [
     "aws-embedded-metrics>=3.5.0",
@@ -52,7 +52,7 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 ignore = ["E501", "B008"]
 
 [tool.coverage.run]
-source = ["src/starter"]
+source = ["src/channel"]
 omit = ["*/tests/*"]
 
 [tool.coverage.report]
@@ -81,4 +81,4 @@ build-backend = "hatchling.build"
 source = "vcs"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/starter"]
+packages = ["src/channel"]

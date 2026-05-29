@@ -1,6 +1,6 @@
 # Copyright (c) 2026 John Carter. All rights reserved.
 """
-Structured JSON logging for AgentCore Starter.
+Structured JSON logging for Channel.
 
 Call configure_logging(service) once at Lambda cold start (or local server
 startup).  All subsequent calls to get_logger() return a logger whose output
@@ -74,7 +74,7 @@ class _JsonFormatter(logging.Formatter):
 
 
 def configure_logging(service: str) -> None:
-    """Configure the 'starter' logger with JSON output.
+    """Configure the 'channel' logger with JSON output.
 
     Safe to call multiple times — only installs the handler once.
     """
@@ -83,11 +83,11 @@ def configure_logging(service: str) -> None:
     _SERVICE = service
     _ENV = os.environ.get("STARTER_ENV", os.environ.get("APP_ENV", "dev"))
     try:
-        _VERSION = importlib.metadata.version("agentcore-starter")
+        _VERSION = importlib.metadata.version("channel")
     except importlib.metadata.PackageNotFoundError:  # pragma: no cover
         _VERSION = os.environ.get("APP_VERSION", "dev")  # pragma: no cover
 
-    logger = logging.getLogger("starter")
+    logger = logging.getLogger("channel")
     if not logger.handlers:
         handler = logging.StreamHandler()
         handler.setFormatter(_JsonFormatter())
@@ -99,8 +99,8 @@ def configure_logging(service: str) -> None:
     logging.getLogger("uvicorn.access").propagate = False
 
 
-def get_logger(name: str = "starter") -> logging.Logger:
-    """Return the named logger (default: root starter logger)."""
+def get_logger(name: str = "channel") -> logging.Logger:
+    """Return the named logger (default: root channel logger)."""
     return logging.getLogger(name)
 
 

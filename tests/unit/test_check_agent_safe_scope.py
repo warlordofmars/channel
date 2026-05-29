@@ -81,12 +81,12 @@ def test_parse_files_to_touch_empty_body_returns_none():
 def test_parse_files_to_touch_multiple_backticks_in_one_bullet():
     body = """## Files to touch
 
-- Edit: `src/starter/api/foo.py` and `tests/unit/test_foo.py`
+- Edit: `src/channel/api/foo.py` and `tests/unit/test_foo.py`
 
 ## Next
 """
     assert scope_check.parse_files_to_touch(body) == [
-        "src/starter/api/foo.py",
+        "src/channel/api/foo.py",
         "tests/unit/test_foo.py",
     ]
 
@@ -94,7 +94,7 @@ def test_parse_files_to_touch_multiple_backticks_in_one_bullet():
 def test_parse_files_to_touch_bare_path_without_backticks():
     body = """## Files to touch
 
-- New: src/starter/foo.py
+- New: src/channel/foo.py
 - Edit: CLAUDE.md
 
 ## Next
@@ -102,7 +102,7 @@ def test_parse_files_to_touch_bare_path_without_backticks():
     # Bare paths should still be picked up — slashes or known top-level files.
     parsed = scope_check.parse_files_to_touch(body)
     assert parsed is not None
-    assert "src/starter/foo.py" in parsed
+    assert "src/channel/foo.py" in parsed
     assert "CLAUDE.md" in parsed
 
 
@@ -114,15 +114,15 @@ def test_parse_files_to_touch_bare_paths_multiple_per_bullet():
     matches any diff entry, causing false FAILs."""
     body = """## Files to touch
 
-- Edit: src/starter/foo.py and src/starter/bar.py
+- Edit: src/channel/foo.py and src/channel/bar.py
 - New: docs/a.md, docs/b.md
 
 ## Next
 """
     parsed = scope_check.parse_files_to_touch(body)
     assert parsed is not None
-    assert "src/starter/foo.py" in parsed
-    assert "src/starter/bar.py" in parsed
+    assert "src/channel/foo.py" in parsed
+    assert "src/channel/bar.py" in parsed
     assert "docs/a.md" in parsed
     assert "docs/b.md" in parsed
     # No mashed-together token should sneak through.
@@ -210,8 +210,8 @@ def test_area_label_paths_multiple_bounded_areas_combine():
     """Case (e) — multiple area labels combine into a union of globs."""
     globs = scope_check.area_label_paths(["api", "auth"])
     assert globs is not None
-    assert any(g.startswith("src/starter/api/") for g in globs)
-    assert any(g.startswith("src/starter/auth/") for g in globs)
+    assert any(g.startswith("src/channel/api/") for g in globs)
+    assert any(g.startswith("src/channel/auth/") for g in globs)
 
 
 def test_area_label_paths_meta_in_mix_disables_fallback():
@@ -239,10 +239,10 @@ def test_check_scope_all_in_scope():
 
 def test_check_scope_some_out_of_scope():
     out = scope_check.check_scope(
-        diff_files=["ui/src/foo.jsx", "src/starter/api/bad.py"],
+        diff_files=["ui/src/foo.jsx", "src/channel/api/bad.py"],
         allowed_globs=["ui/**"],
     )
-    assert out == ["src/starter/api/bad.py"]
+    assert out == ["src/channel/api/bad.py"]
 
 
 def test_check_scope_universal_allowed_paths_pass():
@@ -256,8 +256,8 @@ def test_check_scope_universal_allowed_paths_pass():
 
 def test_check_scope_glob_with_double_star():
     out = scope_check.check_scope(
-        diff_files=["src/starter/api/deep/nested/file.py"],
-        allowed_globs=["src/starter/api/**"],
+        diff_files=["src/channel/api/deep/nested/file.py"],
+        allowed_globs=["src/channel/api/**"],
     )
     assert out == []
 
@@ -337,8 +337,8 @@ def test_case_e_multiple_area_labels_mapping_precedence():
     body = "## Context\n\nNo files-to-touch section.\n"
     labels = ["api", "auth", "agent-safe"]
     diff = [
-        "src/starter/api/foo.py",
-        "src/starter/auth/oauth.py",
+        "src/channel/api/foo.py",
+        "src/channel/auth/oauth.py",
     ]
     v = scope_check.evaluate(body, labels, diff)
     assert v.level == "PASS"
@@ -349,7 +349,7 @@ def test_case_e_multiple_areas_with_out_of_scope_file_fails():
     body = "## Context\n\nNo files-to-touch section.\n"
     labels = ["api", "auth", "agent-safe"]
     diff = [
-        "src/starter/api/foo.py",
+        "src/channel/api/foo.py",
         "ui/src/components/Foo.jsx",  # out of scope for api+auth
     ]
     v = scope_check.evaluate(body, labels, diff)
@@ -361,11 +361,11 @@ def test_case_f_h2_heading_in_evaluator():
     """(f) H2 heading → parsed correctly by the full evaluator."""
     body = """## Files to touch
 
-- `src/starter/foo.py`
+- `src/channel/foo.py`
 
 ## More
 """
-    v = scope_check.evaluate(body, ["agent-safe"], ["src/starter/foo.py"])
+    v = scope_check.evaluate(body, ["agent-safe"], ["src/channel/foo.py"])
     assert v.level == "PASS"
 
 
@@ -373,11 +373,11 @@ def test_case_f_h3_heading_in_evaluator():
     """(f) H3 heading → parsed correctly by the full evaluator."""
     body = """### Files to touch
 
-- `src/starter/foo.py`
+- `src/channel/foo.py`
 
 ### More
 """
-    v = scope_check.evaluate(body, ["agent-safe"], ["src/starter/foo.py"])
+    v = scope_check.evaluate(body, ["agent-safe"], ["src/channel/foo.py"])
     assert v.level == "PASS"
 
 
@@ -386,7 +386,7 @@ def test_case_f_h3_heading_in_evaluator():
 
 def test_evaluate_warns_when_no_scope_info_anywhere():
     body = "## Context\n\nNo info.\n"
-    v = scope_check.evaluate(body, ["priority:p2"], ["src/starter/foo.py"])
+    v = scope_check.evaluate(body, ["priority:p2"], ["src/channel/foo.py"])
     assert v.level == "WARN"
     assert v.source == "none"
 
@@ -422,9 +422,9 @@ def test_verdict_to_dict_serialises_cleanly():
 def test_universal_allowed_changelog_passes_in_files_to_touch_mode():
     body = """## Files to touch
 
-- `src/starter/foo.py`
+- `src/channel/foo.py`
 """
-    v = scope_check.evaluate(body, [], ["src/starter/foo.py", "CHANGELOG.md"])
+    v = scope_check.evaluate(body, [], ["src/channel/foo.py", "CHANGELOG.md"])
     assert v.level == "PASS"
 
 
@@ -620,14 +620,14 @@ def test_implicit_test_rule_a_tsx_co_located_test_passes():
 
 def test_implicit_test_rule_b_python_nested_test_passes():
     """Rule B — Python source listed → nested test under tests/unit/
-    implicitly accepted. tests/unit/api/test_main.py for src/starter/api/main.py."""
+    implicitly accepted. tests/unit/api/test_main.py for src/channel/api/main.py."""
     body = """## Files to touch
 
-- `src/starter/api/main.py`
+- `src/channel/api/main.py`
 
 ## Next
 """
-    diff = ["src/starter/api/main.py", "tests/unit/api/test_main.py"]
+    diff = ["src/channel/api/main.py", "tests/unit/api/test_main.py"]
     v = scope_check.evaluate(body, ["agent-safe", "api"], diff)
     assert v.level == "PASS"
 
@@ -676,10 +676,10 @@ def test_implicit_test_forward_direction_only_python():
 
 ## Next
 """
-    diff = ["tests/unit/test_main.py", "src/starter/api/main.py"]
+    diff = ["tests/unit/test_main.py", "src/channel/api/main.py"]
     v = scope_check.evaluate(body, ["agent-safe", "api"], diff)
     assert v.level == "FAIL"
-    assert "src/starter/api/main.py" in v.out_of_scope
+    assert "src/channel/api/main.py" in v.out_of_scope
 
 
 def test_implicit_test_rule_a_does_not_cross_directories():
@@ -708,7 +708,7 @@ def test_implicit_test_helper_returns_expected_paths_for_js():
 def test_implicit_test_helper_returns_expected_paths_for_python():
     """Direct test of `_implicit_test_paths` for Python — exposes Rule B's
     derived paths so future maintainers can see the full surface."""
-    derived = scope_check._implicit_test_paths("src/starter/api/main.py")
+    derived = scope_check._implicit_test_paths("src/channel/api/main.py")
     assert "tests/unit/test_main.py" in derived
     assert "tests/unit/**/test_main.py" in derived
 
@@ -726,10 +726,10 @@ def test_implicit_test_helper_skips_non_source_paths():
 
 def test_implicit_test_helper_skips_glob_entries():
     """Glob entries in `## Files to touch` must not derive implicit tests
-    — `src/starter/api/*.py` would otherwise map to `tests/unit/test_*.py`
+    — `src/channel/api/*.py` would otherwise map to `tests/unit/test_*.py`
     (effectively every unit test). The implicit allowlist keys off
     concrete paths only."""
-    assert scope_check._implicit_test_paths("src/starter/api/*.py") == []
+    assert scope_check._implicit_test_paths("src/channel/api/*.py") == []
     assert scope_check._implicit_test_paths("ui/src/components/*.jsx") == []
     assert scope_check._implicit_test_paths("scripts/?.py") == []
     assert scope_check._implicit_test_paths("ui/src/[abc].js") == []
@@ -742,11 +742,11 @@ def test_implicit_test_glob_in_files_to_touch_does_not_widen_scope():
     derived `tests/unit/test_*.py` pattern is rejected."""
     body = """## Files to touch
 
-- `src/starter/api/*.py`
+- `src/channel/api/*.py`
 
 ## Next
 """
-    diff = ["src/starter/api/users.py", "tests/unit/test_unrelated.py"]
+    diff = ["src/channel/api/users.py", "tests/unit/test_unrelated.py"]
     v = scope_check.evaluate(body, ["agent-safe", "api"], diff)
     assert v.level == "FAIL"
     assert "tests/unit/test_unrelated.py" in v.out_of_scope
@@ -765,7 +765,7 @@ def test_fix2_kept_areas_still_resolve():
         assert area in scope_check.BOUNDED_AREA_GLOBS, f"{area!r} should still map"
     api_globs = scope_check.area_label_paths(["api", "priority:p2"])
     assert api_globs is not None
-    assert any(g.startswith("src/starter/api/") for g in api_globs)
+    assert any(g.startswith("src/channel/api/") for g in api_globs)
     # Live meta-areas still WARN-fall-through.
     for meta in ("dx", "security", "reliability", "observability"):
         assert meta in scope_check.META_AREAS, f"{meta!r} should still be a meta-area"

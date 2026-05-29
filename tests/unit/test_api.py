@@ -4,7 +4,7 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from starter.api.main import app
+from channel.api.main import app
 
 client = TestClient(app)
 
@@ -35,14 +35,14 @@ def test_csp_report_malformed_json_returns_204():
 
 
 def test_app_version_from_env(monkeypatch):
-    from starter.api import main
+    from channel.api import main
 
     monkeypatch.setenv("APP_VERSION", "9.9.9")
     assert main._app_version() == "9.9.9"
 
 
 def test_origin_verify_middleware_rejects_missing_header(monkeypatch):
-    from starter.auth import tokens
+    from channel.auth import tokens
 
     tokens._origin_verify_secret.cache_clear()
     monkeypatch.setenv("STARTER_ORIGIN_VERIFY_SECRET", "super-secret")
@@ -52,7 +52,7 @@ def test_origin_verify_middleware_rejects_missing_header(monkeypatch):
 
 
 def test_origin_verify_middleware_accepts_matching_header(monkeypatch):
-    from starter.auth import tokens
+    from channel.auth import tokens
 
     tokens._origin_verify_secret.cache_clear()
     monkeypatch.setenv("STARTER_ORIGIN_VERIFY_SECRET", "super-secret")

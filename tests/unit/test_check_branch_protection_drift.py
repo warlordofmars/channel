@@ -203,7 +203,7 @@ def test_normalize_branch_protection_handles_non_dict_signature_subobject():
 def test_normalize_repo_settings_keeps_only_pinned_keys():
     settings = {
         "id": 12345,
-        "name": "agentcore-starter",
+        "name": "channel",
         "private": False,
         "allow_auto_merge": True,
         "allow_merge_commit": True,

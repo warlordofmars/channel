@@ -30,8 +30,8 @@ describe("PageLayout", () => {
     const { container } = await act(async () =>
       renderInRouter(<PageLayout><span /></PageLayout>)
     );
-    expect(container.querySelector('img[alt="AgentCore Starter"]')).toBeTruthy();
-    expect(screen.getAllByText("AgentCore Starter").length).toBeGreaterThanOrEqual(1);
+    expect(container.querySelector('img[alt="Channel"]')).toBeTruthy();
+    expect(screen.getAllByText("Channel").length).toBeGreaterThanOrEqual(1);
   });
 
   it("renders Docs link in header", async () => {
@@ -60,7 +60,7 @@ describe("PageLayout", () => {
     await act(async () =>
       renderInRouter(<PageLayout><span /></PageLayout>)
     );
-    const logo = screen.getAllByText("AgentCore Starter")[0].closest("span");
+    const logo = screen.getAllByText("Channel")[0].closest("span");
     fireEvent.click(logo);
     expect(mockNavigate).toHaveBeenCalledWith("/");
   });
@@ -69,7 +69,7 @@ describe("PageLayout", () => {
     await act(async () =>
       renderInRouter(<PageLayout><span /></PageLayout>)
     );
-    expect(screen.getByText(/© 2026 AgentCore Starter/)).toBeTruthy();
+    expect(screen.getByText(/© 2026 Channel/)).toBeTruthy();
   });
 
   it("renders footer Docs link", async () => {

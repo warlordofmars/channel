@@ -16,7 +16,7 @@ from __future__ import annotations
 import time
 import uuid
 
-from starter.auth import state_store
+from channel.auth import state_store
 
 
 def _unique_state() -> str:

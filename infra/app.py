@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 # Copyright (c) 2026 John Carter. All rights reserved.
-"""CDK app entry point for AgentCore Starter infrastructure."""
+"""CDK app entry point for Channel infrastructure."""
 
 import aws_cdk as cdk
 from cdk_nag import AwsSolutionsChecks
-from stacks.starter_stack import AgentCoreStarterStack
+from stacks.channel_stack import ChannelStack
 
 app = cdk.App()
 
 # env_name is passed at deploy time: cdk deploy -c env=dev
 # Defaults to "prod" if not provided.
 env_name = app.node.try_get_context("env") or "prod"
-stack_id = "AgentCoreStarterStack" if env_name == "prod" else f"AgentCoreStarterStack-{env_name}"
+stack_id = "ChannelStack" if env_name == "prod" else f"ChannelStack-{env_name}"
 
 env = cdk.Environment(
     # account is passed at deploy time: cdk deploy -c account=123456789012
@@ -25,7 +25,7 @@ env = cdk.Environment(
 # In CI this is injected from the HOSTED_ZONE_ID Actions variable.
 hosted_zone_id = app.node.try_get_context("hosted_zone_id") or ""
 
-stack = AgentCoreStarterStack(
+stack = ChannelStack(
     app, stack_id, env_name=env_name, hosted_zone_id=hosted_zone_id, env=env
 )
 

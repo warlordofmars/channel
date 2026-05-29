@@ -37,7 +37,7 @@ get the header injected automatically.
 
 `version` is computed at module import time and reflects the deployed
 package version. The resolution order is: the `APP_VERSION` environment
-variable if set, otherwise `importlib.metadata.version("agentcore-starter")`,
+variable if set, otherwise `importlib.metadata.version("channel")`,
 otherwise the literal string `"dev"` (the tests-without-an-installed-package
 case). Operators can use it as a quick sanity check that a deploy
 actually rolled.

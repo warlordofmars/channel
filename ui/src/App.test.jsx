@@ -97,9 +97,9 @@ describe("AppShell", () => {
     window.history.pushState({}, "", "/");
   });
 
-  it("renders header with AgentCore Starter title", async () => {
+  it("renders header with Channel title", async () => {
     await act(async () => render(<App />));
-    expect(screen.getByText("AgentCore Starter")).toBeTruthy();
+    expect(screen.getByText("Channel")).toBeTruthy();
   });
 
   it("renders Users tab for admin", async () => {
@@ -147,15 +147,15 @@ describe("AppShell", () => {
   it("does not show email when token has no email claim", async () => {
     _storage["starter_mgmt_token"] = makeToken({ email: null });
     await act(async () => render(<App />));
-    expect(screen.getByText("AgentCore Starter")).toBeTruthy();
+    expect(screen.getByText("Channel")).toBeTruthy();
     expect(screen.queryByText("null")).toBeNull();
   });
 
   it("clicking logo navigates to /", async () => {
     await act(async () => render(<App />));
-    fireEvent.click(screen.getByText("AgentCore Starter"));
+    fireEvent.click(screen.getByText("Channel"));
     // HomeRoute redirects back to /app since token is valid — no crash expected
-    expect(screen.getByText("AgentCore Starter")).toBeTruthy();
+    expect(screen.getByText("Channel")).toBeTruthy();
   });
 
   it("sign out button clears mgmt token and reloads", async () => {
@@ -169,7 +169,7 @@ describe("AppShell", () => {
 
   it("shows version in footer after health check", async () => {
     await act(async () => render(<App />));
-    await waitFor(() => expect(screen.getByText("AgentCore Starter 1.2.3")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("Channel 1.2.3")).toBeTruthy());
   });
 
   it("hides footer when health check returns no version", async () => {
@@ -184,7 +184,7 @@ describe("AppShell", () => {
     );
     await act(async () => render(<App />));
     await waitFor(() => {});
-    expect(screen.queryByText(/AgentCore Starter \d/)).toBeNull();
+    expect(screen.queryByText(/Channel \d/)).toBeNull();
   });
 
   it("does not crash when health check fails", async () => {
@@ -194,7 +194,7 @@ describe("AppShell", () => {
     );
     await act(async () => render(<App />));
     expect(screen.getByText("Users")).toBeTruthy();
-    expect(screen.queryByText(/AgentCore Starter \d/)).toBeNull();
+    expect(screen.queryByText(/Channel \d/)).toBeNull();
   });
 
   it("renders dark mode toggle button", async () => {
@@ -225,8 +225,8 @@ describe("AppShell", () => {
 
   it("version in footer links to /changelog", async () => {
     await act(async () => render(<App />));
-    await waitFor(() => expect(screen.getByText("AgentCore Starter 1.2.3")).toBeTruthy());
-    const link = screen.getByText("AgentCore Starter 1.2.3").closest("a");
+    await waitFor(() => expect(screen.getByText("Channel 1.2.3")).toBeTruthy());
+    const link = screen.getByText("Channel 1.2.3").closest("a");
     expect(link).toBeTruthy();
     expect(link.getAttribute("href")).toBe("/changelog");
   });
@@ -240,15 +240,15 @@ describe("AppShell", () => {
 
   it("footer changelog link has hover:underline class", async () => {
     await act(async () => render(<App />));
-    await waitFor(() => expect(screen.getByText("AgentCore Starter 1.2.3")).toBeTruthy());
-    const link = screen.getByText("AgentCore Starter 1.2.3").closest("a");
+    await waitFor(() => expect(screen.getByText("Channel 1.2.3")).toBeTruthy());
+    const link = screen.getByText("Channel 1.2.3").closest("a");
     expect(link.className).toContain("hover:underline");
   });
 
   it("footer changelog link has focus:underline class", async () => {
     await act(async () => render(<App />));
-    await waitFor(() => expect(screen.getByText("AgentCore Starter 1.2.3")).toBeTruthy());
-    const link = screen.getByText("AgentCore Starter 1.2.3").closest("a");
+    await waitFor(() => expect(screen.getByText("Channel 1.2.3")).toBeTruthy());
+    const link = screen.getByText("Channel 1.2.3").closest("a");
     expect(link.className).toContain("focus:underline");
   });
 

@@ -22,7 +22,7 @@ from urllib.parse import urlencode
 import httpx
 from jose import jwt as jose_jwt
 
-from starter.logging_config import get_logger
+from channel.logging_config import get_logger
 
 logger = get_logger(__name__)
 
@@ -51,7 +51,7 @@ def _google_client_id() -> str:
     if val := os.environ.get("GOOGLE_CLIENT_ID"):
         return val
     return _ssm_param(  # pragma: no cover
-        os.environ.get("GOOGLE_CLIENT_ID_PARAM", "/agentcore-starter/google-client-id")
+        os.environ.get("GOOGLE_CLIENT_ID_PARAM", "/channel/google-client-id")
     )
 
 
@@ -60,7 +60,7 @@ def _google_client_secret() -> str:
     if val := os.environ.get("GOOGLE_CLIENT_SECRET"):
         return val
     return _ssm_param(  # pragma: no cover
-        os.environ.get("GOOGLE_CLIENT_SECRET_PARAM", "/agentcore-starter/google-client-secret")
+        os.environ.get("GOOGLE_CLIENT_SECRET_PARAM", "/channel/google-client-secret")
     )
 
 
@@ -94,9 +94,7 @@ def _allowed_emails() -> frozenset[str]:
             value = frozenset()
     else:
         try:  # pragma: no cover
-            raw = _ssm_param(
-                os.environ.get("ALLOWED_EMAILS_PARAM", "/agentcore-starter/allowed-emails")
-            )
+            raw = _ssm_param(os.environ.get("ALLOWED_EMAILS_PARAM", "/channel/allowed-emails"))
             parsed = json.loads(raw)
             if not isinstance(parsed, list):
                 raise ValueError("ALLOWED_EMAILS SSM value must be a JSON array")

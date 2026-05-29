@@ -8,7 +8,7 @@ from jose import JWTError
 
 os.environ.setdefault("STARTER_JWT_SECRET", "test-secret-for-unit-tests")
 
-from starter.auth.tokens import (  # noqa: E402
+from channel.auth.tokens import (  # noqa: E402
     Token,
     decode_jwt,
     decode_mgmt_jwt,
@@ -69,7 +69,7 @@ def test_token_dataclass_expired():
 
 
 def test_origin_verify_secret_from_env(monkeypatch):
-    from starter.auth import tokens
+    from channel.auth import tokens
 
     tokens._origin_verify_secret.cache_clear()
     monkeypatch.setenv("STARTER_ORIGIN_VERIFY_SECRET", "my-verify-secret")

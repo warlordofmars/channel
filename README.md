@@ -1,4 +1,4 @@
-# AgentCore Starter
+# Channel
 
 <!-- Backend stack -->
 [![Python](https://img.shields.io/badge/python-3.12%2B-blue?logo=python&logoColor=white)](https://www.python.org/)

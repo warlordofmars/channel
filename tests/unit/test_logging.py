@@ -3,7 +3,7 @@
 
 import logging
 
-from starter.logging_config import (
+from channel.logging_config import (
     configure_logging,
     get_logger,
     new_request_id,
@@ -13,12 +13,12 @@ from starter.logging_config import (
 
 def test_configure_logging_installs_handler():
     configure_logging("test-service")
-    logger = logging.getLogger("starter")
+    logger = logging.getLogger("channel")
     assert len(logger.handlers) >= 1
 
 
 def test_get_logger_returns_logger():
-    logger = get_logger("starter.test")
+    logger = get_logger("channel.test")
     assert isinstance(logger, logging.Logger)
 
 
@@ -41,9 +41,9 @@ def test_format_includes_client_id_when_set():
     buf = io.StringIO()
     handler = logging.StreamHandler(buf)
     handler.setFormatter(logging.Formatter())
-    logger = get_logger("starter")
+    logger = get_logger("channel")
     # Temporarily add a plain handler to capture the JSON output
-    from starter.logging_config import _JsonFormatter
+    from channel.logging_config import _JsonFormatter
 
     json_handler = logging.StreamHandler(buf)
     json_handler.setFormatter(_JsonFormatter())
@@ -61,7 +61,7 @@ def test_format_includes_exception_info():
     import json as json_mod
     import sys
 
-    from starter.logging_config import _JsonFormatter
+    from channel.logging_config import _JsonFormatter
 
     formatter = _JsonFormatter()
     try:

@@ -29,7 +29,7 @@ from typing import Any
 import boto3
 from botocore.exceptions import ClientError
 
-from starter.logging_config import get_logger
+from channel.logging_config import get_logger
 
 logger = get_logger(__name__)
 
@@ -51,7 +51,7 @@ def _get_table() -> Any:
     local dev and CI inherit the configured default naturally —
     matches the pattern in :mod:`starter.agents.bedrock`.
     """
-    table_name = os.environ.get("STARTER_TABLE_NAME", "agentcore-starter-dev")
+    table_name = os.environ.get("STARTER_TABLE_NAME", "channel-dev")
     endpoint_url = os.environ.get("DYNAMODB_ENDPOINT")  # set for DynamoDB Local
     region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
     kwargs: dict[str, Any] = {"endpoint_url": endpoint_url}

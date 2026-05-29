@@ -1,13 +1,7 @@
-# AgentCore Starter
+# Channel
 
-A starter template for AWS-native AI agent backend services.
+An AI agent chat backend on AWS.
 Built with FastAPI (Python), DynamoDB, AWS CDK, and a React management UI.
-
-> **Naming disambiguation**: this template is named after a product family,
-> not the AWS Bedrock AgentCore service. The inline-agent wrapper lives at
-> `agents/inline_agent.py`; AgentCore Runtime, Memory, and Gateway are not
-> currently integrated. See issue #17 for the feasibility spike on
-> integrating them.
 
 ## Stack
 
@@ -23,9 +17,9 @@ Built with FastAPI (Python), DynamoDB, AWS CDK, and a React management UI.
 ## Structure
 
 ```text
-agentcore-starter/
+channel/
 ├── src/
-│   └── starter/
+│   └── channel/
 │       ├── storage.py         # DynamoDB read/write logic
 │       ├── models.py          # Data models
 │       ├── logging_config.py  # Structured JSON logging setup
@@ -69,7 +63,7 @@ agentcore-starter/
 ├── infra/
 │   ├── app.py                 # CDK app entry point
 │   └── stacks/
-│       └── starter_stack.py   # Lambda + DynamoDB + CloudFront + IAM
+│       └── channel_stack.py   # Lambda + DynamoDB + CloudFront + IAM
 ├── tests/
 │   ├── unit/                  # Pure logic, no AWS deps
 │   ├── integration/           # Tests against DynamoDB Local
@@ -94,7 +88,7 @@ Google OAuth is the identity provider for management UI login
 (`/auth/login`). On successful Google sign-in, the API mints a
 management JWT (`typ=mgmt`, `role=admin|user`, 8h TTL) signed with
 HS256 using a secret resolved from SSM
-(`/agentcore-starter/{env}/jwt-secret`). All `/api/*` endpoints
+(`/channel/{env}/jwt-secret`). All `/api/*` endpoints
 require a valid Bearer mgmt JWT. JWT validation enforces `iss`,
 `typ=mgmt`, and `exp`. The token is stored client-side in
 `localStorage` under the `starter_mgmt_token` key.
@@ -446,7 +440,7 @@ uv run inv e2e-local --tests tests/e2e/<file>.py
 uv run inv e2e-local --n 5
 ```
 
-`inv e2e-local` probes ports 5173–5179 for the AgentCore Starter Vite dev server (via
+`inv e2e-local` probes ports 5173–5179 for the Channel Vite dev server (via
 `/auth/login?test_email=probe`) and passes the detected URL as `STARTER_UI_URL`.
 
 Key local e2e gotchas:
@@ -569,7 +563,7 @@ This section defines the taxonomy.
   the agent** after the §7.5 Copilot review + CI pass. Apply when the
   work is low-risk enough that an LLM reviewer's feedback is
   sufficient without a human final look: `priority:p2` / `p3`,
-  `size:xs` / `s` / `m`, and not touching `infra/stacks/starter_stack.py`,
+  `size:xs` / `s` / `m`, and not touching `infra/stacks/channel_stack.py`,
   `.github/workflows/`, or any auth / token-issuance path. Without
   this label, the agent still runs Copilot review (everyone benefits
   from a second opinion) but then stops for human merge.
@@ -589,14 +583,14 @@ This section defines the taxonomy.
     `<dir>/<name>.test.<ext>` and `<dir>/__snapshots__/<name>.test.<ext>.snap`
     in the **same directory only**.
   - **Python** — listing any non-test `<basename>.py` (under
-    `src/starter/**`, `scripts/**`, or anywhere) implicitly accepts
+    `src/channel/**`, `scripts/**`, or anywhere) implicitly accepts
     `tests/unit/test_<basename>.py` and any nested
     `tests/unit/**/test_<basename>.py` (matches the repo's pytest
     convention of a fixed test root regardless of source location).
     Entries whose basename already starts with `test_` are skipped —
     forward-direction only.
 
-  Glob entries in `## Files to touch` (e.g. `src/starter/api/*.py`) do
+  Glob entries in `## Files to touch` (e.g. `src/channel/api/*.py`) do
   not generate implicit test derivations; the implicit allowlist is
   keyed off concrete source paths so a wildcard entry can't widen
   scope to `tests/unit/test_*.py` (effectively all unit tests).

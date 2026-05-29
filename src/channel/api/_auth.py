@@ -8,7 +8,7 @@ from typing import Any
 from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from starter.auth.tokens import decode_mgmt_jwt
+from channel.auth.tokens import decode_mgmt_jwt
 
 _bearer = HTTPBearer()
 

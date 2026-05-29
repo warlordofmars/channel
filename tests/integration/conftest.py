@@ -28,7 +28,7 @@ os.environ.setdefault("AWS_SECRET_ACCESS_KEY", "local")
 os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
 os.environ.setdefault("DYNAMODB_ENDPOINT", "http://localhost:8000")
 os.environ.setdefault("STARTER_JWT_SECRET", "integration-test-secret")
-os.environ.setdefault("STARTER_TABLE_NAME", "agentcore-starter-test")
+os.environ.setdefault("STARTER_TABLE_NAME", "channel-test")
 
 
 @pytest.fixture(scope="session")

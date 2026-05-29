@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock, patch
 
-from starter.agents.inline_agent import (
+from channel.agents.inline_agent import (
     InlineAgentRequest,
     InlineAgentResponse,
     _agent_client,
@@ -99,7 +99,7 @@ def test_invoke_returns_concatenated_chunks() -> None:
     mock_client = MagicMock()
     mock_client.invoke_inline_agent.return_value = _mock_completion("Hello", " world")
 
-    with patch("starter.agents.inline_agent._agent_client", return_value=mock_client):
+    with patch("channel.agents.inline_agent._agent_client", return_value=mock_client):
         result = invoke(
             InlineAgentRequest(message="Hi", session_id="s1"),
             user_id="user1",
@@ -114,7 +114,7 @@ def test_invoke_generates_session_id_when_omitted() -> None:
     mock_client = MagicMock()
     mock_client.invoke_inline_agent.return_value = _mock_completion("ok")
 
-    with patch("starter.agents.inline_agent._agent_client", return_value=mock_client):
+    with patch("channel.agents.inline_agent._agent_client", return_value=mock_client):
         result = invoke(InlineAgentRequest(message="Hi"), user_id="user1")
 
     assert result.session_id  # a UUID was generated
@@ -125,7 +125,7 @@ def test_invoke_passes_instruction() -> None:
     mock_client = MagicMock()
     mock_client.invoke_inline_agent.return_value = _mock_completion("ok")
 
-    with patch("starter.agents.inline_agent._agent_client", return_value=mock_client):
+    with patch("channel.agents.inline_agent._agent_client", return_value=mock_client):
         invoke(
             InlineAgentRequest(message="Hi", session_id="s1", instruction="Be brief."),
             user_id="user1",
@@ -139,7 +139,7 @@ def test_invoke_omits_instruction_key_when_not_set() -> None:
     mock_client = MagicMock()
     mock_client.invoke_inline_agent.return_value = _mock_completion("ok")
 
-    with patch("starter.agents.inline_agent._agent_client", return_value=mock_client):
+    with patch("channel.agents.inline_agent._agent_client", return_value=mock_client):
         invoke(InlineAgentRequest(message="Hi", session_id="s1"), user_id="user1")
 
     call_kwargs = mock_client.invoke_inline_agent.call_args[1]
@@ -150,7 +150,7 @@ def test_invoke_namespaces_session_id() -> None:
     mock_client = MagicMock()
     mock_client.invoke_inline_agent.return_value = _mock_completion("ok")
 
-    with patch("starter.agents.inline_agent._agent_client", return_value=mock_client):
+    with patch("channel.agents.inline_agent._agent_client", return_value=mock_client):
         invoke(
             InlineAgentRequest(message="Hi", session_id="my-session"),
             user_id="alice",
@@ -164,7 +164,7 @@ def test_invoke_skips_empty_bytes() -> None:
     mock_client = MagicMock()
     mock_client.invoke_inline_agent.return_value = _mock_completion_with_empty()
 
-    with patch("starter.agents.inline_agent._agent_client", return_value=mock_client):
+    with patch("channel.agents.inline_agent._agent_client", return_value=mock_client):
         result = invoke(InlineAgentRequest(message="Hi", session_id="s1"), user_id="u1")
 
     assert result.reply == "hi"
@@ -179,7 +179,7 @@ def test_invoke_stream_yields_delta_and_done() -> None:
     mock_client = MagicMock()
     mock_client.invoke_inline_agent.return_value = _mock_completion("Hello", " world")
 
-    with patch("starter.agents.inline_agent._agent_client", return_value=mock_client):
+    with patch("channel.agents.inline_agent._agent_client", return_value=mock_client):
         chunks = list(
             invoke_stream(
                 InlineAgentRequest(message="Hi", session_id="s1"),
@@ -199,7 +199,7 @@ def test_invoke_stream_sse_format() -> None:
     mock_client = MagicMock()
     mock_client.invoke_inline_agent.return_value = _mock_completion("hi")
 
-    with patch("starter.agents.inline_agent._agent_client", return_value=mock_client):
+    with patch("channel.agents.inline_agent._agent_client", return_value=mock_client):
         chunks = list(invoke_stream(InlineAgentRequest(message="X", session_id="s1"), user_id="u1"))
 
     for chunk in chunks:
@@ -211,7 +211,7 @@ def test_invoke_stream_generates_session_id_when_omitted() -> None:
     mock_client = MagicMock()
     mock_client.invoke_inline_agent.return_value = _mock_completion("hi")
 
-    with patch("starter.agents.inline_agent._agent_client", return_value=mock_client):
+    with patch("channel.agents.inline_agent._agent_client", return_value=mock_client):
         chunks = list(invoke_stream(InlineAgentRequest(message="X"), user_id="u1"))
 
     done = json.loads(chunks[-1][len("data: ") :])

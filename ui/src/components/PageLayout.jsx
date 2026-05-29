@@ -26,8 +26,8 @@ export default function PageLayout({ children }) {
             className="flex items-center gap-2 cursor-pointer bg-transparent border-none p-0 text-inherit"
             onClick={() => navigate("/")}
           >
-            <img src="/logo.svg" alt="AgentCore Starter" className="h-7 w-auto" />
-            <span className="font-bold text-xl tracking-[1px]">AgentCore Starter</span>
+            <img src="/logo.svg" alt="Channel" className="h-7 w-auto" />
+            <span className="font-bold text-xl tracking-[1px]">Channel</span>
           </button>
 
           <div className="flex-1" />
@@ -97,8 +97,8 @@ export default function PageLayout({ children }) {
         <div className="max-w-[1100px] mx-auto px-4 md:px-8 py-8">
           <div className="flex flex-col gap-6 sm:flex-row sm:justify-between sm:items-start">
             <div className="flex items-center gap-2">
-              <img src="/logo.svg" alt="AgentCore Starter" className="h-5 w-auto opacity-60" />
-              <span className="font-bold text-sm tracking-[1px] text-[var(--text-muted)]">AgentCore Starter</span>
+              <img src="/logo.svg" alt="Channel" className="h-5 w-auto opacity-60" />
+              <span className="font-bold text-sm tracking-[1px] text-[var(--text-muted)]">Channel</span>
             </div>
             <div className="flex flex-wrap gap-x-8 gap-y-2 text-sm text-[var(--text-muted)]">
               <a href="/docs/" className="no-underline hover:text-[var(--text)] transition-colors">Docs</a>
@@ -111,7 +111,7 @@ export default function PageLayout({ children }) {
               </a>
             </div>
           </div>
-          <p className="mt-6 text-[13px] text-[var(--text-muted)]">© 2026 AgentCore Starter.</p>
+          <p className="mt-6 text-[13px] text-[var(--text-muted)]">© 2026 Channel.</p>
         </div>
       </footer>
       <ConsentBanner />

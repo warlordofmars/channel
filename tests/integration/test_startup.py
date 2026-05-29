@@ -1,8 +1,8 @@
 # Copyright (c) 2026 John Carter. All rights reserved.
 """Integration test: app refuses to import under simulated Lambda env.
 
-Verifies the wire-at-import contract — :mod:`starter.api.main` must
-raise :class:`starter.startup.StartupConfigError` during module
+Verifies the wire-at-import contract — :mod:`channel.api.main` must
+raise :class:`channel.startup.StartupConfigError` during module
 construction when any of the four security-critical SSM parameters is
 still set to ``CHANGE_ME_ON_FIRST_DEPLOY``. Wiring at module import
 (not via ``@app.on_event("startup")``) is what causes Lambda INIT to
@@ -20,8 +20,8 @@ import sys
 
 import pytest
 
-from starter import startup
-from starter.startup import (
+from channel import startup
+from channel.startup import (
     HARD_FAIL_PARAM_ENV_VARS,
     PLACEHOLDER_VALUE,
     SOFT_WARN_PARAM_ENV_VAR,
@@ -29,7 +29,7 @@ from starter.startup import (
 
 
 def _force_reimport_main() -> None:
-    """Drop cached starter.api.main + starter.startup so import re-runs hooks.
+    """Drop cached channel.api.main + channel.startup so import re-runs hooks.
 
     Each test simulates a Lambda cold start, where the module-level
     ``validate_secrets_or_die()`` call fires during import. Without
@@ -37,9 +37,9 @@ def _force_reimport_main() -> None:
     module and the wire-at-import contract would not actually be tested.
     """
     for mod in (
-        "starter.api.main",
-        "starter.api._auth",
-        "starter.startup",
+        "channel.api.main",
+        "channel.api._auth",
+        "channel.startup",
     ):
         sys.modules.pop(mod, None)
 
@@ -47,7 +47,7 @@ def _force_reimport_main() -> None:
 @pytest.fixture
 def lambda_env(monkeypatch):
     """Simulate the Lambda runtime: AWS_LAMBDA_FUNCTION_NAME + wired SSM env vars."""
-    monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "agentcore-starter-api")
+    monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "channel-api")
     for ev in HARD_FAIL_PARAM_ENV_VARS:
         monkeypatch.setenv(ev, f"/test/{ev.lower()}")
     monkeypatch.setenv(SOFT_WARN_PARAM_ENV_VAR, "/test/alarm-email")
@@ -68,20 +68,20 @@ def test_app_import_fails_when_any_hard_fail_param_is_placeholder(
     def _fake_ssm(name: str) -> str:
         return PLACEHOLDER_VALUE if name == placeholder_path else "rotated-value"
 
-    # Re-importing starter.startup creates a *fresh* class object for
+    # Re-importing channel.startup creates a *fresh* class object for
     # StartupConfigError — the class imported at the top of this file is
     # from the previously-loaded module, so pytest.raises() must match
     # against the freshly re-imported symbol.
     _force_reimport_main()
-    fresh_startup = importlib.import_module("starter.startup")
+    fresh_startup = importlib.import_module("channel.startup")
     monkeypatch.setattr(fresh_startup, "_get_ssm_value", _fake_ssm)
     fresh_error = fresh_startup.StartupConfigError
 
     # Now the api.main import will run validate_secrets_or_die() which calls
     # the patched _get_ssm_value.
-    sys.modules.pop("starter.api.main", None)
+    sys.modules.pop("channel.api.main", None)
     with pytest.raises(fresh_error) as excinfo:
-        importlib.import_module("starter.api.main")
+        importlib.import_module("channel.api.main")
 
     assert placeholder_path in str(excinfo.value)
 
@@ -99,7 +99,7 @@ def test_app_import_emits_single_warning_for_alarm_email_placeholder(monkeypatch
         return PLACEHOLDER_VALUE if name == alarm_path else "rotated-value"
 
     _force_reimport_main()
-    fresh_startup = importlib.import_module("starter.startup")
+    fresh_startup = importlib.import_module("channel.startup")
     monkeypatch.setattr(fresh_startup, "_get_ssm_value", _fake_ssm)
 
     captured: list[logging.LogRecord] = []
@@ -109,11 +109,11 @@ def test_app_import_emits_single_warning_for_alarm_email_placeholder(monkeypatch
             captured.append(record)
 
     handler = _ListHandler(level=logging.DEBUG)
-    startup_logger = logging.getLogger("starter.startup")
+    startup_logger = logging.getLogger("channel.startup")
     startup_logger.addHandler(handler)
     try:
-        sys.modules.pop("starter.api.main", None)
-        importlib.import_module("starter.api.main")  # must succeed
+        sys.modules.pop("channel.api.main", None)
+        importlib.import_module("channel.api.main")  # must succeed
     finally:
         startup_logger.removeHandler(handler)
 
@@ -126,20 +126,20 @@ def test_app_import_emits_single_warning_for_alarm_email_placeholder(monkeypatch
 def test_app_import_succeeds_when_all_params_rotated(monkeypatch, lambda_env):
     """Sanity: with every param rotated the app imports cleanly under Lambda env."""
     _force_reimport_main()
-    fresh_startup = importlib.import_module("starter.startup")
+    fresh_startup = importlib.import_module("channel.startup")
     monkeypatch.setattr(fresh_startup, "_get_ssm_value", lambda _name: "rotated-value")
 
-    sys.modules.pop("starter.api.main", None)
-    main = importlib.import_module("starter.api.main")
+    sys.modules.pop("channel.api.main", None)
+    main = importlib.import_module("channel.api.main")
     assert hasattr(main, "app")
 
 
 def teardown_module() -> None:
-    """Restore the real starter.api.main for any tests that import it later."""
+    """Restore the real channel.api.main for any tests that import it later."""
     _force_reimport_main()
     # Re-import a clean copy without the lambda env so subsequent suites get
     # the normal local-dev module.
-    importlib.import_module("starter.startup")
-    importlib.import_module("starter.api.main")
+    importlib.import_module("channel.startup")
+    importlib.import_module("channel.api.main")
     # Touch the public name so static analysis doesn't flag the import as unused.
     assert startup.PLACEHOLDER_VALUE == PLACEHOLDER_VALUE

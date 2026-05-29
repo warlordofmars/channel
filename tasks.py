@@ -1,6 +1,6 @@
 # Copyright (c) 2026 John Carter. All rights reserved.
 """
-Invoke task definitions for AgentCore Starter.
+Invoke task definitions for Channel.
 
 Usage:
     uv run inv --list                       # list all tasks
@@ -35,7 +35,7 @@ ROOT = Path(__file__).parent
 UI = ROOT / "ui"
 INFRA = ROOT / "infra"
 REGION = "us-east-1"
-DYNAMO_CONTAINER = "starter-dynamo-local"
+DYNAMO_CONTAINER = "channel-dynamo-local"
 DYNAMO_PORT = 8000
 API_PORT = 8001
 UI_PORT = 5173
@@ -45,7 +45,7 @@ UI_PORT = 5173
 
 
 def _stack_name(env="prod"):
-    return "AgentCoreStarterStack" if env == "prod" else f"AgentCoreStarterStack-{env}"
+    return "ChannelStack" if env == "prod" else f"ChannelStack-{env}"
 
 
 def _infer_next_version(ctx):
@@ -128,7 +128,7 @@ def _wait_for_http(url: str, label: str, timeout: int = 30) -> bool:
 
 
 def _find_vite_port() -> int | None:
-    """Scan ports 5173-5179 to find the AgentCore Starter Vite dev server.
+    """Scan ports 5173-5179 to find the Channel Vite dev server.
 
     Identifies the dev server by probing /auth/login?test_email=probe — only the
     Starter API (via Vite proxy) responds with the bypass HTML.  Other projects
@@ -172,7 +172,7 @@ def lint_infra(ctx):
 @task
 def typecheck(ctx):
     """Type-check backend with mypy"""
-    ctx.run("uv run mypy src/starter", pty=True)
+    ctx.run("uv run mypy src/channel", pty=True)
 
 
 @task
@@ -287,7 +287,7 @@ def e2e_local(ctx, tests="tests/e2e", n=1):
         sys.exit(1)
     vite_port = _find_vite_port()
     if not vite_port:
-        print("ERROR: Could not find AgentCore Starter Vite dev server on ports 5173-5179")
+        print("ERROR: Could not find Channel Vite dev server on ports 5173-5179")
         print("       Make sure 'inv dev' is running and the UI has started.")
         sys.exit(1)
     ui_url = f"http://localhost:{vite_port}"
@@ -341,7 +341,7 @@ def dev(ctx, seed=False):
     dev_env = {
         **os.environ,
         "STARTER_JWT_SECRET": jwt_secret,
-        "STARTER_TABLE_NAME": "agentcore-starter",
+        "STARTER_TABLE_NAME": "channel",
         "DYNAMODB_ENDPOINT": f"http://localhost:{DYNAMO_PORT}",
         "AWS_ACCESS_KEY_ID": "local",
         "AWS_SECRET_ACCESS_KEY": "local",
@@ -349,7 +349,7 @@ def dev(ctx, seed=False):
         "CORS_ORIGINS": cors_origins,
         # Prevents VectorStore instantiation from crashing on every request;
         # semantic search will still fail locally (no real S3 Vectors bucket).
-        # No vector store in starter,
+        # No vector store in channel,
         # Always enable auth bypass in local dev — the bypass only activates when
         # ?test_email= is present, so normal browser flows are unaffected.
         "STARTER_BYPASS_GOOGLE_AUTH": "1",
@@ -380,7 +380,7 @@ def dev(ctx, seed=False):
 
     # Start management API
     api_proc = subprocess.Popen(
-        ["uv", "run", "uvicorn", "starter.api.main:app", f"--port={API_PORT}", "--reload"],
+        ["uv", "run", "uvicorn", "channel.api.main:app", f"--port={API_PORT}", "--reload"],
         cwd=ROOT,
         env=dev_env,
     )
@@ -415,7 +415,7 @@ def dev(ctx, seed=False):
     print()
 
     if seed:
-        print("--seed is not implemented in the starter template — add your own seed script.")
+        print("--seed is not implemented — add your own seed script.")
     print("Press Ctrl-C to stop all services.\n")
 
     for p in procs:
@@ -435,7 +435,7 @@ def export_openapi(ctx, out="docs-site/public/openapi.json"):
     changing any ``@router.*`` signature, summary, or response model.
 
     ``info.version`` is normalised to ``"dev"`` so the committed spec is
-    stable across environments — the installed agentcore-starter package version
+    stable across environments — the installed channel package version
     varies by build (``setuptools_scm`` appends the git sha + date) and
     would otherwise trip the drift check on every commit.
     """
@@ -443,7 +443,7 @@ def export_openapi(ctx, out="docs-site/public/openapi.json"):
     from pathlib import Path
 
     # Import lazily so `inv --help` doesn't need the full app tree on sys.path.
-    from starter.api.main import app
+    from channel.api.main import app
 
     spec = app.openapi()
     spec.setdefault("info", {})["version"] = "dev"

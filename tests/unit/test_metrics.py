@@ -3,11 +3,11 @@
 
 import pytest
 
-from starter.metrics import NAMESPACE, emit_metric
+from channel.metrics import NAMESPACE, emit_metric
 
 
 def test_namespace_is_correct():
-    assert NAMESPACE == "AgentCoreStarter"
+    assert NAMESPACE == "Channel"
 
 
 @pytest.mark.asyncio
