@@ -3,7 +3,6 @@ import React, { useEffect, useState } from "react";
 import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { Menu, Moon, Sun, X } from "lucide-react";
 import { trackEvent, trackPageView } from "./analytics.js";
-import AuthCallback from "./components/AuthCallback.jsx";
 import EmptyState from "./components/EmptyState.jsx";
 import ErrorBoundary from "./components/ErrorBoundary.jsx";
 import LoginPage from "./components/LoginPage.jsx";
@@ -215,7 +214,6 @@ export default function App() {
         <Routes>
           <Route path="/" element={<HomeRoute />} />
           <Route path="/app" element={<AppShell />} />
-          <Route path="/oauth/callback" element={<AuthCallback />} />
           <Route path="*" element={<NotFoundPage />} />
         </Routes>
       </BrowserRouter>

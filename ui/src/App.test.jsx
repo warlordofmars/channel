@@ -6,9 +6,6 @@ import App from "./App.jsx";
 vi.mock("./components/LoginPage.jsx", () => ({
   default: () => <div data-testid="login-page" />,
 }));
-vi.mock("./components/AuthCallback.jsx", () => ({
-  default: () => <div data-testid="auth-callback" />,
-}));
 vi.mock("./components/UsersPanel.jsx", () => ({
   default: () => <div data-testid="users-panel" />,
 }));
@@ -65,13 +62,6 @@ describe("App routing", () => {
     _storage["starter_mgmt_token"] = makeToken({ role: "admin" });
     await act(async () => render(<App />));
     await waitFor(() => expect(screen.getByTestId("users-panel")).toBeTruthy());
-  });
-
-  it("shows AuthCallback at /oauth/callback", async () => {
-    window.history.pushState({}, "", "/oauth/callback");
-    await act(async () => render(<App />));
-    expect(screen.getByTestId("auth-callback")).toBeTruthy();
-    window.history.pushState({}, "", "/");
   });
 
   it("renders the branded NotFoundPage on unknown routes", async () => {

@@ -20,23 +20,6 @@ def test_health_includes_version():
     assert "version" in resp.json()
 
 
-def test_oauth_metadata_returns_issuer():
-    resp = client.get("/.well-known/oauth-authorization-server")
-    assert resp.status_code == 200
-    data = resp.json()
-    assert "issuer" in data
-    assert "authorization_endpoint" in data
-    assert "token_endpoint" in data
-
-
-def test_protected_resource_metadata():
-    resp = client.get("/.well-known/oauth-protected-resource")
-    assert resp.status_code == 200
-    data = resp.json()
-    assert "resource" in data
-    assert "authorization_servers" in data
-
-
 def test_csp_report_empty_body_returns_204():
     resp = client.post("/api/csp-report", content=b"")
     assert resp.status_code == 204

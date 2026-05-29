@@ -16,10 +16,8 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from starter.api._auth import require_admin  # noqa: F401 — re-exported for route use
-from starter.api.agents import router as agents_router
 from starter.api.csp import router as csp_router
 from starter.auth.mgmt_auth import router as mgmt_auth_router
-from starter.auth.oauth import router as oauth_router
 from starter.logging_config import (
     configure_logging,
     get_logger,
@@ -126,17 +124,11 @@ async def _verify_origin_secret(request: Request, call_next):
     return await call_next(request)
 
 
-# OAuth 2.1 well-known discovery endpoints (unauthenticated)
-app.include_router(oauth_router)
-
 # Management UI auth endpoints (unauthenticated — issues mgmt JWTs)
 app.include_router(mgmt_auth_router)
 
 # CSP report receiver — unauthenticated by design
 app.include_router(csp_router, prefix="/api")
-
-# Agent scaffold endpoints (require management JWT)
-app.include_router(agents_router, prefix="/api")
 
 
 @app.get("/health", include_in_schema=False)

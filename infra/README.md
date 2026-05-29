@@ -9,11 +9,10 @@ AWS CDK (Python) stack that provisions all AgentCore Starter resources. Defined 
 | DynamoDB table | `agentcore-starter-{env}` | Single-table, PAY_PER_REQUEST, PITR enabled (prod), TTL on `ttl` attribute |
 | DynamoDB GSI | `KeyIndex` | `GSI1PK` + `GSI1SK` — key lookups |
 | DynamoDB GSI | `TagIndex` | `GSI2PK` + `GSI2SK` — list by tag |
-| DynamoDB GSI | `ClientIndex` | `GSI3PK` — OAuth client lookups |
 | Lambda | `ApiFunction` | FastAPI management API, Python 3.12, 512 MB, 30s timeout |
 | Lambda Function URL | (API) | `auth=NONE`, CORS open, HTTPS only |
 | S3 Bucket | `UiBucket` | Private, OAC, auto-delete on stack removal |
-| CloudFront Distribution | `UiDistribution` | UI from S3, `/api/*` + `/oauth/*` → API Lambda |
+| CloudFront Distribution | `UiDistribution` | UI from S3, `/api/*` + `/auth/*` → API Lambda |
 | SSM Parameter | `/agentcore-starter/jwt-secret` | JWT signing secret, `RETAIN` policy |
 | IAM Role | `ApiLambdaRole` | DynamoDB + SSM read, Lambda basic execution |
 
@@ -23,8 +22,7 @@ AWS CDK (Python) stack that provisions all AgentCore Starter resources. Defined 
 |---|---|
 | `/*` (default) | S3 bucket (React UI) |
 | `/api/*` | API Lambda Function URL |
-| `/oauth/*` | API Lambda Function URL |
-| `/.well-known/*` | API Lambda Function URL |
+| `/auth/*` | API Lambda Function URL |
 | `/health` | API Lambda Function URL |
 
 ### Stack outputs

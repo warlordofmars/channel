@@ -112,14 +112,7 @@ class AgentCoreStarterStack(cdk.Stack):
             projection_type=dynamodb.ProjectionType.ALL,
         )
 
-        # GSI 3 — ClientIndex: OAuth client lookups
-        table.add_global_secondary_index(
-            index_name="ClientIndex",
-            partition_key=dynamodb.Attribute(name="GSI3PK", type=dynamodb.AttributeType.STRING),
-            projection_type=dynamodb.ProjectionType.ALL,
-        )
-
-        # GSI 4 — UserEmailIndex: look up users by email
+        # GSI 3 — UserEmailIndex: look up users by email
         table.add_global_secondary_index(
             index_name="UserEmailIndex",
             partition_key=dynamodb.Attribute(name="GSI4PK", type=dynamodb.AttributeType.STRING),
@@ -595,37 +588,6 @@ class AgentCoreStarterStack(cdk.Stack):
                         sampled_requests_enabled=True,
                     ),
                 ),
-                # Rate limit: 100 req/5min per IP on /oauth/* (auth endpoints)
-                wafv2.CfnWebACL.RuleProperty(
-                    name="OAuthRateLimit",
-                    priority=2,
-                    action=wafv2.CfnWebACL.RuleActionProperty(block={}),
-                    statement=wafv2.CfnWebACL.StatementProperty(
-                        rate_based_statement=wafv2.CfnWebACL.RateBasedStatementProperty(
-                            limit=100,
-                            aggregate_key_type="IP",
-                            scope_down_statement=wafv2.CfnWebACL.StatementProperty(
-                                byte_match_statement=wafv2.CfnWebACL.ByteMatchStatementProperty(
-                                    search_string="/oauth/",
-                                    field_to_match=wafv2.CfnWebACL.FieldToMatchProperty(
-                                        uri_path={}
-                                    ),
-                                    text_transformations=[
-                                        wafv2.CfnWebACL.TextTransformationProperty(
-                                            priority=0, type="NONE"
-                                        )
-                                    ],
-                                    positional_constraint="STARTS_WITH",
-                                )
-                            ),
-                        )
-                    ),
-                    visibility_config=wafv2.CfnWebACL.VisibilityConfigProperty(
-                        cloud_watch_metrics_enabled=True,
-                        metric_name="OAuthRateLimit",
-                        sampled_requests_enabled=True,
-                    ),
-                ),
                 # Rate limit: 1000 req/5min per IP globally
                 wafv2.CfnWebACL.RuleProperty(
                     name="GlobalRateLimit",
@@ -746,14 +708,6 @@ function handler(event) {
             additional_behaviors={
                 "/api/*": api_behavior,
                 "/auth/*": api_behavior,
-                "/oauth/*": api_behavior,
-                "/.well-known/*": cloudfront.BehaviorOptions(
-                    origin=api_cf_origin,
-                    viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-                    cache_policy=cloudfront.CachePolicy.CACHING_DISABLED,
-                    origin_request_policy=cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
-                    response_headers_policy=security_headers_policy,
-                ),
                 "/health": cloudfront.BehaviorOptions(
                     origin=api_cf_origin,
                     viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,

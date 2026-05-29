@@ -11,7 +11,7 @@ Built with FastAPI (Python), DynamoDB, AWS CDK, and a React management UI.
 
 ## Stack
 
-- FastAPI (Python) — OAuth 2.1 authorization server + management REST API
+- FastAPI (Python) — management REST API
 - React (Vite) + shadcn/ui — management UI SPA
 - DynamoDB — persistent storage (single table design)
 - AWS Lambda + Function URL — hosting
@@ -31,9 +31,7 @@ agentcore-starter/
 │       ├── logging_config.py  # Structured JSON logging setup
 │       ├── metrics.py         # CloudWatch EMF metrics helpers
 │       ├── auth/
-│       │   ├── oauth.py       # OAuth 2.1 authorization server
-│       │   ├── dcr.py         # Dynamic Client Registration (RFC 7591)
-│       │   ├── tokens.py      # Token issuance + validation
+│       │   ├── tokens.py      # Management JWT issuance + validation
 │       │   ├── google.py      # Google OAuth integration
 │       │   └── mgmt_auth.py   # Management API authentication
 │       ├── agents/
@@ -42,9 +40,7 @@ agentcore-starter/
 │       │   └── inline_agent.py # invoke + invoke_stream (Bedrock inline agent)
 │       └── api/
 │           ├── main.py        # FastAPI app + routes
-│           ├── admin.py       # Admin-only endpoints
-│           ├── agents.py      # Agent scaffold endpoints
-│           └── users.py       # User management endpoints
+│           └── csp.py         # CSP violation reporting endpoint
 ├── ui/
 │   ├── src/
 │   │   ├── App.jsx            # Router, AppShell, tab nav
@@ -61,7 +57,6 @@ agentcore-starter/
 │   │       ├── UsersPanel.jsx # Admin: user list + management
 │   │       ├── EmptyState.jsx # Shared empty-state illustrations
 │   │       ├── PageLayout.jsx # Shared page layout + navbar
-│   │       ├── AuthCallback.jsx
 │   │       └── LoginPage.jsx
 │   └── package.json
 ├── docs-site/                 # VitePress documentation site
@@ -95,17 +90,17 @@ agentcore-starter/
 
 ## Auth
 
-- OAuth 2.1 authorization server built into AgentCore Starter (self-contained)
-- Dynamic Client Registration per RFC 7591 (required by MCP spec)
-- PKCE required on all authorization code flows
-- Tokens stored in DynamoDB with TTL
-- All API endpoints require a valid Bearer token
-- Management UI login via Google OAuth (`/auth/login`)
+Google OAuth is the identity provider for management UI login
+(`/auth/login`). On successful Google sign-in, the API mints a
+management JWT (`typ=mgmt`, `role=admin|user`, 8h TTL) signed with
+HS256 using a secret resolved from SSM
+(`/agentcore-starter/{env}/jwt-secret`). All `/api/*` endpoints
+require a valid Bearer mgmt JWT. JWT validation enforces `iss`,
+`typ=mgmt`, and `exp`. The token is stored client-side in
+`localStorage` under the `starter_mgmt_token` key.
 
 ## DynamoDB single table design
 
-- OAuth client items: `PK=CLIENT#{client_id}`, `SK=META`
-- Token items: `PK=TOKEN#{jti}`, `SK=META` (TTL enabled)
 - Activity log items: `PK=LOG#{date}#{hour}`, `SK={timestamp}#{event_id}`
   (hour-sharded to avoid hot partitions)
 - Audit log items: `PK=AUDIT#{date}#{hour}`, `SK={timestamp}#{event_id}`
@@ -113,9 +108,8 @@ agentcore-starter/
   default 365 days)
 - User items: `PK=USER#{user_id}`, `SK=META`
 - Mgmt state items: `PK=MGMT_STATE#{state}`, `SK=META`
-  (TTL enabled, used for OAuth state parameter)
+  (TTL enabled, used for the Google OAuth state parameter)
 - GSIs:
-  - `ClientIdIndex` — `GSI3PK=CLIENT#{client_id}` (for client lookups)
   - `UserEmailIndex` — `PK=EMAIL#{email}` (for user lookups by email)
 
 ## Management UI
@@ -478,7 +472,7 @@ touches any of the following:
 **Always required:**
 
 - Fixing a failing e2e test — the fix must pass locally before the PR opens
-- Auth flows (`auth/`, `AuthCallback.jsx`, `LoginPage.jsx`, OAuth endpoints)
+- Auth flows (`auth/`, `LoginPage.jsx`, OAuth endpoints)
 - Management API endpoints (`api/`) that the UI tests exercise
 
 **Use judgement (run the relevant `--tests` file at minimum):**
