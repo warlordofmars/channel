@@ -1,6 +1,6 @@
 # Building agents
 
-AgentCore Starter ships two layers of Bedrock integration out of the box:
+Channel ships two layers of Bedrock integration out of the box:
 
 | Layer | Module | When to use |
 |---|---|---|

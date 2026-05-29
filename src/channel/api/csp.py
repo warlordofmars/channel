@@ -17,8 +17,8 @@ from urllib.parse import urlparse
 
 from fastapi import APIRouter, Request, Response, status
 
-from starter.logging_config import get_logger
-from starter.metrics import emit_metric
+from channel.logging_config import get_logger
+from channel.metrics import emit_metric
 
 router = APIRouter(tags=["csp"])
 logger = get_logger(__name__)

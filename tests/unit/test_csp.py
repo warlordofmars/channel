@@ -5,8 +5,8 @@ import json
 
 from fastapi.testclient import TestClient
 
-from starter.api.csp import _blocked_domain, _extract_legacy, _extract_modern, _truncate
-from starter.api.main import app
+from channel.api.csp import _blocked_domain, _extract_legacy, _extract_modern, _truncate
+from channel.api.main import app
 
 _client = TestClient(app)
 

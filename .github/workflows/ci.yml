@@ -37,7 +37,7 @@ jobs:
         run: uv run ruff format --check src tests
 
       - name: mypy
-        run: uv run mypy src/starter
+        run: uv run mypy src/channel
 
       - name: Copyright headers
         run: uv run python scripts/check_copyright.py
@@ -72,8 +72,10 @@ jobs:
         run: npm install
 
       - name: pip-audit
-        # CVE-2026-3219 affects pip 26.0.1 itself (no fix available yet)
-        run: uv run pip-audit --skip-editable --ignore-vuln CVE-2026-3219
+        # CVE-2026-3219 and CVE-2026-6357 affect the pip bundled with the venv
+        # itself, not anything in our pyproject.toml. pip is build-time only —
+        # the deployed Lambda runtime has no pip.
+        run: uv run pip-audit --skip-editable --ignore-vuln CVE-2026-3219 --ignore-vuln CVE-2026-6357
 
       - name: npm audit
         working-directory: ui
@@ -131,7 +133,7 @@ jobs:
         run: uv sync --all-extras
 
       - name: Run unit tests with coverage
-        run: uv run pytest tests/unit -v --cov=src/starter --cov-report=xml:coverage-unit.xml
+        run: uv run pytest tests/unit -v --cov=src/channel --cov-report=xml:coverage-unit.xml
 
       - name: Write coverage summary
         if: always()
@@ -171,7 +173,7 @@ jobs:
           AWS_DEFAULT_REGION: us-east-1
           STARTER_JWT_SECRET: test-secret
           STARTER_TABLE_NAME: starter-integration
-        run: uv run pytest tests/unit tests/integration -v --cov=src/starter --cov-report=xml:coverage-combined.xml --cov-fail-under=100
+        run: uv run pytest tests/unit tests/integration -v --cov=src/channel --cov-report=xml:coverage-combined.xml --cov-fail-under=100
 
       - name: Write coverage summary
         if: always()
@@ -371,7 +373,7 @@ jobs:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         run: |
           curl -s -u "$SONAR_TOKEN:" \
-            "https://sonarcloud.io/api/issues/search?projectKeys=warlordofmars_agentcore-starter&resolved=false&types=VULNERABILITY,SECURITY_HOTSPOT&ps=500" \
+            "https://sonarcloud.io/api/issues/search?projectKeys=warlordofmars_channel&resolved=false&types=VULNERABILITY,SECURITY_HOTSPOT&ps=500" \
             -o sonar-issues.json
           python3 scripts/sonar_to_sarif.py sonar-issues.json sonar.sarif
 
@@ -487,11 +489,11 @@ jobs:
 
       - name: Synth prod stack
         working-directory: infra
-        run: cdk synth AgentCoreStarterStack --no-staging -c env=prod -c hosted_zone_id=${{ vars.HOSTED_ZONE_ID }}
+        run: cdk synth ChannelStack --no-staging -c env=prod -c hosted_zone_id=${{ vars.HOSTED_ZONE_ID }}
 
       - name: Synth dev stack
         working-directory: infra
-        run: cdk synth AgentCoreStarterStack-dev --no-staging -c env=dev -c hosted_zone_id=${{ vars.HOSTED_ZONE_ID }}
+        run: cdk synth ChannelStack-dev --no-staging -c env=dev -c hosted_zone_id=${{ vars.HOSTED_ZONE_ID }}
 
       - name: Trivy — IaC scan (table, for log visibility)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
@@ -611,7 +613,7 @@ jobs:
       - name: Export stack URLs
         id: urls
         run: |
-          STACK=AgentCoreStarterStack-dev
+          STACK=ChannelStack-dev
           query() { aws cloudformation describe-stacks --stack-name $STACK --region us-east-1 \
             --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" --output text; }
           echo "api_url_direct=$(query ApiFunctionUrl)" >> "$GITHUB_OUTPUT"
@@ -830,7 +832,7 @@ jobs:
       - name: Export stack URLs
         id: urls
         run: |
-          STACK=AgentCoreStarterStack
+          STACK=ChannelStack
           query() { aws cloudformation describe-stacks --stack-name $STACK --region us-east-1 \
             --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" --output text; }
           echo "api_url_direct=$(query ApiFunctionUrl)" >> "$GITHUB_OUTPUT"

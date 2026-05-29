@@ -18,10 +18,10 @@ from fastapi.testclient import TestClient
 os.environ.setdefault("STARTER_JWT_SECRET", "test-secret-for-unit-tests")
 os.environ.setdefault("GOOGLE_CLIENT_ID", "test-google-client-id")
 
-from starter.api.main import app  # noqa: E402
-from starter.auth import state_store  # noqa: E402
-from starter.auth.google import _google_client_id, _reset_allowed_emails_cache  # noqa: E402
-from starter.auth.mgmt_auth import (  # noqa: E402
+from channel.api.main import app  # noqa: E402
+from channel.auth import state_store  # noqa: E402
+from channel.auth.google import _google_client_id, _reset_allowed_emails_cache  # noqa: E402
+from channel.auth.mgmt_auth import (  # noqa: E402
     _consume_pending_state,
     _create_pending_state,
     _html_redirect,
@@ -118,7 +118,7 @@ def test_make_user_role_admin(monkeypatch):
 
 def test_mgmt_login_bypass_issues_html_with_token(monkeypatch):
     monkeypatch.setenv("ALLOWED_EMAILS", "[]")
-    with patch("starter.auth.mgmt_auth._BYPASS", True):
+    with patch("channel.auth.mgmt_auth._BYPASS", True):
         resp = _client.get("/auth/login?test_email=e2e@test.com")
     assert resp.status_code == 200
     assert "starter_mgmt_token" in resp.text
@@ -126,7 +126,7 @@ def test_mgmt_login_bypass_issues_html_with_token(monkeypatch):
 
 def test_mgmt_login_no_bypass_redirects_to_google(monkeypatch):
     monkeypatch.setenv("GOOGLE_CLIENT_ID", "test-google-id")
-    with patch("starter.auth.mgmt_auth._BYPASS", False):
+    with patch("channel.auth.mgmt_auth._BYPASS", False):
         resp = _client.get("/auth/login")
     assert resp.status_code == 302
     assert "accounts.google.com" in resp.headers["location"]
@@ -152,11 +152,11 @@ def test_mgmt_callback_success(monkeypatch):
     state = _create_pending_state()
     with (
         patch(
-            "starter.auth.mgmt_auth.exchange_google_code",
+            "channel.auth.mgmt_auth.exchange_google_code",
             new=AsyncMock(return_value="fake-id-token"),
         ),
         patch(
-            "starter.auth.mgmt_auth.verify_google_id_token",
+            "channel.auth.mgmt_auth.verify_google_id_token",
             new=AsyncMock(
                 return_value={
                     "email": "user@example.com",
@@ -177,11 +177,11 @@ def test_mgmt_callback_unlisted_email_with_populated_allowlist_returns_403(monke
     state = _create_pending_state()
     with (
         patch(
-            "starter.auth.mgmt_auth.exchange_google_code",
+            "channel.auth.mgmt_auth.exchange_google_code",
             new=AsyncMock(return_value="fake-id-token"),
         ),
         patch(
-            "starter.auth.mgmt_auth.verify_google_id_token",
+            "channel.auth.mgmt_auth.verify_google_id_token",
             new=AsyncMock(
                 return_value={
                     "email": "stranger@example.com",
@@ -207,11 +207,11 @@ def test_mgmt_callback_unlisted_email_with_empty_allowlist_returns_403(monkeypat
     state = _create_pending_state()
     with (
         patch(
-            "starter.auth.mgmt_auth.exchange_google_code",
+            "channel.auth.mgmt_auth.exchange_google_code",
             new=AsyncMock(return_value="fake-id-token"),
         ),
         patch(
-            "starter.auth.mgmt_auth.verify_google_id_token",
+            "channel.auth.mgmt_auth.verify_google_id_token",
             new=AsyncMock(
                 return_value={
                     "email": "anyone@example.com",
@@ -232,11 +232,11 @@ def test_mgmt_callback_listed_admin_email_returns_admin_role(monkeypatch):
     state = _create_pending_state()
     with (
         patch(
-            "starter.auth.mgmt_auth.exchange_google_code",
+            "channel.auth.mgmt_auth.exchange_google_code",
             new=AsyncMock(return_value="fake-id-token"),
         ),
         patch(
-            "starter.auth.mgmt_auth.verify_google_id_token",
+            "channel.auth.mgmt_auth.verify_google_id_token",
             new=AsyncMock(
                 return_value={
                     "email": "admin@example.com",
@@ -245,7 +245,7 @@ def test_mgmt_callback_listed_admin_email_returns_admin_role(monkeypatch):
                 }
             ),
         ),
-        patch("starter.auth.mgmt_auth.issue_mgmt_jwt") as mock_issue,
+        patch("channel.auth.mgmt_auth.issue_mgmt_jwt") as mock_issue,
     ):
         mock_issue.return_value = "stub-jwt"
         resp = _client.get(f"/auth/callback?code=authcode&state={state}")
@@ -267,11 +267,11 @@ def test_mgmt_callback_listed_non_admin_email_returns_user_role(monkeypatch):
     state = _create_pending_state()
     with (
         patch(
-            "starter.auth.mgmt_auth.exchange_google_code",
+            "channel.auth.mgmt_auth.exchange_google_code",
             new=AsyncMock(return_value="fake-id-token"),
         ),
         patch(
-            "starter.auth.mgmt_auth.verify_google_id_token",
+            "channel.auth.mgmt_auth.verify_google_id_token",
             new=AsyncMock(
                 return_value={
                     "email": "user@example.com",
@@ -280,8 +280,8 @@ def test_mgmt_callback_listed_non_admin_email_returns_user_role(monkeypatch):
                 }
             ),
         ),
-        patch("starter.auth.mgmt_auth.is_admin_email", return_value=False),
-        patch("starter.auth.mgmt_auth.issue_mgmt_jwt") as mock_issue,
+        patch("channel.auth.mgmt_auth.is_admin_email", return_value=False),
+        patch("channel.auth.mgmt_auth.issue_mgmt_jwt") as mock_issue,
     ):
         mock_issue.return_value = "stub-jwt"
         resp = _client.get(f"/auth/callback?code=authcode&state={state}")
@@ -293,11 +293,11 @@ def test_mgmt_callback_unverified_email(monkeypatch):
     state = _create_pending_state()
     with (
         patch(
-            "starter.auth.mgmt_auth.exchange_google_code",
+            "channel.auth.mgmt_auth.exchange_google_code",
             new=AsyncMock(return_value="fake-id-token"),
         ),
         patch(
-            "starter.auth.mgmt_auth.verify_google_id_token",
+            "channel.auth.mgmt_auth.verify_google_id_token",
             new=AsyncMock(return_value={"email": "user@example.com", "email_verified": False}),
         ),
     ):
@@ -308,7 +308,7 @@ def test_mgmt_callback_unverified_email(monkeypatch):
 def test_mgmt_callback_google_exchange_error(monkeypatch):
     state = _create_pending_state()
     with patch(
-        "starter.auth.mgmt_auth.exchange_google_code",
+        "channel.auth.mgmt_auth.exchange_google_code",
         new=AsyncMock(side_effect=Exception("network error")),
     ):
         resp = _client.get(f"/auth/callback?code=authcode&state={state}")

@@ -53,7 +53,6 @@ ui/src/
 │   └── utils.js                  # cn and other shared utils
 └── components/
     ├── LoginPage.jsx             # Google OAuth login page
-    ├── AuthCallback.jsx          # OAuth callback handler
     ├── Dashboard.jsx             # Admin: CloudWatch metrics + cost data
     ├── UsersPanel.jsx            # Admin: user list + management
     ├── EmptyState.jsx            # Shared empty-state illustration

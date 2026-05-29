@@ -9,9 +9,9 @@
   },
   "branches": {
     "main": {
-      "url": "https://api.github.com/repos/warlordofmars/agentcore-starter/branches/main/protection",
+      "url": "https://api.github.com/repos/warlordofmars/channel/branches/main/protection",
       "required_status_checks": {
-        "url": "https://api.github.com/repos/warlordofmars/agentcore-starter/branches/main/protection/required_status_checks",
+        "url": "https://api.github.com/repos/warlordofmars/channel/branches/main/protection/required_status_checks",
         "strict": true,
         "contexts": [
           "Lint & Type Check",
@@ -22,7 +22,7 @@
           "Infra Synth",
           "Security Audit"
         ],
-        "contexts_url": "https://api.github.com/repos/warlordofmars/agentcore-starter/branches/main/protection/required_status_checks/contexts",
+        "contexts_url": "https://api.github.com/repos/warlordofmars/channel/branches/main/protection/required_status_checks/contexts",
         "checks": [
           {
             "context": "Lint & Type Check",
@@ -55,11 +55,11 @@
         ]
       },
       "required_signatures": {
-        "url": "https://api.github.com/repos/warlordofmars/agentcore-starter/branches/main/protection/required_signatures",
+        "url": "https://api.github.com/repos/warlordofmars/channel/branches/main/protection/required_signatures",
         "enabled": false
       },
       "enforce_admins": {
-        "url": "https://api.github.com/repos/warlordofmars/agentcore-starter/branches/main/protection/enforce_admins",
+        "url": "https://api.github.com/repos/warlordofmars/channel/branches/main/protection/enforce_admins",
         "enabled": false
       },
       "required_linear_history": {
@@ -85,9 +85,9 @@
       }
     },
     "development": {
-      "url": "https://api.github.com/repos/warlordofmars/agentcore-starter/branches/development/protection",
+      "url": "https://api.github.com/repos/warlordofmars/channel/branches/development/protection",
       "required_status_checks": {
-        "url": "https://api.github.com/repos/warlordofmars/agentcore-starter/branches/development/protection/required_status_checks",
+        "url": "https://api.github.com/repos/warlordofmars/channel/branches/development/protection/required_status_checks",
         "strict": true,
         "contexts": [
           "Lint & Type Check",
@@ -98,7 +98,7 @@
           "Infra Synth",
           "Security Audit"
         ],
-        "contexts_url": "https://api.github.com/repos/warlordofmars/agentcore-starter/branches/development/protection/required_status_checks/contexts",
+        "contexts_url": "https://api.github.com/repos/warlordofmars/channel/branches/development/protection/required_status_checks/contexts",
         "checks": [
           {
             "context": "Lint & Type Check",
@@ -131,11 +131,11 @@
         ]
       },
       "required_signatures": {
-        "url": "https://api.github.com/repos/warlordofmars/agentcore-starter/branches/development/protection/required_signatures",
+        "url": "https://api.github.com/repos/warlordofmars/channel/branches/development/protection/required_signatures",
         "enabled": false
       },
       "enforce_admins": {
-        "url": "https://api.github.com/repos/warlordofmars/agentcore-starter/branches/development/protection/enforce_admins",
+        "url": "https://api.github.com/repos/warlordofmars/channel/branches/development/protection/enforce_admins",
         "enabled": false
       },
       "required_linear_history": {

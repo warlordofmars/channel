@@ -7,8 +7,8 @@ import logging
 
 import pytest
 
-from starter import startup
-from starter.startup import (
+from channel import startup
+from channel.startup import (
     HARD_FAIL_PARAM_ENV_VARS,
     PLACEHOLDER_VALUE,
     SOFT_WARN_PARAM_ENV_VAR,
@@ -24,7 +24,7 @@ from starter.startup import (
 
 def _set_lambda_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Pretend we are running inside an AWS Lambda."""
-    monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "agentcore-starter-api")
+    monkeypatch.setenv("AWS_LAMBDA_FUNCTION_NAME", "channel-api")
 
 
 def _wire_hard_fail_param_names(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
@@ -37,7 +37,7 @@ def _wire_hard_fail_param_names(monkeypatch: pytest.MonkeyPatch) -> dict[str, st
 
 class _ListHandler(logging.Handler):
     """In-memory log handler used to capture records on the non-propagating
-    ``starter`` logger tree (the project's JSON logger sets
+    ``channel`` logger tree (the project's JSON logger sets
     ``propagate=False``, so :data:`pytest`'s caplog fixture cannot see
     these records via the root).
     """
@@ -52,9 +52,9 @@ class _ListHandler(logging.Handler):
 
 @pytest.fixture
 def capture_startup_logs():
-    """Yield a list of records emitted on ``starter.startup``."""
+    """Yield a list of records emitted on ``channel.startup``."""
     handler = _ListHandler()
-    logger = logging.getLogger("starter.startup")
+    logger = logging.getLogger("channel.startup")
     previous_level = logger.level
     logger.addHandler(handler)
     logger.setLevel(logging.DEBUG)

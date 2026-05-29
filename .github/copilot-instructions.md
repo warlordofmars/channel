@@ -1,6 +1,6 @@
-# Copilot review instructions for AgentCore Starter
+# Copilot review instructions for Channel
 
-AgentCore Starter is a production-ready starter template for AWS-native AI agent backend services (FastAPI + React + DynamoDB on AWS Lambda). Use the rules below when reviewing pull requests in this repo so the autonomous agent can act on your feedback cleanly.
+Channel is a production-ready starter template for AWS-native AI agent backend services (FastAPI + React + DynamoDB on AWS Lambda). Use the rules below when reviewing pull requests in this repo so the autonomous agent can act on your feedback cleanly.
 
 ## What to flag
 
@@ -28,7 +28,7 @@ The agent will auto-dismiss these as style-only nits and move on.
 - **UI styling**: Use CSS variables (`var(--text-muted)`, `var(--border)`, `var(--accent)`); never hardcode hex colours. Use `lucide-react` icons — never emojis as UI elements. Prefer `shadcn/ui` primitives (`Button`, `Card`, `Table`) over raw HTML.
 - **Copyright headers**: Every new source file carries `// Copyright (c) 2026 John Carter. All rights reserved.` (or `#` for Python).
 - **No new `README.md` / `docs/*.md` files** unless the issue explicitly asks for them — this repo dislikes drive-by documentation.
-- **Auth**: OAuth 2.1 + PKCE for API clients, Google OAuth for mgmt UI. Any changes near `src/starter/auth/` warrant extra scrutiny.
+- **Auth**: OAuth 2.1 + PKCE for API clients, Google OAuth for mgmt UI. Any changes near `src/channel/auth/` warrant extra scrutiny.
 
 ## Agent-specific rule
 

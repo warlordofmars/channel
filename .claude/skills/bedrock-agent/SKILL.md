@@ -116,11 +116,12 @@ namespace template strings.
   inline-agent wrapper (per ADR-0003); the `invoke` /
   `invoke_stream` shape and the user-namespaced `sessionId` are
   the reference today and remain in force for the template's
-  `/api/agents/*` path.
-- `src/starter/api/agents.py` — the FastAPI route handlers that
-  consume the inline-agent wrapper; route-handler conventions
-  (auth dependency, `StreamingResponse`, SSE event schema) live
-  in the `fastapi-route` skill, not here.
+  agent invocation surface. The scaffold FastAPI route handlers
+  that previously consumed this wrapper were removed during the
+  channel fork's Phase 0; new route handlers will be written in
+  Phase 6 — see the `fastapi-route` skill for the route-handler
+  conventions (auth dependency, `StreamingResponse`, SSE event
+  schema).
 - [ADR-0003](../../../docs/adr/0003-inline-agent-and-session-memory.md)
   — inline-agent decision and the user-namespaced `sessionId`
   convention; in force for the template's `/api/agents/*` path.

@@ -19,8 +19,8 @@ jobs:
     name: DynamoDB PITR Restore Test
     runs-on: ubuntu-latest
     env:
-      RESTORE_TABLE: agentcore-starter-backup-test-${{ github.run_id }}
-      SOURCE_TABLE: agentcore-starter
+      RESTORE_TABLE: channel-backup-test-${{ github.run_id }}
+      SOURCE_TABLE: channel
       AWS_REGION: us-east-1
 
     steps:
@@ -110,7 +110,7 @@ jobs:
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 title: 'DynamoDB backup restore test failing',
-                body: `## Backup Restore Failure\n\nThe weekly DynamoDB PITR restore test failed, indicating a potential issue with the prod backup chain.\n\nSee the [workflow run](${run_url}) for details.\n\n**Action required:** Verify PITR is enabled on the \`agentcore-starter\` table and investigate the restore failure.`,
+                body: `## Backup Restore Failure\n\nThe weekly DynamoDB PITR restore test failed, indicating a potential issue with the prod backup chain.\n\nSee the [workflow run](${run_url}) for details.\n\n**Action required:** Verify PITR is enabled on the \`channel\` table and investigate the restore failure.`,
                 labels: ['reliability', 'bug'],
               });
             } else {

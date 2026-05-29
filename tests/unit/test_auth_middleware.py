@@ -8,8 +8,8 @@ from fastapi.testclient import TestClient
 
 os.environ.setdefault("STARTER_JWT_SECRET", "test-secret-for-unit-tests")
 
-from starter.api._auth import require_admin, require_mgmt_user  # noqa: E402
-from starter.auth.tokens import issue_mgmt_jwt  # noqa: E402
+from channel.api._auth import require_admin, require_mgmt_user  # noqa: E402
+from channel.auth.tokens import issue_mgmt_jwt  # noqa: E402
 
 
 def _admin_token() -> str:

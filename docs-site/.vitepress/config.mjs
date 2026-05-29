@@ -2,8 +2,8 @@ import { defineConfig } from "vitepress";
 
 export default defineConfig({
   base: "/docs/",
-  title: "AgentCore Starter Docs",
-  description: "Documentation for AgentCore Starter",
+  title: "Channel Docs",
+  description: "Documentation for Channel",
   cleanUrls: true,
   sitemap: {
     hostname: "https://example.com",
@@ -16,20 +16,20 @@ export default defineConfig({
   head: [
     ["link", { rel: "icon", type: "image/svg+xml", href: "/docs/favicon.svg" }],
     ["meta", { property: "og:type", content: "website" }],
-    ["meta", { property: "og:site_name", content: "AgentCore Starter" }],
-    ["meta", { property: "og:title", content: "AgentCore Starter Docs" }],
+    ["meta", { property: "og:site_name", content: "Channel" }],
+    ["meta", { property: "og:title", content: "Channel Docs" }],
     [
       "meta",
       {
         property: "og:description",
-        content: "Documentation for AgentCore Starter.",
+        content: "Documentation for Channel.",
       },
     ],
   ],
 
   themeConfig: {
-    logo: { src: "/logo.svg", alt: "AgentCore Starter" },
-    siteTitle: "AgentCore Starter",
+    logo: { src: "/logo.svg", alt: "Channel" },
+    siteTitle: "Channel",
     // logoLink goes to the marketing page root, not /docs/.
     logoLink: "/",
     // Nav links are rendered via nav-bar-content-after as plain <a> elements.
@@ -63,7 +63,7 @@ export default defineConfig({
     appearance: true,
 
     footer: {
-      message: "AgentCore Starter",
+      message: "Channel",
     },
 
     search: {

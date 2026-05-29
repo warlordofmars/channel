@@ -25,9 +25,9 @@ export default function LoginPage() {
   return (
     <div className="min-h-screen flex items-center justify-center bg-[var(--bg)]">
       <div className="bg-[var(--surface)] border border-[var(--border)] rounded-xl p-12 text-center shadow-[0_2px_16px_rgba(0,0,0,.1)] max-w-sm w-full">
-        <img src="/logo.svg" alt="AgentCore Starter" className="w-24 h-24 block mx-auto mb-5" />
+        <img src="/logo.svg" alt="Channel" className="w-24 h-24 block mx-auto mb-5" />
         <p className="text-[var(--text-muted)] mb-8">
-          AgentCore Starter
+          Channel
         </p>
         <button
           onClick={handleSignIn}

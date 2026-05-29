@@ -1,6 +1,6 @@
 # Copyright (c) 2026 John Carter. All rights reserved.
 """
-AgentCore Starter CDK Stack — defines all AWS infrastructure.
+Channel CDK Stack — defines all AWS infrastructure.
 
 Resources:
   - DynamoDB table (single-table design) with GSIs and TTL
@@ -12,9 +12,9 @@ Resources:
   - GitHub Actions OIDC deploy role (one per environment)
 
 Multi-environment usage:
-  cdk deploy AgentCoreStarterStack         -c env=prod   # production
-  cdk deploy AgentCoreStarterStack-dev     -c env=dev    # development
-  cdk deploy AgentCoreStarterStack-staging -c env=staging
+  cdk deploy ChannelStack         -c env=prod   # production
+  cdk deploy ChannelStack-dev     -c env=dev    # development
+  cdk deploy ChannelStack-staging -c env=staging
 """
 
 from __future__ import annotations
@@ -41,13 +41,13 @@ from aws_cdk import aws_wafv2 as wafv2
 from cdk_nag import NagPackSuppression, NagSuppressions
 from constructs import Construct
 
-GITHUB_REPO = "warlordofmars/agentcore-starter"
+GITHUB_REPO = "warlordofmars/channel"
 
 
 HOSTED_ZONE_NAME = "warlordofmars.net"
 
 
-class AgentCoreStarterStack(cdk.Stack):
+class ChannelStack(cdk.Stack):
     def __init__(
         self,
         scope: Construct,
@@ -59,7 +59,7 @@ class AgentCoreStarterStack(cdk.Stack):
         super().__init__(scope, construct_id, **kwargs)
 
         # Apply cost-allocation tags to every resource in the stack.
-        cdk.Tags.of(self).add("project", "agentcore-starter")
+        cdk.Tags.of(self).add("project", "channel")
         cdk.Tags.of(self).add("env", env_name)
 
         is_prod = env_name == "prod"
@@ -79,7 +79,7 @@ class AgentCoreStarterStack(cdk.Stack):
         # ----------------------------------------------------------------
         # Table name is derived from env_name so arbitrary envs never conflict.
 
-        table_name = "agentcore-starter" if is_prod else f"agentcore-starter-{env_name}"
+        table_name = "channel" if is_prod else f"channel-{env_name}"
 
         table = dynamodb.Table(
             self,
@@ -112,14 +112,7 @@ class AgentCoreStarterStack(cdk.Stack):
             projection_type=dynamodb.ProjectionType.ALL,
         )
 
-        # GSI 3 — ClientIndex: OAuth client lookups
-        table.add_global_secondary_index(
-            index_name="ClientIndex",
-            partition_key=dynamodb.Attribute(name="GSI3PK", type=dynamodb.AttributeType.STRING),
-            projection_type=dynamodb.ProjectionType.ALL,
-        )
-
-        # GSI 4 — UserEmailIndex: look up users by email
+        # GSI 3 — UserEmailIndex: look up users by email
         table.add_global_secondary_index(
             index_name="UserEmailIndex",
             partition_key=dynamodb.Attribute(name="GSI4PK", type=dynamodb.AttributeType.STRING),
@@ -133,7 +126,7 @@ class AgentCoreStarterStack(cdk.Stack):
         # Prod keeps legacy paths (no env suffix) for backward compatibility.
         def _ssm_path(name: str) -> str:
             return (
-                f"/agentcore-starter/{name}" if is_prod else f"/agentcore-starter/{env_name}/{name}"
+                f"/channel/{name}" if is_prod else f"/channel/{env_name}/{name}"
             )
 
         ssm_param_name = _ssm_path("jwt-secret")
@@ -143,7 +136,7 @@ class AgentCoreStarterStack(cdk.Stack):
             "JwtSecret",
             parameter_name=ssm_param_name,
             string_value="CHANGE_ME_ON_FIRST_DEPLOY",
-            description=f"AgentCore Starter JWT signing secret ({env_name}) — rotate after first deploy",
+            description=f"Channel JWT signing secret ({env_name}) — rotate after first deploy",
             tier=ssm.ParameterTier.STANDARD,
         )
         # Always retain the JWT secret — losing it invalidates all issued tokens.
@@ -174,7 +167,7 @@ class AgentCoreStarterStack(cdk.Stack):
             "AllowedEmails",
             parameter_name=_ssm_path("allowed-emails"),
             string_value="[]",
-            description=f"JSON array of Google email addresses allowed to access AgentCore Starter ({env_name}); empty = deny all (must be populated post-deploy)",
+            description=f"JSON array of Google email addresses allowed to access Channel ({env_name}); empty = deny all (must be populated post-deploy)",
             tier=ssm.ParameterTier.STANDARD,
         )
         allowed_emails_param.apply_removal_policy(cdk.RemovalPolicy.RETAIN)
@@ -227,7 +220,7 @@ class AgentCoreStarterStack(cdk.Stack):
                             # Export only runtime deps — exclude dev and infra (CDK) groups
                             "UV_CACHE_DIR=/tmp/uv-cache uv export --no-hashes --no-group dev --no-group infra -o /tmp/requirements.txt",
                             "pip install -r /tmp/requirements.txt -t /asset-output --quiet --no-cache-dir",
-                            "cp -r src/starter /asset-output/starter",
+                            "cp -r src/channel /asset-output/channel",
                             # run.sh is the AWSLWA entrypoint — must be executable at Lambda root
                             "cp run.sh /asset-output/run.sh",
                             "chmod +x /asset-output/run.sh",
@@ -250,7 +243,7 @@ class AgentCoreStarterStack(cdk.Stack):
         )
 
         # JWT issuer URL embedded in tokens — must be unique per environment.
-        issuer_host = "agentcore-starter" if is_prod else f"agentcore-starter-{env_name}"
+        issuer_host = "channel" if is_prod else f"channel-{env_name}"
         custom_domain = f"{issuer_host}.{HOSTED_ZONE_NAME}"
 
         # ----------------------------------------------------------------
@@ -381,12 +374,12 @@ class AgentCoreStarterStack(cdk.Stack):
             layers=[awslwa_layer],
             memory_size=512,
             timeout=cdk.Duration.seconds(30),
-            description=f"AgentCore Starter management API (FastAPI + AWSLWA) [{env_name}]",
+            description=f"Channel management API (FastAPI + AWSLWA) [{env_name}]",
             tracing=lambda_.Tracing.ACTIVE,
         )
 
         # CDK names functions "{StackId}-{LogicalId}-{RandomSuffix}".
-        # construct_id is the first segment, e.g. "AgentCoreStarterStack-dev".
+        # construct_id is the first segment, e.g. "ChannelStack-dev".
         api_role.add_to_policy(
             iam.PolicyStatement(
                 actions=[
@@ -468,7 +461,7 @@ class AgentCoreStarterStack(cdk.Stack):
             "default-src 'self'; "
             "script-src 'self' https://www.googletagmanager.com; "
             "connect-src 'self' https://www.google-analytics.com "
-            "https://agentcore-starter.example.com; "
+            "https://channel.example.com; "
             "img-src 'self' data: https://www.google-analytics.com; "
             "style-src 'self' 'unsafe-inline'; "
             "frame-ancestors 'none'; "
@@ -480,8 +473,8 @@ class AgentCoreStarterStack(cdk.Stack):
         security_headers_policy = cloudfront.ResponseHeadersPolicy(
             self,
             "StarterSecurityHeadersPolicy",
-            response_headers_policy_name=f"agentcore-starter-security-headers-{env_name}",
-            comment="AgentCore Starter security response headers (HSTS, CSP-RO, frame/referrer/permissions)",
+            response_headers_policy_name=f"channel-security-headers-{env_name}",
+            comment="Channel security response headers (HSTS, CSP-RO, frame/referrer/permissions)",
             security_headers_behavior=cloudfront.ResponseSecurityHeadersBehavior(
                 strict_transport_security=cloudfront.ResponseHeadersStrictTransportSecurity(
                     access_control_max_age=cdk.Duration.seconds(31536000),
@@ -532,7 +525,7 @@ class AgentCoreStarterStack(cdk.Stack):
         waf_log_group = logs.LogGroup(
             self,
             "WafLogGroup",
-            log_group_name=f"aws-waf-logs-agentcore-starter-{env_name}",
+            log_group_name=f"aws-waf-logs-channel-{env_name}",
             retention=logs.RetentionDays.ONE_MONTH,
             removal_policy=cdk.RemovalPolicy.DESTROY,
         )
@@ -552,12 +545,12 @@ class AgentCoreStarterStack(cdk.Stack):
         web_acl = wafv2.CfnWebACL(
             self,
             "WebAcl",
-            name=f"agentcore-starter-{env_name}",
+            name=f"channel-{env_name}",
             scope="CLOUDFRONT",
             default_action=wafv2.CfnWebACL.DefaultActionProperty(allow={}),
             visibility_config=wafv2.CfnWebACL.VisibilityConfigProperty(
                 cloud_watch_metrics_enabled=True,
-                metric_name=f"agentcore-starter-{env_name}-waf",
+                metric_name=f"channel-{env_name}-waf",
                 sampled_requests_enabled=True,
             ),
             rules=[
@@ -592,37 +585,6 @@ class AgentCoreStarterStack(cdk.Stack):
                     visibility_config=wafv2.CfnWebACL.VisibilityConfigProperty(
                         cloud_watch_metrics_enabled=True,
                         metric_name="AWSManagedRulesKnownBadInputsRuleSet",
-                        sampled_requests_enabled=True,
-                    ),
-                ),
-                # Rate limit: 100 req/5min per IP on /oauth/* (auth endpoints)
-                wafv2.CfnWebACL.RuleProperty(
-                    name="OAuthRateLimit",
-                    priority=2,
-                    action=wafv2.CfnWebACL.RuleActionProperty(block={}),
-                    statement=wafv2.CfnWebACL.StatementProperty(
-                        rate_based_statement=wafv2.CfnWebACL.RateBasedStatementProperty(
-                            limit=100,
-                            aggregate_key_type="IP",
-                            scope_down_statement=wafv2.CfnWebACL.StatementProperty(
-                                byte_match_statement=wafv2.CfnWebACL.ByteMatchStatementProperty(
-                                    search_string="/oauth/",
-                                    field_to_match=wafv2.CfnWebACL.FieldToMatchProperty(
-                                        uri_path={}
-                                    ),
-                                    text_transformations=[
-                                        wafv2.CfnWebACL.TextTransformationProperty(
-                                            priority=0, type="NONE"
-                                        )
-                                    ],
-                                    positional_constraint="STARTS_WITH",
-                                )
-                            ),
-                        )
-                    ),
-                    visibility_config=wafv2.CfnWebACL.VisibilityConfigProperty(
-                        cloud_watch_metrics_enabled=True,
-                        metric_name="OAuthRateLimit",
                         sampled_requests_enabled=True,
                     ),
                 ),
@@ -746,14 +708,6 @@ function handler(event) {
             additional_behaviors={
                 "/api/*": api_behavior,
                 "/auth/*": api_behavior,
-                "/oauth/*": api_behavior,
-                "/.well-known/*": cloudfront.BehaviorOptions(
-                    origin=api_cf_origin,
-                    viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-                    cache_policy=cloudfront.CachePolicy.CACHING_DISABLED,
-                    origin_request_policy=cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
-                    response_headers_policy=security_headers_policy,
-                ),
                 "/health": cloudfront.BehaviorOptions(
                     origin=api_cf_origin,
                     viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
@@ -872,7 +826,7 @@ function handler(event) {
             managed_policies=[
                 iam.ManagedPolicy.from_aws_managed_policy_name("AdministratorAccess")
             ],
-            description=f"GitHub Actions OIDC deploy role for AgentCore Starter ({env_name})",
+            description=f"GitHub Actions OIDC deploy role for Channel ({env_name})",
         )
 
         # ----------------------------------------------------------------
@@ -891,7 +845,7 @@ function handler(event) {
         logs.QueryDefinition(
             self,
             "QueryErrors",
-            query_definition_name=f"AgentCoreStarter/{env_name}/errors",
+            query_definition_name=f"Channel/{env_name}/errors",
             query_string=logs.QueryString(
                 fields=["@timestamp", "client_id", "tool", "error_message"],
                 filter_statements=['level = "ERROR"'],
@@ -903,7 +857,7 @@ function handler(event) {
         logs.QueryDefinition(
             self,
             "QueryTopClients",
-            query_definition_name=f"AgentCoreStarter/{env_name}/top-clients",
+            query_definition_name=f"Channel/{env_name}/top-clients",
             query_string=logs.QueryString(
                 stats_statements=["count(*) as requests by client_id"],
                 sort="requests desc",
@@ -914,7 +868,7 @@ function handler(event) {
         logs.QueryDefinition(
             self,
             "QueryApiLatency",
-            query_definition_name=f"AgentCoreStarter/{env_name}/api-latency",
+            query_definition_name=f"Channel/{env_name}/api-latency",
             query_string=logs.QueryString(
                 fields=["@timestamp", "method", "path", "status_code", "duration_ms"],
                 filter_statements=["ispresent(method)"],
@@ -927,7 +881,7 @@ function handler(event) {
         # ----------------------------------------------------------------
         # CloudWatch dashboard + alarms
         # ----------------------------------------------------------------
-        dashboard_name = "AgentCoreStarter" if is_prod else f"AgentCoreStarter-{env_name}"
+        dashboard_name = "Channel" if is_prod else f"Channel-{env_name}"
 
         # SLO targets and derived error budgets
         # MCP availability: 99.5% success → 0.5% error budget
@@ -937,12 +891,12 @@ function handler(event) {
         _API_ERROR_BUDGET_PCT = 1.0
 
         # SNS topic for alarm notifications — prod only gets an email subscription
-        # (subscription address lives in SSM /agentcore-starter/{env}/alarm-email; set it
+        # (subscription address lives in SSM /channel/{env}/alarm-email; set it
         # post-deploy, then run `aws sns subscribe --protocol email ...`).
         alarm_topic = sns.Topic(
             self,
             "AlarmTopic",
-            display_name=f"AgentCoreStarter alarms ({env_name})",
+            display_name=f"Channel alarms ({env_name})",
         )
 
         def _notify(alarm: cw.Alarm) -> cw.Alarm:
@@ -970,14 +924,14 @@ function handler(event) {
             alarm = cw.Alarm(
                 self,
                 construct_id,
-                alarm_name=f"AgentCoreStarter-{env_name}-{construct_id.removesuffix('Alarm')}",
+                alarm_name=f"Channel-{env_name}-{construct_id.removesuffix('Alarm')}",
                 metric=error_rate,
                 threshold=5,
                 evaluation_periods=2,
                 datapoints_to_alarm=2,
                 comparison_operator=cw.ComparisonOperator.GREATER_THAN_THRESHOLD,
                 treat_missing_data=cw.TreatMissingData.NOT_BREACHING,
-                alarm_description=f"AgentCoreStarter {label} error rate > 5% ({env_name})",
+                alarm_description=f"Channel {label} error rate > 5% ({env_name})",
             )
             return _notify(alarm)
 
@@ -987,7 +941,7 @@ function handler(event) {
         ddb_throttle_alarm = cw.Alarm(
             self,
             "DdbThrottleAlarm",
-            alarm_name=f"AgentCoreStarter-{env_name}-DdbThrottles",
+            alarm_name=f"Channel-{env_name}-DdbThrottles",
             metric=cw.Metric(
                 namespace="AWS/DynamoDB",
                 metric_name="ThrottledRequests",
@@ -999,7 +953,7 @@ function handler(event) {
             evaluation_periods=1,
             comparison_operator=cw.ComparisonOperator.GREATER_THAN_THRESHOLD,
             treat_missing_data=cw.TreatMissingData.NOT_BREACHING,
-            alarm_description=f"AgentCoreStarter DynamoDB throttled requests > 0 ({env_name})",
+            alarm_description=f"Channel DynamoDB throttled requests > 0 ({env_name})",
         )
         _notify(ddb_throttle_alarm)
 
@@ -1007,7 +961,7 @@ function handler(event) {
         cf_5xx_alarm = cw.Alarm(
             self,
             "CloudFront5xxAlarm",
-            alarm_name=f"AgentCoreStarter-{env_name}-CloudFront5xx",
+            alarm_name=f"Channel-{env_name}-CloudFront5xx",
             metric=cw.Metric(
                 namespace="AWS/CloudFront",
                 metric_name="5xxErrorRate",
@@ -1022,7 +976,7 @@ function handler(event) {
             evaluation_periods=1,
             comparison_operator=cw.ComparisonOperator.GREATER_THAN_THRESHOLD,
             treat_missing_data=cw.TreatMissingData.NOT_BREACHING,
-            alarm_description=f"AgentCoreStarter CloudFront 5xx rate > 1% ({env_name})",
+            alarm_description=f"Channel CloudFront 5xx rate > 1% ({env_name})",
         )
         _notify(cf_5xx_alarm)
 
@@ -1030,9 +984,9 @@ function handler(event) {
         tool_errors_alarm = cw.Alarm(
             self,
             "ToolErrorsAlarm",
-            alarm_name=f"AgentCoreStarter-{env_name}-ToolErrors",
+            alarm_name=f"Channel-{env_name}-ToolErrors",
             metric=cw.Metric(
-                namespace="AgentCoreStarter",
+                namespace="Channel",
                 metric_name="ToolErrors",
                 dimensions_map={"Environment": env_name},
                 period=cdk.Duration.minutes(5),
@@ -1043,16 +997,16 @@ function handler(event) {
             datapoints_to_alarm=2,
             comparison_operator=cw.ComparisonOperator.GREATER_THAN_THRESHOLD,
             treat_missing_data=cw.TreatMissingData.NOT_BREACHING,
-            alarm_description=f"AgentCoreStarter tool errors > 10 in 5 min ({env_name})",
+            alarm_description=f"Channel tool errors > 10 in 5 min ({env_name})",
         )
         _notify(tool_errors_alarm)
 
         storage_latency_alarm = cw.Alarm(
             self,
             "StorageLatencyAlarm",
-            alarm_name=f"AgentCoreStarter-{env_name}-StorageLatencyHigh",
+            alarm_name=f"Channel-{env_name}-StorageLatencyHigh",
             metric=cw.Metric(
-                namespace="AgentCoreStarter",
+                namespace="Channel",
                 metric_name="StorageLatencyMs",
                 dimensions_map={"Environment": env_name},
                 period=cdk.Duration.minutes(5),
@@ -1063,7 +1017,7 @@ function handler(event) {
             datapoints_to_alarm=2,
             comparison_operator=cw.ComparisonOperator.GREATER_THAN_THRESHOLD,
             treat_missing_data=cw.TreatMissingData.NOT_BREACHING,
-            alarm_description=f"AgentCoreStarter storage latency p99 > 2000ms ({env_name})",
+            alarm_description=f"Channel storage latency p99 > 2000ms ({env_name})",
         )
         _notify(storage_latency_alarm)
 
@@ -1073,13 +1027,13 @@ function handler(event) {
             alarm = cw.Alarm(
                 self,
                 construct_id,
-                alarm_name=f"AgentCoreStarter-{env_name}-{construct_id.removesuffix('Alarm')}",
+                alarm_name=f"Channel-{env_name}-{construct_id.removesuffix('Alarm')}",
                 metric=fn.metric_throttles(period=cdk.Duration.minutes(5), statistic="Sum"),
                 threshold=0,
                 evaluation_periods=1,
                 comparison_operator=cw.ComparisonOperator.GREATER_THAN_THRESHOLD,
                 treat_missing_data=cw.TreatMissingData.NOT_BREACHING,
-                alarm_description=f"AgentCoreStarter {label} Lambda throttles > 0 ({env_name})",
+                alarm_description=f"Channel {label} Lambda throttles > 0 ({env_name})",
             )
             return _notify(alarm)
 
@@ -1092,7 +1046,7 @@ function handler(event) {
         ddb_user_errors_alarm = cw.Alarm(
             self,
             "DdbUserErrorsAlarm",
-            alarm_name=f"AgentCoreStarter-{env_name}-DdbUserErrors",
+            alarm_name=f"Channel-{env_name}-DdbUserErrors",
             metric=cw.Metric(
                 namespace="AWS/DynamoDB",
                 metric_name="UserErrors",
@@ -1104,7 +1058,7 @@ function handler(event) {
             evaluation_periods=1,
             comparison_operator=cw.ComparisonOperator.GREATER_THAN_THRESHOLD,
             treat_missing_data=cw.TreatMissingData.NOT_BREACHING,
-            alarm_description=f"AgentCoreStarter DynamoDB user errors > 10 in 5 min ({env_name})",
+            alarm_description=f"Channel DynamoDB user errors > 10 in 5 min ({env_name})",
         )
         _notify(ddb_user_errors_alarm)
 
@@ -1115,9 +1069,9 @@ function handler(event) {
         auth_failures_alarm = cw.Alarm(
             self,
             "AuthFailuresAlarm",
-            alarm_name=f"AgentCoreStarter-{env_name}-AuthFailures",
+            alarm_name=f"Channel-{env_name}-AuthFailures",
             metric=cw.Metric(
-                namespace="AgentCoreStarter",
+                namespace="Channel",
                 metric_name="TokenValidationFailures",
                 dimensions_map={"Environment": env_name},
                 period=cdk.Duration.minutes(5),
@@ -1128,7 +1082,7 @@ function handler(event) {
             datapoints_to_alarm=2,
             comparison_operator=cw.ComparisonOperator.GREATER_THAN_THRESHOLD,
             treat_missing_data=cw.TreatMissingData.NOT_BREACHING,
-            alarm_description=f"AgentCoreStarter auth failures > 10 in 5 min ({env_name})",
+            alarm_description=f"Channel auth failures > 10 in 5 min ({env_name})",
         )
         _notify(auth_failures_alarm)
 
@@ -1160,7 +1114,7 @@ function handler(event) {
             alarm = cw.Alarm(
                 self,
                 construct_id,
-                alarm_name=f"AgentCoreStarter-{env_name}-{construct_id.removesuffix('Alarm')}",
+                alarm_name=f"Channel-{env_name}-{construct_id.removesuffix('Alarm')}",
                 metric=error_rate_pct,
                 threshold=threshold,
                 evaluation_periods=1,
@@ -1168,7 +1122,7 @@ function handler(event) {
                 comparison_operator=cw.ComparisonOperator.GREATER_THAN_THRESHOLD,
                 treat_missing_data=cw.TreatMissingData.NOT_BREACHING,
                 alarm_description=(
-                    f"AgentCoreStarter {label} SLO {burn_type}-burn: error rate > {threshold}% "
+                    f"Channel {label} SLO {burn_type}-burn: error rate > {threshold}% "
                     f"over {window_minutes}m (budget={error_budget_pct}% × {burn_multiplier}×) ({env_name})"
                 ),
             )
@@ -1187,7 +1141,7 @@ function handler(event) {
         dashboard.add_widgets(
             cw.Row(
                 cw.TextWidget(
-                    markdown=f"# AgentCore Starter — {env_name}  \nLambda · DynamoDB · CloudFront",
+                    markdown=f"# Channel — {env_name}  \nLambda · DynamoDB · CloudFront",
                     width=24,
                     height=1,
                 ),
@@ -1357,7 +1311,7 @@ function handler(event) {
                     title="Tool Invocations",
                     left=[
                         cw.Metric(
-                            namespace="AgentCoreStarter",
+                            namespace="Channel",
                             metric_name="ToolInvocations",
                             dimensions_map={"Environment": env_name},
                             period=cdk.Duration.minutes(5),
@@ -1370,7 +1324,7 @@ function handler(event) {
                     title="Tool Errors",
                     left=[
                         cw.Metric(
-                            namespace="AgentCoreStarter",
+                            namespace="Channel",
                             metric_name="ToolErrors",
                             dimensions_map={"Environment": env_name},
                             period=cdk.Duration.minutes(5),
@@ -1383,7 +1337,7 @@ function handler(event) {
                     title="Token Validation Failures",
                     left=[
                         cw.Metric(
-                            namespace="AgentCoreStarter",
+                            namespace="Channel",
                             metric_name="TokenValidationFailures",
                             dimensions_map={"Environment": env_name},
                             period=cdk.Duration.minutes(5),
@@ -1486,11 +1440,11 @@ function handler(event) {
                     id="AwsSolutions-CFR3",
                     reason="CloudWatch metrics and alarms provide operational visibility. CloudFront access logging not required for this use case.",
                 ),
-                # Geo-restriction is intentionally not applied — AgentCore Starter
+                # Geo-restriction is intentionally not applied — Channel
                 # is available to users worldwide.
                 NagPackSuppression(
                     id="AwsSolutions-CFR1",
-                    reason="AgentCore Starter is a globally available service. Geo-restriction is not appropriate.",
+                    reason="Channel is a globally available service. Geo-restriction is not appropriate.",
                 ),
                 # Lambda Function URLs are used instead of API Gateway.
                 # They are public by design — the origin-verify secret and

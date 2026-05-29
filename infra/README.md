@@ -1,20 +1,19 @@
 # Infrastructure
 
-AWS CDK (Python) stack that provisions all AgentCore Starter resources. Defined in `stacks/starter_stack.py`.
+AWS CDK (Python) stack that provisions all Channel resources. Defined in `stacks/starter_stack.py`.
 
 ## Resources created
 
 | Resource | Name / ID | Notes |
 |---|---|---|
-| DynamoDB table | `agentcore-starter-{env}` | Single-table, PAY_PER_REQUEST, PITR enabled (prod), TTL on `ttl` attribute |
+| DynamoDB table | `channel-{env}` | Single-table, PAY_PER_REQUEST, PITR enabled (prod), TTL on `ttl` attribute |
 | DynamoDB GSI | `KeyIndex` | `GSI1PK` + `GSI1SK` — key lookups |
 | DynamoDB GSI | `TagIndex` | `GSI2PK` + `GSI2SK` — list by tag |
-| DynamoDB GSI | `ClientIndex` | `GSI3PK` — OAuth client lookups |
 | Lambda | `ApiFunction` | FastAPI management API, Python 3.12, 512 MB, 30s timeout |
 | Lambda Function URL | (API) | `auth=NONE`, CORS open, HTTPS only |
 | S3 Bucket | `UiBucket` | Private, OAC, auto-delete on stack removal |
-| CloudFront Distribution | `UiDistribution` | UI from S3, `/api/*` + `/oauth/*` → API Lambda |
-| SSM Parameter | `/agentcore-starter/jwt-secret` | JWT signing secret, `RETAIN` policy |
+| CloudFront Distribution | `UiDistribution` | UI from S3, `/api/*` + `/auth/*` → API Lambda |
+| SSM Parameter | `/channel/jwt-secret` | JWT signing secret, `RETAIN` policy |
 | IAM Role | `ApiLambdaRole` | DynamoDB + SSM read, Lambda basic execution |
 
 ### CloudFront routing
@@ -23,17 +22,16 @@ AWS CDK (Python) stack that provisions all AgentCore Starter resources. Defined 
 |---|---|
 | `/*` (default) | S3 bucket (React UI) |
 | `/api/*` | API Lambda Function URL |
-| `/oauth/*` | API Lambda Function URL |
-| `/.well-known/*` | API Lambda Function URL |
+| `/auth/*` | API Lambda Function URL |
 | `/health` | API Lambda Function URL |
 
 ### Stack outputs
 
 | Output | Description |
 |---|---|
-| `AgentCoreStarterStack.ApiFunctionUrl` | Direct API Lambda URL |
-| `AgentCoreStarterStack.UiUrl` | CloudFront URL (use for admin UI + API) |
-| `AgentCoreStarterStack.TableName` | DynamoDB table name |
+| `ChannelStack.ApiFunctionUrl` | Direct API Lambda URL |
+| `ChannelStack.UiUrl` | CloudFront URL (use for admin UI + API) |
+| `ChannelStack.TableName` | DynamoDB table name |
 
 ## Lambda bundling
 
@@ -77,7 +75,7 @@ On first deploy, rotate the JWT secret from the placeholder value:
 
 ```bash
 aws ssm put-parameter \
-  --name /agentcore-starter/jwt-secret \
+  --name /channel/jwt-secret \
   --value "$(openssl rand -hex 32)" \
   --overwrite
 ```
@@ -124,5 +122,5 @@ All Lambda configuration is via environment variables set in the CDK stack:
 |---|---|---|
 | `STARTER_TABLE_NAME` | CDK | DynamoDB table name |
 | `STARTER_ISSUER` | CDK | JWT issuer URL |
-| `STARTER_JWT_SECRET_PARAM` | (optional) | SSM parameter name for JWT secret (defaults to `/agentcore-starter/jwt-secret`) |
+| `STARTER_JWT_SECRET_PARAM` | (optional) | SSM parameter name for JWT secret (defaults to `/channel/jwt-secret`) |
 | `DYNAMODB_ENDPOINT` | (local only) | Override DynamoDB endpoint for local development |

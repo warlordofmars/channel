@@ -1,6 +1,6 @@
 # Introduction
 
-AgentCore Starter is a production-ready template for building AWS-native AI agent backend services.
+Channel is a production-ready template for building AWS-native AI agent backend services.
 
 ## What's included
 
@@ -10,7 +10,6 @@ AgentCore Starter is a production-ready template for building AWS-native AI agen
 - **CloudFront** + S3 CDN for the management UI
 - **React** management SPA (Vite + shadcn/ui)
 - **AWS CDK** (Python) infrastructure as code
-- **OAuth 2.1** authorization server with PKCE
 
 ## Next steps
 

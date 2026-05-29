@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 import boto3
 from pydantic import BaseModel
 
-from starter.agents.bedrock import get_model_id
+from channel.agents.bedrock import get_model_id
 
 if TYPE_CHECKING:  # pragma: no cover
     from mypy_boto3_bedrock_agent_runtime import AgentsforBedrockRuntimeClient

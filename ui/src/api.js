@@ -1,6 +1,6 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
 /**
- * AgentCore Starter API client — thin wrapper around fetch.
+ * Channel API client — thin wrapper around fetch.
  * Token is read from localStorage.
  */
 
@@ -96,7 +96,7 @@ export const api = {
     const blob = await res.blob();
     const disposition = res.headers.get("content-disposition") ?? "";
     const match = disposition.match(/filename="([^"]+)"/);
-    const filename = match ? match[1] : "agentcore-starter-export.json";
+    const filename = match ? match[1] : "channel-export.json";
     return { blob, filename };
   },
 };

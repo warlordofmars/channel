@@ -17,7 +17,7 @@ Both hooks short-circuit when ``AWS_LAMBDA_FUNCTION_NAME`` is unset, so
 ``inv dev``, unit tests, and integration tests against DynamoDB Local
 are unaffected.
 
-Wired at module import in :mod:`starter.api.main` (not via
+Wired at module import in :mod:`channel.api.main` (not via
 ``@app.on_event("startup")``) so the failure surfaces during Lambda INIT
 rather than after the container has been marked ready.
 """
@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import os
 
-from starter.logging_config import get_logger
+from channel.logging_config import get_logger
 
 logger = get_logger(__name__)
 

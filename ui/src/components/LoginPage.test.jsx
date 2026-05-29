@@ -18,13 +18,13 @@ describe("LoginPage", () => {
 
   it("renders the logo", async () => {
     await act(async () => render(<LoginPage />));
-    const img = screen.getByAltText("AgentCore Starter");
+    const img = screen.getByAltText("Channel");
     expect(img.getAttribute("src")).toBe("/logo.svg");
   });
 
   it("renders the tagline", async () => {
     await act(async () => render(<LoginPage />));
-    expect(screen.getByText(/AgentCore Starter/)).toBeTruthy();
+    expect(screen.getByText(/Channel/)).toBeTruthy();
   });
 
   it("renders sign-in button with Google icon", async () => {

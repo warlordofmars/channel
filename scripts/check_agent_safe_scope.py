@@ -67,8 +67,8 @@ from typing import Literal
 # labels (`dependencies`, `python`, `javascript`, `github_actions`).
 
 BOUNDED_AREA_GLOBS: dict[str, list[str]] = {
-    "api": ["src/starter/api/**", "tests/unit/test_api*.py", "tests/unit/test_agents_api.py"],
-    "auth": ["src/starter/auth/**", "tests/unit/test_auth_*.py", "tests/e2e/test_auth_*.py"],
+    "api": ["src/channel/api/**", "tests/unit/test_api*.py", "tests/unit/test_agents_api.py"],
+    "auth": ["src/channel/auth/**", "tests/unit/test_auth_*.py", "tests/e2e/test_auth_*.py"],
     "infra": ["infra/**"],
     "ui": ["ui/**"],
     "docs": ["docs/**", "docs-site/**", "README.md", "CHANGELOG.md"],
@@ -318,12 +318,12 @@ def area_label_paths(labels: list[str]) -> list[str] | None:
 def _matches_any(path: str, globs: list[str]) -> bool:
     for glob in globs:
         # fnmatch doesn't natively understand `**`. Translate `**` to `*` for
-        # an additive match: a glob `src/starter/api/**` should match
-        # `src/starter/api/foo/bar.py`. We achieve that by also matching the
+        # an additive match: a glob `src/channel/api/**` should match
+        # `src/channel/api/foo/bar.py`. We achieve that by also matching the
         # glob with `**` collapsed to `*` — fnmatch treats `*` as "anything
         # except /" by default? No — in fnmatch `*` matches anything
-        # INCLUDING separators. So `src/starter/api/*` will match
-        # `src/starter/api/foo/bar.py`. Use that.
+        # INCLUDING separators. So `src/channel/api/*` will match
+        # `src/channel/api/foo/bar.py`. Use that.
         normalised = glob.replace("**", "*")
         if fnmatch.fnmatch(path, normalised):
             return True
@@ -351,7 +351,7 @@ def _matches_any(path: str, globs: list[str]) -> bool:
 #         → tests/unit/test_<basename>.py                           implicit
 #         → tests/unit/<any nested>/test_<basename>.py              implicit
 #     Cross-directory by design — pytest convention puts tests in a fixed
-#     root regardless of source location (covers src/starter/** and
+#     root regardless of source location (covers src/channel/** and
 #     scripts/** without enumerating either).
 #
 # Forward-direction only: listing source implicitly accepts test, but
@@ -387,7 +387,7 @@ def _implicit_test_paths(source_path: str) -> list[str]:
         `tests/unit/test_foo.py` — forward-direction only),
       - the entry contains glob metacharacters (`*`, `?`, `[`) — globs are
         not concrete paths and would derive an over-broad implicit set
-        (e.g. `src/starter/**/*.py` would map to `tests/unit/test_**.py`).
+        (e.g. `src/channel/**/*.py` would map to `tests/unit/test_**.py`).
     """
     derived: list[str] = []
 

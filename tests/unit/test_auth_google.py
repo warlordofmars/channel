@@ -7,7 +7,7 @@ os.environ.setdefault("GOOGLE_CLIENT_ID", "test-client-id")
 os.environ.setdefault("GOOGLE_CLIENT_SECRET", "test-client-secret")
 os.environ.setdefault("ALLOWED_EMAILS", '["admin@test.com"]')
 
-from starter.auth.google import (  # noqa: E402
+from channel.auth.google import (  # noqa: E402
     _allowed_emails,
     _google_client_id,
     _google_client_secret,

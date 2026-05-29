@@ -307,7 +307,7 @@ describe("api", () => {
 
   it("exportAccount sends Authorization header when token present", async () => {
     storage["starter_mgmt_token"] = "user-token";
-    mockExportResponse({ disposition: 'attachment; filename="agentcore-starter-export.json"' });
+    mockExportResponse({ disposition: 'attachment; filename="channel-export.json"' });
     await api.exportAccount();
     const [url, opts] = fetchMock.mock.calls[0];
     expect(url).toContain("/api/account/export");
@@ -325,17 +325,17 @@ describe("api", () => {
     const blob = new Blob(["{}"], { type: "application/json" });
     mockExportResponse({
       blob,
-      disposition: 'attachment; filename="agentcore-starter-export-user-20260418.json"',
+      disposition: 'attachment; filename="channel-export-user-20260418.json"',
     });
     const result = await api.exportAccount();
     expect(result.blob).toBe(blob);
-    expect(result.filename).toBe("agentcore-starter-export-user-20260418.json");
+    expect(result.filename).toBe("channel-export-user-20260418.json");
   });
 
   it("exportAccount falls back to a default filename when disposition is missing", async () => {
     mockExportResponse({ disposition: null });
     const result = await api.exportAccount();
-    expect(result.filename).toBe("agentcore-starter-export.json");
+    expect(result.filename).toBe("channel-export.json");
   });
 
   it("exportAccount surfaces error detail from JSON body on non-OK responses", async () => {

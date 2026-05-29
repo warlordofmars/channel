@@ -3,7 +3,6 @@ import React, { useEffect, useState } from "react";
 import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { Menu, Moon, Sun, X } from "lucide-react";
 import { trackEvent, trackPageView } from "./analytics.js";
-import AuthCallback from "./components/AuthCallback.jsx";
 import EmptyState from "./components/EmptyState.jsx";
 import ErrorBoundary from "./components/ErrorBoundary.jsx";
 import LoginPage from "./components/LoginPage.jsx";
@@ -83,8 +82,8 @@ function AppShell() {
           onClick={() => navigate("/")}
           className="flex items-center gap-2 cursor-pointer bg-transparent border-none p-0 text-inherit"
         >
-          <img src="/logo.svg" alt="AgentCore Starter" className="w-7 h-7" />
-          <span className="font-bold text-xl tracking-wide">AgentCore Starter</span>
+          <img src="/logo.svg" alt="Channel" className="w-7 h-7" />
+          <span className="font-bold text-xl tracking-wide">Channel</span>
         </button>
 
         {/* Desktop tab nav — single active tab today; the active/inactive
@@ -180,7 +179,7 @@ function AppShell() {
             href="/changelog"
             className="text-inherit no-underline hover:underline focus:underline"
           >
-            AgentCore Starter {version}
+            Channel {version}
           </a>
         </footer>
       )}
@@ -215,7 +214,6 @@ export default function App() {
         <Routes>
           <Route path="/" element={<HomeRoute />} />
           <Route path="/app" element={<AppShell />} />
-          <Route path="/oauth/callback" element={<AuthCallback />} />
           <Route path="*" element={<NotFoundPage />} />
         </Routes>
       </BrowserRouter>

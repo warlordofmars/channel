@@ -24,16 +24,16 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from starter.auth import state_store
-from starter.auth.google import (
+from channel.auth import state_store
+from channel.auth.google import (
     exchange_google_code,
     google_authorization_url,
     is_admin_email,
     is_email_allowed,
     verify_google_id_token,
 )
-from starter.auth.tokens import ISSUER, issue_mgmt_jwt
-from starter.logging_config import get_logger
+from channel.auth.tokens import ISSUER, issue_mgmt_jwt
+from channel.logging_config import get_logger
 
 router = APIRouter(tags=["mgmt-auth"])
 logger = get_logger(__name__)

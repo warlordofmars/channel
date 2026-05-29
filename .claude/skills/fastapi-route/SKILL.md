@@ -21,42 +21,36 @@ cited inline by file and line range.
 Endpoints live in `src/starter/api/<area>.py` where `<area>`
 matches the issue's area label. The current router files are:
 
-- `src/starter/api/agents.py` — agent invocation endpoints
 - `src/starter/api/csp.py` — CSP violation report receiver
 - `src/starter/api/main.py` — app construction, middleware,
   `/health`. Do **not** add domain endpoints here; route handlers
   go in dedicated router files.
 
-A new functional area (e.g. `users`, `admin`) → new file
+A new functional area (e.g. `users`, `admin`, `widgets`) → new file
 `src/starter/api/<area>.py` with its own `APIRouter`. Do not
 extend an existing router with unrelated routes — area-per-file is
-the discoverability contract.
+the discoverability contract. The fully-worked endpoint module
+template lives at [`example.py`](./example.py) — copy it and adapt
+the names.
 
 ## 2. Router wiring in `main.py`
 
 Every router file is included from `src/starter/api/main.py` with
-`app.include_router(...)`. The current registrations live at
-`src/starter/api/main.py:115-124`:
+`app.include_router(...)`. The current registrations are:
 
 ```python
-# OAuth 2.1 well-known discovery endpoints (unauthenticated)
-app.include_router(oauth_router)
-
 # Management UI auth endpoints (unauthenticated — issues mgmt JWTs)
 app.include_router(mgmt_auth_router)
 
 # CSP report receiver — unauthenticated by design
 app.include_router(csp_router, prefix="/api")
-
-# Agent scaffold endpoints (require management JWT)
-app.include_router(agents_router, prefix="/api")
 ```
 
 Conventions:
 
 - Authenticated domain routers carry `prefix="/api"`.
-- Auth and OAuth discovery routers do **not** carry `/api`
-  (they expose well-known paths).
+- Auth routers do **not** carry `/api` (they expose well-known
+  paths like `/auth/login` and `/auth/callback`).
 - Add a one-line comment above each `include_router` call stating
   the auth posture (unauthenticated / requires mgmt JWT / etc.).
 - Import the router as `<area>_router` (alias on import) to keep
@@ -75,52 +69,44 @@ Two auth dependencies are exported from
   `require_mgmt_user` and additionally requires `role == "admin"`.
   Use for admin-only endpoints (user management, dashboard).
 
-Wire either one through `Depends(...)`:
+Wire either one through `Depends(...)`. The canonical shape is
+[`example.py:57-77`](./example.py) (non-streaming) and
+[`example.py:85-109`](./example.py) (streaming):
 
 ```python
 from typing import Any
 from fastapi import Depends
 from starter.api._auth import require_mgmt_user
 
-@router.post("/agents/echo")
-def echo(
-    body: EchoRequest,
-    _claims: dict[str, Any] = Depends(require_mgmt_user),
-) -> EchoResponse:
+@router.post("/widgets")
+def create_widget(
+    body: WidgetCreateRequest,
+    claims: dict[str, Any] = Depends(require_mgmt_user),
+) -> WidgetResponse:
     ...
 ```
 
 Naming convention: bind the claims to `_claims` (leading
 underscore) when the handler does not consume them, and to
 `claims` when it does — for example `claims["sub"]` for the
-caller's user id. See `src/starter/api/agents.py:31-35` (unused)
-versus `src/starter/api/agents.py:94-98` (consumed).
+caller's user id.
 
-OAuth 2.1 access-token-protected endpoints (RFC 7591 / MCP-style)
-are not yet wired; this skill will be extended when that surface
-lands. For now: every authenticated endpoint uses
-`require_mgmt_user` or `require_admin`.
+Every authenticated endpoint uses `require_mgmt_user` or
+`require_admin`.
 
 ## 4. Streaming pattern
 
 Streaming endpoints return
 `StreamingResponse(generator(), media_type="text/event-stream")`.
-The canonical example is
-`src/starter/api/agents.py:54-75`:
+The canonical example is [`example.py:85-109`](./example.py):
 
 ```python
-@router.post("/agents/echo/stream")
-def echo_stream(
-    body: EchoRequest,
+@router.post("/widgets/stream")
+def stream_widgets(
     _claims: dict[str, Any] = Depends(require_mgmt_user),
 ) -> StreamingResponse:
     def _stream() -> Iterator[str]:
-        yield from converse_stream(
-            ConverseRequest(
-                messages=[BedrockMessage(role="user", content=body.message)],
-                system=body.system,
-            )
-        )
+        yield from converse_stream(...)  # delegate to a domain generator
 
     return StreamingResponse(_stream(), media_type="text/event-stream")
 ```
@@ -146,7 +132,8 @@ streaming clients should connect to the Function URL directly.
 
 Every new endpoint requires unit tests. Tests live alongside the
 existing suites under `tests/unit/test_<area>_api.py`. The
-canonical pattern is in `tests/unit/test_agents_api.py`:
+companion test cases for the worked example are listed at
+[`example.py:122-128`](./example.py); the pattern is:
 
 - Construct a `TestClient(app)` once at module scope.
 - Set `STARTER_JWT_SECRET` via `os.environ.setdefault` *before*
@@ -184,8 +171,9 @@ code:
 - **Anonymous functions inside `StreamingResponse`** — vitest-style
   v8 counters do not apply on the Python side, but the inner
   `_stream` closure does need at least one test that drives it to
-  completion (see
-  `tests/unit/test_agents_api.py:91-116` for the pattern).
+  completion (split the response body on `\n\n` and assert the
+  parsed event sequence — see [`example.py:85-109`](./example.py)
+  for the handler shape).
 - **Untested error branches** — every `raise HTTPException(...)`
   needs a test that triggers it, even for trivial validation
   paths. If a branch is genuinely unreachable, mark the line with

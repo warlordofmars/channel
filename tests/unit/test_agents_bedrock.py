@@ -5,7 +5,7 @@ import json
 import os
 from unittest.mock import MagicMock, patch
 
-from starter.agents.bedrock import (
+from channel.agents.bedrock import (
     BedrockMessage,
     ConverseRequest,
     ConverseResponse,
@@ -77,7 +77,7 @@ def test_converse_success() -> None:
     mock_client = MagicMock()
     mock_client.converse.return_value = _mock_converse_response("Hi there!")
 
-    with patch("starter.agents.bedrock._bedrock_client", return_value=mock_client):
+    with patch("channel.agents.bedrock._bedrock_client", return_value=mock_client):
         result = converse(ConverseRequest(messages=[BedrockMessage(role="user", content="Hello")]))
 
     assert isinstance(result, ConverseResponse)
@@ -91,7 +91,7 @@ def test_converse_with_system_prompt() -> None:
     mock_client = MagicMock()
     mock_client.converse.return_value = _mock_converse_response("Got it.")
 
-    with patch("starter.agents.bedrock._bedrock_client", return_value=mock_client):
+    with patch("channel.agents.bedrock._bedrock_client", return_value=mock_client):
         converse(
             ConverseRequest(
                 messages=[BedrockMessage(role="user", content="Hi")],
@@ -108,7 +108,7 @@ def test_converse_without_system_prompt_omits_key() -> None:
     mock_client = MagicMock()
     mock_client.converse.return_value = _mock_converse_response()
 
-    with patch("starter.agents.bedrock._bedrock_client", return_value=mock_client):
+    with patch("channel.agents.bedrock._bedrock_client", return_value=mock_client):
         converse(ConverseRequest(messages=[BedrockMessage(role="user", content="Hi")]))
 
     call_kwargs = mock_client.converse.call_args[1]
@@ -119,7 +119,7 @@ def test_converse_message_shape() -> None:
     mock_client = MagicMock()
     mock_client.converse.return_value = _mock_converse_response()
 
-    with patch("starter.agents.bedrock._bedrock_client", return_value=mock_client):
+    with patch("channel.agents.bedrock._bedrock_client", return_value=mock_client):
         converse(
             ConverseRequest(
                 messages=[
@@ -156,7 +156,7 @@ def test_converse_stream_yields_delta_and_done() -> None:
         {"metadata": {"usage": {"inputTokens": 10, "outputTokens": 5}}},
     )
 
-    with patch("starter.agents.bedrock._bedrock_client", return_value=mock_client):
+    with patch("channel.agents.bedrock._bedrock_client", return_value=mock_client):
         chunks = list(
             converse_stream(ConverseRequest(messages=[BedrockMessage(role="user", content="Hi")]))
         )
@@ -179,7 +179,7 @@ def test_converse_stream_sse_format() -> None:
         {"metadata": {"usage": {"inputTokens": 1, "outputTokens": 1}}},
     )
 
-    with patch("starter.agents.bedrock._bedrock_client", return_value=mock_client):
+    with patch("channel.agents.bedrock._bedrock_client", return_value=mock_client):
         chunks = list(
             converse_stream(ConverseRequest(messages=[BedrockMessage(role="user", content="X")]))
         )
@@ -196,7 +196,7 @@ def test_converse_stream_with_system_prompt() -> None:
         {"metadata": {"usage": {"inputTokens": 5, "outputTokens": 2}}},
     )
 
-    with patch("starter.agents.bedrock._bedrock_client", return_value=mock_client):
+    with patch("channel.agents.bedrock._bedrock_client", return_value=mock_client):
         list(
             converse_stream(
                 ConverseRequest(
@@ -220,7 +220,7 @@ def test_converse_stream_skips_empty_text_delta() -> None:
         {"metadata": {"usage": {"inputTokens": 2, "outputTokens": 1}}},
     )
 
-    with patch("starter.agents.bedrock._bedrock_client", return_value=mock_client):
+    with patch("channel.agents.bedrock._bedrock_client", return_value=mock_client):
         chunks = list(
             converse_stream(ConverseRequest(messages=[BedrockMessage(role="user", content="X")]))
         )

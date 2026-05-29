@@ -24,7 +24,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from botocore.exceptions import ClientError
 
-from starter.auth import state_store
+from channel.auth import state_store
 
 
 @pytest.fixture
@@ -66,7 +66,7 @@ class _LogCapture:
 
     def __init__(self) -> None:
         self.records: list[logging.LogRecord] = []
-        self.logger = logging.getLogger("starter.auth.state_store")
+        self.logger = logging.getLogger("channel.auth.state_store")
         self._handler: logging.Handler | None = None
         self._previous_level: int | None = None
 
@@ -404,7 +404,7 @@ def test_get_table_uses_defaults_when_env_unset(monkeypatch):
     with patch.object(state_store.boto3, "resource", side_effect=_fake_resource):
         state_store._get_table()
 
-    assert captured["table_name"] == "agentcore-starter-dev"
+    assert captured["table_name"] == "channel-dev"
     assert "region_name" not in captured["kwargs"]
     assert captured["kwargs"]["endpoint_url"] is None
 
