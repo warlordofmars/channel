@@ -26,8 +26,18 @@ export default function Sidebar({ collapsed = false, onToggle = () => {} }) {
   const token = localStorage.getItem(TOKEN_KEY) ?? "";
   const claims = parseToken(token) ?? {};
   const email = claims.email ?? "you@example.com";
-  const userName = email.split("@")[0] || "You";
-  const initials = userName.slice(0, 2).toUpperCase();
+  // Prefer Google's full display_name; fall back to the email's
+  // local-part if absent (older tokens, test stubs, etc.).
+  const userName =
+    (claims.display_name && claims.display_name.trim()) ||
+    email.split("@")[0] ||
+    "You";
+  // "John Carter" → "JC"; single-word name → first 2 letters.
+  const initials = (() => {
+    const words = userName.trim().split(/\s+/).filter(Boolean);
+    if (words.length >= 2) return (words[0][0] + words[1][0]).toUpperCase();
+    return userName.slice(0, 2).toUpperCase();
+  })();
 
   const filtered = RECENTS.filter((r) =>
     r.title.toLowerCase().includes(search.toLowerCase())
