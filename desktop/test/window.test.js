@@ -56,4 +56,20 @@ describe("createMainWindow", () => {
     expect(event.preventDefault).not.toHaveBeenCalled();
     expect(win.hide).not.toHaveBeenCalled();
   });
+
+  it("hides the titlebar with inset traffic lights on darwin", async () => {
+    const { BrowserWindow } = await import("electron");
+    createMainWindow({ preloadPath: "/preload.js", platform: "darwin" });
+    const opts = BrowserWindow.mock.calls[0][0];
+    expect(opts.titleBarStyle).toBe("hidden");
+    expect(opts.trafficLightPosition).toEqual({ x: 14, y: 14 });
+  });
+
+  it("keeps default chrome on non-darwin platforms", async () => {
+    const { BrowserWindow } = await import("electron");
+    createMainWindow({ preloadPath: "/preload.js", platform: "win32" });
+    const opts = BrowserWindow.mock.calls[0][0];
+    expect(opts.titleBarStyle).toBeUndefined();
+    expect(opts.trafficLightPosition).toBeUndefined();
+  });
 });

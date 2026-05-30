@@ -3,9 +3,23 @@ import { BrowserWindow } from "electron";
 
 const DEFAULT_DIMENSIONS = { width: 1280, height: 800, minWidth: 720, minHeight: 480 };
 
-export function createMainWindow({ preloadPath, isQuitting = () => false }) {
+// macOS-only: hide the title bar chrome but keep the traffic lights, so
+// the sidebar background extends to the top edge and the window feels
+// native (matches the visual style of Claude Desktop / Linear / Notion).
+// On Windows/Linux titleBarStyle: "hidden" would also hide min/max/close
+// without a replacement, so we leave those platforms on the default chrome.
+function macosFrameOpts(platform) {
+  if (platform !== "darwin") return {};
+  return {
+    titleBarStyle: "hidden",
+    trafficLightPosition: { x: 14, y: 14 },
+  };
+}
+
+export function createMainWindow({ preloadPath, isQuitting = () => false, platform = process.platform }) {
   const win = new BrowserWindow({
     ...DEFAULT_DIMENSIONS,
+    ...macosFrameOpts(platform),
     show: true,
     autoHideMenuBar: false,
     webPreferences: {

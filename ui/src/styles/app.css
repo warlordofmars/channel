@@ -86,9 +86,17 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 13px 14px 6px;
+  /* Top padding gives the macOS traffic lights (positioned x:14 y:14 by
+     the Electron main process) room above the sidebar actions on the
+     desktop build; harmless extra space on the web build. */
+  padding: 28px 14px 6px;
   -webkit-app-region: drag;
 }
+/* Children of the drag region inherit the drag behavior — explicitly
+   opt buttons + interactive controls out so they remain clickable. */
+.sb-top button,
+.sb-top input,
+.sb-top a { -webkit-app-region: no-drag; }
 .sb-actions { display: flex; align-items: center; gap: 4px; margin-left: auto; }
 
 .icon-btn {
