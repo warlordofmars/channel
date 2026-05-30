@@ -88,3 +88,54 @@ export function startLoopback({ state, onResult }) {
     server.on("error", reject);
   });
 }
+
+let inFlight = null;
+
+export function loginWithDeps({ authBaseUrl, openExternal, onAppQuit, startLoopback: startFn = startLoopback, timeoutMs = 60_000 }) {
+  if (inFlight) return inFlight;
+
+  const state = generateState();
+
+  inFlight = new Promise((resolve, reject) => {
+    let server;
+    let timer;
+    let settled = false;
+
+    const settle = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (server) server.close();
+      inFlight = null;
+      fn(value);
+    };
+
+    startFn({
+      state,
+      onResult: (r) => {
+        if (r.ok) settle(resolve, r.token);
+        else settle(reject, new Error(r.code));
+      },
+    }).then((s) => {
+      server = s;
+      onAppQuit(() => server.close());
+      const url = new URL("/auth/login", authBaseUrl);
+      url.searchParams.set("desktop_callback", `http://127.0.0.1:${server.port}/callback`);
+      url.searchParams.set("state", state);
+      openExternal(url.toString());
+      timer = setTimeout(() => settle(reject, new Error("TIMEOUT")), timeoutMs);
+    }).catch((e) => settle(reject, e));
+  });
+
+  return inFlight;
+}
+
+// Convenience export that wires the real electron deps.
+export async function login({ authBaseUrl }) {
+  const { shell, app } = await import("electron");
+  return loginWithDeps({
+    authBaseUrl,
+    openExternal: (u) => shell.openExternal(u),
+    onAppQuit: (cb) => app.on("before-quit", cb),
+  });
+}

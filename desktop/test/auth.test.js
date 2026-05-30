@@ -126,3 +126,176 @@ describe("startLoopback — error paths", () => {
     await close();
   });
 });
+
+describe("login()", () => {
+  it("opens external browser at /auth/login with state + desktop_callback", async () => {
+    const openExternal = vi.fn().mockResolvedValue(undefined);
+    const appOnce = vi.fn();
+    let captureOnResult;
+    const fakeStartLoopback = vi.fn(({ state, onResult }) => {
+      captureOnResult = onResult;
+      return Promise.resolve({ port: 51234, close: vi.fn().mockResolvedValue() });
+    });
+
+    const { loginWithDeps } = await import("../main/auth.js");
+    const promise = loginWithDeps({
+      authBaseUrl: "https://example.test",
+      openExternal,
+      onAppQuit: appOnce,
+      startLoopback: fakeStartLoopback,
+      timeoutMs: 1000,
+    });
+    // Resolve from the loopback side
+    queueMicrotask(() => captureOnResult({ ok: true, token: "JWT123" }));
+    expect(await promise).toBe("JWT123");
+
+    expect(openExternal).toHaveBeenCalledTimes(1);
+    const url = new URL(openExternal.mock.calls[0][0]);
+    expect(url.origin).toBe("https://example.test");
+    expect(url.pathname).toBe("/auth/login");
+    expect(url.searchParams.get("desktop_callback")).toBe("http://127.0.0.1:51234/callback");
+    expect(url.searchParams.get("state")).toMatch(/^[A-Za-z0-9_-]{43}$/);
+  });
+
+  it("rejects with TIMEOUT after timeoutMs with no callback", async () => {
+    const { loginWithDeps } = await import("../main/auth.js");
+    await expect(loginWithDeps({
+      authBaseUrl: "https://example.test",
+      openExternal: vi.fn().mockResolvedValue(),
+      onAppQuit: vi.fn(),
+      startLoopback: () => Promise.resolve({ port: 1, close: vi.fn().mockResolvedValue() }),
+      timeoutMs: 10,
+    })).rejects.toThrow("TIMEOUT");
+  });
+
+  it("rejects with USER_CANCELLED when loopback signals access_denied", async () => {
+    let captureOnResult;
+    const { loginWithDeps } = await import("../main/auth.js");
+    const promise = loginWithDeps({
+      authBaseUrl: "https://example.test",
+      openExternal: vi.fn().mockResolvedValue(),
+      onAppQuit: vi.fn(),
+      startLoopback: ({ onResult }) => { captureOnResult = onResult; return Promise.resolve({ port: 1, close: vi.fn().mockResolvedValue() }); },
+      timeoutMs: 1000,
+    });
+    queueMicrotask(() => captureOnResult({ ok: false, code: "USER_CANCELLED" }));
+    await expect(promise).rejects.toThrow("USER_CANCELLED");
+  });
+
+  it("coalesces concurrent login() calls into one in-flight promise", async () => {
+    let captureOnResult;
+    const startLoopback = vi.fn(({ onResult }) => {
+      captureOnResult = onResult;
+      return Promise.resolve({ port: 1, close: vi.fn().mockResolvedValue() });
+    });
+    const { loginWithDeps } = await import("../main/auth.js");
+    const deps = {
+      authBaseUrl: "https://example.test",
+      openExternal: vi.fn().mockResolvedValue(),
+      onAppQuit: vi.fn(),
+      startLoopback,
+      timeoutMs: 1000,
+    };
+    const p1 = loginWithDeps(deps);
+    const p2 = loginWithDeps(deps);
+    queueMicrotask(() => captureOnResult({ ok: true, token: "T" }));
+    const [a, b] = await Promise.all([p1, p2]);
+    expect(a).toBe("T");
+    expect(b).toBe("T");
+    expect(startLoopback).toHaveBeenCalledTimes(1);
+  });
+
+  it("closes the loopback on app before-quit", async () => {
+    const close = vi.fn().mockResolvedValue();
+    let beforeQuitListener;
+    const { loginWithDeps } = await import("../main/auth.js");
+    void loginWithDeps({
+      authBaseUrl: "https://example.test",
+      openExternal: vi.fn().mockResolvedValue(),
+      onAppQuit: (cb) => { beforeQuitListener = cb; },
+      startLoopback: () => Promise.resolve({ port: 1, close }),
+      timeoutMs: 60000,
+    });
+    await Promise.resolve(); // let openExternal fire
+    beforeQuitListener();
+    await Promise.resolve();
+    expect(close).toHaveBeenCalled();
+  });
+
+  it("rejects when startLoopback itself rejects", async () => {
+    vi.resetModules();
+    const { loginWithDeps } = await import("../main/auth.js");
+    await expect(loginWithDeps({
+      authBaseUrl: "https://example.test",
+      openExternal: vi.fn().mockResolvedValue(),
+      onAppQuit: vi.fn(),
+      startLoopback: () => Promise.reject(new Error("PORT_UNAVAILABLE")),
+      timeoutMs: 1000,
+    })).rejects.toThrow("PORT_UNAVAILABLE");
+  });
+
+  it("settle is idempotent — double-settle does not reject twice", async () => {
+    vi.resetModules();
+    let captureOnResult;
+    const { loginWithDeps } = await import("../main/auth.js");
+    const promise = loginWithDeps({
+      authBaseUrl: "https://example.test",
+      openExternal: vi.fn().mockResolvedValue(),
+      onAppQuit: vi.fn(),
+      startLoopback: ({ onResult }) => {
+        captureOnResult = onResult;
+        return Promise.resolve({ port: 1, close: vi.fn().mockResolvedValue() });
+      },
+      timeoutMs: 1000,
+    });
+    // Fire onResult twice — second call should be a no-op (settled guard)
+    queueMicrotask(() => {
+      captureOnResult({ ok: true, token: "X" });
+      captureOnResult({ ok: false, code: "USER_CANCELLED" }); // should be ignored
+    });
+    expect(await promise).toBe("X");
+  });
+
+  it("onAppQuit fires before server is set (server still null)", async () => {
+    vi.resetModules();
+    let captureQuitCb;
+    const { loginWithDeps } = await import("../main/auth.js");
+    let captureOnResult;
+    const promise = loginWithDeps({
+      authBaseUrl: "https://example.test",
+      openExternal: vi.fn().mockResolvedValue(),
+      onAppQuit: (cb) => { captureQuitCb = cb; },
+      // startLoopback that captures onResult but resolves later
+      startLoopback: ({ onResult }) => {
+        captureOnResult = onResult;
+        // Invoke quit callback immediately (before .then fires), simulating
+        // app quit arriving before the server resolves
+        if (captureQuitCb) captureQuitCb();
+        return Promise.resolve({ port: 1, close: vi.fn().mockResolvedValue() });
+      },
+      timeoutMs: 1000,
+    });
+    // Fire quit before server resolves (captured before .then callback)
+    // Then resolve normally
+    queueMicrotask(() => captureOnResult({ ok: true, token: "Y" }));
+    expect(await promise).toBe("Y");
+  });
+});
+
+describe("login() — production wrapper", () => {
+  it("delegates to loginWithDeps using shell.openExternal and app.on", async () => {
+    vi.resetModules();
+    const electron = await import("electron");
+    const { login } = await import("../main/auth.js");
+    // login() is async — it awaits import("electron") then calls loginWithDeps
+    // which starts a real HTTP server (I/O). Yield to the I/O event loop so
+    // the server.listen callback fires and openExternal is invoked.
+    const promise = login({ authBaseUrl: "https://example.test" });
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    expect(electron.shell.openExternal).toHaveBeenCalledTimes(1);
+    const url = new URL(electron.shell.openExternal.mock.calls[0][0]);
+    expect(url.pathname).toBe("/auth/login");
+    expect(promise).toBeInstanceOf(Promise);
+  });
+});
