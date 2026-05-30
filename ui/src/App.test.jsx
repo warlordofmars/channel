@@ -55,23 +55,23 @@ describe("App routing", () => {
     expect(screen.getByText(/wandered off/i)).toBeTruthy();
   });
 
-  it("renders the app-login placeholder at /app/login (no auth required)", async () => {
+  it("renders the Login page at /app/login (no auth required)", async () => {
     window.history.pushState({}, "", "/app/login");
     await act(async () => render(<App />));
-    expect(screen.getByTestId("app-login")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: /sign in to channel/i })).toBeTruthy();
   });
 
   it("redirects /app to /app/login when no token", async () => {
     window.history.pushState({}, "", "/app");
     await act(async () => render(<App />));
-    expect(screen.getByTestId("app-login")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: /sign in to channel/i })).toBeTruthy();
   });
 
-  it("renders the app-home placeholder at /app with a valid token", async () => {
+  it("renders the ChatHome at /app with a valid token", async () => {
     storage[TOKEN_KEY] = makeToken();
     window.history.pushState({}, "", "/app");
     await act(async () => render(<App />));
-    expect(screen.getByTestId("app-home")).toBeTruthy();
+    expect(screen.getByRole("heading", { level: 1 }).textContent).toMatch(/back at it/i);
   });
 
   it.each([
