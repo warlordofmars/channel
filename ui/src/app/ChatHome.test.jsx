@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import ChatHome from "./ChatHome.jsx";
 import { TOKEN_KEY } from "../lib/auth.js";
 import { QUICK_ACTIONS } from "./data.js";
+import { __resetChannelPrefsForTest } from "../hooks/useChannelPrefs.js";
 
 function makeToken({ email = "ada@example.com" } = {}) {
   const exp = Math.floor(Date.now() / 1000) + 3600;
@@ -22,6 +23,7 @@ describe("ChatHome", () => {
       removeItem: (k) => { delete storage[k]; },
     });
     vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() }));
+    __resetChannelPrefsForTest();
   });
   afterEach(() => vi.unstubAllGlobals());
 
@@ -62,6 +64,7 @@ describe("ChatHome", () => {
 
   it("falls back to first MODELS entry when prefs.model is not in MODELS", () => {
     storage["channel-model"] = "nonexistent-model-id";
+    __resetChannelPrefsForTest();
     render(<ChatHome />);
     // ModelPicker shows the model.short of the fallback (Opus 4.8):
     expect(screen.getByText(/opus 4.8/i)).toBeTruthy();

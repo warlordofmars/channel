@@ -125,8 +125,18 @@ describe("useChannelPrefs", () => {
       setItem: vi.fn(),
       removeItem: vi.fn(),
     });
+    // Re-seed the shared snapshot using the throwing localStorage so the
+    // catch branch in readPref actually fires.
+    __resetChannelPrefsForTest();
     const { result } = renderHook(() => useChannelPrefs());
     expect(result.current.theme).toBe(DEFAULTS.theme);
+  });
+
+  it("setSiteTheme writes the new site theme to localStorage and the snapshot", () => {
+    const { result } = renderHook(() => useChannelPrefs());
+    act(() => result.current.setSiteTheme("dark"));
+    expect(result.current.siteTheme).toBe("dark");
+    expect(storage[STORAGE_KEYS.siteTheme]).toBe("dark");
   });
 
   it("propagates updates across separate hook instances (shared store)", () => {
