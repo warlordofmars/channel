@@ -43,9 +43,8 @@ describe("ErrorBoundary", () => {
     const fallback = screen.getByTestId("error-boundary");
     expect(fallback).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Something went wrong" })).toBeTruthy();
-    // Reload + Contact support paths must both be visible.
-    expect(screen.getByRole("button", { name: "Reload page" })).toBeTruthy();
-    expect(screen.getByRole("link", { name: "Contact support" })).toBeTruthy();
+    // Reload button must be visible.
+    expect(screen.getByRole("button", { name: "Reload" })).toBeTruthy();
     // componentDidCatch logged the error with our specific prefix.
     // React itself also logs caught errors to console.error, so we
     // can't just assert the spy was called — distinguish on the
@@ -69,7 +68,7 @@ describe("ErrorBoundary", () => {
         </ErrorBoundary>,
       ),
     );
-    fireEvent.click(screen.getByRole("button", { name: "Reload page" }));
+    fireEvent.click(screen.getByRole("button", { name: "Reload" }));
     expect(reload).toHaveBeenCalledTimes(1);
 
     vi.unstubAllGlobals();

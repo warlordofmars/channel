@@ -1,4 +1,3 @@
-import tailwindcss from "@tailwindcss/vite";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import path from "path";
@@ -23,7 +22,7 @@ function rawOutsideRoot() {
 }
 
 export default defineConfig({
-  plugins: [rawOutsideRoot(), react(), tailwindcss()],
+  plugins: [rawOutsideRoot(), react()],
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),

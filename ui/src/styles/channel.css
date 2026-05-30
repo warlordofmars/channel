@@ -1,0 +1,99 @@
+/* ============================================================
+   CHANNEL — design tokens + base
+   Clean & technical · warm neutrals · terracotta accent
+   ============================================================ */
+
+@import url('https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&family=Space+Mono:wght@400;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Spline+Sans:wght@400;500;600;700&family=Spline+Sans+Mono:wght@400;500;600&family=Schibsted+Grotesk:wght@400;500;600;700&family=Figtree:wght@400;500;600;700&family=Newsreader:opsz,wght@6..72,400;6..72,500;6..72,600&display=swap');
+
+:root {
+  --font-sans: 'Hanken Grotesk', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+
+  --r-xs: 5px;
+  --r-sm: 7px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --r-xl: 20px;
+  --r-pill: 999px;
+
+  --accent-h: 42;
+}
+
+[data-theme="light"] {
+  --canvas:      oklch(0.972 0.006 78);
+  --surface:     oklch(0.951 0.008 74);   /* sidebar */
+  --raised:      oklch(0.993 0.004 82);   /* cards, composer */
+  --raised-2:    oklch(0.978 0.006 78);
+  --ink:         oklch(0.285 0.012 55);
+  --ink-soft:    oklch(0.470 0.012 58);
+  --ink-faint:   oklch(0.605 0.010 62);
+  --border:      oklch(0.880 0.008 70);
+  --border-soft: oklch(0.918 0.006 74);
+  --accent:      oklch(0.585 0.130 var(--accent-h));
+  --accent-ink:  oklch(0.470 0.120 var(--accent-h));
+  --accent-soft: oklch(0.930 0.038 52);
+  --hover:       oklch(0 0 0 / 0.045);
+  --sel:         oklch(0 0 0 / 0.072);
+  --on-accent:   oklch(0.985 0.01 80);
+  --shadow-sm:   0 1px 2px rgba(50,38,26,0.07);
+  --shadow-md:   0 1px 2px rgba(50,38,26,0.06), 0 10px 28px rgba(50,38,26,0.07);
+  --shadow-lg:   0 1px 2px rgba(50,38,26,0.08), 0 24px 60px rgba(50,38,26,0.13);
+  --wallpaper:   radial-gradient(120% 120% at 70% 10%, oklch(0.90 0.022 60) 0%, oklch(0.83 0.028 50) 55%, oklch(0.76 0.03 42) 100%);
+}
+
+[data-theme="dark"] {
+  --canvas:      oklch(0.183 0.007 58);
+  --surface:     oklch(0.223 0.008 56);
+  --raised:      oklch(0.258 0.008 56);
+  --raised-2:    oklch(0.235 0.008 56);
+  --ink:         oklch(0.925 0.008 82);
+  --ink-soft:    oklch(0.720 0.008 76);
+  --ink-faint:   oklch(0.560 0.008 70);
+  --border:      oklch(0.322 0.008 60);
+  --border-soft: oklch(0.285 0.008 58);
+  --accent:      oklch(0.670 0.120 var(--accent-h));
+  --accent-ink:  oklch(0.760 0.110 var(--accent-h));
+  --accent-soft: oklch(0.330 0.052 46);
+  --hover:       oklch(1 0 0 / 0.05);
+  --sel:         oklch(1 0 0 / 0.085);
+  --on-accent:   oklch(0.18 0.01 50);
+  --shadow-sm:   0 1px 2px rgba(0,0,0,0.3);
+  --shadow-md:   0 2px 6px rgba(0,0,0,0.32), 0 12px 30px rgba(0,0,0,0.36);
+  --shadow-lg:   0 4px 12px rgba(0,0,0,0.4), 0 30px 70px rgba(0,0,0,0.5);
+  --wallpaper:   radial-gradient(120% 120% at 70% 10%, oklch(0.30 0.018 55) 0%, oklch(0.22 0.02 45) 55%, oklch(0.16 0.018 40) 100%);
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  font-family: var(--font-sans);
+  color: var(--ink);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection { background: var(--accent-soft); }
+
+/* scrollbars */
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-thumb:hover { background: var(--ink-faint); background-clip: padding-box; }
+*::-webkit-scrollbar-track { background: transparent; }
+
+.mono { font-family: var(--font-mono); }
+
+/* ---- Channel logo mark (two bars framing a channel) ---- */
+.ch-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.ch-mark svg { display: block; }
