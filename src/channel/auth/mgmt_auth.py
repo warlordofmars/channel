@@ -139,6 +139,17 @@ async def mgmt_login(request: Request) -> RedirectResponse:
         validated = _validate_desktop_callback(desktop_callback)
         if validated is None or not caller_state or not _DESKTOP_STATE_RE.match(caller_state):
             raise HTTPException(status_code=400, detail="Invalid desktop_callback or state")
+        # Desktop bypass — mint a synthetic JWT and redirect to the loopback
+        # without involving Google or DynamoDB. Only fires in non-prod (the
+        # bypass env var is off in production). Saves devs from configuring
+        # a separate Google OAuth client for local Electron iteration.
+        if _BYPASS:
+            from urllib.parse import urlencode
+            dev_email = os.environ.get("STARTER_DESKTOP_DEV_EMAIL", "dev@channel.local")
+            user = _make_user(dev_email, dev_email.split("@")[0])
+            token = issue_mgmt_jwt(user)
+            qs = urlencode({"token": token, "state": caller_state})
+            return RedirectResponse(f"{validated}?{qs}", status_code=302)
         state = caller_state
         payload["desktop_callback"] = validated
     else:
