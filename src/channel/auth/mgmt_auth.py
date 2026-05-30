@@ -191,6 +191,12 @@ async def mgmt_callback(
 
     desktop_callback = record.get("desktop_callback")
     if desktop_callback:
+        # Defense-in-depth: validate again at consume time. The same check
+        # ran at store time (mgmt_login), so failure here means the record
+        # was tampered with at rest or written by an unvalidated code path.
+        if _validate_desktop_callback(desktop_callback) is None:
+            logger.warning("Stored desktop_callback failed re-validation: %r", desktop_callback)
+            raise HTTPException(status_code=400, detail="Invalid stored desktop_callback")
         from urllib.parse import urlencode
         qs = urlencode({"token": token, "state": state})
         return RedirectResponse(f"{desktop_callback}?{qs}", status_code=302)

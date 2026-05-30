@@ -440,3 +440,26 @@ def test_callback_still_returns_html_redirect_when_no_desktop_callback(monkeypat
     assert resp.status_code == 200
     assert b"localStorage.setItem" in resp.content
 
+
+def test_callback_rejects_tampered_desktop_callback(monkeypatch):
+    """Defense in depth: if the stored desktop_callback is invalid (e.g. tampered
+    DynamoDB record), the callback site re-validates and returns 400."""
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "x")
+    monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "y")
+    state = "E" * 43
+    monkeypatch.setattr(
+        "channel.auth.state_store.consume_state",
+        lambda s: {"PK": f"MGMT_STATE#{s}", "SK": "META", "desktop_callback": "https://evil.example.com/callback"},
+    )
+    monkeypatch.setattr("channel.auth.mgmt_auth.exchange_google_code", _async_return("id_token"))
+    monkeypatch.setattr(
+        "channel.auth.mgmt_auth.verify_google_id_token",
+        _async_return({"email": "user@example.com", "email_verified": True, "name": "User"}),
+    )
+    monkeypatch.setattr("channel.auth.mgmt_auth.is_email_allowed", lambda e: True)
+    monkeypatch.setattr("channel.auth.mgmt_auth.is_admin_email", lambda e: False)
+
+    client = TestClient(app)
+    resp = client.get("/auth/callback", params={"code": "c", "state": state}, follow_redirects=False)
+    assert resp.status_code == 400
+
