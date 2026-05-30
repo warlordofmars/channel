@@ -76,6 +76,12 @@ channel/
 │   │           ├── ArtifactPanel.jsx                         # Slide-in viewer with 5 renderers (Code/Chart/Data/Interactive/Document)
 │   │           └── artifactHelpers.js                        # colorFor / inkFor / artIcon utilities
 │   └── package.json
+├── desktop/
+│   ├── package.json
+│   ├── main/                  # main-process modules
+│   ├── preload/               # sandboxed contextBridge
+│   ├── electron-builder.yml
+│   └── test/
 ├── docs-site/                 # VitePress documentation site
 │   ├── .vitepress/
 │   │   ├── config.mjs         # base: "/docs/", nav, sidebar
@@ -135,7 +141,77 @@ require a valid Bearer mgmt JWT. JWT validation enforces `iss`,
 - Marketing routes at `/`, app routes at `/app/*`
 - Communicates with FastAPI management API on port 8001
 - Auth: Google OAuth via `/auth/login`; token stored in localStorage as `starter_mgmt_token`
-- Window frame is web only at MVP — Electron desktop wrapper deferred per design handoff
+- Web SPA AND Electron desktop app ship from the same `ui/` SPA source. The
+  desktop wrapper lives in `desktop/` (Electron main + preload) and bundles
+  the SPA build. See `## Desktop app` below.
+
+## Desktop app
+
+Electron wrapper around the SPA. Built from `desktop/` with its own
+`package.json` (separate from `ui/` so the renderer's bundle can't import
+`electron` at build time).
+
+### Layout
+
+- `desktop/main/` — Node main-process modules (protocol handler, window
+  factory, IPC registry, OAuth loopback)
+- `desktop/preload/` — sandboxed bridge exposing `window.channelDesktop`
+- `desktop/test/` — vitest with `environment: "node"`; 100% coverage gate
+- `desktop/dist-main/`, `desktop/dist-renderer/`, `desktop/release/` —
+  build outputs, all gitignored
+
+### Dev workflow
+
+```bash
+uv run inv desktop-dev
+```
+
+Spawns DynamoDB Local + FastAPI + Vite + Electron in parallel; Electron
+points at `http://localhost:5173` and uses `http://localhost:8001` as the
+OAuth base. Ctrl-C tears everything down.
+
+### Build
+
+```bash
+uv run inv desktop-build --platform current             # local build
+uv run inv desktop-build --platform mac|win|linux       # explicit
+uv run inv desktop-build --api-base https://dev.example # override API
+```
+
+Outputs unsigned artifacts under `desktop/release/`. Signing and
+auto-update arrive in sub-project B.
+
+### OAuth flow (Electron-specific)
+
+The SPA's redirect-to-localStorage OAuth flow doesn't work from an
+Electron renderer (Google rejects embedded BrowserWindows). The desktop
+app uses external-browser + loopback instead:
+
+1. Renderer calls `window.channelDesktop.login()` via the preload IPC bridge.
+2. Main process picks a kernel-assigned port on 127.0.0.1, starts a tiny
+   HTTP server with one route (`GET /callback`), and opens the user's
+   default browser at:
+   ```
+   https://<api-host>/auth/login?desktop_callback=http://127.0.0.1:<port>/callback&state=<S>
+   ```
+3. FastAPI's `/auth/login` validates `desktop_callback` is a loopback URL
+   and stores it (along with the caller-supplied `state`) in the
+   `MGMT_STATE` DynamoDB record.
+4. Google → `/auth/callback` exchanges the code, mints the mgmt JWT, and
+   redirects to the loopback URL with `?token=&state=`.
+5. The main process verifies state (timing-safe), hands the JWT to the
+   renderer via IPC, closes the loopback server, and serves the browser
+   a "you can close this window" HTML page.
+
+`STARTER_BYPASS_GOOGLE_AUTH=1` works identically in dev — the bypass path
+returns the JWT via the same loopback redirect when `desktop_callback` is
+present, so `inv desktop-dev` users get a one-click login.
+
+### Why these decisions
+
+The design and rationale live in
+`docs/superpowers/specs/2026-05-30-electron-shell-oauth-design.md`.
+Don't re-derive sub-project boundaries (A/B/C/D) here — cite the spec.
 
 ## Docs site
 
