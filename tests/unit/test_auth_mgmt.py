@@ -27,6 +27,7 @@ from channel.auth.mgmt_auth import (  # noqa: E402
     _html_redirect,
     _make_user,
     _mgmt_callback_uri,
+    _validate_desktop_callback,
 )
 
 _client = TestClient(app, follow_redirects=False)
@@ -321,3 +322,75 @@ def test_mgmt_callback_google_exchange_error(monkeypatch):
     ):
         resp = _client.get(f"/auth/callback?code=authcode&state={state}")
     assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Desktop-callback test cases for the Electron OAuth loopback flow.
+#
+# When the Electron desktop app starts an OAuth flow, it passes its own
+# random state and a loopback callback URL. These tests verify the
+# validator rejects non-loopback callbacks and that the happy path stores
+# the desktop_callback in the state record's payload.
+# ---------------------------------------------------------------------------
+
+DESKTOP_CALLBACK_OK = "http://127.0.0.1:54321/callback"
+VALID_STATE = "A" * 43  # 43 base64url chars
+
+
+@pytest.mark.parametrize(
+    "bad_callback",
+    [
+        "https://evil.example.com/callback",  # external host
+        "https://127.0.0.1:54321/callback",  # https not allowed
+        "http://127.0.0.1:54321/other",  # wrong path
+        "http://127.0.0.1/callback",  # missing port
+        "http://0.0.0.0:54321/callback",  # not loopback
+        "http://[::1]:54321/callback",  # IPv6 loopback rejected
+        "http://127.0.0.1:54321/callback?foo=bar",  # query injection
+        "http://127.0.0.1:54321/callback#frag",  # fragment injection
+    ],
+)
+def test_desktop_callback_rejects_bad_urls(bad_callback, monkeypatch):
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "x")
+    monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "y")
+    resp = _client.get(
+        "/auth/login",
+        params={"desktop_callback": bad_callback, "state": VALID_STATE},
+    )
+    assert resp.status_code == 400
+
+
+def test_desktop_callback_rejects_short_state(monkeypatch):
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "x")
+    monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "y")
+    resp = _client.get(
+        "/auth/login",
+        params={"desktop_callback": DESKTOP_CALLBACK_OK, "state": "too-short"},
+    )
+    assert resp.status_code == 400
+
+
+def test_desktop_callback_happy_path(monkeypatch, _fake_state_store):
+    """Caller-supplied state is reused as the DynamoDB key + Google's state."""
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "x")
+    monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "y")
+    resp = _client.get(
+        "/auth/login",
+        params={"desktop_callback": DESKTOP_CALLBACK_OK, "state": VALID_STATE},
+    )
+    assert resp.status_code == 302
+    assert _fake_state_store[VALID_STATE]["desktop_callback"] == DESKTOP_CALLBACK_OK
+    assert "accounts.google.com" in resp.headers["location"]
+    assert f"state={VALID_STATE}" in resp.headers["location"]
+
+
+def test_validate_desktop_callback_returns_none_on_urlparse_exception(monkeypatch):
+    """The except-branch in _validate_desktop_callback must be reachable."""
+    import channel.auth.mgmt_auth as _mod
+
+    def _raise(_url: str) -> None:
+        raise ValueError("bad url")
+
+    monkeypatch.setattr(_mod, "urlparse", _raise)
+    result = _validate_desktop_callback("http://127.0.0.1:1234/callback")
+    assert result is None

@@ -18,8 +18,10 @@ from __future__ import annotations
 
 import html
 import os
+import re
 import secrets
 from typing import Any
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -40,6 +42,28 @@ logger = get_logger(__name__)
 
 _BYPASS = bool(os.environ.get("STARTER_BYPASS_GOOGLE_AUTH"))
 _STATE_TTL_SECONDS = 600  # 10 minutes
+
+_DESKTOP_STATE_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost"}
+
+
+def _validate_desktop_callback(callback: str) -> str | None:
+    """Return the callback if it's a safe loopback /callback URL, else None."""
+    try:
+        u = urlparse(callback)
+    except Exception:
+        return None
+    if u.scheme != "http":
+        return None
+    if u.hostname not in _LOOPBACK_HOSTS:
+        return None
+    if not u.port:
+        return None
+    if u.path != "/callback":
+        return None
+    if u.query or u.fragment:
+        return None
+    return callback
 
 # Redirect target after successful login — drops the user back into the
 # authenticated chat app, not the marketing landing page.
@@ -92,6 +116,13 @@ async def mgmt_login(request: Request) -> RedirectResponse:
     In STARTER_BYPASS_GOOGLE_AUTH mode (non-prod), issue a synthetic JWT directly
     when a test_email query parameter is provided, so e2e tests can run without
     a real Google account.
+
+    Optionally accepts ``desktop_callback`` and ``state`` query parameters for
+    the Electron loopback OAuth flow.  When present both are validated strictly:
+    ``desktop_callback`` must be a loopback-only http URL on /callback, and
+    ``state`` must be exactly 43 base64url characters.  The caller-supplied state
+    is reused as both the DynamoDB key and Google's CSRF nonce so the loopback
+    server can verify the same value on return.
     """
     test_email = request.query_params.get("test_email")
     if _BYPASS and test_email:
@@ -99,7 +130,20 @@ async def mgmt_login(request: Request) -> RedirectResponse:
         token = issue_mgmt_jwt(user)
         return _html_redirect(token)  # type: ignore[return-value]
 
-    state = _create_pending_state()
+    desktop_callback = request.query_params.get("desktop_callback")
+    caller_state = request.query_params.get("state")
+    payload: dict[str, Any] = {}
+
+    if desktop_callback is not None:
+        validated = _validate_desktop_callback(desktop_callback)
+        if validated is None or not caller_state or not _DESKTOP_STATE_RE.match(caller_state):
+            raise HTTPException(status_code=400, detail="Invalid desktop_callback or state")
+        state = caller_state
+        payload["desktop_callback"] = validated
+    else:
+        state = secrets.token_urlsafe(32)
+
+    state_store.put_state(state, payload=payload or None, ttl_seconds=_STATE_TTL_SECONDS)
     url = google_authorization_url(state, _mgmt_callback_uri())
     return RedirectResponse(url, status_code=302)
 
