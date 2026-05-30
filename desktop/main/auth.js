@@ -55,12 +55,20 @@ export function startLoopback({ state, onResult }) {
       if (url.pathname !== "/callback") {
         res.writeHead(404); return res.end("not found");
       }
+      const err = url.searchParams.get("error");
+      if (err === "access_denied") {
+        res.writeHead(400); res.end("cancelled");
+        return onResult({ ok: false, code: "USER_CANCELLED" });
+      }
       const got = url.searchParams.get("state") ?? "";
-      const tok = url.searchParams.get("token") ?? "";
+      const tok = url.searchParams.get("token");
       if (!statesEqual(got, state)) {
         res.writeHead(400); res.end("state mismatch");
-        onResult({ ok: false, code: "STATE_MISMATCH" });
-        return;
+        return onResult({ ok: false, code: "STATE_MISMATCH" });
+      }
+      if (!tok) {
+        res.writeHead(400); res.end("missing token");
+        return onResult({ ok: false, code: "INVALID_CALLBACK" });
       }
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       res.end(CLOSE_PAGE_HTML);

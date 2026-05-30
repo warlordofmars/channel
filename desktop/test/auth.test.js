@@ -105,13 +105,24 @@ describe("startLoopback — success path", () => {
     await close();
   });
 
-  it("treats missing token param as empty string (defaults to \"\")", async () => {
-    const state = generateState();
+});
+
+describe("startLoopback — error paths", () => {
+  it("USER_CANCELLED on ?error=access_denied", async () => {
     const onResult = vi.fn();
-    const { port, close } = await startLoopback({ state, onResult });
-    const res = await getHtml(port, `/callback?state=${state}`);
-    expect(res.status).toBe(200);
-    expect(onResult).toHaveBeenCalledWith({ ok: true, token: "" });
+    const { port, close } = await startLoopback({ state: "S", onResult });
+    const res = await getHtml(port, `/callback?error=access_denied&state=S`);
+    expect(res.status).toBe(400);
+    expect(onResult).toHaveBeenCalledWith({ ok: false, code: "USER_CANCELLED" });
+    await close();
+  });
+
+  it("INVALID_CALLBACK when token+error both missing", async () => {
+    const onResult = vi.fn();
+    const { port, close } = await startLoopback({ state: "S", onResult });
+    const res = await getHtml(port, `/callback?state=S`);
+    expect(res.status).toBe(400);
+    expect(onResult).toHaveBeenCalledWith({ ok: false, code: "INVALID_CALLBACK" });
     await close();
   });
 });
