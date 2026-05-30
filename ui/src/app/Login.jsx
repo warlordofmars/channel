@@ -34,7 +34,7 @@ export default function Login() {
     document.documentElement.setAttribute("data-theme", theme);
   }, [theme]);
 
-  const desktop = window.channelDesktop;
+  const desktop = typeof window !== "undefined" ? window.channelDesktop : undefined;
 
   async function handleDesktopLogin() {
     setError(null);

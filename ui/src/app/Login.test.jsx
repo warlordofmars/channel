@@ -6,6 +6,17 @@ import { MemoryRouter } from "react-router-dom";
 import Login from "./Login.jsx";
 import { __resetChannelPrefsForTest } from "../hooks/useChannelPrefs.js";
 
+// navigateSpy is shared across the desktop-mode describe block.
+// vi.mock is hoisted, so the factory runs before imports.
+const navigateSpy = vi.fn();
+vi.mock("react-router-dom", async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    useNavigate: () => navigateSpy,
+  };
+});
+
 describe("Login", () => {
   let assignSpy;
   let storage;
@@ -94,6 +105,7 @@ describe("Login (desktop mode)", () => {
   let storage;
 
   beforeEach(() => {
+    navigateSpy.mockClear();
     storage = {};
     vi.stubGlobal("localStorage", {
       getItem: (k) => storage[k] ?? null,
@@ -123,6 +135,7 @@ describe("Login (desktop mode)", () => {
     await userEvent.click(screen.getByRole("button", { name: /sign in with google/i }));
     expect(window.channelDesktop.login).toHaveBeenCalled();
     expect(localStorage.getItem("starter_mgmt_token")).toBe("THE_JWT");
+    expect(navigateSpy).toHaveBeenCalledWith("/app");
   });
 });
 
