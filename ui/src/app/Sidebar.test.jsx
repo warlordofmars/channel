@@ -174,4 +174,27 @@ describe("Sidebar", () => {
     fireEvent.click(screen.getByText("Home server backup strategy"));
     expect(lastPath).toBe("/app/c/r1");
   });
+
+  it.each([
+    ["New chat", "/app"],
+    ["Projects", "/app/projects"],
+    ["Artifacts", "/app/artifacts"],
+    ["Customize", "/app/customize"],
+  ])("clicking %s navigates to %s", (label, expected) => {
+    let lastPath = null;
+    function PathCatcher() {
+      const { pathname } = useLocation();
+      lastPath = pathname;
+      return null;
+    }
+    render(
+      <MemoryRouter initialEntries={["/app/c/r1"]}>
+        <Routes>
+          <Route path="*" element={<><Sidebar /><PathCatcher /></>} />
+        </Routes>
+      </MemoryRouter>
+    );
+    fireEvent.click(screen.getByRole("button", { name: new RegExp(label, "i") }));
+    expect(lastPath).toBe(expected);
+  });
 });

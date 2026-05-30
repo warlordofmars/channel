@@ -15,8 +15,9 @@ const HARDCODED_ARTIFACT = {
  * shape so the components that consume it don't have to change.
  *
  * `send(text, atts, model, effort)` pushes a user turn + an empty streaming
- * assistant turn, then advances 2 words every 38ms from SAMPLE_REPLY until
- * fully drained. The assistant turn gets a hardcoded artifact when done.
+ * assistant turn, then appends one token (word + trailing whitespace) every
+ * 22ms from SAMPLE_REPLY until fully drained. The assistant turn gets a
+ * hardcoded artifact when done.
  *
  * `loadSample(title, model)` populates a finished conversation immediately
  * — used when the user clicks a Recent in the sidebar.
@@ -44,11 +45,15 @@ export function useMockStream() {
           streaming: true,
         },
       ]);
+      // Split into word + whitespace tokens. We advance by ONE token per
+      // tick so updates feel smooth instead of arriving in 2-word jumps.
+      // 22ms keeps the overall reply duration close to the design's
+      // 38ms-per-2-tokens pacing while doubling the visual frame rate.
       const words = SAMPLE_REPLY.split(/(\s+)/);
       let i = 0;
       stop();
       timer.current = setInterval(() => {
-        i += 2;
+        i += 1;
         const chunk = words.slice(0, i).join("");
         setTurns((prev) => {
           const next = [...prev];
@@ -69,7 +74,7 @@ export function useMockStream() {
             return next;
           });
         }
-      }, 38);
+      }, 22);
     },
     [stop]
   );

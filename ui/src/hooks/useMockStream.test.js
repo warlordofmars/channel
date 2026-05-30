@@ -33,18 +33,18 @@ describe("useMockStream", () => {
     });
   });
 
-  it("send() streams 2 words every 38ms until SAMPLE_REPLY is fully emitted", () => {
+  it("send() streams one token every 22ms until SAMPLE_REPLY is fully emitted", () => {
     const { result } = renderHook(() => useMockStream());
     act(() => result.current.send("hi", [], OPUS, EFFORT));
-    // One tick → 2 words appended.
-    act(() => vi.advanceTimersByTime(38));
+    // One tick → one token (word + trailing whitespace) appended.
+    act(() => vi.advanceTimersByTime(22));
     const partial = result.current.turns[1].text;
     expect(partial.length).toBeGreaterThan(0);
     expect(SAMPLE_REPLY.startsWith(partial)).toBe(true);
     expect(result.current.turns[1].streaming).toBe(true);
 
     // Drain the rest.
-    act(() => vi.advanceTimersByTime(38 * 200));
+    act(() => vi.advanceTimersByTime(22 * 800));
     expect(result.current.turns[1].text).toBe(SAMPLE_REPLY);
     expect(result.current.turns[1].streaming).toBe(false);
     expect(result.current.turns[1].artifact).toEqual({

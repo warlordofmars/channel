@@ -2,7 +2,7 @@
 import React from "react";
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useNavigate } from "react-router-dom";
 import Conversation from "./Conversation.jsx";
 import { MODELS, SAMPLE_REPLY, SAMPLE_USER, RECENTS } from "./data.js";
 import { __resetChannelPrefsForTest } from "../hooks/useChannelPrefs.js";
@@ -206,5 +206,75 @@ describe("Conversation", () => {
     const userTurns = document.body.querySelectorAll(".turn.user .bubble");
     expect(userTurns.length).toBe(1);
     expect(userTurns[0].textContent).toBe("once");
+  });
+
+  it("renders a follow-up Composer at the bottom of the conversation", () => {
+    renderAt(`/app/c/${REAL_RECENT_ID}`);
+    // Composer's textarea has placeholder "Reply…".
+    expect(screen.getByPlaceholderText("Reply…")).toBeTruthy();
+    // The Send button is part of the Composer.
+    expect(screen.getByTitle("Send")).toBeTruthy();
+  });
+
+  it("typing in the follow-up Composer + Send appends a new user turn (no navigate)", () => {
+    renderAt(`/app/c/${REAL_RECENT_ID}`);
+    const ta = screen.getByPlaceholderText("Reply…");
+    fireEvent.change(ta, { target: { value: "follow up question" } });
+    fireEvent.click(screen.getByTitle("Send"));
+    // Two user turns now: the canned SAMPLE_USER and the follow-up.
+    const bubbles = document.body.querySelectorAll(".turn.user .bubble");
+    expect(bubbles.length).toBe(2);
+    expect(bubbles[1].textContent).toBe("follow up question");
+  });
+
+  it("picking a different model in the follow-up Composer persists via setModel", () => {
+    storage["channel-model"] = MODELS[0].id;
+    __resetChannelPrefsForTest();
+    renderAt(`/app/c/${REAL_RECENT_ID}`);
+    // Open the ModelPicker via the visible current-model button in the Composer.
+    fireEvent.click(screen.getByRole("button", { name: /Opus 4.8/i }));
+    fireEvent.click(screen.getByText("Claude Haiku 4.5"));
+    expect(storage["channel-model"]).toBe("claude-haiku-4-5");
+  });
+
+  it("re-fires loadSample when the URL :id changes (sidebar recent click while mounted)", () => {
+    // Navigate from /app/c/r1 to /app/c/r5 without remount — both ids resolve
+    // to the canned SAMPLE_USER/SAMPLE_REPLY pair, but the kickedIdRef must
+    // recognise the id change and re-fire loadSample. Without that, the
+    // previous conversation would persist.
+    function Catcher() {
+      const navigate = useNavigate();
+      return (
+        <button data-testid="goto-r5" onClick={() => navigate("/app/c/r5")}>
+          go
+        </button>
+      );
+    }
+    render(
+      <MemoryRouter initialEntries={["/app/c/r1"]}>
+        <Routes>
+          <Route
+            path="/app/c/:id"
+            element={
+              <>
+                <Conversation />
+                <Catcher />
+              </>
+            }
+          />
+        </Routes>
+      </MemoryRouter>
+    );
+    const initialUserCount = document.body.querySelectorAll(".turn.user").length;
+    expect(initialUserCount).toBe(1);
+    // Click the catcher button to navigate without unmounting Conversation.
+    fireEvent.click(screen.getByTestId("goto-r5"));
+    // loadSample replaces the turns array, so after the route param change
+    // the conversation should still have exactly 1 user turn (not stacked).
+    const afterUserCount = document.body.querySelectorAll(".turn.user").length;
+    expect(afterUserCount).toBe(1);
+    // And the conversation still shows SAMPLE_USER (because both r1 and r5
+    // resolve to the same canned pair).
+    expect(screen.getByText(SAMPLE_USER)).toBeTruthy();
   });
 });

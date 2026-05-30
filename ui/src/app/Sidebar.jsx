@@ -93,16 +93,16 @@ export default function Sidebar({ collapsed = false, onToggle = () => {} }) {
           </div>
         )}
 
-        <button type="button" className="nav-item primary">
+        <button type="button" className="nav-item primary" onClick={() => navigate("/app")}>
           <span className="ic"><Icon name="plus" size={18} /></span> New chat
         </button>
-        <button type="button" className="nav-item">
+        <button type="button" className="nav-item" onClick={() => navigate("/app/projects")}>
           <span className="ic"><Icon name="projects" size={18} /></span> Projects
         </button>
-        <button type="button" className="nav-item">
+        <button type="button" className="nav-item" onClick={() => navigate("/app/artifacts")}>
           <span className="ic"><Icon name="artifacts" size={18} /></span> Artifacts
         </button>
-        <button type="button" className="nav-item">
+        <button type="button" className="nav-item" onClick={() => navigate("/app/customize")}>
           <span className="ic"><Icon name="customize" size={18} /></span> Customize
         </button>
 
