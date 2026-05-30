@@ -38,33 +38,50 @@ export default class ErrorBoundary extends React.Component {
       <div
         role="alert"
         data-testid="error-boundary"
-        className="min-h-screen flex flex-col items-center justify-center text-center px-4"
+        style={{
+          minHeight: "100vh",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: "var(--canvas)",
+          color: "var(--ink)",
+          fontFamily: "var(--font-sans)",
+          padding: "24px",
+        }}
       >
-        <p
-          className="font-bold tracking-[2px] text-[var(--text-muted)] uppercase text-sm mb-3"
-          aria-hidden="true"
+        <div
+          style={{
+            background: "var(--raised)",
+            border: "1px solid var(--border)",
+            borderRadius: "var(--r-lg)",
+            boxShadow: "var(--shadow-md)",
+            padding: "32px",
+            maxWidth: "480px",
+            width: "100%",
+            textAlign: "center",
+          }}
         >
-          Error
-        </p>
-        <h1 className="text-3xl md:text-4xl font-bold mb-4">Something went wrong</h1>
-        <p className="text-[var(--text-muted)] mb-8 max-w-[480px]">
-          The page failed to load. Try reloading; if the problem
-          persists, please get in touch.
-        </p>
-        <div className="flex flex-col sm:flex-row gap-4 sm:gap-6 items-center">
+          <h1 style={{ fontSize: "26px", fontWeight: 600, marginBottom: "12px" }}>
+            Something went wrong
+          </h1>
+          <p style={{ color: "var(--ink-soft)", marginBottom: "20px" }}>
+            {this.state.message || "An unexpected error occurred."}
+          </p>
           <button
-            type="button"
             onClick={this.handleReload}
-            className="px-4 py-2 rounded bg-[var(--accent)] text-white border-0 cursor-pointer text-sm"
+            style={{
+              background: "var(--accent)",
+              color: "var(--on-accent)",
+              border: "none",
+              borderRadius: "var(--r-md)",
+              padding: "10px 18px",
+              fontSize: "14px",
+              fontWeight: 500,
+              cursor: "pointer",
+            }}
           >
-            Reload page
+            Reload
           </button>
-          <a
-            href="mailto:hello@warlordofmars.net"
-            className="text-[var(--accent)] no-underline hover:underline text-sm"
-          >
-            Contact support
-          </a>
         </div>
       </div>
     );
