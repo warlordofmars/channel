@@ -34,7 +34,9 @@ export default function Login() {
     document.documentElement.setAttribute("data-theme", theme);
   }, [theme]);
 
-  const desktop = typeof window !== "undefined" ? window.channelDesktop : undefined;
+  // The SPA isn't SSR'd; window is always defined in both Electron's
+  // sandboxed renderer and any browser-side test environment.
+  const desktop = window.channelDesktop;
 
   async function handleDesktopLogin() {
     setError(null);
