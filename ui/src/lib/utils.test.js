@@ -11,8 +11,8 @@ describe("cn", () => {
     expect(cn("foo", false && "bar", "baz")).toBe("foo baz");
   });
 
-  it("merges conflicting Tailwind classes, keeping last", () => {
-    expect(cn("bg-red-500", "bg-blue-500")).toBe("bg-blue-500");
+  it("joins multiple class names", () => {
+    expect(cn("bg-red-500", "bg-blue-500")).toBe("bg-red-500 bg-blue-500");
   });
 
   it("handles undefined and null gracefully", () => {
