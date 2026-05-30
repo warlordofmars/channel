@@ -145,6 +145,7 @@ async def mgmt_login(request: Request) -> RedirectResponse:
         # a separate Google OAuth client for local Electron iteration.
         if _BYPASS:
             from urllib.parse import urlencode
+
             dev_email = os.environ.get("STARTER_DESKTOP_DEV_EMAIL", "dev@channel.local")
             user = _make_user(dev_email, dev_email.split("@")[0])
             token = issue_mgmt_jwt(user)
