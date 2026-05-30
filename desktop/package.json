@@ -1,0 +1,27 @@
+{
+  "name": "channel-desktop",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Channel desktop app (Electron wrapper around the SPA)",
+  "main": "dist-main/index.js",
+  "scripts": {
+    "build:main": "esbuild main/index.js preload/index.js --bundle --platform=node --target=node20 --external:electron --outdir=dist-main --format=cjs",
+    "build:renderer": "rsync -a --delete ../ui/dist/ dist-renderer/",
+    "build": "npm run build:main && npm run build:renderer && electron-builder",
+    "build:current": "npm run build:main && npm run build:renderer && electron-builder --dir",
+    "dev:main": "esbuild main/index.js preload/index.js --bundle --platform=node --target=node20 --external:electron --outdir=dist-main --format=cjs --watch",
+    "dev:electron": "electron .",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "test:watch": "vitest",
+    "lint": "eslint main preload test --ext .js"
+  },
+  "devDependencies": {
+    "@vitest/coverage-v8": "^4.1.7",
+    "electron": "latest",
+    "electron-builder": "latest",
+    "esbuild": "latest",
+    "eslint": "^8.57.0",
+    "vitest": "^4.1.5"
+  }
+}
