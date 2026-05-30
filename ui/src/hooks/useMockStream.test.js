@@ -33,18 +33,19 @@ describe("useMockStream", () => {
     });
   });
 
-  it("send() streams one token every 22ms until SAMPLE_REPLY is fully emitted", () => {
+  it("send() reveals SAMPLE_REPLY progressively over ~5.5s via requestAnimationFrame", () => {
     const { result } = renderHook(() => useMockStream());
     act(() => result.current.send("hi", [], OPUS, EFFORT));
-    // One tick → one token (word + trailing whitespace) appended.
-    act(() => vi.advanceTimersByTime(22));
+    // After a handful of frames, some prefix of SAMPLE_REPLY is visible.
+    act(() => vi.advanceTimersByTime(120));
     const partial = result.current.turns[1].text;
     expect(partial.length).toBeGreaterThan(0);
     expect(SAMPLE_REPLY.startsWith(partial)).toBe(true);
+    expect(partial.length).toBeLessThan(SAMPLE_REPLY.length);
     expect(result.current.turns[1].streaming).toBe(true);
 
-    // Drain the rest.
-    act(() => vi.advanceTimersByTime(22 * 800));
+    // After the full 5.5s duration the reply is complete + the artifact lands.
+    act(() => vi.advanceTimersByTime(6000));
     expect(result.current.turns[1].text).toBe(SAMPLE_REPLY);
     expect(result.current.turns[1].streaming).toBe(false);
     expect(result.current.turns[1].artifact).toEqual({

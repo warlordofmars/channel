@@ -158,14 +158,16 @@ export default function Conversation() {
           )}
         </div>
       </div>
-      <Composer
-        model={modelObj}
-        effort={prefs.effort}
-        setModel={setModelObj}
-        setEffort={prefs.setEffort}
-        onSend={followUp}
-        placeholder="Reply…"
-      />
+      <div className="bottom-composer">
+        <Composer
+          model={modelObj}
+          effort={prefs.effort}
+          setModel={setModelObj}
+          setEffort={prefs.setEffort}
+          onSend={followUp}
+          placeholder="Reply…"
+        />
+      </div>
     </>
   );
 }
