@@ -48,11 +48,12 @@ describe("Shell", () => {
     expect(screen.getByRole("button", { name: /new chat/i })).toBeTruthy();
   });
 
-  it("uses the design's .stage.full > .win > Sidebar + .main layout shape", () => {
-    // app.css styles the chat-app via `.stage` (fixed full-viewport),
-    // `.win` (flex row), and `.main` (flex: 1). Using any other class names
-    // produces a broken layout where the main pane stacks below the sidebar
-    // instead of beside it.
+  it("uses the design's .stage.full > .win > .body > Sidebar + .main shape", () => {
+    // app.css makes `.win` `flex-direction: column` and `.body` the row that
+    // holds the sidebar + main. Skipping `.body` makes the column direction
+    // stack Sidebar above main (or breaks `.main`'s `flex: 1` vertical math
+    // and the greeting renders at the bottom of the viewport instead of
+    // centered). The `.body` wrapper is required.
     const { container } = render(
       <MemoryRouter>
         <Shell>
@@ -62,9 +63,11 @@ describe("Shell", () => {
     );
     const stage = container.querySelector(".stage.full");
     expect(stage).toBeTruthy();
-    const win = stage.querySelector(".win");
+    const win = stage.querySelector(":scope > .win");
     expect(win).toBeTruthy();
-    const main = win.querySelector("main.main");
+    const body = win.querySelector(":scope > .body");
+    expect(body).toBeTruthy();
+    const main = body.querySelector(":scope > main.main");
     expect(main).toBeTruthy();
     expect(main.querySelector("[data-testid='child']")).toBeTruthy();
   });

@@ -19,8 +19,10 @@ export default function Shell({ children }) {
   return (
     <div className="stage full">
       <div className="win">
-        <Sidebar />
-        <main className="main">{children}</main>
+        <div className="body">
+          <Sidebar />
+          <main className="main">{children}</main>
+        </div>
       </div>
     </div>
   );
