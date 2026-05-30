@@ -1,5 +1,6 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
-import React, { useEffect } from "react";
+import React, { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import ChannelMark from "../components/ChannelMark.jsx";
 import GoogleG from "./GoogleG.jsx";
 import { useChannelPrefs } from "../hooks/useChannelPrefs.js";
@@ -18,12 +19,41 @@ import { useChannelPrefs } from "../hooks/useChannelPrefs.js";
  * Owns `data-theme = theme` (the chat-app theme) while mounted, matching
  * Shell's behaviour — so /app/login renders in the app theme regardless of
  * what marketing left behind.
+ *
+ * When `window.channelDesktop?.isDesktop` is truthy (Electron renderer), the
+ * button calls `window.channelDesktop.login()` directly via the contextBridge
+ * IPC instead of redirecting to /auth/login. On success the returned JWT is
+ * stored in localStorage and the user is navigated to /app.
  */
 export default function Login() {
   const { theme } = useChannelPrefs();
+  const navigate = useNavigate();
+  const [error, setError] = useState(null);
+
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
   }, [theme]);
+
+  const desktop = window.channelDesktop;
+
+  async function handleDesktopLogin() {
+    setError(null);
+    try {
+      const token = await desktop.login();
+      localStorage.setItem("starter_mgmt_token", token);
+      navigate("/app");
+    } catch (err) {
+      const code = err?.message;
+      if (code === "USER_CANCELLED") {
+        setError("Login cancelled.");
+      } else if (code === "TIMEOUT") {
+        setError("Login timed out. Please try again.");
+      } else {
+        setError("Login failed.");
+      }
+    }
+  }
+
   return (
     <div className="stage full">
       <div className="win">
@@ -32,13 +62,24 @@ export default function Login() {
             <span className="mk"><ChannelMark size={46} /></span>
             <h1>Sign in to Channel</h1>
             <p>Your workspace for thinking with AI.</p>
-            <button
-              type="button"
-              className="google-btn"
-              onClick={() => globalThis.location.assign("/auth/login")}
-            >
-              <GoogleG size={19} /> Continue with Google
-            </button>
+            {desktop?.isDesktop ? (
+              <button
+                type="button"
+                className="google-btn"
+                onClick={handleDesktopLogin}
+              >
+                <GoogleG size={19} /> Sign in with Google
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="google-btn"
+                onClick={() => globalThis.location.assign("/auth/login")}
+              >
+                <GoogleG size={19} /> Continue with Google
+              </button>
+            )}
+            {error && <div className="error">{error}</div>}
             <div className="auth-fine">
               By continuing, you agree to Channel&apos;s <a href="/terms">Terms</a> and <a href="/privacy">Privacy Policy</a>.
             </div>
