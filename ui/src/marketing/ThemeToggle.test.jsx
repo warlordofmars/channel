@@ -29,21 +29,21 @@ describe("ThemeToggle", () => {
     expect(screen.getByRole("button", { name: /toggle theme/i })).toBeTruthy();
   });
 
-  it("renders the moon icon when site theme is light", () => {
-    storage["channel-site-theme"] = "light";
+  it("renders an icon for the current theme", () => {
+    storage["channel-theme"] = "light";
     __resetChannelPrefsForTest();
     const { container } = render(<ThemeToggle />);
     expect(container.querySelector("svg")).toBeTruthy();
   });
 
-  it("flips siteTheme on click", () => {
-    storage["channel-site-theme"] = "light";
+  it("flips the global theme on click", () => {
+    storage["channel-theme"] = "light";
     __resetChannelPrefsForTest();
     render(<ThemeToggle />);
     const btn = screen.getByRole("button", { name: /toggle theme/i });
     fireEvent.click(btn);
-    expect(storage["channel-site-theme"]).toBe("dark");
+    expect(storage["channel-theme"]).toBe("dark");
     fireEvent.click(btn);
-    expect(storage["channel-site-theme"]).toBe("light");
+    expect(storage["channel-theme"]).toBe("light");
   });
 });

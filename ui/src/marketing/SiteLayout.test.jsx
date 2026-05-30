@@ -43,16 +43,16 @@ describe("SiteLayout", () => {
     expect(brand.length).toBeGreaterThanOrEqual(2);
   });
 
-  it("applies data-theme to <html> from siteTheme", async () => {
-    storage["channel-site-theme"] = "dark";
+  it("applies data-theme to <html> from the global theme", async () => {
+    storage["channel-theme"] = "light";
     __resetChannelPrefsForTest();
     await act(async () => renderLayout(<div />));
-    expect(document.documentElement.getAttribute("data-theme")).toBe("dark");
+    expect(document.documentElement.getAttribute("data-theme")).toBe("light");
   });
 
-  it("defaults data-theme to 'light' when site storage is empty", async () => {
+  it("defaults data-theme to 'dark' when theme storage is empty", async () => {
     await act(async () => renderLayout(<div />));
-    expect(document.documentElement.getAttribute("data-theme")).toBe("light");
+    expect(document.documentElement.getAttribute("data-theme")).toBe("dark");
   });
 
 });

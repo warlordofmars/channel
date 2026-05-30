@@ -1,5 +1,5 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 import Shell from "./Shell.jsx";
@@ -86,5 +86,25 @@ describe("Shell", () => {
       </MemoryRouter>
     );
     expect(document.documentElement.getAttribute("data-theme")).toBe("light");
+  });
+
+  it("does NOT render the .main-top expand bar when the sidebar is open (default)", () => {
+    const { container } = render(
+      <MemoryRouter><Shell><div /></Shell></MemoryRouter>
+    );
+    expect(container.querySelector(".main-top")).toBeNull();
+  });
+
+  it("clicking the sidebar toggle hides the sidebar and shows the .main-top expand bar", () => {
+    const { container } = render(
+      <MemoryRouter><Shell><div /></Shell></MemoryRouter>
+    );
+    fireEvent.click(screen.getByTitle("Toggle sidebar"));
+    expect(container.querySelector(".sb.collapsed")).toBeTruthy();
+    expect(container.querySelector(".main-top")).toBeTruthy();
+    // Clicking the .main-top expand button toggles back open
+    fireEvent.click(screen.getByTitle("Show sidebar"));
+    expect(container.querySelector(".sb.collapsed")).toBeNull();
+    expect(container.querySelector(".main-top")).toBeNull();
   });
 });

@@ -187,7 +187,7 @@ export default function Pricing() {
           <p>Start on the free plan and upgrade only when you&apos;re ready.</p>
           <div className="hero-cta" style={{ marginTop: 0 }}>
             <Link className="btn btn-primary btn-lg" to="/app">Open Channel</Link>
-            <a className="btn btn-ghost btn-lg" href="#download">Download app</a>
+            <Link className="btn btn-ghost btn-lg" to="/download">Download app</Link>
           </div>
         </div>
       </section>

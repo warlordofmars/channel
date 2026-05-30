@@ -34,13 +34,13 @@ export default function Home() {
           name="hero-screen-light"
           className="hero-shot light"
           src="/screens/hero-home-light.png"
-          alt="The Channel chat app in light theme — chat home with the model picker, recents, and quick actions"
+          alt="The Channel desktop app in light theme — chat home with the model picker, recents, and quick actions"
         />
         <ImageSlot
           name="hero-screen-dark"
           className="hero-shot dark"
           src="/screens/hero-home-dark.png"
-          alt="The Channel chat app in dark theme — chat home with the model picker, recents, and quick actions"
+          alt="The Channel desktop app in dark theme — chat home with the model picker, recents, and quick actions"
         />
       </section>
 

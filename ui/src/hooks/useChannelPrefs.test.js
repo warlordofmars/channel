@@ -40,7 +40,6 @@ describe("useChannelPrefs", () => {
     expect(result.current.font).toBe(DEFAULTS.font);
     expect(result.current.model).toBe(DEFAULTS.model);
     expect(result.current.effort).toBe(DEFAULTS.effort);
-    expect(result.current.siteTheme).toBe(DEFAULTS.siteTheme);
   });
 
   it("reads each pref from localStorage when present", () => {
@@ -51,7 +50,6 @@ describe("useChannelPrefs", () => {
     storage[STORAGE_KEYS.font] = "space";
     storage[STORAGE_KEYS.model] = "claude-haiku-4-5";
     storage[STORAGE_KEYS.effort] = "Low";
-    storage[STORAGE_KEYS.siteTheme] = "dark";
     __resetChannelPrefsForTest();
     const { result } = renderHook(() => useChannelPrefs());
     expect(result.current.theme).toBe("light");
@@ -61,14 +59,12 @@ describe("useChannelPrefs", () => {
     expect(result.current.font).toBe("space");
     expect(result.current.model).toBe("claude-haiku-4-5");
     expect(result.current.effort).toBe("Low");
-    expect(result.current.siteTheme).toBe("dark");
   });
 
   it("writes pref to localStorage and applies data-{pref} on <html>", () => {
     // `data-theme` is intentionally NOT applied by the hook — route
-    // wrappers (SiteLayout / Shell / Login) own that to avoid the race
-    // between marketing siteTheme and app theme. setTheme still persists
-    // to localStorage; the wrapper picks it up on next render.
+    // wrappers (SiteLayout / Shell / Login) own that. setTheme still
+    // persists to localStorage; the wrapper picks it up on next render.
     const { result } = renderHook(() => useChannelPrefs());
     act(() => result.current.setTheme("light"));
     expect(storage[STORAGE_KEYS.theme]).toBe("light");
@@ -104,19 +100,6 @@ describe("useChannelPrefs", () => {
     expect(result.current.theme).toBe("dark");
   });
 
-  it("toggleSiteTheme flips dark ↔ light independently of theme", () => {
-    storage[STORAGE_KEYS.theme] = "dark";
-    storage[STORAGE_KEYS.siteTheme] = "light";
-    __resetChannelPrefsForTest();
-    const { result } = renderHook(() => useChannelPrefs());
-    act(() => result.current.toggleSiteTheme());
-    expect(result.current.siteTheme).toBe("dark");
-    expect(result.current.theme).toBe("dark");
-    // flip back to exercise the "dark → light" branch of the ternary
-    act(() => result.current.toggleSiteTheme());
-    expect(result.current.siteTheme).toBe("light");
-  });
-
   it("STORAGE_KEYS are all distinct and channel-prefixed", () => {
     const keys = Object.values(STORAGE_KEYS);
     expect(new Set(keys).size).toBe(keys.length);
@@ -136,30 +119,23 @@ describe("useChannelPrefs", () => {
     expect(result.current.theme).toBe(DEFAULTS.theme);
   });
 
-  it("setSiteTheme writes the new site theme to localStorage and the snapshot", () => {
-    const { result } = renderHook(() => useChannelPrefs());
-    act(() => result.current.setSiteTheme("dark"));
-    expect(result.current.siteTheme).toBe("dark");
-    expect(storage[STORAGE_KEYS.siteTheme]).toBe("dark");
-  });
-
   it("propagates updates across separate hook instances (shared store)", () => {
     // Regression: each useChannelPrefs() call must subscribe to the same
-    // underlying store. Without this, ThemeToggle's toggleSiteTheme updates
+    // underlying store. Without this, ThemeToggle's toggleTheme updates
     // only its local copy and SiteLayout never re-renders to see the change.
     const a = renderHook(() => useChannelPrefs());
     const b = renderHook(() => useChannelPrefs());
-    expect(a.result.current.siteTheme).toBe(DEFAULTS.siteTheme);
-    expect(b.result.current.siteTheme).toBe(DEFAULTS.siteTheme);
+    expect(a.result.current.theme).toBe(DEFAULTS.theme);
+    expect(b.result.current.theme).toBe(DEFAULTS.theme);
 
-    act(() => a.result.current.toggleSiteTheme());
-    const flipped = DEFAULTS.siteTheme === "dark" ? "light" : "dark";
-    expect(a.result.current.siteTheme).toBe(flipped);
-    expect(b.result.current.siteTheme).toBe(flipped);
+    act(() => a.result.current.toggleTheme());
+    const flipped = DEFAULTS.theme === "dark" ? "light" : "dark";
+    expect(a.result.current.theme).toBe(flipped);
+    expect(b.result.current.theme).toBe(flipped);
 
-    act(() => b.result.current.setTheme("light"));
-    expect(a.result.current.theme).toBe("light");
-    expect(b.result.current.theme).toBe("light");
+    act(() => b.result.current.setAccent("99"));
+    expect(a.result.current.accent).toBe("99");
+    expect(b.result.current.accent).toBe("99");
   });
 
   it("setPref short-circuits when the value is unchanged", () => {

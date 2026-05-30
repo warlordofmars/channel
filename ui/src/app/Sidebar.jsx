@@ -18,7 +18,7 @@ import { RECENTS } from "./data.js";
  *
  * Sign out clears the JWT and sends the user back to the marketing site at /.
  */
-export default function Sidebar() {
+export default function Sidebar({ collapsed = false, onToggle = () => {} }) {
   const [searching, setSearching] = useState(false);
   const [search, setSearch] = useState("");
   const [acctOpen, setAcctOpen] = useState(false);
@@ -45,10 +45,10 @@ export default function Sidebar() {
   }
 
   return (
-    <div className="sb">
+    <div className={"sb" + (collapsed ? " collapsed" : "")}>
       <div className="sb-top">
         <div className="sb-actions">
-          <button type="button" className="icon-btn" title="Toggle sidebar"><Icon name="sidebar" size={18} /></button>
+          <button type="button" className="icon-btn" title="Toggle sidebar" onClick={onToggle}><Icon name="sidebar" size={18} /></button>
           <button type="button" className="icon-btn" title="Search" onClick={() => setSearching((s) => !s)}>
             <Icon name="search" size={18} />
           </button>
