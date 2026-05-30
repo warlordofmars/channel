@@ -33,7 +33,12 @@ function mimeFor(p) {
 function resolveRendererPath(url, rendererRoot) {
   // Reject any URL that contains a ".." path segment before URL normalisation
   // strips it. Encoded variants (%2e%2e, %2E%2E, etc.) are also rejected.
-  const decoded = decodeURIComponent(url);
+  let decoded;
+  try {
+    decoded = decodeURIComponent(url);
+  } catch {
+    return null; // malformed percent-encoding → treat as hostile, falls through to 403
+  }
   if (decoded.includes("..")) return null;
 
   const u = new URL(url);

@@ -79,6 +79,12 @@ describe("handleAppRequest", () => {
     expect(readFileSync).not.toHaveBeenCalled();
   });
 
+  it("rejects malformed percent-encoding with 403", async () => {
+    const response = handleAppRequest(new Request("app://-/%c0%ae%c0%ae/etc/passwd"), RENDERER_ROOT);
+    expect(response.status).toBe(403);
+    expect(readFileSync).not.toHaveBeenCalled();
+  });
+
   it("returns 404 when a real asset path doesn't exist", async () => {
     readFileSync.mockImplementation(() => { throw new Error("ENOENT"); });
     const response = handleAppRequest(new Request("app://-/assets/missing.png"), RENDERER_ROOT);
@@ -92,7 +98,7 @@ describe("handleAppRequest", () => {
     expect(response.headers.get("content-type")).toBe("application/octet-stream");
   });
 
-  it("falls through extension-less missing paths to index.html (SPA route)", async () => {
+  it("falls through extension-less paths to index.html (SPA route)", async () => {
     // index.html mock always returns; assertion is that the response resolved
     readFileSync.mockReturnValue(Buffer.from("<html>root</html>"));
     const response = handleAppRequest(new Request("app://-/something/that/looks/like/a/route"), RENDERER_ROOT);
