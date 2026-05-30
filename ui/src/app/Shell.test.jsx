@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 import Shell from "./Shell.jsx";
 import { TOKEN_KEY } from "../lib/auth.js";
+import { __resetChannelPrefsForTest } from "../hooks/useChannelPrefs.js";
 
 function makeToken() {
   const exp = Math.floor(Date.now() / 1000) + 3600;
@@ -12,17 +13,21 @@ function makeToken() {
 }
 
 describe("Shell", () => {
+  let storage;
   beforeEach(() => {
+    storage = { [TOKEN_KEY]: makeToken() };
     vi.stubGlobal("localStorage", {
-      getItem: (k) => (k === TOKEN_KEY ? makeToken() : null),
-      setItem: vi.fn(),
-      removeItem: vi.fn(),
+      getItem: (k) => storage[k] ?? null,
+      setItem: (k, v) => { storage[k] = String(v); },
+      removeItem: (k) => { delete storage[k]; },
     });
     vi.stubGlobal("matchMedia", () => ({
       matches: false,
       addEventListener: vi.fn(),
       removeEventListener: vi.fn(),
     }));
+    document.documentElement.removeAttribute("data-theme");
+    __resetChannelPrefsForTest();
   });
   afterEach(() => vi.unstubAllGlobals());
 
@@ -70,5 +75,16 @@ describe("Shell", () => {
     const main = body.querySelector(":scope > main.main");
     expect(main).toBeTruthy();
     expect(main.querySelector("[data-testid='child']")).toBeTruthy();
+  });
+
+  it("applies the chat-app theme (theme) to data-theme on mount", async () => {
+    storage["channel-theme"] = "light";
+    __resetChannelPrefsForTest();
+    render(
+      <MemoryRouter>
+        <Shell><div /></Shell>
+      </MemoryRouter>
+    );
+    expect(document.documentElement.getAttribute("data-theme")).toBe("light");
   });
 });

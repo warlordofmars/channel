@@ -2,13 +2,26 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Login from "./Login.jsx";
+import { __resetChannelPrefsForTest } from "../hooks/useChannelPrefs.js";
 
 describe("Login", () => {
   let assignSpy;
+  let storage;
 
   beforeEach(() => {
     assignSpy = vi.fn();
+    storage = {};
     vi.stubGlobal("location", { ...globalThis.location, assign: assignSpy });
+    vi.stubGlobal("localStorage", {
+      getItem: (k) => storage[k] ?? null,
+      setItem: (k, v) => { storage[k] = String(v); },
+      removeItem: (k) => { delete storage[k]; },
+    });
+    vi.stubGlobal("matchMedia", () => ({
+      matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn(),
+    }));
+    document.documentElement.removeAttribute("data-theme");
+    __resetChannelPrefsForTest();
   });
 
   afterEach(() => vi.unstubAllGlobals());
@@ -52,6 +65,13 @@ describe("Login", () => {
   it("renders the ChannelMark logo (.ch-mark) at the top of the card", () => {
     const { container } = render(<Login />);
     expect(container.querySelector(".ch-mark")).toBeTruthy();
+  });
+
+  it("applies the chat-app theme (theme) to data-theme on mount", () => {
+    storage["channel-theme"] = "light";
+    __resetChannelPrefsForTest();
+    render(<Login />);
+    expect(document.documentElement.getAttribute("data-theme")).toBe("light");
   });
 
   it("wraps .auth in .stage.full > .win so the card centers vertically", () => {

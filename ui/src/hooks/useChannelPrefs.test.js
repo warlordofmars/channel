@@ -65,10 +65,14 @@ describe("useChannelPrefs", () => {
   });
 
   it("writes pref to localStorage and applies data-{pref} on <html>", () => {
+    // `data-theme` is intentionally NOT applied by the hook — route
+    // wrappers (SiteLayout / Shell / Login) own that to avoid the race
+    // between marketing siteTheme and app theme. setTheme still persists
+    // to localStorage; the wrapper picks it up on next render.
     const { result } = renderHook(() => useChannelPrefs());
     act(() => result.current.setTheme("light"));
     expect(storage[STORAGE_KEYS.theme]).toBe("light");
-    expect(document.documentElement.getAttribute("data-theme")).toBe("light");
+    expect(result.current.theme).toBe("light");
 
     act(() => result.current.setAccent("300"));
     expect(storage[STORAGE_KEYS.accent]).toBe("300");

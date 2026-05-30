@@ -91,7 +91,11 @@ export function useChannelPrefs() {
   const current = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
   const { theme, siteTheme, accent, density, shape, font, model, effort } = current;
 
-  useEffect(() => { applyAttr("theme", theme); }, [theme]);
+  // NOTE: `theme` and `siteTheme` are intentionally NOT applied to
+  // `data-theme` here. Each route wrapper applies the appropriate one
+  // (SiteLayout → siteTheme; Shell + Login → theme). Applying it from the
+  // hook itself races against the route wrappers' effects because every
+  // useChannelPrefs() consumer would re-apply on mount, last-write-wins.
   useEffect(() => { applyAttr("accent", accent); }, [accent]);
   useEffect(() => { applyAttr("density", density); }, [density]);
   useEffect(() => { applyAttr("shape", shape); }, [shape]);
@@ -102,9 +106,6 @@ export function useChannelPrefs() {
   useEffect(() => {
     document.documentElement.style.setProperty("--accent-h", accent);
   }, [accent]);
-
-  // siteTheme is intentionally not applied to data-theme here — SiteLayout
-  // owns that override (and restores the app theme on unmount).
 
   const setTheme = useCallback((v) => setPref("theme", v), []);
   const setSiteTheme = useCallback((v) => setPref("siteTheme", v), []);
