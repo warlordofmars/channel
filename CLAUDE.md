@@ -6,7 +6,7 @@ Built with FastAPI (Python), DynamoDB, AWS CDK, and a React management UI.
 ## Stack
 
 - FastAPI (Python) — management REST API
-- React (Vite) + shadcn/ui — management UI SPA
+- React (Vite) — management UI SPA
 - DynamoDB — persistent storage (single table design)
 - AWS Lambda + Function URL — hosting
 - AWS CDK (Python) — IaC
@@ -36,22 +36,25 @@ channel/
 │           ├── main.py        # FastAPI app + routes
 │           └── csp.py         # CSP violation reporting endpoint
 ├── ui/
+│   ├── index.html             # Vite entry HTML
 │   ├── src/
-│   │   ├── App.jsx            # Router, AppShell, tab nav
+│   │   ├── App.jsx            # Marketing + app route shell
+│   │   ├── main.jsx           # React DOM entry; imports styles/channel.css
 │   │   ├── api.js             # API client (fetch wrappers)
 │   │   ├── analytics.js       # GA4 trackPageView + trackEvent helpers
-│   │   ├── hooks/
-│   │   │   └── useTheme.js    # Dark/light theme hook
+│   │   ├── styles/
+│   │   │   └── channel.css    # Design tokens (OKLCH themes, radii, shadows, fonts)
 │   │   ├── lib/
-│   │   │   └── utils.js       # Shared utility functions (cn, etc.)
+│   │   │   ├── auth.js        # parseToken, isTokenValid, TOKEN_KEY
+│   │   │   └── utils.js       # cn (class-name join via clsx)
+│   │   ├── hooks/
+│   │   │   ├── useChannelPrefs.js  # theme/accent/density/shape/font/model/effort + siteTheme
+│   │   │   └── useRelativeTime.js
 │   │   └── components/
-│   │       ├── ui/
-│   │       │   └── button.jsx # shadcn/ui Button primitive
-│   │       ├── Dashboard.jsx  # Admin: CloudWatch metrics + cost data
-│   │       ├── UsersPanel.jsx # Admin: user list + management
-│   │       ├── EmptyState.jsx # Shared empty-state illustrations
-│   │       ├── PageLayout.jsx # Shared page layout + navbar
-│   │       └── LoginPage.jsx
+│   │       ├── AuthGate.jsx       # Redirects /app/* visits to /app/login when no JWT
+│   │       ├── ChannelMark.jsx    # Brand mark SVG (rounded square + two bars)
+│   │       ├── ErrorBoundary.jsx  # Token-styled error fallback
+│   │       └── Icon.jsx           # 24×24 stroke icon set
 │   └── package.json
 ├── docs-site/                 # VitePress documentation site
 │   ├── .vitepress/
@@ -109,12 +112,10 @@ require a valid Bearer mgmt JWT. JWT validation enforces `iss`,
 ## Management UI
 
 - React SPA (Vite), runs on port 5173 in dev
+- Marketing routes at `/`, app routes at `/app/*`
 - Communicates with FastAPI management API on port 8001
-- Features:
-  - Admin only: user management (`UsersPanel`), metrics dashboard (`Dashboard`)
-- Auth: Google OAuth via `/auth/login`;
-  token stored in localStorage as `starter_mgmt_token`
-- Tab set: Users, Dashboard (admin only)
+- Auth: Google OAuth via `/auth/login`; token stored in localStorage as `starter_mgmt_token`
+- Window frame is web only at MVP — Electron desktop wrapper deferred per design handoff
 
 ## Docs site
 
@@ -214,13 +215,11 @@ re-derive these during design review — cite them.
 
 ## UI conventions
 
-- **CSS variables only** — never hardcode colours; use `var(--text-muted)`,
-  `var(--border)`, `var(--accent)`, `var(--danger)`, `var(--success)`, etc.
-  for dark-mode compatibility
-- **Lucide icons** — use `lucide-react` for all icons; never use emojis as
-  UI elements
-- **shadcn/ui primitives** — prefer shadcn components (Button, etc.) over
-  custom HTML; add new primitives to `ui/src/components/ui/` as needed
+- **CSS-vars only** — token system in `ui/src/styles/channel.css` (OKLCH light + dark
+  themes, radii, shadows, fonts). No Tailwind. Use `var(--canvas)`, `var(--ink)`,
+  `var(--raised)`, `var(--accent)`, `var(--border)`, etc. Never hardcode colours.
+- **Icons** — `Icon.jsx` provides the project's 24×24 stroke icon set; never use
+  emojis as UI elements
 - **jsdom colour normalisation** — in vitest, jsdom converts hex to
   `rgb(r, g, b)`; assert `"rgb(232, 160, 32)"` not `"#e8a020"`
 - **Anonymous inline functions** — vitest v8 counts uncovered anonymous
@@ -228,7 +227,7 @@ re-derive these during design review — cite them.
   listeners in `useEffect`)
 - **`vi.useFakeTimers()`** — activate **before** `render(...)` when the
   timer is scheduled in the component's mount `useEffect` (the common
-  case — see `ui/src/components/Dashboard.test.jsx:363-370`); activating
+  case); activating
   after mount leaves the timer pinned to the real clock. Activate
   *after* the initial render only when the test needs real-clock
   progress for some setup phase (e.g. `waitFor` / `findBy*` polling on
@@ -466,7 +465,7 @@ touches any of the following:
 **Always required:**
 
 - Fixing a failing e2e test — the fix must pass locally before the PR opens
-- Auth flows (`auth/`, `LoginPage.jsx`, OAuth endpoints)
+- Auth flows (`auth/`, `AuthGate.jsx`, OAuth endpoints)
 - Management API endpoints (`api/`) that the UI tests exercise
 
 **Use judgement (run the relevant `--tests` file at minimum):**
