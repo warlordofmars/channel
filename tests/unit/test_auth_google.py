@@ -58,6 +58,16 @@ def test_google_authorization_url(monkeypatch):
     assert "response_type=code" in url
 
 
+def test_google_authorization_url_requests_profile_scope(monkeypatch):
+    # `profile` is required for Google to return the `name` claim, which the
+    # backend maps to display_name → chat-app greeting. Without it Google
+    # only returns email, and display_name falls back to the email's
+    # local-part.
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "test-oauth-id")
+    url = google_authorization_url("s", "https://example.com/auth/callback")
+    assert "scope=openid+email+profile" in url or "scope=openid%20email%20profile" in url
+
+
 def test_is_email_allowed_when_in_list(monkeypatch):
     monkeypatch.setenv("ALLOWED_EMAILS", '["allowed@test.com"]')
     assert is_email_allowed("allowed@test.com") is True

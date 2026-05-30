@@ -122,7 +122,9 @@ def google_authorization_url(state: str, callback_uri: str) -> str:
     params = {
         "client_id": _google_client_id(),
         "response_type": "code",
-        "scope": "openid email",
+        # `profile` is required for Google to return the `name` claim — the
+        # full display name we use for the chat-app greeting + sidebar.
+        "scope": "openid email profile",
         "redirect_uri": callback_uri,
         "state": state,
         "access_type": "online",
