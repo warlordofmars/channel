@@ -6,9 +6,11 @@ import { TOKEN_KEY } from "../lib/auth.js";
 import { QUICK_ACTIONS } from "./data.js";
 import { __resetChannelPrefsForTest } from "../hooks/useChannelPrefs.js";
 
-function makeToken({ email = "ada@example.com" } = {}) {
+function makeToken({ email = "ada@example.com", display_name } = {}) {
   const exp = Math.floor(Date.now() / 1000) + 3600;
-  const payload = btoa(JSON.stringify({ exp, sub: "u1", role: "user", email }));
+  const claims = { exp, sub: "u1", role: "user", email };
+  if (display_name !== undefined) claims.display_name = display_name;
+  const payload = btoa(JSON.stringify(claims));
   return `eyJhbGciOiJIUzI1NiJ9.${payload}.sig`;
 }
 
@@ -60,6 +62,12 @@ describe("ChatHome", () => {
     storage = {};
     render(<ChatHome />);
     expect(screen.getByRole("heading", { level: 1 }).textContent).toMatch(/back at it, you/i);
+  });
+
+  it("uses the first word of display_name when present (Google full-name)", () => {
+    storage = { [TOKEN_KEY]: makeToken({ email: "j@example.com", display_name: "John Carter" }) };
+    render(<ChatHome />);
+    expect(screen.getByRole("heading", { level: 1 }).textContent).toMatch(/back at it, john$/i);
   });
 
   it("falls back to first MODELS entry when prefs.model is not in MODELS", () => {

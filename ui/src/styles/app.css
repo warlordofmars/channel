@@ -46,7 +46,10 @@
   flex-shrink: 0;
 }
 .lights { display: flex; gap: 8px; align-items: center; }
-.light { width: 12px; height: 12px; border-radius: 50%; }
+/* Scoped to `.lights .light` so the bare `.light` class doesn't collide
+   with `.hero-shot.light` (the light-theme hero variant in site.css) or
+   any other element that happens to carry a `light` class. */
+.lights .light { width: 12px; height: 12px; border-radius: 50%; }
 .urlbar {
   flex: 1;
   max-width: 520px;

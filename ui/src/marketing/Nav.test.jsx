@@ -31,20 +31,11 @@ describe("Nav", () => {
     expect(brand.getAttribute("href")).toBe("/");
   });
 
-  it("on Home, Product/Models/Download are in-page anchors; Pricing stays /pricing", () => {
+  it("Product / Models / Pricing / Download route to their dedicated pages", () => {
     renderNavAt("/");
-    expect(screen.getByRole("link", { name: "Product" }).getAttribute("href")).toBe("#features");
-    expect(screen.getByRole("link", { name: "Models" }).getAttribute("href")).toBe("#models");
-    expect(screen.getByRole("link", { name: "Pricing" }).getAttribute("href")).toBe("/pricing");
-    // Two "Download" links — the nav-links anchor (#download) and the CTA button (/download).
-    const downloads = screen.getAllByRole("link", { name: /^download/i });
-    expect(downloads.map((d) => d.getAttribute("href")).sort()).toEqual(["#download", "/download"]);
-  });
-
-  it("off Home, Product/Models/Download route to their dedicated pages", () => {
-    renderNavAt("/pricing");
     expect(screen.getByRole("link", { name: "Product" }).getAttribute("href")).toBe("/product");
     expect(screen.getByRole("link", { name: "Models" }).getAttribute("href")).toBe("/models");
+    expect(screen.getByRole("link", { name: "Pricing" }).getAttribute("href")).toBe("/pricing");
     const downloads = screen.getAllByRole("link", { name: /^download/i });
     for (const d of downloads) expect(d.getAttribute("href")).toBe("/download");
   });

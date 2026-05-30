@@ -5,9 +5,11 @@ import { MemoryRouter } from "react-router-dom";
 import Sidebar from "./Sidebar.jsx";
 import { TOKEN_KEY } from "../lib/auth.js";
 
-function makeToken({ email = "ada@example.com" } = {}) {
+function makeToken({ email = "ada@example.com", display_name } = {}) {
   const exp = Math.floor(Date.now() / 1000) + 3600;
-  const payload = btoa(JSON.stringify({ exp, sub: "u1", role: "user", email }));
+  const claims = { exp, sub: "u1", role: "user", email };
+  if (display_name !== undefined) claims.display_name = display_name;
+  const payload = btoa(JSON.stringify(claims));
   return `eyJhbGciOiJIUzI1NiJ9.${payload}.sig`;
 }
 
@@ -119,6 +121,14 @@ describe("Sidebar", () => {
     const backdrop = document.querySelector(".backdrop");
     fireEvent.click(backdrop);
     expect(screen.queryByText("Sign out")).toBeNull();
+  });
+
+  it("shows the full display_name (Google name) when present in the JWT", () => {
+    storage = { [TOKEN_KEY]: makeToken({ email: "j@example.com", display_name: "John Carter" }) };
+    renderSidebar();
+    expect(screen.getByText("John Carter")).toBeTruthy();
+    // initials should derive from the two-word name: J + C → "JC"
+    expect(screen.getByText("JC")).toBeTruthy();
   });
 
   it("clicking 'Toggle sidebar' calls the onToggle prop", () => {

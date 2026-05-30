@@ -17,7 +17,12 @@ export default function ChatHome() {
   const prefs = useChannelPrefs();
   const token = localStorage.getItem(TOKEN_KEY) ?? "";
   const claims = parseToken(token) ?? {};
-  const userName = (claims.email ?? "you@example.com").split("@")[0] || "You";
+  // Prefer the Google display_name's first word ("John Carter" → "John");
+  // fall back to the email's local-part, then to a generic "You".
+  const firstName =
+    (claims.display_name && claims.display_name.trim().split(/\s+/)[0]) ||
+    (claims.email ?? "you@example.com").split("@")[0] ||
+    "You";
 
   // Derive the model object from the prefs string id.
   const modelObj = MODELS.find((m) => m.id === prefs.model) ?? MODELS[0];
@@ -32,7 +37,7 @@ export default function ChatHome() {
     <div className="home">
       <div className="greet">
         <span className="gm"><ChannelMark size={34} /></span>
-        <h1>Back at it, {userName}</h1>
+        <h1>Back at it, {firstName}</h1>
       </div>
       <Composer
         model={modelObj}
