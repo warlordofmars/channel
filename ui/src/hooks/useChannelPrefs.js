@@ -1,5 +1,5 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useSyncExternalStore } from "react";
 
 export const STORAGE_KEYS = Object.freeze({
   theme:     "channel-theme",
@@ -32,10 +32,6 @@ function readPref(key, fallback) {
   }
 }
 
-function applyAttr(name, value) {
-  document.documentElement.setAttribute("data-" + name, value);
-}
-
 function writePref(key, value) {
   try {
     localStorage.setItem(key, value);
@@ -44,43 +40,97 @@ function writePref(key, value) {
   }
 }
 
-export function useChannelPrefs() {
-  const [theme, _setTheme] = useState(() => readPref(STORAGE_KEYS.theme, DEFAULTS.theme));
-  const [siteTheme, _setSiteTheme] = useState(() => readPref(STORAGE_KEYS.siteTheme, DEFAULTS.siteTheme));
-  const [accent, _setAccent] = useState(() => readPref(STORAGE_KEYS.accent, DEFAULTS.accent));
-  const [density, _setDensity] = useState(() => readPref(STORAGE_KEYS.density, DEFAULTS.density));
-  const [shape, _setShape] = useState(() => readPref(STORAGE_KEYS.shape, DEFAULTS.shape));
-  const [font, _setFont] = useState(() => readPref(STORAGE_KEYS.font, DEFAULTS.font));
-  const [model, _setModel] = useState(() => readPref(STORAGE_KEYS.model, DEFAULTS.model));
-  const [effort, _setEffort] = useState(() => readPref(STORAGE_KEYS.effort, DEFAULTS.effort));
+function applyAttr(name, value) {
+  document.documentElement.setAttribute("data-" + name, value);
+}
 
-  useEffect(() => { applyAttr("theme", theme);     writePref(STORAGE_KEYS.theme, theme); }, [theme]);
-  // siteTheme is persisted here but applied to <html> by SiteLayout, which
-  // overrides data-theme on mount and restores the app theme on unmount.
-  // The two preferences share data-theme but are stored under different keys.
-  useEffect(() => { writePref(STORAGE_KEYS.siteTheme, siteTheme); }, [siteTheme]);
-  useEffect(() => { applyAttr("accent", accent);   writePref(STORAGE_KEYS.accent, accent); }, [accent]);
-  useEffect(() => { applyAttr("density", density); writePref(STORAGE_KEYS.density, density); }, [density]);
-  useEffect(() => { applyAttr("shape", shape);     writePref(STORAGE_KEYS.shape, shape); }, [shape]);
-  useEffect(() => { applyAttr("font", font);       writePref(STORAGE_KEYS.font, font); }, [font]);
-  useEffect(() => { applyAttr("model", model);     writePref(STORAGE_KEYS.model, model); }, [model]);
-  useEffect(() => { applyAttr("effort", effort);   writePref(STORAGE_KEYS.effort, effort); }, [effort]);
+// Module-level shared store. All `useChannelPrefs()` calls subscribe to the
+// same snapshot, so toggling a preference in one component propagates to
+// every other consumer in the tree. Without this, each hook instance kept
+// independent React state and the marketing theme toggle in <ThemeToggle>
+// updated its own copy while <SiteLayout>'s copy stayed stale.
+const PREF_NAMES = Object.keys(STORAGE_KEYS);
+let snapshot = Object.freeze(
+  PREF_NAMES.reduce((acc, name) => {
+    acc[name] = readPref(STORAGE_KEYS[name], DEFAULTS[name]);
+    return acc;
+  }, {})
+);
+const listeners = new Set();
+
+function subscribe(listener) {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
+function getSnapshot() {
+  return snapshot;
+}
+
+function setPref(name, value) {
+  if (snapshot[name] === value) return;
+  snapshot = Object.freeze({ ...snapshot, [name]: value });
+  writePref(STORAGE_KEYS[name], value);
+  listeners.forEach((l) => l());
+}
+
+// Test-only: reset the in-memory snapshot back to whatever localStorage
+// currently contains. Used between tests that swap the localStorage stub
+// so each test starts from a clean shared store.
+export function __resetChannelPrefsForTest() {
+  snapshot = Object.freeze(
+    PREF_NAMES.reduce((acc, name) => {
+      acc[name] = readPref(STORAGE_KEYS[name], DEFAULTS[name]);
+      return acc;
+    }, {})
+  );
+  listeners.clear();
+}
+
+export function useChannelPrefs() {
+  const current = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+  const { theme, siteTheme, accent, density, shape, font, model, effort } = current;
+
+  useEffect(() => { applyAttr("theme", theme); }, [theme]);
+  useEffect(() => { applyAttr("accent", accent); }, [accent]);
+  useEffect(() => { applyAttr("density", density); }, [density]);
+  useEffect(() => { applyAttr("shape", shape); }, [shape]);
+  useEffect(() => { applyAttr("font", font); }, [font]);
+  useEffect(() => { applyAttr("model", model); }, [model]);
+  useEffect(() => { applyAttr("effort", effort); }, [effort]);
 
   useEffect(() => {
     document.documentElement.style.setProperty("--accent-h", accent);
   }, [accent]);
 
-  const toggleTheme = useCallback(() => _setTheme((t) => (t === "dark" ? "light" : "dark")), []);
-  const toggleSiteTheme = useCallback(() => _setSiteTheme((t) => (t === "dark" ? "light" : "dark")), []);
+  // siteTheme is intentionally not applied to data-theme here — SiteLayout
+  // owns that override (and restores the app theme on unmount).
+
+  const setTheme = useCallback((v) => setPref("theme", v), []);
+  const setSiteTheme = useCallback((v) => setPref("siteTheme", v), []);
+  const setAccent = useCallback((v) => setPref("accent", v), []);
+  const setDensity = useCallback((v) => setPref("density", v), []);
+  const setShape = useCallback((v) => setPref("shape", v), []);
+  const setFont = useCallback((v) => setPref("font", v), []);
+  const setModel = useCallback((v) => setPref("model", v), []);
+  const setEffort = useCallback((v) => setPref("effort", v), []);
+  const toggleTheme = useCallback(
+    () => setPref("theme", snapshot.theme === "dark" ? "light" : "dark"),
+    []
+  );
+  const toggleSiteTheme = useCallback(
+    () => setPref("siteTheme", snapshot.siteTheme === "dark" ? "light" : "dark"),
+    []
+  );
 
   return {
-    theme, setTheme: _setTheme, toggleTheme,
-    siteTheme, setSiteTheme: _setSiteTheme, toggleSiteTheme,
-    accent, setAccent: _setAccent,
-    density, setDensity: _setDensity,
-    shape, setShape: _setShape,
-    font, setFont: _setFont,
-    model, setModel: _setModel,
-    effort, setEffort: _setEffort,
+    theme, setTheme, toggleTheme,
+    siteTheme, setSiteTheme, toggleSiteTheme,
+    accent, setAccent,
+    density, setDensity,
+    shape, setShape,
+    font, setFont,
+    model, setModel,
+    effort, setEffort,
   };
 }

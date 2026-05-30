@@ -1,7 +1,12 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { useChannelPrefs, DEFAULTS, STORAGE_KEYS } from "./useChannelPrefs.js";
+import {
+  useChannelPrefs,
+  DEFAULTS,
+  STORAGE_KEYS,
+  __resetChannelPrefsForTest,
+} from "./useChannelPrefs.js";
 
 describe("useChannelPrefs", () => {
   let storage;
@@ -21,6 +26,7 @@ describe("useChannelPrefs", () => {
     for (const a of Array.from(document.documentElement.attributes)) {
       if (a.name.startsWith("data-")) document.documentElement.removeAttribute(a.name);
     }
+    __resetChannelPrefsForTest();
   });
 
   afterEach(() => vi.unstubAllGlobals());
@@ -46,6 +52,7 @@ describe("useChannelPrefs", () => {
     storage[STORAGE_KEYS.model] = "claude-haiku-4-5";
     storage[STORAGE_KEYS.effort] = "Low";
     storage[STORAGE_KEYS.siteTheme] = "dark";
+    __resetChannelPrefsForTest();
     const { result } = renderHook(() => useChannelPrefs());
     expect(result.current.theme).toBe("light");
     expect(result.current.accent).toBe("150");
@@ -85,6 +92,7 @@ describe("useChannelPrefs", () => {
 
   it("toggleTheme flips dark ↔ light", () => {
     storage[STORAGE_KEYS.theme] = "dark";
+    __resetChannelPrefsForTest();
     const { result } = renderHook(() => useChannelPrefs());
     act(() => result.current.toggleTheme());
     expect(result.current.theme).toBe("light");
@@ -95,6 +103,7 @@ describe("useChannelPrefs", () => {
   it("toggleSiteTheme flips dark ↔ light independently of theme", () => {
     storage[STORAGE_KEYS.theme] = "dark";
     storage[STORAGE_KEYS.siteTheme] = "light";
+    __resetChannelPrefsForTest();
     const { result } = renderHook(() => useChannelPrefs());
     act(() => result.current.toggleSiteTheme());
     expect(result.current.siteTheme).toBe("dark");
@@ -116,8 +125,46 @@ describe("useChannelPrefs", () => {
       setItem: vi.fn(),
       removeItem: vi.fn(),
     });
+    // Re-seed the shared snapshot using the throwing localStorage so the
+    // catch branch in readPref actually fires.
+    __resetChannelPrefsForTest();
     const { result } = renderHook(() => useChannelPrefs());
     expect(result.current.theme).toBe(DEFAULTS.theme);
+  });
+
+  it("setSiteTheme writes the new site theme to localStorage and the snapshot", () => {
+    const { result } = renderHook(() => useChannelPrefs());
+    act(() => result.current.setSiteTheme("dark"));
+    expect(result.current.siteTheme).toBe("dark");
+    expect(storage[STORAGE_KEYS.siteTheme]).toBe("dark");
+  });
+
+  it("propagates updates across separate hook instances (shared store)", () => {
+    // Regression: each useChannelPrefs() call must subscribe to the same
+    // underlying store. Without this, ThemeToggle's toggleSiteTheme updates
+    // only its local copy and SiteLayout never re-renders to see the change.
+    const a = renderHook(() => useChannelPrefs());
+    const b = renderHook(() => useChannelPrefs());
+    expect(a.result.current.siteTheme).toBe(DEFAULTS.siteTheme);
+    expect(b.result.current.siteTheme).toBe(DEFAULTS.siteTheme);
+
+    act(() => a.result.current.toggleSiteTheme());
+    const flipped = DEFAULTS.siteTheme === "dark" ? "light" : "dark";
+    expect(a.result.current.siteTheme).toBe(flipped);
+    expect(b.result.current.siteTheme).toBe(flipped);
+
+    act(() => b.result.current.setTheme("light"));
+    expect(a.result.current.theme).toBe("light");
+    expect(b.result.current.theme).toBe("light");
+  });
+
+  it("setPref short-circuits when the value is unchanged", () => {
+    // Hitting the early return keeps the snapshot reference stable so
+    // subscribers don't re-render unnecessarily.
+    const { result } = renderHook(() => useChannelPrefs());
+    const before = result.current.theme;
+    act(() => result.current.setTheme(before));
+    expect(result.current.theme).toBe(before);
   });
 
   it("writePref silently degrades when localStorage.setItem throws", () => {

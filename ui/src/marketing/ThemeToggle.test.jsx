@@ -2,6 +2,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import ThemeToggle from "./ThemeToggle.jsx";
+import { __resetChannelPrefsForTest } from "../hooks/useChannelPrefs.js";
 
 describe("ThemeToggle", () => {
   let storage;
@@ -18,6 +19,7 @@ describe("ThemeToggle", () => {
       addEventListener: vi.fn(),
       removeEventListener: vi.fn(),
     }));
+    __resetChannelPrefsForTest();
   });
 
   afterEach(() => vi.unstubAllGlobals());
@@ -29,12 +31,14 @@ describe("ThemeToggle", () => {
 
   it("renders the moon icon when site theme is light", () => {
     storage["channel-site-theme"] = "light";
+    __resetChannelPrefsForTest();
     const { container } = render(<ThemeToggle />);
     expect(container.querySelector("svg")).toBeTruthy();
   });
 
   it("flips siteTheme on click", () => {
     storage["channel-site-theme"] = "light";
+    __resetChannelPrefsForTest();
     render(<ThemeToggle />);
     const btn = screen.getByRole("button", { name: /toggle theme/i });
     fireEvent.click(btn);

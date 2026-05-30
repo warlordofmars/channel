@@ -3,6 +3,7 @@ import { act, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App.jsx";
 import { TOKEN_KEY } from "./lib/auth.js";
+import { __resetChannelPrefsForTest } from "./hooks/useChannelPrefs.js";
 
 function makeToken({ expOffsetSeconds = 3600 } = {}) {
   const exp = Math.floor(Date.now() / 1000) + expOffsetSeconds;
@@ -25,6 +26,7 @@ describe("App routing", () => {
       addEventListener: vi.fn(),
       removeEventListener: vi.fn(),
     }));
+    __resetChannelPrefsForTest();
   });
 
   afterEach(() => { vi.unstubAllGlobals(); window.history.pushState({}, "", "/"); });
@@ -89,6 +91,7 @@ describe("App routing", () => {
 
   it("applies the saved theme to <html> on mount", async () => {
     storage["channel-theme"] = "light";
+    __resetChannelPrefsForTest();
     await act(async () => render(<App />));
     expect(document.documentElement.getAttribute("data-theme")).toBe("light");
   });

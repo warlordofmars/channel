@@ -3,6 +3,7 @@ import { act, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 import SiteLayout from "./SiteLayout.jsx";
+import { __resetChannelPrefsForTest } from "../hooks/useChannelPrefs.js";
 
 function renderLayout(children) {
   return render(
@@ -26,6 +27,7 @@ describe("SiteLayout", () => {
       matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn(),
     }));
     document.documentElement.removeAttribute("data-theme");
+    __resetChannelPrefsForTest();
   });
   afterEach(() => vi.unstubAllGlobals());
 
@@ -43,6 +45,7 @@ describe("SiteLayout", () => {
 
   it("applies data-theme to <html> from siteTheme", async () => {
     storage["channel-site-theme"] = "dark";
+    __resetChannelPrefsForTest();
     await act(async () => renderLayout(<div />));
     expect(document.documentElement.getAttribute("data-theme")).toBe("dark");
   });
@@ -55,6 +58,7 @@ describe("SiteLayout", () => {
   it("restores the app theme on unmount", async () => {
     storage["channel-theme"] = "dark";
     storage["channel-site-theme"] = "light";
+    __resetChannelPrefsForTest();
     const { unmount } = await act(async () => renderLayout(<div />));
     expect(document.documentElement.getAttribute("data-theme")).toBe("light");
     await act(async () => unmount());
@@ -63,6 +67,7 @@ describe("SiteLayout", () => {
 
   it("falls back to default app theme on unmount when storage throws", async () => {
     storage["channel-site-theme"] = "light";
+    __resetChannelPrefsForTest();
     const { unmount } = await act(async () => renderLayout(<div />));
     // After mount, swap localStorage for one that throws on read so the
     // unmount-time `getItem` hits the catch branch.
