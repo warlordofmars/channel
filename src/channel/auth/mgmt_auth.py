@@ -41,8 +41,9 @@ logger = get_logger(__name__)
 _BYPASS = bool(os.environ.get("STARTER_BYPASS_GOOGLE_AUTH"))
 _STATE_TTL_SECONDS = 600  # 10 minutes
 
-# Redirect target after successful login
-_UI_ROOT = "/"
+# Redirect target after successful login — drops the user back into the
+# authenticated chat app, not the marketing landing page.
+_UI_ROOT = "/app"
 
 
 def _mgmt_callback_uri() -> str:
