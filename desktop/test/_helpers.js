@@ -20,6 +20,7 @@ export function mockElectron(overrides = {}) {
       Object.assign(this, {
         loadURL: vi.fn(() => Promise.resolve()),
         on: vi.fn(),
+        once: vi.fn(),
         hide: vi.fn(),
         show: vi.fn(),
         webContents: { id: 1, on: vi.fn() },

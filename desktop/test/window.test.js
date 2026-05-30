@@ -72,4 +72,18 @@ describe("createMainWindow", () => {
     expect(opts.titleBarStyle).toBeUndefined();
     expect(opts.trafficLightPosition).toBeUndefined();
   });
+
+  it("starts hidden to avoid the pre-render white flash", async () => {
+    const { BrowserWindow } = await import("electron");
+    const win = createMainWindow({ preloadPath: "/preload.js" });
+    expect(BrowserWindow.mock.calls[0][0].show).toBe(false);
+    expect(win.show).not.toHaveBeenCalled();
+  });
+
+  it("shows the window once ready-to-show fires", async () => {
+    const win = createMainWindow({ preloadPath: "/preload.js" });
+    const readyListener = win.once.mock.calls.find(([event]) => event === "ready-to-show")[1];
+    readyListener();
+    expect(win.show).toHaveBeenCalledTimes(1);
+  });
 });

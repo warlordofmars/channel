@@ -20,7 +20,10 @@ export function createMainWindow({ preloadPath, isQuitting = () => false, platfo
   const win = new BrowserWindow({
     ...DEFAULT_DIMENSIONS,
     ...macosFrameOpts(platform),
-    show: true,
+    // Start hidden; show only after ready-to-show fires (below) so the
+    // user never sees a white/blank frame before the renderer paints
+    // its first content. Works regardless of theme.
+    show: false,
     autoHideMenuBar: false,
     webPreferences: {
       preload: preloadPath,
@@ -28,6 +31,10 @@ export function createMainWindow({ preloadPath, isQuitting = () => false, platfo
       contextIsolation: true,
       sandbox: true,
     },
+  });
+
+  win.once("ready-to-show", () => {
+    win.show();
   });
 
   win.on("close", (event) => {
