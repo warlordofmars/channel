@@ -5,6 +5,7 @@ import AuthGate from "./components/AuthGate.jsx";
 import ErrorBoundary from "./components/ErrorBoundary.jsx";
 import { useChannelPrefs } from "./hooks/useChannelPrefs.js";
 import ChatHome from "./app/ChatHome.jsx";
+import Conversation from "./app/Conversation.jsx";
 import Login from "./app/Login.jsx";
 import Shell from "./app/Shell.jsx";
 import About from "./marketing/pages/About.jsx";
@@ -24,7 +25,6 @@ const ph = (testid, label) => (
     {label} — placeholder, implemented in a later phase.
   </div>
 );
-const AppConversation  = () => ph("app-conversation", "App: Conversation");
 const AppProjects      = () => ph("app-projects", "App: Projects");
 const AppProjectDetail = () => ph("app-project-detail", "App: Project Detail");
 const AppArtifacts     = () => ph("app-artifacts", "App: Artifacts");
@@ -50,7 +50,7 @@ export default function App() {
           {/* App — /app/login is public; everything else gates on the JWT */}
           <Route path="/app/login"          element={<Login />} />
           <Route path="/app"                element={<AuthGate><Shell><ChatHome /></Shell></AuthGate>} />
-          <Route path="/app/c/:id"          element={<AuthGate><AppConversation /></AuthGate>} />
+          <Route path="/app/c/:id"          element={<AuthGate><Shell><Conversation /></Shell></AuthGate>} />
           <Route path="/app/projects"       element={<AuthGate><AppProjects /></AuthGate>} />
           <Route path="/app/projects/:id"   element={<AuthGate><AppProjectDetail /></AuthGate>} />
           <Route path="/app/artifacts"      element={<AuthGate><AppArtifacts /></AuthGate>} />
