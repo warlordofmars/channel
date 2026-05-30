@@ -32,3 +32,24 @@ export const QUICK_ACTIONS = [
   { id: "code",    icon: "code",      label: "Code" },
   { id: "analyze", icon: "customize", label: "Analyze data" },
 ];
+
+// A canned assistant reply used by the mock-streaming engine
+// (ui/src/hooks/useMockStream.js). Lifted verbatim from
+// design-sources/app/data.jsx. The streamer splits this on whitespace
+// and appends two words every 38ms to simulate token streaming.
+export const SAMPLE_REPLY = `Good question — here's how I'd think about it.
+
+The core trade-off is between **read latency** and **write amplification**. A columnar store wins big on analytical scans because it only touches the columns you query, but you pay for that on ingest.
+
+A few concrete recommendations:
+
+1. **Batch your writes.** Buffer events for 5–10 seconds and flush in bulk. Columnar formats hate row-at-a-time inserts.
+2. **Partition by time, then by tenant.** Most of your queries are time-bounded, so this prunes the search space dramatically before any column is read.
+3. **Keep a hot row-store tail.** Serve the last few minutes from the existing row store and merge at query time — users never notice the seam.
+
+Want me to sketch the ingestion buffer as a small artifact you can drop into the pipeline?`;
+
+// The canned user prompt that pairs with SAMPLE_REPLY when `loadSample`
+// rehydrates a recent conversation.
+export const SAMPLE_USER =
+  "We are moving our events pipeline to a columnar store. What should I watch out for on the ingest side?";
