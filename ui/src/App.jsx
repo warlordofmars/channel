@@ -4,6 +4,9 @@ import { BrowserRouter, Route, Routes } from "react-router-dom";
 import AuthGate from "./components/AuthGate.jsx";
 import ErrorBoundary from "./components/ErrorBoundary.jsx";
 import { useChannelPrefs } from "./hooks/useChannelPrefs.js";
+import ChatHome from "./app/ChatHome.jsx";
+import Login from "./app/Login.jsx";
+import Shell from "./app/Shell.jsx";
 import About from "./marketing/pages/About.jsx";
 import Blog from "./marketing/pages/Blog.jsx";
 import Careers from "./marketing/pages/Careers.jsx";
@@ -21,8 +24,6 @@ const ph = (testid, label) => (
     {label} — placeholder, implemented in a later phase.
   </div>
 );
-const AppLogin         = () => ph("app-login", "App: Login");
-const AppHome          = () => ph("app-home", "App: Home");
 const AppConversation  = () => ph("app-conversation", "App: Conversation");
 const AppProjects      = () => ph("app-projects", "App: Projects");
 const AppProjectDetail = () => ph("app-project-detail", "App: Project Detail");
@@ -47,8 +48,8 @@ export default function App() {
           <Route path="/privacy"   element={<Privacy />} />
 
           {/* App — /app/login is public; everything else gates on the JWT */}
-          <Route path="/app/login"          element={<AppLogin />} />
-          <Route path="/app"                element={<AuthGate><AppHome /></AuthGate>} />
+          <Route path="/app/login"          element={<Login />} />
+          <Route path="/app"                element={<AuthGate><Shell><ChatHome /></Shell></AuthGate>} />
           <Route path="/app/c/:id"          element={<AuthGate><AppConversation /></AuthGate>} />
           <Route path="/app/projects"       element={<AuthGate><AppProjects /></AuthGate>} />
           <Route path="/app/projects/:id"   element={<AuthGate><AppProjectDetail /></AuthGate>} />

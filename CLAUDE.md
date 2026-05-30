@@ -44,7 +44,8 @@ channel/
 │   │   ├── analytics.js       # GA4 trackPageView + trackEvent helpers
 │   │   ├── styles/
 │   │   │   ├── channel.css    # Design tokens (OKLCH themes, radii, shadows, fonts)
-│   │   │   └── site.css       # Marketing site layout (nav, footer, hero, tiers)
+│   │   │   ├── site.css       # Marketing site layout (nav, footer, hero, tiers)
+│   │   │   └── app.css        # Chat-app layout (sidebar, composer, popovers, greet)
 │   │   ├── lib/
 │   │   │   ├── auth.js        # parseToken, isTokenValid, TOKEN_KEY
 │   │   │   └── utils.js       # cn (class-name join via clsx)
@@ -56,9 +57,15 @@ channel/
 │   │   │   ├── ChannelMark.jsx    # Brand mark SVG (rounded square + two bars)
 │   │   │   ├── ErrorBoundary.jsx  # Token-styled error fallback
 │   │   │   └── Icon.jsx           # 24×24 stroke icon set
-│   │   └── marketing/             # Marketing site routes (Phase 6b)
-│   │       ├── Nav.jsx, Footer.jsx, SiteLayout.jsx, ThemeToggle.jsx, ImageSlot.jsx
-│   │       └── pages/             # Home, Product, Models, Pricing, Download, About, Blog, Careers, Privacy, NotFound
+│   │   ├── marketing/             # Marketing site routes (Phase 6b)
+│   │   │   ├── Nav.jsx, Footer.jsx, SiteLayout.jsx, ThemeToggle.jsx, ImageSlot.jsx
+│   │   │   └── pages/             # Home, Product, Models, Pricing, Download, About, Blog, Careers, Privacy, NotFound
+│   │   └── app/                   # Chat app routes (Phase 6c onward)
+│   │       ├── data.js                                       # MODELS, EFFORTS, RECENTS, QUICK_ACTIONS
+│   │       ├── Login.jsx, GoogleG.jsx                        # Centered Google sign-in
+│   │       ├── Shell.jsx, Sidebar.jsx, AccountPopover.jsx    # Layout chrome
+│   │       ├── Composer.jsx, ModelPicker.jsx, AttachMenu.jsx # Composer + its popovers
+│   │       └── ChatHome.jsx                                  # Empty-state greeting
 │   └── package.json
 ├── docs-site/                 # VitePress documentation site
 │   ├── .vitepress/
@@ -248,6 +255,14 @@ re-derive these during design review — cite them.
   promise resolution is unaffected. Always pair with `vi.useRealTimers()`
   in a matching cleanup. See `.claude/skills/react-component/SKILL.md`
   §5.2 for the full pattern.
+- **Chat-app popovers** — ModelPicker, AttachMenu, AccountPopover all follow
+  the same `<div className="backdrop" />` + `<div className="pop" />` pattern.
+  The backdrop captures outside-clicks to close the popover; the caller
+  controls `open` state.
+- **User identity from JWT** — chat-app components that need the user's
+  email or display name read the mgmt JWT from `localStorage[TOKEN_KEY]`
+  via `parseToken` from `lib/auth.js`. Display name = email's local-part
+  unless we later add a `name` claim.
 
 ## Copyright headers
 
