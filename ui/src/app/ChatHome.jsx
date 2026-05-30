@@ -1,5 +1,6 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
 import React from "react";
+import { useNavigate } from "react-router-dom";
 import { parseToken, TOKEN_KEY } from "../lib/auth.js";
 import ChannelMark from "../components/ChannelMark.jsx";
 import Icon from "../components/Icon.jsx";
@@ -10,8 +11,9 @@ import { MODELS, QUICK_ACTIONS } from "./data.js";
 /**
  * Empty-state shown at /app when there's no active conversation.
  * Greeting + Composer + quick-action chips. Translated from
- * design-sources/app/chat.jsx `Home` function. The composer's onSend is
- * wired to a Phase-6c no-op; mock streaming arrives in 6d.
+ * design-sources/app/chat.jsx `Home` function. Sending stashes the
+ * draft in sessionStorage and navigates to /app/c/new, where
+ * Conversation consumes it and kicks off the mock streamer.
  */
 export default function ChatHome() {
   const prefs = useChannelPrefs();
@@ -28,9 +30,26 @@ export default function ChatHome() {
   const modelObj = MODELS.find((m) => m.id === prefs.model) ?? MODELS[0];
   const setModelObj = (m) => prefs.setModel(m.id);
 
-  // Phase 6c no-op send. Phase 6d swaps this for the mock streamer hook.
-  function noOpSend(/* text, atts */) {
-    /* no-op until Phase 6d */
+  const navigate = useNavigate();
+
+  // Hand the draft off to Conversation via sessionStorage and route to
+  // /app/c/new. Conversation reads the payload on mount, calls
+  // useMockStream.send(...), and clears the key.
+  function send(text, atts) {
+    try {
+      sessionStorage.setItem(
+        "channel-pending-send",
+        JSON.stringify({
+          text,
+          atts,
+          modelId: modelObj.id,
+          effort: prefs.effort,
+        })
+      );
+    } catch {
+      /* private mode etc — Conversation just renders empty */
+    }
+    navigate("/app/c/new");
   }
 
   return (
@@ -44,7 +63,7 @@ export default function ChatHome() {
         effort={prefs.effort}
         setModel={setModelObj}
         setEffort={prefs.setEffort}
-        onSend={noOpSend}
+        onSend={send}
         autofocus
       />
       <div className="quick">
@@ -53,7 +72,7 @@ export default function ChatHome() {
             type="button"
             className="qa"
             key={q.id}
-            onClick={() => noOpSend(`Help me ${q.label.toLowerCase()} something.`, [])}
+            onClick={() => send(`Help me ${q.label.toLowerCase()} something.`, [])}
           >
             <span className="ic"><Icon name={q.icon} size={17} /></span>
             {q.label}
