@@ -51,17 +51,17 @@ def _validate_desktop_callback(callback: str) -> str | None:
     """Return the callback if it's a safe loopback /callback URL, else None."""
     try:
         u = urlparse(callback)
+        if u.scheme != "http":
+            return None
+        if u.hostname not in _LOOPBACK_HOSTS:
+            return None
+        if not u.port:
+            return None
+        if u.path != "/callback":
+            return None
+        if u.query or u.fragment:
+            return None
     except Exception:
-        return None
-    if u.scheme != "http":
-        return None
-    if u.hostname not in _LOOPBACK_HOSTS:
-        return None
-    if not u.port:
-        return None
-    if u.path != "/callback":
-        return None
-    if u.query or u.fragment:
         return None
     return callback
 

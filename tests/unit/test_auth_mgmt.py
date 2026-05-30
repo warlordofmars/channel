@@ -348,6 +348,7 @@ VALID_STATE = "A" * 43  # 43 base64url chars
         "http://[::1]:54321/callback",  # IPv6 loopback rejected
         "http://127.0.0.1:54321/callback?foo=bar",  # query injection
         "http://127.0.0.1:54321/callback#frag",  # fragment injection
+        "http://127.0.0.1:99999/callback",  # port out of range
     ],
 )
 def test_desktop_callback_rejects_bad_urls(bad_callback, monkeypatch):
@@ -383,14 +384,3 @@ def test_desktop_callback_happy_path(monkeypatch, _fake_state_store):
     assert "accounts.google.com" in resp.headers["location"]
     assert f"state={VALID_STATE}" in resp.headers["location"]
 
-
-def test_validate_desktop_callback_returns_none_on_urlparse_exception(monkeypatch):
-    """The except-branch in _validate_desktop_callback must be reachable."""
-    import channel.auth.mgmt_auth as _mod
-
-    def _raise(_url: str) -> None:
-        raise ValueError("bad url")
-
-    monkeypatch.setattr(_mod, "urlparse", _raise)
-    result = _validate_desktop_callback("http://127.0.0.1:1234/callback")
-    assert result is None
