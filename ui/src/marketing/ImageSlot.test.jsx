@@ -35,4 +35,25 @@ describe("ImageSlot", () => {
     const slot = container.querySelector("[data-image-slot]");
     expect(slot.textContent).toContain("team-photo");
   });
+
+  it("renders an <img> when src is provided, with alt + data-image-slot", () => {
+    const { container } = render(
+      <ImageSlot name="hero" src="/screens/x.png" alt="hero alt" aspect="4 / 3" className="hero-shot" />
+    );
+    const img = container.querySelector("img[data-image-slot]");
+    expect(img).toBeTruthy();
+    expect(img.getAttribute("src")).toBe("/screens/x.png");
+    expect(img.getAttribute("alt")).toBe("hero alt");
+    expect(img.getAttribute("data-image-slot")).toBe("hero");
+    expect(img.style.aspectRatio).toBe("4 / 3");
+    expect(img.className).toContain("hero-shot");
+    // The placeholder block is NOT also rendered.
+    expect(container.querySelector("div[data-image-slot]")).toBeNull();
+  });
+
+  it("defaults alt to empty string when src is provided without alt", () => {
+    const { container } = render(<ImageSlot name="x" src="/y.png" />);
+    const img = container.querySelector("img[data-image-slot]");
+    expect(img.getAttribute("alt")).toBe("");
+  });
 });

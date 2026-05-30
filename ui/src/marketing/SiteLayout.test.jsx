@@ -25,7 +25,7 @@ describe("SiteLayout", () => {
     vi.stubGlobal("matchMedia", () => ({
       matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn(),
     }));
-    document.documentElement.removeAttribute("data-site-theme");
+    document.documentElement.removeAttribute("data-theme");
   });
   afterEach(() => vi.unstubAllGlobals());
 
@@ -41,14 +41,37 @@ describe("SiteLayout", () => {
     expect(brand.length).toBeGreaterThanOrEqual(2);
   });
 
-  it("applies data-site-theme to <html> from useChannelPrefs", async () => {
+  it("applies data-theme to <html> from siteTheme", async () => {
     storage["channel-site-theme"] = "dark";
     await act(async () => renderLayout(<div />));
-    expect(document.documentElement.getAttribute("data-site-theme")).toBe("dark");
+    expect(document.documentElement.getAttribute("data-theme")).toBe("dark");
   });
 
-  it("defaults data-site-theme to 'light' when storage is empty", async () => {
+  it("defaults data-theme to 'light' when site storage is empty", async () => {
     await act(async () => renderLayout(<div />));
-    expect(document.documentElement.getAttribute("data-site-theme")).toBe("light");
+    expect(document.documentElement.getAttribute("data-theme")).toBe("light");
+  });
+
+  it("restores the app theme on unmount", async () => {
+    storage["channel-theme"] = "dark";
+    storage["channel-site-theme"] = "light";
+    const { unmount } = await act(async () => renderLayout(<div />));
+    expect(document.documentElement.getAttribute("data-theme")).toBe("light");
+    await act(async () => unmount());
+    expect(document.documentElement.getAttribute("data-theme")).toBe("dark");
+  });
+
+  it("falls back to default app theme on unmount when storage throws", async () => {
+    storage["channel-site-theme"] = "light";
+    const { unmount } = await act(async () => renderLayout(<div />));
+    // After mount, swap localStorage for one that throws on read so the
+    // unmount-time `getItem` hits the catch branch.
+    vi.stubGlobal("localStorage", {
+      getItem: () => { throw new Error("denied"); },
+      setItem: () => {},
+      removeItem: () => {},
+    });
+    await act(async () => unmount());
+    expect(document.documentElement.getAttribute("data-theme")).toBe("dark");
   });
 });

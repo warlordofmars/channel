@@ -92,7 +92,12 @@ export default function Product() {
       {/* PRODUCT SPOTLIGHT */}
       <section className="section wrap" style={{ paddingTop: "0" }}>
         <div className="spotlight">
-          <ImageSlot name="product-spotlight" className="spotlight-slot" />
+          <ImageSlot
+            name="product-spotlight"
+            className="spotlight-slot"
+            src="/screens/app-03-conversation.png"
+            alt="The Channel chat app — an active conversation showing streaming responses"
+          />
         </div>
       </section>
 
