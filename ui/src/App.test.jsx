@@ -30,25 +30,29 @@ describe("App routing", () => {
   afterEach(() => { vi.unstubAllGlobals(); window.history.pushState({}, "", "/"); });
 
   it.each([
-    ["/", "marketing-home"],
-    ["/product", "marketing-product"],
-    ["/models", "marketing-models"],
-    ["/pricing", "marketing-pricing"],
-    ["/download", "marketing-download"],
-    ["/about", "marketing-about"],
-    ["/blog", "marketing-blog"],
-    ["/careers", "marketing-careers"],
-    ["/privacy", "marketing-privacy"],
-  ])("renders marketing route %s with placeholder", async (path, testId) => {
+    ["/",         /workspace for thinking with AI/i],
+    ["/product",  null], // Any h1 is OK
+    ["/models",   /models|claude/i],
+    ["/pricing",  /pricing|simple, honest/i],
+    ["/download", /download|get channel/i],
+    ["/about",    null],
+    ["/blog",     null],
+    ["/careers",  null],
+    ["/privacy",  /privacy/i],
+  ])("renders marketing route %s with a real page (h1 present%s)", async (path, headingRegex) => {
     window.history.pushState({}, "", path);
     await act(async () => render(<App />));
-    expect(screen.getByTestId(testId)).toBeTruthy();
+    const h1 = screen.getByRole("heading", { level: 1 });
+    expect(h1).toBeTruthy();
+    if (headingRegex) {
+      expect(h1.textContent).toMatch(headingRegex);
+    }
   });
 
-  it("renders 404 placeholder for unknown routes", async () => {
+  it("renders the branded NotFound page for unknown routes", async () => {
     window.history.pushState({}, "", "/this-route-does-not-exist");
     await act(async () => render(<App />));
-    expect(screen.getByTestId("marketing-notfound")).toBeTruthy();
+    expect(screen.getByText(/wandered off/i)).toBeTruthy();
   });
 
   it("renders the app-login placeholder at /app/login (no auth required)", async () => {
