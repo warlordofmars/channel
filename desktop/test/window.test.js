@@ -28,15 +28,15 @@ describe("createMainWindow", () => {
     );
   });
 
-  it("loads app://-/ in production (no VITE_DEV_SERVER_URL)", async () => {
+  it("loads app://-/app in production (no VITE_DEV_SERVER_URL)", async () => {
     const win = createMainWindow({ preloadPath: "/preload.js" });
-    expect(win.loadURL).toHaveBeenCalledWith("app://-/");
+    expect(win.loadURL).toHaveBeenCalledWith("app://-/app");
   });
 
-  it("loads VITE_DEV_SERVER_URL when set", async () => {
+  it("loads <VITE_DEV_SERVER_URL>/app when set", async () => {
     process.env.VITE_DEV_SERVER_URL = "http://localhost:5173";
     const win = createMainWindow({ preloadPath: "/preload.js" });
-    expect(win.loadURL).toHaveBeenCalledWith("http://localhost:5173");
+    expect(win.loadURL).toHaveBeenCalledWith("http://localhost:5173/app");
   });
 
   it("intercepts close to hide the window instead of destroying it", async () => {
