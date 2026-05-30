@@ -43,18 +43,22 @@ channel/
 │   │   ├── api.js             # API client (fetch wrappers)
 │   │   ├── analytics.js       # GA4 trackPageView + trackEvent helpers
 │   │   ├── styles/
-│   │   │   └── channel.css    # Design tokens (OKLCH themes, radii, shadows, fonts)
+│   │   │   ├── channel.css    # Design tokens (OKLCH themes, radii, shadows, fonts)
+│   │   │   └── site.css       # Marketing site layout (nav, footer, hero, tiers)
 │   │   ├── lib/
 │   │   │   ├── auth.js        # parseToken, isTokenValid, TOKEN_KEY
 │   │   │   └── utils.js       # cn (class-name join via clsx)
 │   │   ├── hooks/
 │   │   │   ├── useChannelPrefs.js  # theme/accent/density/shape/font/model/effort + siteTheme
 │   │   │   └── useRelativeTime.js
-│   │   └── components/
-│   │       ├── AuthGate.jsx       # Redirects /app/* visits to /app/login when no JWT
-│   │       ├── ChannelMark.jsx    # Brand mark SVG (rounded square + two bars)
-│   │       ├── ErrorBoundary.jsx  # Token-styled error fallback
-│   │       └── Icon.jsx           # 24×24 stroke icon set
+│   │   ├── components/
+│   │   │   ├── AuthGate.jsx       # Redirects /app/* visits to /app/login when no JWT
+│   │   │   ├── ChannelMark.jsx    # Brand mark SVG (rounded square + two bars)
+│   │   │   ├── ErrorBoundary.jsx  # Token-styled error fallback
+│   │   │   └── Icon.jsx           # 24×24 stroke icon set
+│   │   └── marketing/             # Marketing site routes (Phase 6b)
+│   │       ├── Nav.jsx, Footer.jsx, SiteLayout.jsx, ThemeToggle.jsx, ImageSlot.jsx
+│   │       └── pages/             # Home, Product, Models, Pricing, Download, About, Blog, Careers, Privacy, NotFound
 │   └── package.json
 ├── docs-site/                 # VitePress documentation site
 │   ├── .vitepress/
@@ -220,6 +224,13 @@ re-derive these during design review — cite them.
   `var(--raised)`, `var(--accent)`, `var(--border)`, etc. Never hardcode colours.
 - **Icons** — `Icon.jsx` provides the project's 24×24 stroke icon set; never use
   emojis as UI elements
+- **Marketing image placeholders** — every marketing image is a `<ImageSlot
+  name="<descriptive>" />` rendering a placeholder block tagged
+  `data-image-slot="<name>"`. A future content pass swaps in real `<img>`
+  elements by querying that attribute.
+- **Marketing internal links** — `<Link>` from React Router (never plain
+  `<a>` for in-app navigation). In-page anchors (`#features`, `#models`)
+  stay as `<a>`.
 - **jsdom colour normalisation** — in vitest, jsdom converts hex to
   `rgb(r, g, b)`; assert `"rgb(232, 160, 32)"` not `"#e8a020"`
 - **Anonymous inline functions** — vitest v8 counts uncovered anonymous
