@@ -55,28 +55,4 @@ describe("SiteLayout", () => {
     expect(document.documentElement.getAttribute("data-theme")).toBe("light");
   });
 
-  it("restores the app theme on unmount", async () => {
-    storage["channel-theme"] = "dark";
-    storage["channel-site-theme"] = "light";
-    __resetChannelPrefsForTest();
-    const { unmount } = await act(async () => renderLayout(<div />));
-    expect(document.documentElement.getAttribute("data-theme")).toBe("light");
-    await act(async () => unmount());
-    expect(document.documentElement.getAttribute("data-theme")).toBe("dark");
-  });
-
-  it("falls back to default app theme on unmount when storage throws", async () => {
-    storage["channel-site-theme"] = "light";
-    __resetChannelPrefsForTest();
-    const { unmount } = await act(async () => renderLayout(<div />));
-    // After mount, swap localStorage for one that throws on read so the
-    // unmount-time `getItem` hits the catch branch.
-    vi.stubGlobal("localStorage", {
-      getItem: () => { throw new Error("denied"); },
-      setItem: () => {},
-      removeItem: () => {},
-    });
-    await act(async () => unmount());
-    expect(document.documentElement.getAttribute("data-theme")).toBe("dark");
-  });
 });

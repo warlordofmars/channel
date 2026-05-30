@@ -1,6 +1,7 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
-import React from "react";
+import React, { useEffect } from "react";
 import Sidebar from "./Sidebar.jsx";
+import { useChannelPrefs } from "../hooks/useChannelPrefs.js";
 
 /**
  * Wraps every authenticated chat-app route with the persistent Sidebar.
@@ -14,8 +15,16 @@ import Sidebar from "./Sidebar.jsx";
  * `.win` is the flex row holding the 264px sidebar + the `flex: 1` main
  * pane. `.main` already arranges its children (Home/Conversation/Projects/
  * etc.) as a flex column that centers the empty-state per `.home`.
+ *
+ * Owns `data-theme = theme` while mounted (the chat-app theme). SiteLayout
+ * does the same for `siteTheme`, so navigating between marketing and the
+ * app swaps which preference drives `data-theme`.
  */
 export default function Shell({ children }) {
+  const { theme } = useChannelPrefs();
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", theme);
+  }, [theme]);
   return (
     <div className="stage full">
       <div className="win">

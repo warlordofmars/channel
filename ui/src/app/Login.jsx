@@ -1,7 +1,8 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
-import React from "react";
+import React, { useEffect } from "react";
 import ChannelMark from "../components/ChannelMark.jsx";
 import GoogleG from "./GoogleG.jsx";
+import { useChannelPrefs } from "../hooks/useChannelPrefs.js";
 
 /**
  * Centered Google sign-in card. The prototype simulates auth with a 1.2s
@@ -13,8 +14,16 @@ import GoogleG from "./GoogleG.jsx";
  * Wrapped in `.stage.full > .win` so `.auth`'s `flex: 1` resolves against a
  * full-viewport flex column and the card actually centers vertically — the
  * prototype rendered Login inside `.win`, so we mirror that here.
+ *
+ * Owns `data-theme = theme` (the chat-app theme) while mounted, matching
+ * Shell's behaviour — so /app/login renders in the app theme regardless of
+ * what marketing left behind.
  */
 export default function Login() {
+  const { theme } = useChannelPrefs();
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", theme);
+  }, [theme]);
   return (
     <div className="stage full">
       <div className="win">
