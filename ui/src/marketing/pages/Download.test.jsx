@@ -35,4 +35,24 @@ describe("Download page", () => {
     renderPage();
     expect(document.querySelectorAll('a[href*="Channel "]').length).toBe(0);
   });
+
+  it("renders the dev-preview banner explaining unsigned builds", () => {
+    renderPage();
+    const banner = screen.getByTestId("dev-preview-banner");
+    expect(banner).toBeTruthy();
+    expect(banner.textContent || "").toMatch(/dev preview/i);
+    expect(banner.textContent || "").toMatch(/unsigned/i);
+  });
+
+  it("points each platform download at the dev GitHub release", () => {
+    renderPage();
+    const base = "https://github.com/warlordofmars/channel/releases/download/dev";
+    const hrefs = Array.from(document.querySelectorAll("a")).map((a) => a.getAttribute("href"));
+    expect(hrefs).toContain(`${base}/Channel-mac-arm64.dmg`);
+    expect(hrefs).toContain(`${base}/Channel-mac-x64.dmg`);
+    expect(hrefs).toContain(`${base}/Channel-Setup-win.exe`);
+    expect(hrefs).toContain(`${base}/Channel-linux.AppImage`);
+    expect(hrefs).toContain(`${base}/Channel-linux.deb`);
+    expect(hrefs).toContain(`${base}/Channel-linux.rpm`);
+  });
 });

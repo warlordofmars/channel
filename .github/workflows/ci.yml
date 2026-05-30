@@ -533,6 +533,50 @@ jobs:
           path: desktop/release/
           retention-days: 30
 
+  publish-dev-artifacts:
+    name: Publish dev download artifacts
+    needs: [desktop]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/development'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v4
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: ci-artifacts
+
+      - name: Collect + rename platform artifacts to canonical names
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          # macOS DMGs — order matters: move arm64 first, then x64 is the
+          # only remaining .dmg matching the glob.
+          mv "ci-artifacts/channel-desktop-macos-14/Channel-"*"-arm64.dmg" dist/Channel-mac-arm64.dmg
+          mv "ci-artifacts/channel-desktop-macos-14/Channel-"*".dmg"       dist/Channel-mac-x64.dmg
+          # Windows NSIS installer (drops the version + spaces).
+          mv "ci-artifacts/channel-desktop-windows-latest/Channel Setup "*".exe" dist/Channel-Setup-win.exe
+          # Linux: AppImage / deb / rpm.
+          mv "ci-artifacts/channel-desktop-ubuntu-latest/Channel-"*".AppImage" dist/Channel-linux.AppImage
+          mv "ci-artifacts/channel-desktop-ubuntu-latest/"*"_amd64.deb"        dist/Channel-linux.deb
+          mv "ci-artifacts/channel-desktop-ubuntu-latest/"*".x86_64.rpm"       dist/Channel-linux.rpm
+          ls -la dist/
+
+      - name: Force-update `dev` pre-release with new artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Remove the existing dev release + tag so we can recreate them
+          # against the current commit. --cleanup-tag drops the git tag too.
+          gh release delete dev --yes --cleanup-tag 2>/dev/null || true
+          gh release create dev dist/* \
+            --prerelease \
+            --target development \
+            --title "Channel dev preview (auto-updated)" \
+            --notes "Unsigned development builds, force-updated on every push to \`development\`. Expect OS-level warnings (macOS Gatekeeper / Windows SmartScreen). Linux AppImage needs \`chmod +x\` after download. **No auto-update.** Re-download for the latest dev build."
+
   infra-synth:
     name: Infra Synth
     runs-on: ubuntu-latest
