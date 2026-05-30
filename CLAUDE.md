@@ -69,11 +69,12 @@ channel/
 │   │       ├── ChatHome.jsx                                  # Empty-state greeting
 │   │       ├── Conversation.jsx                              # Streamed-turns view + inline artifact card
 │   │       ├── renderMarkdown.jsx                            # Tiny markdown helper (paragraphs/bold/OL/cursor)
-│   │       └── views/                                        # /app/projects, /app/projects/:id, /app/artifacts
+│   │       └── views/                                        # /app/projects, /app/projects/:id, /app/artifacts, /app/customize
 │   │           ├── Projects.jsx                              # Grid of project cards + 'New project' tile
 │   │           ├── ProjectDetail.jsx                         # Project header + Composer + docs + chats list
 │   │           ├── Artifacts.jsx                             # List of artifact rows + bookmarkable panel
 │   │           ├── ArtifactPanel.jsx                         # Slide-in viewer with 5 renderers (Code/Chart/Data/Interactive/Document)
+│   │           ├── Customize.jsx                             # 5 visual prefs (theme/accent/density/model/effort) + 3 behavior toggles
 │   │           └── artifactHelpers.js                        # colorFor / inkFor / artIcon utilities
 │   └── package.json
 ├── desktop/
