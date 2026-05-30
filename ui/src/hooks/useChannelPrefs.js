@@ -55,9 +55,9 @@ export function useChannelPrefs() {
   const [effort, _setEffort] = useState(() => readPref(STORAGE_KEYS.effort, DEFAULTS.effort));
 
   useEffect(() => { applyAttr("theme", theme);     writePref(STORAGE_KEYS.theme, theme); }, [theme]);
-  // siteTheme is persisted but not applied to <html> by this hook — the
-  // marketing pages own their theme attribute (data-site-theme) so app and
-  // site themes can be set independently on different DOM subtrees.
+  // siteTheme is persisted here but applied to <html> by SiteLayout, which
+  // overrides data-theme on mount and restores the app theme on unmount.
+  // The two preferences share data-theme but are stored under different keys.
   useEffect(() => { writePref(STORAGE_KEYS.siteTheme, siteTheme); }, [siteTheme]);
   useEffect(() => { applyAttr("accent", accent);   writePref(STORAGE_KEYS.accent, accent); }, [accent]);
   useEffect(() => { applyAttr("density", density); writePref(STORAGE_KEYS.density, density); }, [density]);

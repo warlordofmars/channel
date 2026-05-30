@@ -30,8 +30,18 @@ export default function Home() {
 
       {/* PRODUCT SCREEN CAPTURE (follows page theme) */}
       <section className="wrap mock-stage">
-        <ImageSlot name="hero-screen-light" className="hero-shot light" />
-        <ImageSlot name="hero-screen-dark" className="hero-shot dark" />
+        <ImageSlot
+          name="hero-screen-light"
+          className="hero-shot light"
+          src="/screens/app-02-home.png"
+          alt="The Channel chat app — empty-state home with greeting, composer, and quick actions"
+        />
+        <ImageSlot
+          name="hero-screen-dark"
+          className="hero-shot dark"
+          src="/screens/app-02-home.png"
+          alt="The Channel chat app — empty-state home with greeting, composer, and quick actions"
+        />
       </section>
 
       {/* FEATURES */}
