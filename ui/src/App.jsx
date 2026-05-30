@@ -4,9 +4,12 @@ import { BrowserRouter, Route, Routes } from "react-router-dom";
 import AuthGate from "./components/AuthGate.jsx";
 import ErrorBoundary from "./components/ErrorBoundary.jsx";
 import { useChannelPrefs } from "./hooks/useChannelPrefs.js";
+import Artifacts from "./app/views/Artifacts.jsx";
 import ChatHome from "./app/ChatHome.jsx";
 import Conversation from "./app/Conversation.jsx";
 import Login from "./app/Login.jsx";
+import ProjectDetail from "./app/views/ProjectDetail.jsx";
+import Projects from "./app/views/Projects.jsx";
 import Shell from "./app/Shell.jsx";
 import About from "./marketing/pages/About.jsx";
 import Blog from "./marketing/pages/Blog.jsx";
@@ -25,9 +28,6 @@ const ph = (testid, label) => (
     {label} — placeholder, implemented in a later phase.
   </div>
 );
-const AppProjects      = () => ph("app-projects", "App: Projects");
-const AppProjectDetail = () => ph("app-project-detail", "App: Project Detail");
-const AppArtifacts     = () => ph("app-artifacts", "App: Artifacts");
 const AppCustomize     = () => ph("app-customize", "App: Customize");
 
 export default function App() {
@@ -51,9 +51,9 @@ export default function App() {
           <Route path="/app/login"          element={<Login />} />
           <Route path="/app"                element={<AuthGate><Shell><ChatHome /></Shell></AuthGate>} />
           <Route path="/app/c/:id"          element={<AuthGate><Shell><Conversation /></Shell></AuthGate>} />
-          <Route path="/app/projects"       element={<AuthGate><AppProjects /></AuthGate>} />
-          <Route path="/app/projects/:id"   element={<AuthGate><AppProjectDetail /></AuthGate>} />
-          <Route path="/app/artifacts"      element={<AuthGate><AppArtifacts /></AuthGate>} />
+          <Route path="/app/projects"       element={<AuthGate><Shell><Projects /></Shell></AuthGate>} />
+          <Route path="/app/projects/:id"   element={<AuthGate><Shell><ProjectDetail /></Shell></AuthGate>} />
+          <Route path="/app/artifacts"      element={<AuthGate><Shell><Artifacts /></Shell></AuthGate>} />
           <Route path="/app/customize"      element={<AuthGate><AppCustomize /></AuthGate>} />
 
           {/* Anything else → branded 404 */}

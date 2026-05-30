@@ -77,9 +77,6 @@ describe("App routing", () => {
   });
 
   it.each([
-    ["/app/projects", "app-projects"],
-    ["/app/projects/p1", "app-project-detail"],
-    ["/app/artifacts", "app-artifacts"],
     ["/app/customize", "app-customize"],
   ])("renders the %s placeholder when authed", async (path, testId) => {
     storage[TOKEN_KEY] = makeToken();
@@ -98,6 +95,31 @@ describe("App routing", () => {
     expect(matches.length).toBeGreaterThan(0);
     // And the placeholder testid is no longer in the tree.
     expect(screen.queryByTestId("app-conversation")).toBeNull();
+  });
+
+  it("/app/projects renders the Projects view (not the placeholder)", async () => {
+    storage[TOKEN_KEY] = makeToken();
+    window.history.pushState({}, "", "/app/projects");
+    await act(async () => render(<App />));
+    expect(screen.getByRole("heading", { level: 2, name: "Projects" })).toBeTruthy();
+    expect(screen.queryByTestId("app-projects")).toBeNull();
+  });
+
+  it("/app/projects/p1 renders the ProjectDetail view (not the placeholder)", async () => {
+    storage[TOKEN_KEY] = makeToken();
+    window.history.pushState({}, "", "/app/projects/p1");
+    await act(async () => render(<App />));
+    // p1 = "Analytics Rewrite" per PROJECTS[0].
+    expect(screen.getByRole("heading", { level: 2, name: "Analytics Rewrite" })).toBeTruthy();
+    expect(screen.queryByTestId("app-project-detail")).toBeNull();
+  });
+
+  it("/app/artifacts renders the Artifacts view (not the placeholder)", async () => {
+    storage[TOKEN_KEY] = makeToken();
+    window.history.pushState({}, "", "/app/artifacts");
+    await act(async () => render(<App />));
+    expect(screen.getByRole("heading", { level: 2, name: "Artifacts" })).toBeTruthy();
+    expect(screen.queryByTestId("app-artifacts")).toBeNull();
   });
 
   it("applies the saved theme to <html> on mount", async () => {
