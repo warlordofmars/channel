@@ -14,7 +14,8 @@
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "test:watch": "vitest",
-    "lint": "eslint main preload test --ext .js"
+    "lint": "eslint main preload test --ext .js",
+    "smoke": "node test/smoke.js"
   },
   "devDependencies": {
     "@vitest/coverage-v8": "^4.1.7",
