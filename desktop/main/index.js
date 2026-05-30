@@ -8,7 +8,7 @@ import { login } from "./auth.js";
 
 // esbuild CJS bundle: __dirname is the bundle's directory at runtime.
 const RENDERER_ROOT = resolve(__dirname, "../dist-renderer");
-const PRELOAD = resolve(__dirname, "./preload.js");
+const PRELOAD = resolve(__dirname, "../preload/index.js");
 const IS_SMOKE = process.argv.includes("--smoke");
 const AUTH_BASE = process.env.CHANNEL_API_BASE ?? "https://channel.warlordofmars.net";
 

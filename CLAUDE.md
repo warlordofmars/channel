@@ -203,9 +203,11 @@ app uses external-browser + loopback instead:
    renderer via IPC, closes the loopback server, and serves the browser
    a "you can close this window" HTML page.
 
-`STARTER_BYPASS_GOOGLE_AUTH=1` works identically in dev — the bypass path
-returns the JWT via the same loopback redirect when `desktop_callback` is
-present, so `inv desktop-dev` users get a one-click login.
+In `inv desktop-dev`, the dev FastAPI runs with `STARTER_BYPASS_GOOGLE_AUTH=1`,
+but the desktop renderer does not send the `?test_email=` shortcut, so the
+dev flow currently still goes through Google. A follow-up will wire a
+desktop-specific bypass path that mints a synthetic JWT and short-circuits
+the loopback for faster dev iteration.
 
 ### Why these decisions
 

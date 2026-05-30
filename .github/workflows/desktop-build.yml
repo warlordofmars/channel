@@ -41,14 +41,14 @@ jobs:
         shell: bash
         run: |
           cd ui
-          npm install
+          npm ci
           VITE_API_BASE=https://channel.warlordofmars.net npm run build
 
       - name: Install desktop deps
         shell: bash
         run: |
           cd desktop
-          npm install
+          npm ci
 
       - name: Desktop unit tests + 100% coverage gate
         shell: bash
