@@ -472,3 +472,47 @@ def test_callback_rejects_tampered_desktop_callback(monkeypatch):
         "/auth/callback", params={"code": "c", "state": state}, follow_redirects=False
     )
     assert resp.status_code == 400
+
+
+# ─── Desktop bypass branch ──────────────────────────────────────────────────
+
+
+def test_mgmt_login_desktop_bypass_mints_jwt_and_redirects_to_loopback(monkeypatch):
+    """When _BYPASS=1 and desktop_callback+state are present, /auth/login skips
+    Google entirely and redirects to the loopback URL with ?token=<jwt>&state=<S>.
+    """
+    monkeypatch.setenv("ALLOWED_EMAILS", "[]")
+    state = "F" * 43
+    desktop_callback = "http://127.0.0.1:60123/callback"
+    with patch("channel.auth.mgmt_auth._BYPASS", True):
+        resp = _client.get(
+            "/auth/login",
+            params={"desktop_callback": desktop_callback, "state": state},
+        )
+    assert resp.status_code == 302
+    location = resp.headers["location"]
+    assert location.startswith(f"{desktop_callback}?")
+    assert f"state={state}" in location
+    assert "token=" in location
+
+
+def test_mgmt_login_desktop_bypass_honours_STARTER_DESKTOP_DEV_EMAIL(monkeypatch):
+    """STARTER_DESKTOP_DEV_EMAIL overrides the default dev@channel.local."""
+    monkeypatch.setenv("ALLOWED_EMAILS", "[]")
+    monkeypatch.setenv("STARTER_DESKTOP_DEV_EMAIL", "custom@example.test")
+    state = "G" * 43
+    desktop_callback = "http://127.0.0.1:60124/callback"
+    captured: dict[str, Any] = {}
+
+    def fake_issue(user):
+        captured["email"] = user["email"]
+        return "tok"
+
+    monkeypatch.setattr("channel.auth.mgmt_auth.issue_mgmt_jwt", fake_issue)
+    with patch("channel.auth.mgmt_auth._BYPASS", True):
+        resp = _client.get(
+            "/auth/login",
+            params={"desktop_callback": desktop_callback, "state": state},
+        )
+    assert resp.status_code == 302
+    assert captured["email"] == "custom@example.test"
