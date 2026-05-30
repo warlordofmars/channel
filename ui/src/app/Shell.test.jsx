@@ -47,4 +47,25 @@ describe("Shell", () => {
     );
     expect(screen.getByRole("button", { name: /new chat/i })).toBeTruthy();
   });
+
+  it("uses the design's .stage.full > .win > Sidebar + .main layout shape", () => {
+    // app.css styles the chat-app via `.stage` (fixed full-viewport),
+    // `.win` (flex row), and `.main` (flex: 1). Using any other class names
+    // produces a broken layout where the main pane stacks below the sidebar
+    // instead of beside it.
+    const { container } = render(
+      <MemoryRouter>
+        <Shell>
+          <div data-testid="child" />
+        </Shell>
+      </MemoryRouter>
+    );
+    const stage = container.querySelector(".stage.full");
+    expect(stage).toBeTruthy();
+    const win = stage.querySelector(".win");
+    expect(win).toBeTruthy();
+    const main = win.querySelector("main.main");
+    expect(main).toBeTruthy();
+    expect(main.querySelector("[data-testid='child']")).toBeTruthy();
+  });
 });
