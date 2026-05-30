@@ -3,7 +3,6 @@ import { useCallback, useEffect, useSyncExternalStore } from "react";
 
 export const STORAGE_KEYS = Object.freeze({
   theme:     "channel-theme",
-  siteTheme: "channel-site-theme",
   accent:    "channel-accent",
   density:   "channel-density",
   shape:     "channel-shape",
@@ -14,7 +13,6 @@ export const STORAGE_KEYS = Object.freeze({
 
 export const DEFAULTS = Object.freeze({
   theme:     "dark",
-  siteTheme: "light",
   accent:    "42",
   density:   "cozy",
   shape:     "soft",
@@ -89,13 +87,12 @@ export function __resetChannelPrefsForTest() {
 
 export function useChannelPrefs() {
   const current = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
-  const { theme, siteTheme, accent, density, shape, font, model, effort } = current;
+  const { theme, accent, density, shape, font, model, effort } = current;
 
-  // NOTE: `theme` and `siteTheme` are intentionally NOT applied to
-  // `data-theme` here. Each route wrapper applies the appropriate one
-  // (SiteLayout → siteTheme; Shell + Login → theme). Applying it from the
-  // hook itself races against the route wrappers' effects because every
-  // useChannelPrefs() consumer would re-apply on mount, last-write-wins.
+  // NOTE: `theme` is intentionally NOT applied to `data-theme` here. Each
+  // route wrapper (SiteLayout / Shell / Login) applies it on mount —
+  // applying from the hook itself races against those wrappers' effects
+  // because every useChannelPrefs() consumer would re-apply on mount.
   useEffect(() => { applyAttr("accent", accent); }, [accent]);
   useEffect(() => { applyAttr("density", density); }, [density]);
   useEffect(() => { applyAttr("shape", shape); }, [shape]);
@@ -108,7 +105,6 @@ export function useChannelPrefs() {
   }, [accent]);
 
   const setTheme = useCallback((v) => setPref("theme", v), []);
-  const setSiteTheme = useCallback((v) => setPref("siteTheme", v), []);
   const setAccent = useCallback((v) => setPref("accent", v), []);
   const setDensity = useCallback((v) => setPref("density", v), []);
   const setShape = useCallback((v) => setPref("shape", v), []);
@@ -119,14 +115,9 @@ export function useChannelPrefs() {
     () => setPref("theme", snapshot.theme === "dark" ? "light" : "dark"),
     []
   );
-  const toggleSiteTheme = useCallback(
-    () => setPref("siteTheme", snapshot.siteTheme === "dark" ? "light" : "dark"),
-    []
-  );
 
   return {
     theme, setTheme, toggleTheme,
-    siteTheme, setSiteTheme, toggleSiteTheme,
     accent, setAccent,
     density, setDensity,
     shape, setShape,

@@ -4,9 +4,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 import Nav from "./Nav.jsx";
 
-function renderNav() {
+function renderNavAt(path) {
   return render(
-    <MemoryRouter>
+    <MemoryRouter initialEntries={[path]}>
       <Nav />
     </MemoryRouter>
   );
@@ -26,34 +26,42 @@ describe("Nav", () => {
   afterEach(() => vi.unstubAllGlobals());
 
   it("renders the brand link pointing at /", () => {
-    renderNav();
+    renderNavAt("/");
     const brand = screen.getByText("Channel").closest("a");
     expect(brand.getAttribute("href")).toBe("/");
   });
 
-  it("renders four primary nav links: Product, Models, Pricing, Download", () => {
-    renderNav();
+  it("on Home, Product/Models/Download are in-page anchors; Pricing stays /pricing", () => {
+    renderNavAt("/");
+    expect(screen.getByRole("link", { name: "Product" }).getAttribute("href")).toBe("#features");
+    expect(screen.getByRole("link", { name: "Models" }).getAttribute("href")).toBe("#models");
+    expect(screen.getByRole("link", { name: "Pricing" }).getAttribute("href")).toBe("/pricing");
+    // Two "Download" links — the nav-links anchor (#download) and the CTA button (/download).
+    const downloads = screen.getAllByRole("link", { name: /^download/i });
+    expect(downloads.map((d) => d.getAttribute("href")).sort()).toEqual(["#download", "/download"]);
+  });
+
+  it("off Home, Product/Models/Download route to their dedicated pages", () => {
+    renderNavAt("/pricing");
     expect(screen.getByRole("link", { name: "Product" }).getAttribute("href")).toBe("/product");
     expect(screen.getByRole("link", { name: "Models" }).getAttribute("href")).toBe("/models");
-    expect(screen.getByRole("link", { name: "Pricing" }).getAttribute("href")).toBe("/pricing");
-    expect(screen.getByRole("link", { name: "Download" }).getAttribute("href")).toBe("/download");
+    const downloads = screen.getAllByRole("link", { name: /^download/i });
+    for (const d of downloads) expect(d.getAttribute("href")).toBe("/download");
+  });
+
+  it("marks the active route's link with the .on class", () => {
+    renderNavAt("/product");
+    expect(screen.getByRole("link", { name: "Product" }).className).toContain("on");
+    expect(screen.getByRole("link", { name: "Models" }).className).not.toContain("on");
   });
 
   it("renders a Sign in link pointing at /app", () => {
-    renderNav();
+    renderNavAt("/");
     expect(screen.getByRole("link", { name: "Sign in" }).getAttribute("href")).toBe("/app");
   });
 
   it("renders the ThemeToggle button", () => {
-    renderNav();
+    renderNavAt("/");
     expect(screen.getByRole("button", { name: /toggle theme/i })).toBeTruthy();
-  });
-
-  it("renders a Download CTA button pointing at /download", () => {
-    renderNav();
-    const downloads = screen.getAllByRole("link", { name: /download/i });
-    // Two: one in nav-links row, one in nav-right CTA. Both → /download.
-    expect(downloads.length).toBeGreaterThanOrEqual(2);
-    for (const d of downloads) expect(d.getAttribute("href")).toBe("/download");
   });
 });

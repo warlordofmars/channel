@@ -5,18 +5,17 @@ import Nav from "./Nav.jsx";
 import { useChannelPrefs } from "../hooks/useChannelPrefs.js";
 
 /**
- * Wraps every marketing page with the shared Nav + Footer chrome. Applies
- * `siteTheme` to `data-theme` so the marketing site renders with the user's
- * marketing preference (default light) — independent of the chat app theme.
- * The chat-app wrappers (Shell, Login) apply `theme` themselves on mount,
- * so leaving the marketing route automatically swaps `data-theme` over.
+ * Wraps every marketing page with the shared Nav + Footer chrome and
+ * applies the single `theme` preference to `data-theme`. The chat-app
+ * wrappers (Shell, Login) do the same — so the marketing toggle's choice
+ * carries straight into the app and back.
  */
 export default function SiteLayout({ children }) {
-  const { siteTheme } = useChannelPrefs();
+  const { theme } = useChannelPrefs();
 
   useEffect(() => {
-    document.documentElement.setAttribute("data-theme", siteTheme);
-  }, [siteTheme]);
+    document.documentElement.setAttribute("data-theme", theme);
+  }, [theme]);
 
   return (
     <>

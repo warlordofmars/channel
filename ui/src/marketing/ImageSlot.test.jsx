@@ -45,8 +45,12 @@ describe("ImageSlot", () => {
     expect(img.getAttribute("src")).toBe("/screens/x.png");
     expect(img.getAttribute("alt")).toBe("hero alt");
     expect(img.getAttribute("data-image-slot")).toBe("hero");
-    expect(img.style.aspectRatio).toBe("4 / 3");
     expect(img.className).toContain("hero-shot");
+    // No inline aspect-ratio or object-fit on real images — let the consumer
+    // CSS (e.g. .hero-shot in site.css) drive sizing so we don't crop assets
+    // that don't match the placeholder's 16:9 default.
+    expect(img.style.aspectRatio).toBe("");
+    expect(img.style.objectFit).toBe("");
     // The placeholder block is NOT also rendered.
     expect(container.querySelector("div[data-image-slot]")).toBeNull();
   });

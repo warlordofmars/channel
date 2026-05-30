@@ -120,4 +120,29 @@ describe("Sidebar", () => {
     fireEvent.click(backdrop);
     expect(screen.queryByText("Sign out")).toBeNull();
   });
+
+  it("clicking 'Toggle sidebar' calls the onToggle prop", () => {
+    const onToggle = vi.fn();
+    render(<MemoryRouter><Sidebar collapsed={false} onToggle={onToggle} /></MemoryRouter>);
+    fireEvent.click(screen.getByTitle("Toggle sidebar"));
+    expect(onToggle).toHaveBeenCalledTimes(1);
+  });
+
+  it("applies .collapsed class to .sb when the collapsed prop is true", () => {
+    const { container } = render(
+      <MemoryRouter><Sidebar collapsed={true} onToggle={() => {}} /></MemoryRouter>
+    );
+    expect(container.querySelector(".sb.collapsed")).toBeTruthy();
+  });
+
+  it("omits .collapsed class when the collapsed prop is false (or default)", () => {
+    const { container } = render(<MemoryRouter><Sidebar /></MemoryRouter>);
+    expect(container.querySelector(".sb.collapsed")).toBeNull();
+    expect(container.querySelector(".sb")).toBeTruthy();
+  });
+
+  it("clicking the toggle button is safe when no onToggle prop is passed (default noop)", () => {
+    render(<MemoryRouter><Sidebar /></MemoryRouter>);
+    expect(() => fireEvent.click(screen.getByTitle("Toggle sidebar"))).not.toThrow();
+  });
 });

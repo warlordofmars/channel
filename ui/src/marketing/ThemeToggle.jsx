@@ -4,21 +4,21 @@ import Icon from "../components/Icon.jsx";
 import { useChannelPrefs } from "../hooks/useChannelPrefs.js";
 
 /**
- * Round icon button that flips the marketing site's theme between light and
- * dark. Reads + writes `channel-site-theme` via `useChannelPrefs` so the app
- * and site themes can be toggled independently.
+ * Round icon button that flips the global `theme` between light and dark.
+ * One preference applies to both marketing and the chat app, so toggling
+ * here carries into /app and back.
  */
 export default function ThemeToggle() {
-  const { siteTheme, toggleSiteTheme } = useChannelPrefs();
+  const { theme, toggleTheme } = useChannelPrefs();
   return (
     <button
       type="button"
       className="icon-btn-m"
-      onClick={toggleSiteTheme}
+      onClick={toggleTheme}
       aria-label="Toggle theme"
       title="Toggle theme"
     >
-      <Icon name={siteTheme === "dark" ? "sun" : "moon"} size={16} />
+      <Icon name={theme === "dark" ? "sun" : "moon"} size={16} />
     </button>
   );
 }
