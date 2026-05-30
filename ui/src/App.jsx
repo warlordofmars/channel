@@ -7,6 +7,7 @@ import { useChannelPrefs } from "./hooks/useChannelPrefs.js";
 import Artifacts from "./app/views/Artifacts.jsx";
 import ChatHome from "./app/ChatHome.jsx";
 import Conversation from "./app/Conversation.jsx";
+import Customize from "./app/views/Customize.jsx";
 import Login from "./app/Login.jsx";
 import ProjectDetail from "./app/views/ProjectDetail.jsx";
 import Projects from "./app/views/Projects.jsx";
@@ -22,13 +23,6 @@ import Pricing from "./marketing/pages/Pricing.jsx";
 import Privacy from "./marketing/pages/Privacy.jsx";
 import Product from "./marketing/pages/Product.jsx";
 
-// App-side placeholders — replaced in Phase 6c (chat shell + login + home).
-const ph = (testid, label) => (
-  <div data-testid={testid} style={{ padding: 24, color: "var(--ink)" }}>
-    {label} — placeholder, implemented in a later phase.
-  </div>
-);
-const AppCustomize     = () => ph("app-customize", "App: Customize");
 
 export default function App() {
   useChannelPrefs();
@@ -54,7 +48,7 @@ export default function App() {
           <Route path="/app/projects"       element={<AuthGate><Shell><Projects /></Shell></AuthGate>} />
           <Route path="/app/projects/:id"   element={<AuthGate><Shell><ProjectDetail /></Shell></AuthGate>} />
           <Route path="/app/artifacts"      element={<AuthGate><Shell><Artifacts /></Shell></AuthGate>} />
-          <Route path="/app/customize"      element={<AuthGate><AppCustomize /></AuthGate>} />
+          <Route path="/app/customize"      element={<AuthGate><Shell><Customize /></Shell></AuthGate>} />
 
           {/* Anything else → branded 404 */}
           <Route path="*" element={<NotFound />} />

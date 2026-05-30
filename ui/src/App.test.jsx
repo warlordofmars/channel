@@ -76,14 +76,6 @@ describe("App routing", () => {
     expect(screen.getByRole("heading", { level: 1 }).textContent).toMatch(/back at it/i);
   });
 
-  it.each([
-    ["/app/customize", "app-customize"],
-  ])("renders the %s placeholder when authed", async (path, testId) => {
-    storage[TOKEN_KEY] = makeToken();
-    window.history.pushState({}, "", path);
-    await act(async () => render(<App />));
-    expect(screen.getByTestId(testId)).toBeTruthy();
-  });
 
   it("/app/c/r1 renders the Conversation component (not the placeholder)", async () => {
     storage[TOKEN_KEY] = makeToken();
@@ -120,6 +112,14 @@ describe("App routing", () => {
     await act(async () => render(<App />));
     expect(screen.getByRole("heading", { level: 2, name: "Artifacts" })).toBeTruthy();
     expect(screen.queryByTestId("app-artifacts")).toBeNull();
+  });
+
+  it("/app/customize renders the Customize view (not the placeholder)", async () => {
+    storage[TOKEN_KEY] = makeToken();
+    window.history.pushState({}, "", "/app/customize");
+    await act(async () => render(<App />));
+    expect(screen.getByRole("heading", { level: 2, name: "Customize" })).toBeTruthy();
+    expect(screen.queryByTestId("app-customize")).toBeNull();
   });
 
   it("applies the saved theme to <html> on mount", async () => {
