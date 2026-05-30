@@ -420,25 +420,34 @@ class ChannelStack(cdk.Stack):
         api_origin_domain = cdk.Fn.select(2, cdk.Fn.split("/", api_url.url))
 
         # CloudFront injects X-Origin-Verify in every environment so Lambda
-        # can reject direct Function URL access. The header value is resolved
-        # from SSM at deploy time via a CloudFormation dynamic reference.
+        # can reject direct Function URL access. The header value is read
+        # from SSM at synth time (in tasks.py deploy) and passed in via the
+        # `origin_verify_secret` CDK context value.
         #
-        # OriginVerifySecret is intentionally Type=String, NOT SecureString.
-        # CfnDynamicReferenceService.SSM (used to inject the value into
-        # CloudFront's origin custom headers) cannot resolve SecureString
-        # parameters. The secret is defense-in-depth — preventing direct
-        # Function URL access from outside the AWS account — not crypto.
-        # The IAM-gated visibility on SSM and CloudFront origin config is
-        # the security boundary. Rotating to SecureString breaks the deploy.
-        # See docs-site/operations/security.md for the rotation runbook.
-        origin_verify_header = {
-            "X-Origin-Verify": cdk.Token.as_string(
-                cdk.CfnDynamicReference(
-                    cdk.CfnDynamicReferenceService.SSM,
-                    origin_verify_param.parameter_name,
-                )
-            )
-        }
+        # Previously we used CfnDynamicReference(SSM, ...) to resolve the
+        # SSM value at deploy time, but CFN did not reliably re-resolve the
+        # token when SSM changed: a second deploy after `aws ssm put-parameter
+        # --overwrite` left the CloudFront resource untouched, so the
+        # placeholder secret stayed baked into the origin custom-header. The
+        # synth-time read is explicit — every `inv deploy` pulls the current
+        # SSM value and embeds it directly. See warlordofmars/channel#5 and
+        # warlordofmars/agentcore-starter#158 (finding #2) for the history.
+        #
+        # The SSM parameter resource above is still the source of truth —
+        # ops writes to it directly. This stack just reads it at synth time
+        # for the CloudFront copy. Type=String is unchanged (the security
+        # posture isn't affected: CFN already substitutes {{resolve:ssm:}}
+        # to a literal in the deployed template).
+        #
+        # `CHANGE_ME_ON_FIRST_DEPLOY` is the fallback when no context value
+        # is passed (e.g. raw `cdk synth` for inspection) — the synth still
+        # renders cleanly so smoke tools and CI synth gates work, but a
+        # deploy without the context value produces a non-functional stack.
+        origin_verify_secret = (
+            self.node.try_get_context("origin_verify_secret")
+            or "CHANGE_ME_ON_FIRST_DEPLOY"
+        )
+        origin_verify_header = {"X-Origin-Verify": origin_verify_secret}
 
         api_cf_origin = origins.HttpOrigin(
             api_origin_domain,

@@ -87,6 +87,29 @@ def _aws_account(ctx) -> str:
     ).stdout.strip()
 
 
+def _origin_verify_secret(ctx, env: str) -> str:
+    """Read /channel/<env>/origin-verify-secret from SSM.
+
+    Passed to the CDK stack as the ``origin_verify_secret`` context value so
+    the CloudFront origin custom-header is a literal string, not a CFN
+    dynamic reference. Background: warlordofmars/channel#5 — CFN does not
+    reliably re-resolve {{resolve:ssm:}} for CloudFront origin custom-headers
+    on subsequent deploys after an SSM ``put-parameter --overwrite``.
+
+    The SSM parameter is created by the stack itself with a
+    ``CHANGE_ME_ON_FIRST_DEPLOY`` placeholder. On a *first* deploy to a new
+    env, that placeholder is still in SSM and gets read here — the stack
+    then deploys with the same placeholder in the CloudFront origin header,
+    which is fine until the operator overwrites the SSM value and re-deploys.
+    """
+    return ctx.run(
+        f"aws ssm get-parameter --name /channel/{env}/origin-verify-secret"
+        " --query Parameter.Value --output text",
+        hide=True,
+        warn=True,
+    ).stdout.strip() or "CHANGE_ME_ON_FIRST_DEPLOY"
+
+
 def _hosted_zone_id(ctx, zone_name: str = "warlordofmars.net") -> str:
     """Resolve the Route53 hosted zone ID.
 
@@ -458,11 +481,13 @@ def synth(ctx, env="prod"):
     """Synthesize CDK template locally (skips Docker bundling). Use --env dev for dev stack."""
     account = _aws_account(ctx)
     zone_id = _hosted_zone_id(ctx)
+    origin_verify = _origin_verify_secret(ctx, env)
     stack = _stack_name(env)
     with ctx.cd(INFRA):
         ctx.run(
             f"uv run cdk synth {stack} --no-staging"
-            f" -c account={account} -c env={env} -c hosted_zone_id={zone_id}",
+            f" -c account={account} -c env={env} -c hosted_zone_id={zone_id}"
+            f" -c origin_verify_secret={origin_verify}",
             pty=True,
         )
 
@@ -472,11 +497,13 @@ def diff(ctx, env="prod"):
     """Show CDK diff against the deployed stack. Use --env dev for dev stack."""
     account = _aws_account(ctx)
     zone_id = _hosted_zone_id(ctx)
+    origin_verify = _origin_verify_secret(ctx, env)
     stack = _stack_name(env)
     with ctx.cd(INFRA):
         ctx.run(
             f"uv run cdk diff {stack}"
-            f" -c account={account} -c env={env} -c hosted_zone_id={zone_id}",
+            f" -c account={account} -c env={env} -c hosted_zone_id={zone_id}"
+            f" -c origin_verify_secret={origin_verify}",
             pty=True,
         )
 
@@ -486,6 +513,7 @@ def deploy(ctx, env="prod"):
     """Deploy CDK stack to AWS. Use --env dev for dev stack."""
     account = _aws_account(ctx)
     zone_id = _hosted_zone_id(ctx)
+    origin_verify = _origin_verify_secret(ctx, env)
     stack = _stack_name(env)
     if env == "prod":
         # In CI, APP_VERSION is set by the release job. Locally, infer from commits.
@@ -503,7 +531,8 @@ def deploy(ctx, env="prod"):
     with ctx.cd(INFRA):
         ctx.run(
             f"uv run cdk deploy {stack} --require-approval never"
-            f" -c account={account} -c env={env} -c hosted_zone_id={zone_id}",
+            f" -c account={account} -c env={env} -c hosted_zone_id={zone_id}"
+            f" -c origin_verify_secret={origin_verify}",
             env={"APP_VERSION": app_version},
             pty=True,
         )
