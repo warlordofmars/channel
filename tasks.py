@@ -33,6 +33,7 @@ from invoke import task
 
 ROOT = Path(__file__).parent
 UI = ROOT / "ui"
+DESKTOP = ROOT / "desktop"
 INFRA = ROOT / "infra"
 REGION = "us-east-1"
 DYNAMO_CONTAINER = "channel-dynamo-local"
@@ -268,14 +269,74 @@ def test_frontend(ctx):
         ctx.run(f"npm test{extra}", pty=not ci)
 
 
+@task(help={"coverage": "Run the v8 coverage gate (100% on main/* + preload/*)"})
+def desktop_test(ctx, coverage=False):
+    """Run desktop main-process unit tests."""
+    cmd = "npm run test:coverage" if coverage else "npm test"
+    ctx.run(f"cd {DESKTOP} && {cmd}", pty=True)
+
+
+@task(
+    help={
+        "platform": "mac | win | linux | current",
+        "api_base": "VITE_API_BASE for the SPA build",
+    }
+)
+def desktop_build(ctx, platform="current", api_base="https://channel.warlordofmars.net"):
+    """Build the Electron desktop app for the named platform.
+
+    Outputs unsigned artifacts in desktop/release/. Signing + auto-update are
+    sub-project B (see docs/superpowers/specs/2026-05-30-electron-shell-oauth-design.md).
+    """
+    # Build SPA with the Electron-specific API base URL
+    ctx.run(f"cd {UI} && VITE_API_BASE={api_base} npm run build", pty=True)
+    # Bundle main + preload via esbuild
+    ctx.run(f"cd {DESKTOP} && npm run build:main", pty=True)
+    # Copy SPA bundle into desktop/dist-renderer/
+    ctx.run(f"cd {DESKTOP} && npm run build:renderer", pty=True)
+    # Package for the target platform via electron-builder
+    flag = "" if platform == "current" else f"--{platform}"
+    ctx.run(f"cd {DESKTOP} && npx electron-builder {flag}", pty=True)
+
+
+@task
+def desktop_dev(ctx):
+    """Start FastAPI + Vite + Electron pointing at localhost (Ctrl-C tears down all three)."""
+    # Reuse the existing inv dev orchestration (DynamoDB Local + FastAPI + Vite)
+    # and launch Electron alongside it. The Vite proxy in ui/vite.config.js
+    # handles /auth + /api + /oauth + /mcp routes to FastAPI on :8001.
+    env = os.environ.copy()
+    env["VITE_DEV_SERVER_URL"] = f"http://localhost:{UI_PORT}"
+    env["CHANNEL_API_BASE"] = f"http://localhost:{API_PORT}"
+
+    api_proc = subprocess.Popen(["uv", "run", "inv", "dev"], cwd=ROOT)
+
+    # Wait for Vite to be reachable before launching Electron
+    vite_url = env["VITE_DEV_SERVER_URL"]
+    for _ in range(60):
+        try:
+            urllib.request.urlopen(vite_url, timeout=1)
+            break
+        except Exception:
+            time.sleep(1)
+
+    electron_proc = subprocess.Popen(["npm", "run", "dev:electron"], cwd=DESKTOP, env=env)
+
+    try:
+        electron_proc.wait()
+    finally:
+        api_proc.send_signal(signal.SIGINT)
+        api_proc.wait()
+
+
 @task(test_unit, test_integration, test_frontend)
 def test(ctx):
     """Run all tests (unit + integration + frontend)"""
 
 
-@task(lint_backend, typecheck, check_copyright, test_unit, test_frontend)
+@task(lint_backend, typecheck, check_copyright, test_unit, test_frontend, desktop_test)
 def pre_push(ctx):
-    """Local CI gate: lint + typecheck + copyright check + unit tests + frontend tests (run before every push)"""
+    """Local CI gate: lint + typecheck + copyright check + unit tests + frontend tests + desktop tests (run before every push)"""
 
 
 @task

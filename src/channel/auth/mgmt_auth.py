@@ -65,6 +65,7 @@ def _validate_desktop_callback(callback: str) -> str | None:
         return None
     return callback
 
+
 # Redirect target after successful login — drops the user back into the
 # authenticated chat app, not the marketing landing page.
 _UI_ROOT = "/app"
@@ -198,6 +199,7 @@ async def mgmt_callback(
             logger.warning("Stored desktop_callback failed re-validation: %r", desktop_callback)
             raise HTTPException(status_code=400, detail="Invalid stored desktop_callback")
         from urllib.parse import urlencode
+
         qs = urlencode({"token": token, "state": state})
         return RedirectResponse(f"{desktop_callback}?{qs}", status_code=302)
 
