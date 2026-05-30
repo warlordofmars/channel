@@ -1,7 +1,7 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
 import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import Sidebar from "./Sidebar.jsx";
 import { TOKEN_KEY } from "../lib/auth.js";
 
@@ -154,5 +154,24 @@ describe("Sidebar", () => {
   it("clicking the toggle button is safe when no onToggle prop is passed (default noop)", () => {
     render(<MemoryRouter><Sidebar /></MemoryRouter>);
     expect(() => fireEvent.click(screen.getByTitle("Toggle sidebar"))).not.toThrow();
+  });
+
+  it("clicking a recent navigates to /app/c/<that-id>", () => {
+    let lastPath = null;
+    function PathCatcher() {
+      const { pathname } = useLocation();
+      lastPath = pathname;
+      return null;
+    }
+    render(
+      <MemoryRouter initialEntries={["/app"]}>
+        <Routes>
+          <Route path="/app" element={<><Sidebar /><PathCatcher /></>} />
+          <Route path="/app/c/:id" element={<PathCatcher />} />
+        </Routes>
+      </MemoryRouter>
+    );
+    fireEvent.click(screen.getByText("Home server backup strategy"));
+    expect(lastPath).toBe("/app/c/r1");
   });
 });

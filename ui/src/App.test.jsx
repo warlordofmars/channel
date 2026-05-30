@@ -77,7 +77,6 @@ describe("App routing", () => {
   });
 
   it.each([
-    ["/app/c/r1", "app-conversation"],
     ["/app/projects", "app-projects"],
     ["/app/projects/p1", "app-project-detail"],
     ["/app/artifacts", "app-artifacts"],
@@ -87,6 +86,18 @@ describe("App routing", () => {
     window.history.pushState({}, "", path);
     await act(async () => render(<App />));
     expect(screen.getByTestId(testId)).toBeTruthy();
+  });
+
+  it("/app/c/r1 renders the Conversation component (not the placeholder)", async () => {
+    storage[TOKEN_KEY] = makeToken();
+    window.history.pushState({}, "", "/app/c/r1");
+    await act(async () => render(<App />));
+    // The real component renders the canned SAMPLE_USER prompt, which the
+    // placeholder never did.
+    const matches = screen.getAllByText(/columnar store/i);
+    expect(matches.length).toBeGreaterThan(0);
+    // And the placeholder testid is no longer in the tree.
+    expect(screen.queryByTestId("app-conversation")).toBeNull();
   });
 
   it("applies the saved theme to <html> on mount", async () => {

@@ -1,5 +1,6 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
 import React, { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { parseToken, TOKEN_KEY } from "../lib/auth.js";
 import Icon from "../components/Icon.jsx";
 import AccountPopover from "./AccountPopover.jsx";
@@ -19,6 +20,7 @@ import { RECENTS } from "./data.js";
  * Sign out clears the JWT and sends the user back to the marketing site at /.
  */
 export default function Sidebar({ collapsed = false, onToggle = () => {} }) {
+  const navigate = useNavigate();
   const [searching, setSearching] = useState(false);
   const [search, setSearch] = useState("");
   const [acctOpen, setAcctOpen] = useState(false);
@@ -108,7 +110,14 @@ export default function Sidebar({ collapsed = false, onToggle = () => {} }) {
           <div key={g.name}>
             <div className="sb-section">{g.name}</div>
             {g.items.map((r) => (
-              <button type="button" key={r.id} className="recent">{r.title}</button>
+              <button
+                type="button"
+                key={r.id}
+                className="recent"
+                onClick={() => navigate(`/app/c/${r.id}`)}
+              >
+                {r.title}
+              </button>
             ))}
           </div>
         ))}
