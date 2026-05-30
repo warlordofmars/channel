@@ -309,6 +309,11 @@ def desktop_dev(ctx):
     env["VITE_DEV_SERVER_URL"] = f"http://localhost:{UI_PORT}"
     env["CHANNEL_API_BASE"] = f"http://localhost:{API_PORT}"
 
+    # Rebuild the main+preload bundle so source edits to desktop/main/
+    # or desktop/preload/ are reflected at launch (Electron loads the
+    # bundled CJS output, not source).
+    ctx.run(f"cd {DESKTOP} && npm run build:main", pty=True)
+
     api_proc = subprocess.Popen(["uv", "run", "inv", "dev"], cwd=ROOT)
 
     # Wait for Vite to be reachable before launching Electron
