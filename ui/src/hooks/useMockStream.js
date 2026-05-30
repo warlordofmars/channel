@@ -8,28 +8,41 @@ const HARDCODED_ARTIFACT = {
   ic: "code",
 };
 
+// Target total duration for the canned stream. The interpolation below
+// converts elapsed wall-clock time into a target character index, so the
+// reply finishes in roughly this many milliseconds regardless of the
+// host frame rate.
+const STREAM_DURATION_MS = 5500;
+
 /**
- * Mock streaming engine for the chat conversation. Ported verbatim from
- * design-sources/app/chat.jsx `useStream`. Real Bedrock streaming will
- * swap this hook for one with the same `{ turns, send, clear, loadSample }`
- * shape so the components that consume it don't have to change.
+ * Mock streaming engine for the chat conversation. Originally a port of
+ * `useStream` from design-sources/app/chat.jsx, now refactored to drive
+ * the reveal with `requestAnimationFrame` + time-based interpolation
+ * instead of `setInterval`. Reasons:
  *
- * `send(text, atts, model, effort)` pushes a user turn + an empty streaming
- * assistant turn, then appends one token (word + trailing whitespace) every
- * 22ms from SAMPLE_REPLY until fully drained. The assistant turn gets a
- * hardcoded artifact when done.
+ *   - `setInterval(fn, 22ms)` fires ~45 times/sec but the browser paints
+ *     at 60fps. The cadence mismatch made some frames carry one update
+ *     and others none — visible as a stutter even though both rates
+ *     were "fast enough on paper".
+ *   - rAF aligns each state update with the next paint, so the user sees
+ *     at most one update per frame, never two stacking.
+ *   - Time-based interpolation (chars revealed ∝ elapsed/TOTAL) keeps the
+ *     reveal smooth regardless of how many ticks we hit per second; a
+ *     missed frame just lands a slightly larger slice next frame.
  *
- * `loadSample(title, model)` populates a finished conversation immediately
- * — used when the user clicks a Recent in the sidebar.
+ * Real Bedrock streaming will later swap this hook for one with the same
+ * `{ turns, send, clear, loadSample }` shape — `Conversation` consumes
+ * only this API.
  */
 export function useMockStream() {
   const [turns, setTurns] = useState([]);
-  const timer = useRef(null);
+  // Holds either a requestAnimationFrame id (for active streams) or null.
+  const rafRef = useRef(null);
 
   const stop = useCallback(() => {
-    if (timer.current) {
-      clearInterval(timer.current);
-      timer.current = null;
+    if (rafRef.current != null) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
     }
   }, []);
 
@@ -45,36 +58,47 @@ export function useMockStream() {
           streaming: true,
         },
       ]);
-      // Split into word + whitespace tokens. We advance by ONE token per
-      // tick so updates feel smooth instead of arriving in 2-word jumps.
-      // 22ms keeps the overall reply duration close to the design's
-      // 38ms-per-2-tokens pacing while doubling the visual frame rate.
-      const words = SAMPLE_REPLY.split(/(\s+)/);
-      let i = 0;
       stop();
-      timer.current = setInterval(() => {
-        i += 1;
-        const chunk = words.slice(0, i).join("");
-        setTurns((prev) => {
-          const next = [...prev];
-          const last = next[next.length - 1];
-          next[next.length - 1] = { ...last, text: chunk };
-          return next;
-        });
-        if (i >= words.length) {
-          stop();
+      const startedAt = performance.now();
+      let lastChunkLength = -1;
+      const total = SAMPLE_REPLY.length;
+      const tick = () => {
+        const elapsed = performance.now() - startedAt;
+        const progress = Math.min(1, elapsed / STREAM_DURATION_MS);
+        const targetLen = Math.floor(progress * total);
+        // Skip the React update when two consecutive frames land on the
+        // same character count. At 60fps over ~5.5s every frame advances
+        // by ~2-3 chars so the equal case is rare in practice; we still
+        // gate to avoid spurious renders if the host frame rate spikes.
+        /* v8 ignore next */
+        if (targetLen !== lastChunkLength) {
+          lastChunkLength = targetLen;
+          const chunk = SAMPLE_REPLY.slice(0, targetLen);
+          setTurns((prev) => {
+            const next = [...prev];
+            const last = next[next.length - 1];
+            next[next.length - 1] = { ...last, text: chunk };
+            return next;
+          });
+        }
+        if (progress >= 1) {
+          rafRef.current = null;
           setTurns((prev) => {
             const next = [...prev];
             const last = next[next.length - 1];
             next[next.length - 1] = {
               ...last,
+              text: SAMPLE_REPLY,
               streaming: false,
               artifact: HARDCODED_ARTIFACT,
             };
             return next;
           });
+          return;
         }
-      }, 22);
+        rafRef.current = requestAnimationFrame(tick);
+      };
+      rafRef.current = requestAnimationFrame(tick);
     },
     [stop]
   );
