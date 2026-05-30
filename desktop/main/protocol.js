@@ -72,9 +72,30 @@ export function handleAppRequest(request, rendererRoot) {
   return new Response(body, { status: 200, headers: { "content-type": "text/html; charset=utf-8" } });
 }
 
-export function registerAppProtocol(rendererRoot) {
+/**
+ * Register the app:// scheme as privileged. MUST be called before
+ * app.whenReady() — Electron requires privileged-scheme registration
+ * before the default session is created.
+ */
+export function registerAppScheme() {
   protocol.registerSchemesAsPrivileged([
     { scheme: "app", privileges: { standard: true, secure: true, supportFetchAPI: true } },
   ]);
+}
+
+/**
+ * Attach the request handler. MUST be called inside or after
+ * app.whenReady() — protocol.handle reads the default session.
+ */
+export function registerAppHandler(rendererRoot) {
   protocol.handle("app", (request) => handleAppRequest(request, rendererRoot));
+}
+
+/**
+ * Convenience: both phases in one call. Only safe AFTER app.whenReady().
+ * Kept for tests; production callers should call the two phases separately.
+ */
+export function registerAppProtocol(rendererRoot) {
+  registerAppScheme();
+  registerAppHandler(rendererRoot);
 }

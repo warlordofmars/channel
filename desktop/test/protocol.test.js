@@ -10,12 +10,32 @@ vi.mock("node:fs", async () => {
 });
 
 // Import after mocks
-const { registerAppProtocol, handleAppRequest } = await import("../main/protocol.js");
+const { registerAppProtocol, registerAppScheme, registerAppHandler, handleAppRequest } = await import("../main/protocol.js");
 
 const RENDERER_ROOT = "/fake/dist-renderer";
 
 beforeEach(() => {
   vi.clearAllMocks();
+});
+
+describe("registerAppScheme", () => {
+  it("registers app:// as a privileged scheme (no protocol.handle call)", async () => {
+    const { protocol } = await import("electron");
+    registerAppScheme();
+    expect(protocol.registerSchemesAsPrivileged).toHaveBeenCalledWith([
+      { scheme: "app", privileges: { standard: true, secure: true, supportFetchAPI: true } },
+    ]);
+    expect(protocol.handle).not.toHaveBeenCalled();
+  });
+});
+
+describe("registerAppHandler", () => {
+  it("attaches the app:// request handler (no scheme call)", async () => {
+    const { protocol } = await import("electron");
+    registerAppHandler(RENDERER_ROOT);
+    expect(protocol.handle).toHaveBeenCalledWith("app", expect.any(Function));
+    expect(protocol.registerSchemesAsPrivileged).not.toHaveBeenCalled();
+  });
 });
 
 describe("registerAppProtocol", () => {
