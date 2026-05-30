@@ -25,6 +25,11 @@ win:
     - target: portable
       arch: [x64]
 linux:
+  # Pin the executable name so the binary inside linux-unpacked/ matches
+  # the CI smoke step's CHANNEL_DESKTOP_BIN path. Default on Linux is
+  # the package.json `name` (`channel-desktop`); we override to `channel`
+  # so all three platforms produce a binary derived from `productName`.
+  executableName: channel
   target:
     - AppImage
     - deb

@@ -8,7 +8,12 @@ if (!bin || !existsSync(bin)) {
   process.exit(2);
 }
 
-const proc = spawn(bin, ["--smoke"], { stdio: ["ignore", "inherit", "inherit"] });
+// --no-sandbox: bypass Chromium's SUID sandbox requirement on Linux CI
+// runners (the chrome-sandbox binary isn't owned by root + mode 4755 in
+// non-root container environments). Harmless on macOS/Windows where the
+// SUID sandbox doesn't apply. The flag affects only this smoke launch —
+// real distribution builds never invoke smoke.js.
+const proc = spawn(bin, ["--smoke", "--no-sandbox"], { stdio: ["ignore", "inherit", "inherit"] });
 const timer = setTimeout(() => {
   console.error("smoke: timed out after 30s");
   proc.kill("SIGKILL");
