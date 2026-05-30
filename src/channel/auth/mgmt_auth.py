@@ -151,20 +151,22 @@ async def mgmt_login(request: Request) -> RedirectResponse:
 @router.get(
     "/auth/callback",
     include_in_schema=False,
+    response_model=None,
     responses={400: {"description": "Invalid Google OAuth callback"}},
 )
 async def mgmt_callback(
     code: str | None = None,
     state: str | None = None,
     error: str | None = None,
-) -> HTMLResponse:
+) -> HTMLResponse | RedirectResponse:
     """Handle the Google OAuth callback for the management UI."""
     if error:
         raise HTTPException(status_code=400, detail=f"Google OAuth error: {error}")
     if not code or not state:
         raise HTTPException(status_code=400, detail="Missing code or state parameter")
 
-    if not _consume_pending_state(state):
+    record = state_store.consume_state(state)
+    if record is None:
         raise HTTPException(status_code=400, detail="Invalid or expired state")
 
     try:
@@ -183,8 +185,14 @@ async def mgmt_callback(
         raise HTTPException(status_code=403, detail="Email not authorised")
 
     display_name: str = claims.get("name", email.split("@")[0])
-
     user = _make_user(email, display_name)
     token = issue_mgmt_jwt(user)
     logger.info("Management login: %s (role=%s)", email, user["role"])
+
+    desktop_callback = record.get("desktop_callback")
+    if desktop_callback:
+        from urllib.parse import urlencode
+        qs = urlencode({"token": token, "state": state})
+        return RedirectResponse(f"{desktop_callback}?{qs}", status_code=302)
+
     return _html_redirect(token)
