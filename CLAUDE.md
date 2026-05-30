@@ -62,13 +62,19 @@ channel/
 │   │   │   ├── Nav.jsx, Footer.jsx, SiteLayout.jsx, ThemeToggle.jsx, ImageSlot.jsx
 │   │   │   └── pages/             # Home, Product, Models, Pricing, Download, About, Blog, Careers, Privacy, NotFound
 │   │   └── app/                   # Chat app routes (Phase 6c onward)
-│   │       ├── data.js                                       # MODELS, EFFORTS, RECENTS, QUICK_ACTIONS, SAMPLE_REPLY, SAMPLE_USER
+│   │       ├── data.js                                       # MODELS, EFFORTS, RECENTS, QUICK_ACTIONS, SAMPLE_REPLY, SAMPLE_USER, PROJECTS, ARTIFACTS, PROJECT_DOCS
 │   │       ├── Login.jsx, GoogleG.jsx                        # Centered Google sign-in
 │   │       ├── Shell.jsx, Sidebar.jsx, AccountPopover.jsx    # Layout chrome
 │   │       ├── Composer.jsx, ModelPicker.jsx, AttachMenu.jsx # Composer + its popovers
 │   │       ├── ChatHome.jsx                                  # Empty-state greeting
 │   │       ├── Conversation.jsx                              # Streamed-turns view + inline artifact card
-│   │       └── renderMarkdown.jsx                            # Tiny markdown helper (paragraphs/bold/OL/cursor)
+│   │       ├── renderMarkdown.jsx                            # Tiny markdown helper (paragraphs/bold/OL/cursor)
+│   │       └── views/                                        # /app/projects, /app/projects/:id, /app/artifacts
+│   │           ├── Projects.jsx                              # Grid of project cards + 'New project' tile
+│   │           ├── ProjectDetail.jsx                         # Project header + Composer + docs + chats list
+│   │           ├── Artifacts.jsx                             # List of artifact rows + bookmarkable panel
+│   │           ├── ArtifactPanel.jsx                         # Slide-in viewer with 5 renderers (Code/Chart/Data/Interactive/Document)
+│   │           └── artifactHelpers.js                        # colorFor / inkFor / artIcon utilities
 │   └── package.json
 ├── docs-site/                 # VitePress documentation site
 │   ├── .vitepress/
