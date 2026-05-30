@@ -102,6 +102,14 @@ def test_html_redirect_sets_token_in_localstorage():
     assert "starter_mgmt_token" in body
 
 
+def test_html_redirect_targets_app_not_marketing_root():
+    # After Google OAuth success the user should land in the chat app
+    # (/app), not the marketing landing page (/).
+    resp = _html_redirect("t")
+    body = resp.body.decode()
+    assert "location.replace('/app')" in body
+
+
 def test_make_user_role_user(monkeypatch):
     monkeypatch.setenv("ALLOWED_EMAILS", "[]")
     user = _make_user("user@example.com", "Alice")

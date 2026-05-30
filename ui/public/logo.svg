@@ -1,19 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" fill="none">
-  <!-- Outer hexagon -->
-  <polygon points="24,4 42,14 42,34 24,44 6,34 6,14" fill="#f5a623" stroke="none"/>
-  <!-- Inner honeycomb: 7 small hexagons arranged in a hex cluster -->
-  <!-- Center -->
-  <polygon points="24,17 28.3,19.5 28.3,24.5 24,27 19.7,24.5 19.7,19.5" fill="#1a1a2e"/>
-  <!-- Top -->
-  <polygon points="24,8 28.3,10.5 28.3,15.5 24,18 19.7,15.5 19.7,10.5" fill="#1a1a2e"/>
-  <!-- Bottom -->
-  <polygon points="24,26 28.3,28.5 28.3,33.5 24,36 19.7,33.5 19.7,28.5" fill="#1a1a2e"/>
-  <!-- Top-right -->
-  <polygon points="32,12.5 36.3,15 36.3,20 32,22.5 27.7,20 27.7,15" fill="#1a1a2e"/>
-  <!-- Bottom-right -->
-  <polygon points="32,21.5 36.3,24 36.3,29 32,31.5 27.7,29 27.7,24" fill="#1a1a2e"/>
-  <!-- Top-left -->
-  <polygon points="16,12.5 20.3,15 20.3,20 16,22.5 11.7,20 11.7,15" fill="#1a1a2e"/>
-  <!-- Bottom-left -->
-  <polygon points="16,21.5 20.3,24 20.3,29 16,31.5 11.7,29 11.7,24" fill="#1a1a2e"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+  <rect x="0.5" y="0.5" width="23" height="23" rx="6.24" fill="#c97a4e"/>
+  <rect x="6.6" y="6" width="3.1" height="12" rx="1.2" fill="#fdf9ee"/>
+  <rect x="14.3" y="6" width="3.1" height="12" rx="1.2" fill="#fdf9ee"/>
 </svg>

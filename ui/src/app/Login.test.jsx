@@ -53,4 +53,17 @@ describe("Login", () => {
     const { container } = render(<Login />);
     expect(container.querySelector(".ch-mark")).toBeTruthy();
   });
+
+  it("wraps .auth in .stage.full > .win so the card centers vertically", () => {
+    // Without the .stage.full > .win wrappers, .auth's `flex: 1` has no
+    // flex parent and the sign-in card collapses to its content size near
+    // the top of the viewport instead of centering vertically.
+    const { container } = render(<Login />);
+    const stage = container.querySelector(".stage.full");
+    expect(stage).toBeTruthy();
+    const win = stage.querySelector(".win");
+    expect(win).toBeTruthy();
+    const auth = win.querySelector(".auth");
+    expect(auth).toBeTruthy();
+  });
 });
