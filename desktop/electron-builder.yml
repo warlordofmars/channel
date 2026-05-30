@@ -1,0 +1,32 @@
+appId: net.warlordofmars.channel.desktop
+productName: Channel
+copyright: Copyright (c) 2026 John Carter
+directories:
+  buildResources: resources
+  output: release
+files:
+  - dist-main/**/*
+  - dist-renderer/**/*
+  - package.json
+asar: true
+mac:
+  category: public.app-category.productivity
+  target:
+    - target: dmg
+      arch: [arm64, x64]
+    - target: zip
+      arch: [arm64, x64]
+  hardenedRuntime: false
+  gatekeeperAssess: false
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: portable
+      arch: [x64]
+linux:
+  target:
+    - AppImage
+    - deb
+    - rpm
+  category: Office

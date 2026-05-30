@@ -321,3 +321,198 @@ def test_mgmt_callback_google_exchange_error(monkeypatch):
     ):
         resp = _client.get(f"/auth/callback?code=authcode&state={state}")
     assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Desktop-callback test cases for the Electron OAuth loopback flow.
+#
+# When the Electron desktop app starts an OAuth flow, it passes its own
+# random state and a loopback callback URL. These tests verify the
+# validator rejects non-loopback callbacks and that the happy path stores
+# the desktop_callback in the state record's payload.
+# ---------------------------------------------------------------------------
+
+DESKTOP_CALLBACK_OK = "http://127.0.0.1:54321/callback"
+VALID_STATE = "A" * 43  # 43 base64url chars
+
+
+@pytest.mark.parametrize(
+    "bad_callback",
+    [
+        "https://evil.example.com/callback",  # external host
+        "https://127.0.0.1:54321/callback",  # https not allowed
+        "http://127.0.0.1:54321/other",  # wrong path
+        "http://127.0.0.1/callback",  # missing port
+        "http://0.0.0.0:54321/callback",  # not loopback
+        "http://[::1]:54321/callback",  # IPv6 loopback rejected
+        "http://127.0.0.1:54321/callback?foo=bar",  # query injection
+        "http://127.0.0.1:54321/callback#frag",  # fragment injection
+        "http://127.0.0.1:99999/callback",  # port out of range
+    ],
+)
+def test_desktop_callback_rejects_bad_urls(bad_callback, monkeypatch):
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "x")
+    monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "y")
+    resp = _client.get(
+        "/auth/login",
+        params={"desktop_callback": bad_callback, "state": VALID_STATE},
+    )
+    assert resp.status_code == 400
+
+
+def test_desktop_callback_rejects_short_state(monkeypatch):
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "x")
+    monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "y")
+    resp = _client.get(
+        "/auth/login",
+        params={"desktop_callback": DESKTOP_CALLBACK_OK, "state": "too-short"},
+    )
+    assert resp.status_code == 400
+
+
+def test_desktop_callback_happy_path(monkeypatch, _fake_state_store):
+    """Caller-supplied state is reused as the DynamoDB key + Google's state."""
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "x")
+    monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "y")
+    resp = _client.get(
+        "/auth/login",
+        params={"desktop_callback": DESKTOP_CALLBACK_OK, "state": VALID_STATE},
+    )
+    assert resp.status_code == 302
+    assert _fake_state_store[VALID_STATE]["desktop_callback"] == DESKTOP_CALLBACK_OK
+    assert "accounts.google.com" in resp.headers["location"]
+    assert f"state={VALID_STATE}" in resp.headers["location"]
+
+
+def _async_return(value):
+    async def f(*a, **kw):
+        return value
+
+    return f
+
+
+def test_callback_redirects_to_desktop_callback_when_set(monkeypatch):
+    """When the state record carries desktop_callback, redirect to the loopback URL."""
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "x")
+    monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "y")
+    state = "B" * 43
+    desktop_callback = "http://127.0.0.1:54321/callback"
+    monkeypatch.setattr(
+        "channel.auth.state_store.consume_state",
+        lambda s: {"PK": f"MGMT_STATE#{s}", "SK": "META", "desktop_callback": desktop_callback},
+    )
+    monkeypatch.setattr("channel.auth.mgmt_auth.exchange_google_code", _async_return("id_token"))
+    monkeypatch.setattr(
+        "channel.auth.mgmt_auth.verify_google_id_token",
+        _async_return({"email": "user@example.com", "email_verified": True, "name": "User"}),
+    )
+    monkeypatch.setattr("channel.auth.mgmt_auth.is_email_allowed", lambda e: True)
+    monkeypatch.setattr("channel.auth.mgmt_auth.is_admin_email", lambda e: False)
+
+    client = TestClient(app)
+    resp = client.get(
+        "/auth/callback", params={"code": "c", "state": state}, follow_redirects=False
+    )
+    assert resp.status_code == 302
+    location = resp.headers["location"]
+    assert location.startswith("http://127.0.0.1:54321/callback?")
+    assert f"state={state}" in location
+    assert "token=" in location
+
+
+def test_callback_still_returns_html_redirect_when_no_desktop_callback(monkeypatch):
+    """Existing web flow (no desktop_callback) returns the HTML redirect page."""
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "x")
+    monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "y")
+    state = "C" * 43
+    monkeypatch.setattr(
+        "channel.auth.state_store.consume_state",
+        lambda s: {"PK": f"MGMT_STATE#{s}", "SK": "META"},  # no desktop_callback
+    )
+    monkeypatch.setattr("channel.auth.mgmt_auth.exchange_google_code", _async_return("id_token"))
+    monkeypatch.setattr(
+        "channel.auth.mgmt_auth.verify_google_id_token",
+        _async_return({"email": "user@example.com", "email_verified": True, "name": "User"}),
+    )
+    monkeypatch.setattr("channel.auth.mgmt_auth.is_email_allowed", lambda e: True)
+    monkeypatch.setattr("channel.auth.mgmt_auth.is_admin_email", lambda e: False)
+
+    client = TestClient(app)
+    resp = client.get(
+        "/auth/callback", params={"code": "c", "state": state}, follow_redirects=False
+    )
+    assert resp.status_code == 200
+    assert b"localStorage.setItem" in resp.content
+
+
+def test_callback_rejects_tampered_desktop_callback(monkeypatch):
+    """Defense in depth: if the stored desktop_callback is invalid (e.g. tampered
+    DynamoDB record), the callback site re-validates and returns 400."""
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "x")
+    monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "y")
+    state = "E" * 43
+    monkeypatch.setattr(
+        "channel.auth.state_store.consume_state",
+        lambda s: {
+            "PK": f"MGMT_STATE#{s}",
+            "SK": "META",
+            "desktop_callback": "https://evil.example.com/callback",
+        },
+    )
+    monkeypatch.setattr("channel.auth.mgmt_auth.exchange_google_code", _async_return("id_token"))
+    monkeypatch.setattr(
+        "channel.auth.mgmt_auth.verify_google_id_token",
+        _async_return({"email": "user@example.com", "email_verified": True, "name": "User"}),
+    )
+    monkeypatch.setattr("channel.auth.mgmt_auth.is_email_allowed", lambda e: True)
+    monkeypatch.setattr("channel.auth.mgmt_auth.is_admin_email", lambda e: False)
+
+    client = TestClient(app)
+    resp = client.get(
+        "/auth/callback", params={"code": "c", "state": state}, follow_redirects=False
+    )
+    assert resp.status_code == 400
+
+
+# ─── Desktop bypass branch ──────────────────────────────────────────────────
+
+
+def test_mgmt_login_desktop_bypass_mints_jwt_and_redirects_to_loopback(monkeypatch):
+    """When _BYPASS=1 and desktop_callback+state are present, /auth/login skips
+    Google entirely and redirects to the loopback URL with ?token=<jwt>&state=<S>.
+    """
+    monkeypatch.setenv("ALLOWED_EMAILS", "[]")
+    state = "F" * 43
+    desktop_callback = "http://127.0.0.1:60123/callback"
+    with patch("channel.auth.mgmt_auth._BYPASS", True):
+        resp = _client.get(
+            "/auth/login",
+            params={"desktop_callback": desktop_callback, "state": state},
+        )
+    assert resp.status_code == 302
+    location = resp.headers["location"]
+    assert location.startswith(f"{desktop_callback}?")
+    assert f"state={state}" in location
+    assert "token=" in location
+
+
+def test_mgmt_login_desktop_bypass_honours_STARTER_DESKTOP_DEV_EMAIL(monkeypatch):
+    """STARTER_DESKTOP_DEV_EMAIL overrides the default dev@channel.local."""
+    monkeypatch.setenv("ALLOWED_EMAILS", "[]")
+    monkeypatch.setenv("STARTER_DESKTOP_DEV_EMAIL", "custom@example.test")
+    state = "G" * 43
+    desktop_callback = "http://127.0.0.1:60124/callback"
+    captured: dict[str, Any] = {}
+
+    def fake_issue(user):
+        captured["email"] = user["email"]
+        return "tok"
+
+    monkeypatch.setattr("channel.auth.mgmt_auth.issue_mgmt_jwt", fake_issue)
+    with patch("channel.auth.mgmt_auth._BYPASS", True):
+        resp = _client.get(
+            "/auth/login",
+            params={"desktop_callback": desktop_callback, "state": state},
+        )
+    assert resp.status_code == 302
+    assert captured["email"] == "custom@example.test"

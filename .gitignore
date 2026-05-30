@@ -39,3 +39,9 @@ infra/cdk.out/
 !.claude/agents
 !.claude/skills
 .autonomous-progress
+
+# Electron desktop app
+desktop/node_modules/
+desktop/dist-main/
+desktop/dist-renderer/
+desktop/release/

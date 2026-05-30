@@ -1,5 +1,5 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { SAMPLE_REPLY, SAMPLE_USER } from "../app/data.js";
 
 const HARDCODED_ARTIFACT = {
@@ -126,7 +126,12 @@ export function useMockStream() {
     [stop]
   );
 
-  useEffect(() => stop, [stop]);
+  // No unmount-time rAF cancel: React.StrictMode's dev-only mount→cleanup→
+  // re-mount cycle would otherwise cancel the rAF scheduled by the
+  // mount-time send() in Conversation, leaving an empty assistant turn
+  // (Conversation's kickedIdRef.current === id guard blocks the re-send).
+  // The rAF runs to completion (5.5s) regardless; setTurns on an unmounted
+  // component is a silent no-op in React 18+, so there's no real leak.
 
   return { turns, send, clear, loadSample };
 }
