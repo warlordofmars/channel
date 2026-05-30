@@ -16,14 +16,16 @@ export function mockElectron(overrides = {}) {
       getPath: vi.fn(() => "/tmp"),
       ...overrides.app,
     },
-    BrowserWindow: vi.fn().mockImplementation(() => ({
-      loadURL: vi.fn(() => Promise.resolve()),
-      on: vi.fn(),
-      hide: vi.fn(),
-      show: vi.fn(),
-      webContents: { id: 1, on: vi.fn() },
-      ...overrides.windowInstance,
-    })),
+    BrowserWindow: vi.fn().mockImplementation(function () {
+      Object.assign(this, {
+        loadURL: vi.fn(() => Promise.resolve()),
+        on: vi.fn(),
+        hide: vi.fn(),
+        show: vi.fn(),
+        webContents: { id: 1, on: vi.fn() },
+        ...overrides.windowInstance,
+      });
+    }),
     ipcMain: { handle: vi.fn(), removeHandler: vi.fn() },
     ipcRenderer: { invoke: vi.fn() },
     contextBridge: { exposeInMainWorld: vi.fn() },
