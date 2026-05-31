@@ -356,6 +356,43 @@ class ChannelStack(cdk.Stack):
                 ],
             )
         )
+        # Bedrock AgentCore Memory — Phase 7c writes one event per chat
+        # turn. The Memory resource is created lazily at first request,
+        # so the Lambda needs both control-plane (find-or-create) and
+        # data-plane (read/write events) access. List* actions are
+        # account-scoped; the rest are pinned to channel-{env}* (the
+        # asterisk covers the opaque suffix AgentCore appends to memory
+        # ids on creation).
+        agentcore_memory_arn = (
+            f"arn:aws:bedrock-agentcore:{self.region}:{self.account}:memory/channel-{env_name}*"
+        )
+        api_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "bedrock-agentcore:CreateEvent",
+                    "bedrock-agentcore:ListEvents",
+                    "bedrock-agentcore:GetEvent",
+                    "bedrock-agentcore:DeleteEvent",
+                    "bedrock-agentcore-control:CreateMemory",
+                    "bedrock-agentcore-control:GetMemory",
+                ],
+                resources=[agentcore_memory_arn],
+            )
+        )
+        api_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["bedrock-agentcore-control:ListMemories"],
+                resources=["*"],
+            )
+        )
+
+        # Phase 7c — dev-only debug endpoints under /api/_debug/* are
+        # gated by this env var at FastAPI app-construction time. Set it
+        # ONLY on non-prod envs; the corresponding CDK assertion test
+        # (``tests/unit/test_channel_stack.py``) guards against leaks.
+        if not is_prod:
+            common_env["STARTER_ENABLE_DEBUG_ENDPOINTS"] = "1"
+
         api_fn = lambda_.Function(
             self,
             "ApiFunction",
