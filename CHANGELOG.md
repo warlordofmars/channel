@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Phase 7c — agent now persists every chat turn to Bedrock AgentCore
+  Memory via a Strands `AfterInvocationEvent` hook. Writes are
+  fire-and-forget (never block the SSE response), failures swallowed
+  with EMF + structured-log surfacing, and recall stays disabled —
+  that's Phase 7d. Dev environments gain a debug endpoint
+  (`GET /api/_debug/memory/events`) for inspecting writes, gated by
+  `STARTER_ENABLE_DEBUG_ENDPOINTS=1` with a CDK assertion test that
+  blocks the flag from leaking to prod.
 - Real Bedrock streaming via Strands Agents — replaces the canned reply
   that 7a shipped. Three models served: Sonnet 4.6, Haiku 4.5, Opus 4.6.
 - `GET /api/models` — server-side allowlist drives the ModelPicker.
