@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from datetime import datetime, timezone
 from typing import Any, cast
 
@@ -28,6 +29,28 @@ from channel.metrics import record_memory_write_outcome
 logger = logging.getLogger(__name__)
 
 _ROLE_MAP: dict[str, str] = {"user": "USER", "assistant": "ASSISTANT"}
+
+# AgentCore validates ``actorId`` against
+# ``[a-zA-Z0-9][a-zA-Z0-9-_/]*(?::[a-zA-Z0-9-_/]+)*[a-zA-Z0-9-_/]*`` —
+# letters, digits, hyphens, underscores, slashes, colons. Our JWT
+# ``sub`` is the user's email (Google OAuth path) or arbitrary string
+# (other paths); the email form contains ``@`` and ``.`` which fail
+# the regex. Sanitize by replacing each disallowed char with ``_``.
+_ACTOR_ID_DISALLOWED_RE = re.compile(r"[^a-zA-Z0-9_/-]")
+
+
+def _sanitize_actor_id(jwt_sub: str) -> str:
+    """Convert ``jwt_sub`` to a valid AgentCore ``actorId``.
+
+    Replaces disallowed characters (anything outside
+    ``[a-zA-Z0-9_/-]``) with ``_``. Stable: the same ``jwt_sub``
+    always produces the same actorId. **Theoretically collision-prone**
+    for inputs differing only in disallowed chars (``a@b.com`` and
+    ``a.b@com`` both map to ``a_b_com``); revisit if user volume grows
+    or weird email shapes appear.
+    """
+    return _ACTOR_ID_DISALLOWED_RE.sub("_", jwt_sub)
+
 
 # Module-level cache keyed by env. Resets on Lambda cold-start; value is
 # the AgentCore-assigned memoryId (which includes an opaque suffix).
@@ -43,24 +66,34 @@ def get_or_create_memory(env: str) -> str:
     falls through to ``CreateMemory``.
 
     AgentCore appends an opaque suffix to ``memoryId`` (e.g.
-    ``channel-dev-A1B2C3D4``). Look up by **name**, not by id, or
+    ``channel_dev-A1B2C3D4``). Look up by **name**, not by id, or
     re-deploys against an existing Memory will create duplicates.
 
-    Override the default ``channel-{env}`` naming via
+    Override the default ``channel_{env}`` naming via
     ``STARTER_AGENTCORE_MEMORY_NAME`` — useful for pointing a personal
-    dev environment at a pre-existing Memory resource.
+    dev environment at a pre-existing Memory resource. AgentCore
+    requires names to match ``[a-zA-Z][a-zA-Z0-9_]{0,47}`` — letters,
+    digits, underscores only; hyphens are rejected at the service
+    layer.
     """
     if env in _memory_id_cache:
         return _memory_id_cache[env]
 
-    name = os.environ.get("STARTER_AGENTCORE_MEMORY_NAME") or f"channel-{env}"
+    name = os.environ.get("STARTER_AGENTCORE_MEMORY_NAME") or f"channel_{env}"
     control = boto3.client("bedrock-agentcore-control")
 
+    # AgentCore's ``ListMemories`` returns ``memories`` (NOT
+    # ``memorySummaries``), and each entry exposes ``id`` and ``arn``
+    # but NOT a separate ``name`` field. The id is ``{name}-{8-char-suffix}``
+    # where the suffix is AgentCore-appended at creation time. Match by
+    # prefix to find an existing Memory provisioned under our naming
+    # convention.
     existing = control.list_memories()
-    for mem in existing.get("memorySummaries", []):
-        if mem["name"] == name:
-            _memory_id_cache[env] = mem["id"]
-            return mem["id"]
+    for mem in existing.get("memories", []):
+        mem_id = mem["id"]
+        if mem_id == name or mem_id.startswith(f"{name}-"):
+            _memory_id_cache[env] = mem_id
+            return mem_id
 
     created = control.create_memory(
         name=name,
@@ -96,7 +129,10 @@ class AgentCoreMemoryHook:
         client: Any | None = None,
     ) -> None:
         self._memory_id = memory_id
-        self._actor_id = actor_id
+        # actor_id is sanitized at the hook boundary so callers can pass
+        # the raw JWT sub (email-form or otherwise) without worrying
+        # about AgentCore's regex constraints.
+        self._actor_id = _sanitize_actor_id(actor_id)
         self._session_id = session_id
         self._client = client if client is not None else boto3.client("bedrock-agentcore")
 

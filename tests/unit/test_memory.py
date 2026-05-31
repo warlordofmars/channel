@@ -13,6 +13,7 @@ from channel.agents import memory as memory_module
 from channel.agents.memory import (
     AgentCoreMemoryHook,
     _payload_from_messages,
+    _sanitize_actor_id,
     get_or_create_memory,
 )
 
@@ -72,61 +73,93 @@ def test_payload_from_messages_raises_on_unknown_role():
         _payload_from_messages([{"role": "system", "content": [{"text": "..."}]}])
 
 
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        # Email-form JWT subs (the auth-bypass + Google OAuth shape).
+        ("alice@example.com", "alice_example_com"),
+        ("e2e-7c-1234-abc-a@example.com", "e2e-7c-1234-abc-a_example_com"),
+        # Already-safe inputs pass through unchanged.
+        ("user-abc-123", "user-abc-123"),
+        ("workspace_1/user_42", "workspace_1/user_42"),
+        # Sub-second edge case: ``+`` plus-addressing.
+        ("alice+tag@example.com", "alice_tag_example_com"),
+    ],
+)
+def test_sanitize_actor_id_replaces_disallowed_chars(raw: str, expected: str):
+    assert _sanitize_actor_id(raw) == expected
+
+
 def test_get_or_create_memory_returns_cached_value_on_second_call():
     fake_control = MagicMock()
     fake_control.list_memories.return_value = {
-        "memorySummaries": [{"name": "channel-jc", "id": "channel-jc-A1B2"}]
+        "memories": [{"id": "channel_jc-A1B2C3D4"}],
     }
 
     with patch("channel.agents.memory.boto3.client", return_value=fake_control):
         first = get_or_create_memory("jc")
         second = get_or_create_memory("jc")
 
-    assert first == "channel-jc-A1B2"
-    assert second == "channel-jc-A1B2"
+    assert first == "channel_jc-A1B2C3D4"
+    assert second == "channel_jc-A1B2C3D4"
     fake_control.list_memories.assert_called_once()
 
 
-def test_get_or_create_memory_finds_existing_by_name():
+def test_get_or_create_memory_finds_existing_by_name_prefix():
+    """The Memory id is ``{name}-{8-char-suffix}``. Match by prefix."""
     fake_control = MagicMock()
     fake_control.list_memories.return_value = {
-        "memorySummaries": [
-            {"name": "channel-prod", "id": "channel-prod-X1Y2"},
-            {"name": "channel-jc", "id": "channel-jc-A1B2"},
-            {"name": "other-app", "id": "other-Z3"},
-        ]
+        "memories": [
+            {"id": "channel_prod-X1Y2Z3W4"},
+            {"id": "channel_jc-A1B2C3D4"},
+            {"id": "other_app-Q9R8S7T6"},
+        ],
     }
 
     with patch("channel.agents.memory.boto3.client", return_value=fake_control):
-        assert get_or_create_memory("jc") == "channel-jc-A1B2"
+        assert get_or_create_memory("jc") == "channel_jc-A1B2C3D4"
 
     fake_control.create_memory.assert_not_called()
 
 
+def test_get_or_create_memory_does_not_match_unrelated_prefix():
+    """``channel_jc`` should NOT match ``channel_jcsmith-…`` (different name)."""
+    fake_control = MagicMock()
+    fake_control.list_memories.return_value = {
+        "memories": [{"id": "channel_jcsmith-AAAA1111"}],
+    }
+    fake_control.create_memory.return_value = {"memory": {"id": "channel_jc-NEW9NEW9"}}
+
+    with patch("channel.agents.memory.boto3.client", return_value=fake_control):
+        assert get_or_create_memory("jc") == "channel_jc-NEW9NEW9"
+
+    fake_control.create_memory.assert_called_once()
+
+
 def test_get_or_create_memory_creates_when_absent():
     fake_control = MagicMock()
-    fake_control.list_memories.return_value = {"memorySummaries": []}
+    fake_control.list_memories.return_value = {"memories": []}
     fake_control.create_memory.return_value = {
-        "memory": {"id": "channel-dev-NEW1", "name": "channel-dev"}
+        "memory": {"id": "channel_dev-NEW1NEW1"},
     }
 
     with patch("channel.agents.memory.boto3.client", return_value=fake_control):
-        assert get_or_create_memory("dev") == "channel-dev-NEW1"
+        assert get_or_create_memory("dev") == "channel_dev-NEW1NEW1"
 
     fake_control.create_memory.assert_called_once()
     kwargs = fake_control.create_memory.call_args.kwargs
-    assert kwargs["name"] == "channel-dev"
+    assert kwargs["name"] == "channel_dev"
 
 
 def test_get_or_create_memory_respects_override_env_var(monkeypatch):
-    monkeypatch.setenv("STARTER_AGENTCORE_MEMORY_NAME", "preexisting-mem")
+    monkeypatch.setenv("STARTER_AGENTCORE_MEMORY_NAME", "preexisting_mem")
     fake_control = MagicMock()
     fake_control.list_memories.return_value = {
-        "memorySummaries": [{"name": "preexisting-mem", "id": "preexisting-mem-Q1"}]
+        "memories": [{"id": "preexisting_mem-Q1R2S3T4"}],
     }
 
     with patch("channel.agents.memory.boto3.client", return_value=fake_control):
-        assert get_or_create_memory("jc") == "preexisting-mem-Q1"
+        assert get_or_create_memory("jc") == "preexisting_mem-Q1R2S3T4"
 
 
 # ---------------------------------------------------------------------------
@@ -252,3 +285,28 @@ def test_hook_default_client_is_bedrock_agentcore():
         AgentCoreMemoryHook(memory_id="m", actor_id="a", session_id="s")
 
     mock_client.assert_called_once_with("bedrock-agentcore")
+
+
+@pytest.mark.asyncio
+async def test_hook_sanitizes_actor_id_passed_to_create_event():
+    """Email-form actor_ids must be sanitized before reaching AgentCore."""
+    fake_client = MagicMock()
+    hook = AgentCoreMemoryHook(
+        memory_id="m-1",
+        actor_id="alice@example.com",  # contains @ + . — AgentCore rejects
+        session_id="chat-xyz",
+        client=fake_client,
+    )
+
+    event = _fake_event_with_messages(
+        [
+            {"role": "user", "content": [{"text": "hi"}]},
+            {"role": "assistant", "content": [{"text": "hello"}]},
+        ]
+    )
+
+    with patch("channel.agents.memory.record_memory_write_outcome", new=AsyncMock()):
+        await hook._on_after_invocation_async(event)
+
+    kwargs = fake_client.create_event.call_args.kwargs
+    assert kwargs["actorId"] == "alice_example_com"

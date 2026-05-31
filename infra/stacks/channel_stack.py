@@ -360,11 +360,12 @@ class ChannelStack(cdk.Stack):
         # turn. The Memory resource is created lazily at first request,
         # so the Lambda needs both control-plane (find-or-create) and
         # data-plane (read/write events) access. List* actions are
-        # account-scoped; the rest are pinned to channel-{env}* (the
+        # account-scoped; the rest are pinned to channel_{env}* (the
         # asterisk covers the opaque suffix AgentCore appends to memory
-        # ids on creation).
+        # ids on creation). Name uses underscores not hyphens —
+        # AgentCore's name validator is ``[a-zA-Z][a-zA-Z0-9_]{0,47}``.
         agentcore_memory_arn = (
-            f"arn:aws:bedrock-agentcore:{self.region}:{self.account}:memory/channel-{env_name}*"
+            f"arn:aws:bedrock-agentcore:{self.region}:{self.account}:memory/channel_{env_name}*"
         )
         api_role.add_to_policy(
             iam.PolicyStatement(

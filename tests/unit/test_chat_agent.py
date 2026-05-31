@@ -116,7 +116,7 @@ def test_build_agent_attaches_agentcore_memory_hook(monkeypatch):
     )
     monkeypatch.setattr(
         "channel.agents.chat_agent.get_or_create_memory",
-        lambda env: f"channel-{env}-MEMID",
+        lambda env: f"channel_{env}_MEMID",
     )
 
     build_agent(
@@ -126,7 +126,7 @@ def test_build_agent_attaches_agentcore_memory_hook(monkeypatch):
     )
 
     assert captured["hook_kwargs"] == {
-        "memory_id": "channel-test-MEMID",
+        "memory_id": "channel_test_MEMID",
         "actor_id": "user-abc",
         "session_id": "chat-xyz",
     }

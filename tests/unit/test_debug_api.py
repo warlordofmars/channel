@@ -101,8 +101,8 @@ def test_delete_memory_event_calls_agentcore_delete(mounted_app: TestClient):
         ),
     ):
         resp = mounted_app.delete(
-            "/api/_debug/memory/events/evt-1",
-            params={"chat_id": "chat-xyz"},
+            "/api/_debug/memory/events",
+            params={"chat_id": "chat-xyz", "event_id": "evt-1"},
         )
 
     assert resp.status_code == 200

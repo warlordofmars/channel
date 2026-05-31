@@ -189,11 +189,16 @@ def _list_events(
 
 
 def _delete_event(api_url: str, jwt: str, chat_id: str, event_id: str) -> None:
-    """Best-effort cleanup — ignore failures (test already asserted)."""
+    """Best-effort cleanup — ignore failures (test already asserted).
+
+    ``event_id`` goes as a query parameter (not path) because the
+    AgentCore id format ``<digits>#<hex>`` contains a URL fragment
+    delimiter.
+    """
     with contextlib.suppress(httpx.HTTPError):  # pragma: no cover — cleanup only
         httpx.delete(
-            f"{api_url}/api/_debug/memory/events/{event_id}",
-            params={"chat_id": chat_id},
+            f"{api_url}/api/_debug/memory/events",
+            params={"chat_id": chat_id, "event_id": event_id},
             headers={"Authorization": f"Bearer {jwt}"},
             timeout=10.0,
         )

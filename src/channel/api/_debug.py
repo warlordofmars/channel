@@ -27,7 +27,7 @@ from typing import Any
 import boto3
 from fastapi import APIRouter, Depends, Query
 
-from channel.agents.memory import get_or_create_memory
+from channel.agents.memory import _sanitize_actor_id, get_or_create_memory
 from channel.api._auth import require_mgmt_user
 
 router = APIRouter(prefix="/api/_debug", tags=["debug"])
@@ -44,25 +44,32 @@ async def list_memory_events(
     client = boto3.client("bedrock-agentcore")
     resp = client.list_events(
         memoryId=memory_id,
-        actorId=claims["sub"],
+        actorId=_sanitize_actor_id(claims["sub"]),
         sessionId=chat_id,
         maxResults=limit,
     )
     return {"events": resp.get("events", [])}
 
 
-@router.delete("/memory/events/{event_id}")
+@router.delete("/memory/events")
 async def delete_memory_event(
-    event_id: str,
     chat_id: str = Query(...),
+    event_id: str = Query(...),
     claims: dict[str, Any] = Depends(require_mgmt_user),
 ) -> dict[str, str]:
-    """Delete one AgentCore event. Best-effort cleanup for e2e tests."""
+    """Delete one AgentCore event. Best-effort cleanup for e2e tests.
+
+    ``event_id`` is a query parameter (not a path parameter) because the
+    AgentCore event id format is ``<digits>#<hex>`` — the ``#`` is a URL
+    fragment delimiter in path position, so the suffix would silently
+    drop on the wire and AgentCore would reject the resulting
+    digits-only id with a regex validation error.
+    """
     memory_id = get_or_create_memory(os.environ["STARTER_ENV"])
     client = boto3.client("bedrock-agentcore")
     client.delete_event(
         memoryId=memory_id,
-        actorId=claims["sub"],
+        actorId=_sanitize_actor_id(claims["sub"]),
         sessionId=chat_id,
         eventId=event_id,
     )
