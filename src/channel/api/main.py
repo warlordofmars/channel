@@ -16,6 +16,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from channel.api._auth import require_admin  # noqa: F401 — re-exported for route use
+from channel.api.chats import router as chats_router
 from channel.api.csp import router as csp_router
 from channel.auth.mgmt_auth import router as mgmt_auth_router
 from channel.logging_config import (
@@ -129,6 +130,9 @@ app.include_router(mgmt_auth_router)
 
 # CSP report receiver — unauthenticated by design
 app.include_router(csp_router, prefix="/api")
+
+# Chat REST + SSE API — all endpoints require a valid mgmt JWT
+app.include_router(chats_router, prefix="/api")
 
 
 @app.get("/health", include_in_schema=False)
