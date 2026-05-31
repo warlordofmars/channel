@@ -20,8 +20,13 @@ import { makeSseDecoder } from "../lib/sseParser.js";
  * `streaming: true` until the `done` event arrives.
  *
  * @param {string|null} chatId
+ * @param {object} [options]
+ * @param {(title: string) => void} [options.onTitleSuggested] — Phase 7d
+ *   auto-title callback. Fired when the backend emits a
+ *   ``title_suggested`` SSE event (server-side after the first round-trip
+ *   for fresh chats). Default no-op so existing callers don't break.
  */
-export function useChatStream(chatId) {
+export function useChatStream(chatId, { onTitleSuggested } = {}) {
   const [turns, setTurns] = useState([]);
   const [status, setStatus] = useState(chatId ? "loading-history" : "idle");
   const [error, setError] = useState(null);
@@ -135,6 +140,11 @@ export function useChatStream(chatId) {
               ),
             );
             setStatus("idle");
+          } else if (event.type === "title_suggested") {
+            // Phase 7d: backend emits this after the first round-trip
+            // on a fresh chat. Caller decides what to do with the title
+            // (typically: update the sidebar via ChatsContext.renameChat).
+            onTitleSuggested?.(event.title);
           }
         }
       }

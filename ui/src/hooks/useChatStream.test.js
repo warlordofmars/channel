@@ -319,6 +319,68 @@ describe("useChatStream", () => {
     });
   });
 
+  it("forwards title_suggested events to onTitleSuggested callback", async () => {
+    api.getChat.mockResolvedValue({
+      chat: { chat_id: "c1" },
+      messages: [],
+      next_cursor: null,
+    });
+    api.streamMessage.mockResolvedValue({
+      ok: true,
+      body: makeMockResponseBody([
+        { type: "user_persisted", msg_id: "u-1", seq: 0 },
+        { type: "delta", text: "Hi" },
+        {
+          type: "done",
+          msg_id: "a-1",
+          seq: 1,
+          model: "x",
+          input_tokens: 0,
+          output_tokens: 0,
+          stop_reason: "end_turn",
+        },
+        { type: "title_suggested", chat_id: "c1", title: "Fresh title" },
+      ]),
+    });
+
+    const onTitleSuggested = vi.fn();
+    const { result } = renderHook(() =>
+      useChatStream("c1", { onTitleSuggested }),
+    );
+    await waitFor(() => expect(result.current.status).toBe("idle"));
+
+    await act(async () => {
+      await result.current.send({ message: "hi", model: "m", effort: "med" });
+    });
+
+    expect(onTitleSuggested).toHaveBeenCalledWith("Fresh title");
+  });
+
+  it("does not crash when title_suggested arrives without onTitleSuggested option", async () => {
+    api.getChat.mockResolvedValue({
+      chat: { chat_id: "c1" },
+      messages: [],
+      next_cursor: null,
+    });
+    api.streamMessage.mockResolvedValue({
+      ok: true,
+      body: makeMockResponseBody([
+        { type: "done", msg_id: "a-1", seq: 1, model: "x", input_tokens: 0, output_tokens: 0, stop_reason: "end_turn" },
+        { type: "title_suggested", chat_id: "c1", title: "Title without callback" },
+      ]),
+    });
+
+    const { result } = renderHook(() => useChatStream("c1"));
+    await waitFor(() => expect(result.current.status).toBe("idle"));
+
+    await act(async () => {
+      await result.current.send({ message: "hi", model: "m", effort: "med" });
+    });
+
+    // No throw — and the stream still completes normally.
+    expect(result.current.status).toBe("idle");
+  });
+
   it("aborts the in-flight stream when chatId changes", async () => {
     // First chat: history loads, then stream starts but doesn't complete.
     api.getChat.mockResolvedValueOnce({
