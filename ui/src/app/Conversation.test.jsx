@@ -80,14 +80,14 @@ describe("Conversation", () => {
           msg_id: "a1",
           role: "assistant",
           text: "**bold reply**",
-          model: "Claude Opus 4.8 · High",
+          model: "Claude Opus 4.7 · High",
           streaming: false,
         },
       ],
     });
     renderAt("/app/c/c1");
     expect(screen.getByText("Channel")).toBeTruthy();
-    expect(screen.getByText("Claude Opus 4.8 · High")).toBeTruthy();
+    expect(screen.getByText("Claude Opus 4.7 · High")).toBeTruthy();
     expect(screen.getByText("bold reply")).toBeTruthy();
   });
 
@@ -137,7 +137,7 @@ describe("Conversation", () => {
           msg_id: "a1",
           role: "assistant",
           text: "done",
-          model: "Claude Opus 4.8 · High",
+          model: "Claude Opus 4.7 · High",
           streaming: false,
         },
       ],
@@ -297,7 +297,7 @@ describe("Conversation", () => {
     storage["channel-model"] = MODELS[0].id;
     __resetChannelPrefsForTest();
     renderAt("/app/c/c1");
-    fireEvent.click(screen.getByRole("button", { name: /Opus 4.8/i }));
+    fireEvent.click(screen.getByRole("button", { name: /Opus 4.7/i }));
     fireEvent.click(screen.getByText("Claude Haiku 4.5"));
     expect(storage["channel-model"]).toBe("claude-haiku-4-5");
   });

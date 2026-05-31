@@ -94,7 +94,7 @@ describe("ProjectDetail", () => {
     expect(raw).toBeTruthy();
     const payload = JSON.parse(raw);
     expect(payload.text).toBe("kick off a new chat");
-    expect(payload.modelId).toBe("claude-opus-4-8");
+    expect(payload.modelId).toBe("claude-opus-4-7");
     expect(payload.effort).toBe("High");
     expect(getLastPath()).toBe("/app/c/new");
   });
@@ -142,20 +142,20 @@ describe("ProjectDetail", () => {
     __resetChannelPrefsForTest();
     renderAt("/app/projects/p1");
     // Sending should still work — Composer renders the first MODELS entry's short name.
-    expect(screen.getByRole("button", { name: /Opus 4.8/i })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Opus 4.7/i })).toBeTruthy();
     const ta = screen.getByRole("textbox");
     fireEvent.change(ta, { target: { value: "with fallback model" } });
     fireEvent.click(screen.getByTitle("Send"));
     const payload = JSON.parse(sessionStorage.getItem("channel-pending-send"));
-    expect(payload.modelId).toBe("claude-opus-4-8");
+    expect(payload.modelId).toBe("claude-opus-4-7");
   });
 
   it("picking a different model in the Composer persists via setModel", () => {
-    storage["channel-model"] = "claude-opus-4-8";
+    storage["channel-model"] = "claude-opus-4-7";
     __resetChannelPrefsForTest();
     renderAt("/app/projects/p1");
     // Open the ModelPicker via the current-model button in the Composer.
-    fireEvent.click(screen.getByRole("button", { name: /Opus 4.8/i }));
+    fireEvent.click(screen.getByRole("button", { name: /Opus 4.7/i }));
     fireEvent.click(screen.getByText("Claude Haiku 4.5"));
     expect(storage["channel-model"]).toBe("claude-haiku-4-5");
   });
