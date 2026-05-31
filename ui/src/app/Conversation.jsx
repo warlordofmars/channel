@@ -114,7 +114,11 @@ export default function Conversation() {
                 <div className="bubble">{t.text}</div>
               </div>
             ) : (
-              <div className="turn" key={t.msg_id}>
+              <div
+                className="turn"
+                key={t.msg_id}
+                {...(!t.streaming && { "data-testid": "assistant-turn-idle" })}
+              >
                 <div className="assistant-head">
                   <ChannelMark size={20} />
                   <span className="nm">Channel</span>
