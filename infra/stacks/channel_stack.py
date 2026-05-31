@@ -295,8 +295,6 @@ class ChannelStack(cdk.Stack):
             "APP_VERSION": app_version,
             # Used by EMF metrics as the "Environment" dimension.
             "STARTER_ENV": env_name,
-            # Default Bedrock model for agent endpoints.
-            "BEDROCK_MODEL_ID": "anthropic.claude-sonnet-4-6",
         }
 
         # Tag every resource with the deployed version for operational visibility.
@@ -351,18 +349,6 @@ class ChannelStack(cdk.Stack):
                 ],
             )
         )
-        # bedrock:InvokeInlineAgent is required for invoke_inline_agent calls.
-        # Inline agents are ephemeral (no pre-provisioned agent resource), so
-        # the resource ARN pattern covers all inline agent invocations in the account.
-        api_role.add_to_policy(
-            iam.PolicyStatement(
-                actions=["bedrock:InvokeInlineAgent"],
-                resources=[
-                    f"arn:aws:bedrock:{self.region}:{self.account}:agent/*",
-                ],
-            )
-        )
-
         api_fn = lambda_.Function(
             self,
             "ApiFunction",
