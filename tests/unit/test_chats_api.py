@@ -328,6 +328,226 @@ def test_post_message_returns_sse_via_strands(
     assert [m.role for m in persisted] == [MessageRole.USER, MessageRole.ASSISTANT]
 
 
+# ---------------------------------------------------------------------------
+# Phase 7d auto-title
+# ---------------------------------------------------------------------------
+
+
+def _stub_first_round_trip_chat(monkeypatch: pytest.MonkeyPatch) -> Chat:
+    """Common shape: fresh chat (message_count=0), all storage mocked."""
+    chat = Chat(
+        chat_id="c1", user_id="u-1", title="New chat",
+        created_at="t", last_message_at="t",
+        model_default="claude-sonnet-4-6", message_count=0,
+    )
+    monkeypatch.setattr("channel.api.chats.storage.get_chat_by_id", lambda _: chat)
+    monkeypatch.setattr(
+        "channel.api.chats.storage.put_message",
+        lambda **kwargs: Message(
+            chat_id=kwargs["chat_id"], msg_id="m", role=kwargs["role"],
+            text=kwargs["text"], model=kwargs.get("model"), created_at="t",
+        ),
+    )
+    monkeypatch.setattr("channel.api.chats.storage.update_chat_index", lambda **_: None)
+    monkeypatch.setattr(
+        "channel.api.chats.storage.list_messages", lambda *_a, **_kw: ([], None),
+    )
+    return chat
+
+
+def test_post_message_emits_title_suggested_on_first_round_trip(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """First round-trip (chat.message_count == 0 at entry) must emit a
+    title_suggested event AFTER done and BEFORE stream close."""
+    _stub_first_round_trip_chat(monkeypatch)
+
+    patched_titles: list[str] = []
+    monkeypatch.setattr(
+        "channel.api.chats.storage.patch_chat",
+        lambda **kwargs: patched_titles.append(kwargs["title"]),
+    )
+
+    async def fake_main_stream(self, prompt):
+        yield {"event": {"contentBlockDelta": {"delta": {"text": "Hi"}}}}
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+
+    class FakeAgent:
+        stream_async = fake_main_stream
+
+    monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
+
+    async def fake_titler_stream(self, prompt):
+        yield {"event": {"contentBlockDelta": {"delta": {"text": "Quick chat title"}}}}
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+
+    class FakeTitler:
+        stream_async = fake_titler_stream
+
+    monkeypatch.setattr("channel.api.chats.build_titler_agent", lambda: FakeTitler())
+
+    response = client.post(
+        "/api/chats/c1/messages",
+        json={"message": "hi", "model": "claude-sonnet-4-6", "effort": "medium"},
+    )
+    assert response.status_code == 200
+    body = response.text
+
+    assert '"type": "title_suggested"' in body
+    assert '"title": "Quick chat title"' in body
+    # Done event MUST appear before title_suggested.
+    assert body.find('"type": "title_suggested"') > body.find('"type": "done"')
+    assert patched_titles == ["Quick chat title"]
+
+
+def test_post_message_skips_titler_on_non_first_round_trip(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Chat with message_count > 0 must NOT emit title_suggested."""
+    chat = Chat(
+        chat_id="c1", user_id="u-1", title="Existing title",
+        created_at="t", last_message_at="t",
+        model_default="claude-sonnet-4-6", message_count=4,
+    )
+    monkeypatch.setattr("channel.api.chats.storage.get_chat_by_id", lambda _: chat)
+    monkeypatch.setattr(
+        "channel.api.chats.storage.put_message",
+        lambda **kwargs: Message(
+            chat_id=kwargs["chat_id"], msg_id="m", role=kwargs["role"],
+            text=kwargs["text"], created_at="t",
+        ),
+    )
+    monkeypatch.setattr("channel.api.chats.storage.update_chat_index", lambda **_: None)
+    monkeypatch.setattr(
+        "channel.api.chats.storage.list_messages", lambda *_a, **_kw: ([], None),
+    )
+
+    titler_built: list[bool] = []
+    monkeypatch.setattr(
+        "channel.api.chats.build_titler_agent",
+        lambda: titler_built.append(True) or object(),
+    )
+
+    async def fake_stream(self, prompt):
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+
+    class FakeAgent:
+        stream_async = fake_stream
+
+    monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
+
+    response = client.post(
+        "/api/chats/c1/messages",
+        json={"message": "hi", "model": "claude-sonnet-4-6", "effort": "medium"},
+    )
+    assert response.status_code == 200
+    assert '"type": "title_suggested"' not in response.text
+    assert titler_built == []
+
+
+def test_post_message_titler_failure_is_swallowed_and_stream_completes(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Titler error MUST NOT break the user's stream. Done event still
+    lands; title_suggested is omitted; chat keeps its default title."""
+    _stub_first_round_trip_chat(monkeypatch)
+
+    patched: list[Any] = []
+    monkeypatch.setattr(
+        "channel.api.chats.storage.patch_chat",
+        lambda **kwargs: patched.append(kwargs),
+    )
+
+    async def fake_stream(self, prompt):
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+
+    class FakeAgent:
+        stream_async = fake_stream
+
+    class FakeTitler:
+        async def stream_async(self, prompt):
+            raise RuntimeError("haiku unavailable")
+            yield  # pragma: no cover  # unreachable; satisfies generator typing
+
+    monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
+    monkeypatch.setattr("channel.api.chats.build_titler_agent", lambda: FakeTitler())
+
+    response = client.post(
+        "/api/chats/c1/messages",
+        json={"message": "hi", "model": "claude-sonnet-4-6", "effort": "medium"},
+    )
+    assert response.status_code == 200
+    body = response.text
+    assert '"type": "done"' in body
+    assert '"type": "title_suggested"' not in body
+    assert patched == []
+
+
+def test_post_message_respects_auto_title_kill_switch(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("STARTER_AUTO_TITLE_ENABLED", "0")
+    _stub_first_round_trip_chat(monkeypatch)
+
+    titler_built: list[bool] = []
+    monkeypatch.setattr(
+        "channel.api.chats.build_titler_agent",
+        lambda: titler_built.append(True) or object(),
+    )
+
+    async def fake_stream(self, prompt):
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+
+    class FakeAgent:
+        stream_async = fake_stream
+
+    monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
+
+    response = client.post(
+        "/api/chats/c1/messages",
+        json={"message": "hi", "model": "claude-sonnet-4-6", "effort": "medium"},
+    )
+    assert response.status_code == 200
+    assert '"type": "title_suggested"' not in response.text
+    assert titler_built == []
+
+
+def test_post_message_titler_empty_response_swallows_without_patch(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Titler returns empty text → record failure, don't patch chat."""
+    _stub_first_round_trip_chat(monkeypatch)
+
+    patched: list[Any] = []
+    monkeypatch.setattr(
+        "channel.api.chats.storage.patch_chat",
+        lambda **kwargs: patched.append(kwargs),
+    )
+
+    async def fake_stream(self, prompt):
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+
+    class FakeAgent:
+        stream_async = fake_stream
+
+    async def empty_titler(self, prompt):
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+
+    class FakeTitler:
+        stream_async = empty_titler
+
+    monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
+    monkeypatch.setattr("channel.api.chats.build_titler_agent", lambda: FakeTitler())
+
+    response = client.post(
+        "/api/chats/c1/messages",
+        json={"message": "hi", "model": "claude-sonnet-4-6", "effort": "medium"},
+    )
+    assert response.status_code == 200
+    assert '"type": "title_suggested"' not in response.text
+    assert patched == []
+
+
 def test_post_message_seeds_agent_with_prior_chat_history(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
