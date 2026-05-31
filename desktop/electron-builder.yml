@@ -16,6 +16,14 @@ mac:
   gatekeeperAssess: true
   entitlements: resources/entitlements.mac.plist
   entitlementsInherit: resources/entitlements.mac.plist
+  # Disable electron-builder's built-in auto-notarisation. With
+  # `hardenedRuntime: true` + a successful sign, electron-builder would
+  # otherwise try its own notarytool call expecting env vars
+  # APPLE_API_KEY/APPLE_API_KEY_ID/APPLE_API_ISSUER — different from the
+  # names our afterSign hook in scripts/notarize.js consumes. We use the
+  # afterSign hook instead so it can base64-decode the .p8 from the
+  # GH Actions secret at notarise time.
+  notarize: false
   # Universal2 binaries: one artefact that runs on both Apple Silicon and Intel.
   # Doubles binary size (~280MB) but means a single stable URL for Channel-mac.dmg
   # and a single latest-mac.yml manifest. Audience is small enough that bandwidth
