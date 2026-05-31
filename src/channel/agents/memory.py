@@ -135,13 +135,25 @@ class AgentCoreMemoryHook:
         self._actor_id = _sanitize_actor_id(actor_id)
         self._session_id = session_id
         self._client = client if client is not None else boto3.client("bedrock-agentcore")
+        # Strong refs to in-flight writes — prevents Python's GC from
+        # collecting the task before AgentCore replies. See Sonar
+        # python:S7502 and asyncio.create_task() docs.
+        self._pending_writes: set[asyncio.Task[None]] = set()
 
     def register_hooks(self, registry: Any, **_: Any) -> None:
         registry.add_callback(AfterInvocationEvent, self._on_after_invocation)
 
     def _on_after_invocation(self, event: AfterInvocationEvent) -> None:
-        """Sync entry point — schedule the async write, return immediately."""
-        asyncio.create_task(self._on_after_invocation_async(event))
+        """Sync entry point — schedule the async write, return immediately.
+
+        The task reference is held in ``_pending_writes`` (instance set) +
+        discarded on completion via ``add_done_callback``. Without the
+        strong reference, Python's GC can reclaim the task before it
+        finishes — see asyncio docs (Sonar python:S7502).
+        """
+        task = asyncio.create_task(self._on_after_invocation_async(event))
+        self._pending_writes.add(task)
+        task.add_done_callback(self._pending_writes.discard)
 
     async def _on_after_invocation_async(self, event: AfterInvocationEvent) -> None:
         """Async write path. Log + swallow on failure."""

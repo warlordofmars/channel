@@ -257,7 +257,9 @@ async def test_hook_swallows_exceptions_and_emits_failure_metric():
 
 def test_hook_after_invocation_fires_and_forgets():
     """The sync callback must fire-and-forget via asyncio.create_task,
-    not block the agent loop."""
+    not block the agent loop. The task must also be held in
+    ``_pending_writes`` so the GC can't reclaim it mid-flight
+    (Sonar python:S7502)."""
     hook = AgentCoreMemoryHook(
         memory_id="m",
         actor_id="a",
@@ -273,16 +275,22 @@ def test_hook_after_invocation_fires_and_forgets():
     )
 
     scheduled: list[Any] = []
+    fake_task = MagicMock(name="fake_task")
 
     def _record(coro: Any) -> Any:
         scheduled.append(coro)
         coro.close()  # silence "coroutine was never awaited"
-        return MagicMock()
+        return fake_task
 
     with patch("channel.agents.memory.asyncio.create_task", side_effect=_record):
         hook._on_after_invocation(event)
 
     assert len(scheduled) == 1
+    # Strong reference held + completion handler wired to drop it.
+    assert fake_task in hook._pending_writes
+    fake_task.add_done_callback.assert_called_once_with(
+        hook._pending_writes.discard,
+    )
 
 
 def test_hook_default_client_is_bedrock_agentcore():
