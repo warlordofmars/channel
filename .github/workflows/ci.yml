@@ -547,20 +547,19 @@ jobs:
         with:
           path: ci-artifacts
 
-      - name: Collect + rename platform artifacts to canonical names
+      - name: Collect platform artifacts (electron-builder already emits canonical names)
         run: |
           set -euo pipefail
           mkdir -p dist
-          # macOS DMGs — order matters: move arm64 first, then x64 is the
-          # only remaining .dmg matching the glob.
-          mv "ci-artifacts/channel-desktop-macos-14/Channel-"*"-arm64.dmg" dist/Channel-mac-arm64.dmg
-          mv "ci-artifacts/channel-desktop-macos-14/Channel-"*".dmg"       dist/Channel-mac-x64.dmg
-          # Windows NSIS installer (drops the version + spaces).
-          mv "ci-artifacts/channel-desktop-windows-latest/Channel Setup "*".exe" dist/Channel-Setup-win.exe
-          # Linux: AppImage / deb / rpm.
-          mv "ci-artifacts/channel-desktop-ubuntu-latest/Channel-"*".AppImage" dist/Channel-linux.AppImage
-          mv "ci-artifacts/channel-desktop-ubuntu-latest/"*"_amd64.deb"        dist/Channel-linux.deb
-          mv "ci-artifacts/channel-desktop-ubuntu-latest/"*".x86_64.rpm"       dist/Channel-linux.rpm
+          # electron-builder.yml sets artifactName per platform so the build
+          # outputs are already in the stable-URL form. Just move them into
+          # a single dist/ directory for gh release create. Universal mac
+          # build → one Channel-mac.dmg; arm64+x64 split is gone.
+          mv "ci-artifacts/channel-desktop-macos-14/Channel-mac.dmg"             dist/Channel-mac.dmg
+          mv "ci-artifacts/channel-desktop-windows-latest/Channel-Setup.exe"     dist/Channel-Setup.exe
+          mv "ci-artifacts/channel-desktop-ubuntu-latest/Channel-linux.AppImage" dist/Channel-linux.AppImage
+          mv "ci-artifacts/channel-desktop-ubuntu-latest/Channel-linux.deb"      dist/Channel-linux.deb
+          mv "ci-artifacts/channel-desktop-ubuntu-latest/Channel-linux.rpm"      dist/Channel-linux.rpm
           ls -la dist/
 
       - name: Force-update `dev` pre-release with new artifacts

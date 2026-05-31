@@ -33,8 +33,6 @@ win:
   target:
     - target: nsis
       arch: [x64]
-    - target: portable
-      arch: [x64]
   artifactName: "Channel-Setup.${ext}"
 linux:
   # Pin the executable name so the binary inside linux-unpacked/ matches
