@@ -534,4 +534,91 @@ describe("useChatStream", () => {
     expect(result.current.turns).toHaveLength(1);
     expect(result.current.turns[0].role).toBe("assistant");
   });
+
+  it("preserves optimistic turns when history-load resolves after send()", async () => {
+    // Covers the prev.length !== 0 branch of the history-merge setTurns:
+    // first-message-creates-chat flow has send() push optimistic turns
+    // BEFORE api.getChat resolves. The resolution must keep prev, not
+    // overwrite with messages (which would wipe SSE-target rows).
+    let resolveHistory;
+    api.getChat.mockReturnValueOnce(
+      new Promise((res) => {
+        resolveHistory = res;
+      }),
+    );
+    api.streamMessage.mockResolvedValue({
+      ok: true,
+      body: makeMockResponseBody([
+        { type: "user_persisted", msg_id: "user-x", seq: 0 },
+        { type: "delta", text: "ok" },
+        {
+          type: "done",
+          msg_id: "asst-x",
+          seq: 1,
+          model: "m",
+          input_tokens: 0,
+          output_tokens: 0,
+          stop_reason: "end_turn",
+        },
+      ]),
+    });
+
+    const { result } = renderHook(() => useChatStream("c1"));
+    // status starts at "loading-history" because chatId is set and the
+    // getChat promise hasn't resolved.
+
+    // Fire send WHILE history is still pending.
+    await act(async () => {
+      await result.current.send({ message: "hi", model: "m", effort: "med" });
+    });
+
+    // The optimistic + streamed turns are in place.
+    expect(result.current.turns.map((t) => t.role)).toEqual([
+      "user",
+      "assistant",
+    ]);
+
+    // Now history finally resolves with some leftover history rows.
+    // The merge should preserve the in-flight turns rather than
+    // overwriting them.
+    await act(async () => {
+      resolveHistory({
+        chat: { chat_id: "c1" },
+        messages: [{ msg_id: "hist-1", role: "user", text: "old" }],
+        next_cursor: null,
+      });
+    });
+
+    expect(result.current.turns.map((t) => t.msg_id)).toEqual([
+      "user-x",
+      "asst-x",
+    ]);
+  });
+
+  it("clears stale turns when switching chats (loadedChatIdRef branch)", async () => {
+    // Covers the loadedChatIdRef.current !== chatId branch: switching
+    // from one chat with turns to a different chat clears the old
+    // turns before the new history loads.
+    api.getChat
+      .mockResolvedValueOnce({
+        chat: { chat_id: "c1" },
+        messages: [{ msg_id: "old", role: "user", text: "old" }],
+        next_cursor: null,
+      })
+      .mockResolvedValueOnce({
+        chat: { chat_id: "c2" },
+        messages: [{ msg_id: "new", role: "user", text: "new" }],
+        next_cursor: null,
+      });
+
+    const { result, rerender } = renderHook(({ id }) => useChatStream(id), {
+      initialProps: { id: "c1" },
+    });
+    await waitFor(() => expect(result.current.status).toBe("idle"));
+    expect(result.current.turns[0].msg_id).toBe("old");
+
+    rerender({ id: "c2" });
+    await waitFor(() => expect(result.current.status).toBe("idle"));
+    expect(result.current.turns[0].msg_id).toBe("new");
+  });
 });

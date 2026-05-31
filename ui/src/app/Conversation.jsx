@@ -20,12 +20,13 @@ function resolveModel(modelId) {
 // to the raw value (acceptable visual debug hint).
 function modelLabel(raw) {
   if (!raw) return "";
-  // Strip inference-profile prefix (us./global.) AND vendor namespace
-  // AND any ``-v<N>`` version suffix to get back to the short id the
-  // SPA's MODELS array is keyed by (e.g. ``claude-opus-4-6``).
+  // Strip inference-profile prefix (us./global.) + vendor namespace +
+  // the trailing date-and-version suffix (e.g. ``-20251001-v1:0`` or
+  // ``-v1``) so we can match on the short id the SPA's MODELS array
+  // is keyed by (e.g. ``claude-opus-4-6``).
   const shortId = raw
     .replace(/^(us|global)\.anthropic\.|^anthropic\./, "")
-    .replace(/-v\d+$/, "");
+    .replace(/(-\d{8})?-v\d+(:\d+)?$/, "");
   const display = MODELS.find((m) => m.id === shortId);
   return display ? display.name : raw;
 }

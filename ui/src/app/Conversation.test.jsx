@@ -339,6 +339,48 @@ describe("Conversation", () => {
     expect(screen.queryByText(/^us\.anthropic\.|^anthropic\./)).toBeNull();
   });
 
+  it.each([
+    ["us.anthropic.claude-sonnet-4-6", "Claude Sonnet 4.6"],
+    ["us.anthropic.claude-opus-4-6-v1", "Claude Opus 4.6"],
+    ["us.anthropic.claude-haiku-4-5-20251001-v1:0", "Claude Haiku 4.5"],
+    ["anthropic.claude-sonnet-4-6", "Claude Sonnet 4.6"],
+    ["global.anthropic.claude-haiku-4-5-20251001-v1:0", "Claude Haiku 4.5"],
+  ])("modelLabel strips %s -> %s", (raw, expected) => {
+    mockStream({
+      turns: [
+        { role: "user", text: "hi", msg_id: "u1" },
+        {
+          role: "assistant",
+          text: "ok",
+          msg_id: "a1",
+          model: raw,
+          streaming: false,
+        },
+      ],
+    });
+    renderAt("/app/c/c1");
+    expect(screen.getByText(expected)).toBeInTheDocument();
+  });
+
+  it("falls back to raw model id when not found in MODELS", () => {
+    mockStream({
+      turns: [
+        { role: "user", text: "hi", msg_id: "u1" },
+        {
+          role: "assistant",
+          text: "ok",
+          msg_id: "a1",
+          model: "anthropic.totally-unknown-model",
+          streaming: false,
+        },
+      ],
+    });
+    renderAt("/app/c/c1");
+    expect(
+      screen.getByText("anthropic.totally-unknown-model"),
+    ).toBeInTheDocument();
+  });
+
   it("regenerate button calls hook.regenerate on the last assistant turn", () => {
     const regenerate = vi.fn();
     mockStream({

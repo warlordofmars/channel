@@ -27,12 +27,27 @@ export function useChatStream(chatId) {
   const [error, setError] = useState(null);
   const abortRef = useRef(null);
 
+  // Tracks the chatId of the most-recently-applied history install.
+  // Used to distinguish a real chatId change (user clicked a different
+  // chat in the sidebar — clear stale turns) from React StrictMode dev
+  // mode's intentional double-effect (cleanup → re-setup with the SAME
+  // chatId — must NOT clear, otherwise we wipe whatever optimistic
+  // turns send() just pushed and the SSE deltas land on nothing).
+  const loadedChatIdRef = useRef(null);
   useEffect(() => {
     if (!chatId) {
       setTurns([]);
       setStatus("idle");
+      loadedChatIdRef.current = null;
       return;
     }
+    if (
+      loadedChatIdRef.current !== null &&
+      loadedChatIdRef.current !== chatId
+    ) {
+      setTurns([]);
+    }
+    loadedChatIdRef.current = chatId;
     let cancelled = false;
     setStatus("loading-history");
     api
@@ -41,9 +56,7 @@ export function useChatStream(chatId) {
         if (cancelled) return;
         // Only install loaded history if the caller hasn't already
         // pushed optimistic turns (the first-message-creates-chat flow
-        // calls send() during the same mount; without this guard the
-        // empty-history response wipes the optimistic user + assistant
-        // turns and the SSE deltas land on rows that no longer exist).
+        // calls send() during the same mount).
         setTurns((prev) => (prev.length === 0 ? messages : prev));
         setStatus("idle");
       })

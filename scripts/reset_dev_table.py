@@ -22,6 +22,8 @@ Usage::
 
 from __future__ import annotations
 
+import os
+
 import boto3
 
 TABLE = "channel"
@@ -29,9 +31,10 @@ ENDPOINT = "http://localhost:8000"
 
 
 def main() -> None:
-    ddb = boto3.client(
-        "dynamodb", region_name="us-east-1", endpoint_url=ENDPOINT
+    region = os.environ.get("AWS_DEFAULT_REGION") or os.environ.get(
+        "AWS_REGION", "us-east-1"
     )
+    ddb = boto3.client("dynamodb", region_name=region, endpoint_url=ENDPOINT)
 
     try:
         ddb.delete_table(TableName=TABLE)

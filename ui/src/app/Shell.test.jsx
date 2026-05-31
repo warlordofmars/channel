@@ -141,8 +141,10 @@ describe("Shell", () => {
     expect(screen.getByText("Hello from the hook")).toBeTruthy();
   });
 
-  it("clicking 'New chat' calls createChat and navigates to /app/c/<new_id>", async () => {
-    mockCreateChat.mockResolvedValue({ chat_id: "new-123" });
+  it("clicking 'New chat' navigates to /app (the welcome screen) without creating a chat upfront", async () => {
+    // Mirrors Claude Desktop: the chat record is created lazily by
+    // ChatHome when the user sends their first message. The sidebar
+    // button is just navigation, no API call.
     let lastPath = null;
     function PathCatcher() {
       const { pathname } = useLocation();
@@ -150,7 +152,7 @@ describe("Shell", () => {
       return null;
     }
     render(
-      <MemoryRouter initialEntries={["/app"]}>
+      <MemoryRouter initialEntries={["/app/c/existing"]}>
         <Routes>
           <Route
             path="*"
@@ -164,7 +166,7 @@ describe("Shell", () => {
       </MemoryRouter>
     );
     fireEvent.click(screen.getByRole("button", { name: /new chat/i }));
-    await waitFor(() => expect(mockCreateChat).toHaveBeenCalledTimes(1));
-    await waitFor(() => expect(lastPath).toBe("/app/c/new-123"));
+    await waitFor(() => expect(lastPath).toBe("/app"));
+    expect(mockCreateChat).not.toHaveBeenCalled();
   });
 });
