@@ -139,6 +139,14 @@ app.include_router(chats_router, prefix="/api")
 # /models path isn't nested under chats_router's "/chats" prefix)
 app.include_router(models_router, prefix="/api")
 
+# Dev-only debug router (Phase 7c). Mounted ONLY when the env flag is
+# explicitly set; prod stacks must not set it. See channel_stack.py +
+# tests/unit/test_channel_stack.py for the deploy-time guard.
+if os.environ.get("STARTER_ENABLE_DEBUG_ENDPOINTS") == "1":
+    from channel.api._debug import router as debug_router
+
+    app.include_router(debug_router)
+
 
 @app.get("/health", include_in_schema=False)
 async def health() -> dict[str, str]:

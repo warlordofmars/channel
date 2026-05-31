@@ -153,7 +153,11 @@ async def _stream_bedrock_reply(
         state["user_msg_id"] = user_msg.msg_id
         yield sse_user_persisted(msg_id=user_msg.msg_id, seq=0)
 
-    agent = build_agent(model_id=model)
+    agent = build_agent(
+        model_id=model,
+        user_id=claims["sub"],
+        chat_id=chat.chat_id,
+    )
     accumulated: list[str] = []
     stop_reason = "end_turn"
     input_tokens = 0

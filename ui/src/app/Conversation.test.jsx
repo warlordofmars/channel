@@ -128,6 +128,32 @@ describe("Conversation", () => {
     renderAt("/app/c/c1");
     expect(document.body.querySelector(".cursor")).toBeTruthy();
     expect(screen.queryByTitle("Copy")).toBeNull();
+    // While streaming, the assistant turn must NOT advertise the
+    // ``assistant-turn-idle`` testid — the Playwright e2e blocks on this
+    // attribute to know the SSE turn has finished. Premature presence
+    // would race the e2e past mid-stream content.
+    expect(
+      document.body.querySelector('[data-testid="assistant-turn-idle"]'),
+    ).toBeNull();
+  });
+
+  it("tags settled assistant turns with data-testid=assistant-turn-idle", () => {
+    mockStream({
+      turns: [
+        {
+          msg_id: "a1",
+          role: "assistant",
+          text: "settled",
+          model: "Claude Sonnet 4.6",
+          streaming: false,
+        },
+      ],
+    });
+    renderAt("/app/c/c1");
+    const settled = document.body.querySelectorAll(
+      '[data-testid="assistant-turn-idle"]',
+    );
+    expect(settled).toHaveLength(1);
   });
 
   it("shows the message-actions row on a completed assistant turn", () => {
