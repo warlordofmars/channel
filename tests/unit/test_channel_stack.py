@@ -99,12 +99,15 @@ def test_lambda_role_grants_agentcore_write_and_lookup_actions(dev_template):
     Policy resources at synth time."""
 
     policies = dev_template.find_resources("AWS::IAM::Policy")
+    # IAM action prefix is ``bedrock-agentcore:`` for both planes — see
+    # channel_stack.py comment for the Service Authorization Reference
+    # citation.
     required = {
         "bedrock-agentcore:CreateEvent",
         "bedrock-agentcore:ListEvents",
-        "bedrock-agentcore-control:CreateMemory",
-        "bedrock-agentcore-control:GetMemory",
-        "bedrock-agentcore-control:ListMemories",
+        "bedrock-agentcore:CreateMemory",
+        "bedrock-agentcore:GetMemory",
+        "bedrock-agentcore:ListMemories",
     }
     granted: set[str] = set()
     for pol in policies.values():
