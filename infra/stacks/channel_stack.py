@@ -636,6 +636,35 @@ class ChannelStack(cdk.Stack):
                         managed_rule_group_statement=wafv2.CfnWebACL.ManagedRuleGroupStatementProperty(
                             vendor_name="AWS",
                             name="AWSManagedRulesCommonRuleSet",
+                            # GenericRFI_QUERYARGUMENTS blocks query strings
+                            # containing `://` patterns (a heuristic for Remote
+                            # File Inclusion attacks). The desktop OAuth flow
+                            # legitimately passes a
+                            #   desktop_callback=http://127.0.0.1:<port>/callback
+                            # loopback URL — exactly the pattern this rule blocks.
+                            # Without this override, /auth/login with a
+                            # desktop_callback returns 403 from the WAF, which
+                            # CloudFront's error_responses swap to the SPA
+                            # index.html (200 text/html) and the desktop app's
+                            # sign-in flow silently breaks.
+                            #
+                            # Downgrading the single rule to `count` mode keeps
+                            # it logging to CloudWatch (so we can spot real
+                            # attacks) but stops blocking. RFI protection on
+                            # query args is largely redundant with the
+                            # application-level input validation in
+                            # mgmt_auth._validate_desktop_callback (enforces
+                            # loopback host + /callback path + no fragments
+                            # or extra query). All other CommonRuleSet rules
+                            # (SQLi, XSS, etc.) remain in block mode.
+                            rule_action_overrides=[
+                                wafv2.CfnWebACL.RuleActionOverrideProperty(
+                                    name="GenericRFI_QUERYARGUMENTS",
+                                    action_to_use=wafv2.CfnWebACL.RuleActionProperty(
+                                        count={},
+                                    ),
+                                ),
+                            ],
                         ),
                     ),
                     visibility_config=wafv2.CfnWebACL.VisibilityConfigProperty(
