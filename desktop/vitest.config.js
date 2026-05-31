@@ -10,7 +10,7 @@ export default defineConfig({
     coverage: {
       provider: "v8",
       reporter: ["text", "lcov"],
-      include: ["main/**/*.js", "preload/**/*.js"],
+      include: ["main/**/*.js", "preload/**/*.js", "scripts/notarize.js"],
       exclude: ["main/index.js"],
       thresholds: {
         lines: 100,
