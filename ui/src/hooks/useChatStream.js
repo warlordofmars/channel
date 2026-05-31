@@ -52,12 +52,22 @@ export function useChatStream(chatId) {
     };
   }, [chatId]);
 
+  // Separate effect: abort any in-flight stream when chatId changes or
+  // the component unmounts. Without this, the reader loop below would
+  // keep writing setTurns against the previous chat's optimistic IDs
+  // after the user navigates away.
+  useEffect(() => {
+    return () => {
+      abortRef.current?.abort();
+    };
+  }, [chatId]);
+
   const send = useCallback(
     async ({ message, model, effort, attachments }) => {
       if (!chatId) return;
       setError(null);
-      const tempUserId = `tmp-u-${Date.now()}`;
-      const tempAsstId = `tmp-a-${Date.now()}`;
+      const tempUserId = `tmp-u-${crypto.randomUUID()}`;
+      const tempAsstId = `tmp-a-${crypto.randomUUID()}`;
       setTurns((prev) => [
         ...prev,
         { msg_id: tempUserId, role: "user", text: message, pending: true },
@@ -91,45 +101,56 @@ export function useChatStream(chatId) {
       // Reader loop: each chunk feeds the stateful SSE decoder which
       // hands back complete events. The decoder buffers partial events
       // across chunk boundaries so we never JSON.parse a half-line.
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        const events = sse.feed(decoder.decode(value, { stream: true }));
-        for (const event of events) {
-          if (event.type === "user_persisted") {
-            setTurns((prev) =>
-              prev.map((t) =>
-                t.msg_id === tempUserId
-                  ? { ...t, msg_id: event.msg_id, pending: false }
-                  : t,
-              ),
-            );
-          } else if (event.type === "delta") {
-            setTurns((prev) =>
-              prev.map((t) =>
-                t.msg_id === tempAsstId
-                  ? { ...t, text: t.text + event.text }
-                  : t,
-              ),
-            );
-          } else if (event.type === "done") {
-            setTurns((prev) =>
-              prev.map((t) =>
-                t.msg_id === tempAsstId
-                  ? {
-                      ...t,
-                      msg_id: event.msg_id,
-                      streaming: false,
-                      model: event.model,
-                      input_tokens: event.input_tokens,
-                      output_tokens: event.output_tokens,
-                    }
-                  : t,
-              ),
-            );
-            setStatus("idle");
+      //
+      // try/catch wraps the loop because AbortController.abort() (from
+      // chatId change or unmount) causes reader.read() to reject. The
+      // abort is user-initiated so we bail out silently — state remains
+      // in whatever partial form it reached.
+      try {
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          const events = sse.feed(decoder.decode(value, { stream: true }));
+          for (const event of events) {
+            if (event.type === "user_persisted") {
+              setTurns((prev) =>
+                prev.map((t) =>
+                  t.msg_id === tempUserId
+                    ? { ...t, msg_id: event.msg_id, pending: false }
+                    : t,
+                ),
+              );
+            } else if (event.type === "delta") {
+              setTurns((prev) =>
+                prev.map((t) =>
+                  t.msg_id === tempAsstId
+                    ? { ...t, text: t.text + event.text }
+                    : t,
+                ),
+              );
+            } else if (event.type === "done") {
+              setTurns((prev) =>
+                prev.map((t) =>
+                  t.msg_id === tempAsstId
+                    ? {
+                        ...t,
+                        msg_id: event.msg_id,
+                        streaming: false,
+                        model: event.model,
+                        input_tokens: event.input_tokens,
+                        output_tokens: event.output_tokens,
+                      }
+                    : t,
+                ),
+              );
+              setStatus("idle");
+            }
           }
         }
+      } catch {
+        // Reader aborted or errored — bail out silently. Abort is
+        // user-initiated (chatId change / unmount / explicit abort()),
+        // so no error surface needed.
       }
     },
     [chatId],

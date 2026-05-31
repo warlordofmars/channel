@@ -318,6 +318,88 @@ describe("useChatStream", () => {
     });
   });
 
+  it("aborts the in-flight stream when chatId changes", async () => {
+    // First chat: history loads, then stream starts but doesn't complete.
+    api.getChat.mockResolvedValueOnce({
+      chat: { chat_id: "c1" },
+      messages: [],
+      next_cursor: null,
+    });
+
+    // Construct a never-completing stream so we can observe abort.
+    const neverComplete = new ReadableStream({
+      start(controller) {
+        const encoder = new TextEncoder();
+        controller.enqueue(
+          encoder.encode('data: {"type":"delta","text":"x"}\n\n'),
+        );
+        // Never close.
+      },
+    });
+
+    let capturedSignal;
+    api.streamMessage.mockImplementationOnce((_chatId, opts) => {
+      capturedSignal = opts.signal;
+      return Promise.resolve({ ok: true, body: neverComplete });
+    });
+
+    // Second chat: history fetch only, no streaming.
+    api.getChat.mockResolvedValueOnce({
+      chat: { chat_id: "c2" },
+      messages: [],
+      next_cursor: null,
+    });
+
+    const { result, rerender } = renderHook(({ id }) => useChatStream(id), {
+      initialProps: { id: "c1" },
+    });
+    await waitFor(() => expect(result.current.status).toBe("idle"));
+
+    // Start the never-completing stream.
+    act(() => {
+      result.current.send({ message: "hi" });
+    });
+
+    // Switch to a different chat while the stream is still in flight.
+    rerender({ id: "c2" });
+
+    // The captured signal from the first send should now be aborted.
+    await waitFor(() => expect(capturedSignal.aborted).toBe(true));
+  });
+
+  it("aborts the in-flight stream on unmount", async () => {
+    api.getChat.mockResolvedValue({
+      chat: { chat_id: "c1" },
+      messages: [],
+      next_cursor: null,
+    });
+
+    const neverComplete = new ReadableStream({
+      start(controller) {
+        const encoder = new TextEncoder();
+        controller.enqueue(
+          encoder.encode('data: {"type":"delta","text":"x"}\n\n'),
+        );
+      },
+    });
+
+    let capturedSignal;
+    api.streamMessage.mockImplementationOnce((_chatId, opts) => {
+      capturedSignal = opts.signal;
+      return Promise.resolve({ ok: true, body: neverComplete });
+    });
+
+    const { result, unmount } = renderHook(() => useChatStream("c1"));
+    await waitFor(() => expect(result.current.status).toBe("idle"));
+
+    act(() => {
+      result.current.send({ message: "hi" });
+    });
+
+    unmount();
+    await waitFor(() => expect(capturedSignal.aborted).toBe(true));
+  });
+
   it("leaves unrelated turns untouched while streaming (false-branch of msg_id map)", async () => {
     // Seed history with an existing turn so the per-event setTurns map
     // hits its false branch (existing turn's msg_id !== tempUserId/tempAsstId).
