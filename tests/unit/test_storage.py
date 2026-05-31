@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from boto3.dynamodb.conditions import And, BeginsWith, ConditionBase, Equals
 
 from channel.models import MessageRole
 from channel.storage import (
@@ -23,6 +24,32 @@ from channel.storage import (
     put_message,
     update_chat_index,
 )
+
+
+def _extract_conditions(expr: ConditionBase) -> dict[str, tuple[str, Any]]:
+    """Walk a boto3 condition tree, returning ``{attr_name: (op, value)}``.
+
+    Mirrors enough of the real ``KeyConditionExpression`` shape that
+    ``FakeTable.query`` can filter on real condition objects produced by
+    ``Key(...).eq(...) & Key(...).begins_with(...)`` — the same form
+    used against real DynamoDB by ``channel.storage``.
+    """
+
+    result: dict[str, tuple[str, Any]] = {}
+
+    def walk(node: ConditionBase) -> None:
+        if isinstance(node, And):
+            for child in node._values:
+                walk(child)
+        elif isinstance(node, Equals):
+            attr, value = node._values
+            result[attr.name] = ("eq", value)
+        elif isinstance(node, BeginsWith):
+            attr, value = node._values
+            result[attr.name] = ("begins_with", value)
+
+    walk(expr)
+    return result
 
 
 class FakeTable:
@@ -40,22 +67,25 @@ class FakeTable:
         return {"Item": item} if item else {}
 
     def query(self, **kwargs: Any) -> dict[str, Any]:
-        index = kwargs.get("IndexName")
-        if index == "ChatByIdIndex":
-            pk_value = kwargs["KeyConditionExpression"]
-            items = [
-                item
-                for item in self.items.values()
-                if item.get("GSI3PK") == pk_value and item.get("GSI3SK") == "META"
-            ]
-            return {"Items": items}
-        # Main table query: PK begins_with(SK, prefix) or full
-        pk = kwargs["pk"]
-        sk_prefix = kwargs.get("sk_prefix", "")
+        conds = _extract_conditions(kwargs["KeyConditionExpression"])
         limit = kwargs.get("Limit")
         scan_forward = kwargs.get("ScanIndexForward", True)
+
+        def matches(item: dict[str, Any]) -> bool:
+            for attr, (op, value) in conds.items():
+                actual = item.get(attr)
+                if op == "eq" and actual != value:
+                    return False
+                if op == "begins_with" and not (
+                    isinstance(actual, str) and actual.startswith(value)
+                ):
+                    return False
+            return True
+
+        # Sort by SK for main-table queries; the GSI lookup is single-row
+        # and unaffected by sort direction in this fake.
         items = sorted(
-            (i for i in self.items.values() if i["PK"] == pk and i["SK"].startswith(sk_prefix)),
+            (i for i in self.items.values() if matches(i)),
             key=lambda i: i["SK"],
             reverse=not scan_forward,
         )

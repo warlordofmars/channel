@@ -23,6 +23,7 @@ from itertools import count
 from typing import Any
 
 import boto3
+from boto3.dynamodb.conditions import Key
 
 from channel.models import Chat, Message, MessageRole
 
@@ -102,7 +103,7 @@ def get_chat_by_id(chat_id: str) -> Chat | None:
 
     result = _table().query(
         IndexName=_CHAT_INDEX_GSI,
-        KeyConditionExpression=f"CHAT_ID#{chat_id}",
+        KeyConditionExpression=Key("GSI3PK").eq(f"CHAT_ID#{chat_id}") & Key("GSI3SK").eq("META"),
     )
     items = result.get("Items") or []
     if not items:
@@ -116,8 +117,9 @@ def list_chats_for_user(
     """List chats for a user, newest first, paginated by SK cursor."""
 
     kwargs: dict[str, Any] = {
-        "pk": f"USER#{user_id}",
-        "sk_prefix": "CHAT#",
+        "KeyConditionExpression": (
+            Key("PK").eq(f"USER#{user_id}") & Key("SK").begins_with("CHAT#")
+        ),
         "Limit": limit,
         "ScanIndexForward": False,
     }
@@ -178,8 +180,7 @@ def list_messages(
     chat_id: str, *, limit: int, cursor: Any | None
 ) -> tuple[list[Message], Any | None]:
     kwargs: dict[str, Any] = {
-        "pk": f"CHAT#{chat_id}",
-        "sk_prefix": "MSG#",
+        "KeyConditionExpression": (Key("PK").eq(f"CHAT#{chat_id}") & Key("SK").begins_with("MSG#")),
         "Limit": limit,
         "ScanIndexForward": True,
     }
