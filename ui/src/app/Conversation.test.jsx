@@ -407,7 +407,7 @@ describe("Conversation", () => {
     ).toBeInTheDocument();
   });
 
-  it("regenerate button calls hook.regenerate on the last assistant turn", () => {
+  it("retry icon on the last assistant turn calls hook.regenerate", () => {
     const regenerate = vi.fn();
     mockStream({
       turns: [
@@ -417,11 +417,11 @@ describe("Conversation", () => {
       regenerate,
     });
     renderAt("/app/c/c1");
-    fireEvent.click(screen.getByText("Regenerate"));
+    fireEvent.click(screen.getByTitle("Retry"));
     expect(regenerate).toHaveBeenCalled();
   });
 
-  it("regenerate button is hidden while streaming", () => {
+  it("retry icon is absent on the streaming assistant turn (msg-actions hidden)", () => {
     mockStream({
       turns: [
         { role: "user", text: "hi", msg_id: "u1" },
@@ -430,22 +430,11 @@ describe("Conversation", () => {
       status: "streaming",
     });
     renderAt("/app/c/c1");
-    expect(screen.queryByText("Regenerate")).toBeNull();
+    expect(screen.queryByTitle("Retry")).toBeNull();
   });
 
-  it("regenerate button is hidden when last turn is a user message", () => {
-    mockStream({
-      turns: [
-        { role: "user", text: "hi", msg_id: "u1" },
-        { role: "assistant", text: "ok", msg_id: "a1", streaming: false },
-        { role: "user", text: "hi again", msg_id: "u2" },
-      ],
-    });
-    renderAt("/app/c/c1");
-    expect(screen.queryByText("Regenerate")).toBeNull();
-  });
-
-  it("regenerate button is hidden on earlier (non-last) assistant turns", () => {
+  it("retry icon on earlier (non-last) assistant turns is disabled", () => {
+    const regenerate = vi.fn();
     mockStream({
       turns: [
         { role: "user", text: "hi", msg_id: "u1" },
@@ -453,9 +442,27 @@ describe("Conversation", () => {
         { role: "user", text: "hi again", msg_id: "u2" },
         { role: "assistant", text: "second", msg_id: "a2", streaming: false },
       ],
+      regenerate,
     });
     renderAt("/app/c/c1");
-    const buttons = screen.queryAllByText("Regenerate");
-    expect(buttons).toHaveLength(1);
+    const retries = screen.getAllByTitle("Retry");
+    expect(retries).toHaveLength(2);
+    // Earlier assistant turn — disabled.
+    expect(retries[0]).toBeDisabled();
+    // Last assistant turn — enabled.
+    expect(retries[1]).not.toBeDisabled();
+    fireEvent.click(retries[1]);
+    expect(regenerate).toHaveBeenCalledTimes(1);
+  });
+
+  it("standalone 'Regenerate' text button is no longer rendered", () => {
+    mockStream({
+      turns: [
+        { role: "user", text: "hi", msg_id: "u1" },
+        { role: "assistant", text: "ok", msg_id: "a1", streaming: false },
+      ],
+    });
+    renderAt("/app/c/c1");
+    expect(screen.queryByText("Regenerate")).toBeNull();
   });
 });

@@ -94,8 +94,12 @@ export default function Conversation() {
           )}
           {turns.map((t, i) => {
             const isLast = i === turns.length - 1;
-            const showRegenerate =
+            // Retry icon is the canonical regenerate trigger. It's the
+            // last assistant turn's responsibility; older turns get a
+            // no-op so the row layout stays consistent.
+            const retryEnabled =
               isLast && t.role === "assistant" && !t.streaming;
+            const onRetry = retryEnabled ? () => regenerate({}) : noop;
             return t.role === "user" ? (
               <div className="turn user" key={t.msg_id}>
                 {t.atts && t.atts.length > 0 && (
@@ -144,7 +148,13 @@ export default function Conversation() {
                     <button type="button" className="icon-btn" title="Copy" onClick={noop}>
                       <Icon name="copy" size={16} />
                     </button>
-                    <button type="button" className="icon-btn" title="Retry" onClick={noop}>
+                    <button
+                      type="button"
+                      className="icon-btn"
+                      title="Retry"
+                      onClick={onRetry}
+                      disabled={!retryEnabled}
+                    >
                       <Icon name="refresh" size={16} />
                     </button>
                     <button type="button" className="icon-btn" title="Good" onClick={noop}>
@@ -154,15 +164,6 @@ export default function Conversation() {
                       <Icon name="thumb-down" size={16} />
                     </button>
                   </div>
-                )}
-                {showRegenerate && (
-                  <button
-                    type="button"
-                    className="msg-action"
-                    onClick={() => regenerate({})}
-                  >
-                    Regenerate
-                  </button>
                 )}
               </div>
             );
