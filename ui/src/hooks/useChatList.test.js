@@ -69,6 +69,37 @@ describe("useChatList", () => {
     expect(result.current.chats[1].title).toBe("Other");
   });
 
+  it("renameChatLocal updates the matching chat's title without calling the server", async () => {
+    api.listChats.mockResolvedValue({
+      items: [
+        { chat_id: "a", title: "Old A" },
+        { chat_id: "b", title: "Old B" },
+      ],
+      next_cursor: null,
+    });
+    api.patchChat.mockClear();
+    const { result } = renderHook(() => useChatList());
+    await waitFor(() => expect(result.current.status).toBe("idle"));
+
+    act(() => result.current.renameChatLocal("a", "New A"));
+    expect(result.current.chats[0].title).toBe("New A");
+    expect(result.current.chats[1].title).toBe("Old B");
+    // Phase 7d: server has already persisted; client must NOT re-PATCH.
+    expect(api.patchChat).not.toHaveBeenCalled();
+  });
+
+  it("renameChatLocal is a no-op for an unknown chat_id", async () => {
+    api.listChats.mockResolvedValue({
+      items: [{ chat_id: "a", title: "Original" }],
+      next_cursor: null,
+    });
+    const { result } = renderHook(() => useChatList());
+    await waitFor(() => expect(result.current.status).toBe("idle"));
+
+    act(() => result.current.renameChatLocal("missing", "x"));
+    expect(result.current.chats[0].title).toBe("Original");
+  });
+
   it("optimistically archives a chat", async () => {
     api.listChats.mockResolvedValue({
       items: [{ chat_id: "a", archived: false }],

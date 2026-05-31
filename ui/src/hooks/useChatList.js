@@ -43,10 +43,34 @@ export function useChatList() {
     await api.patchChat(chatId, { title });
   }, []);
 
+  /**
+   * Local-only rename — does NOT call the server. Phase 7d auto-title
+   * uses this when the backend emits a ``title_suggested`` SSE event:
+   * the server has already persisted the new title via storage.patch_chat,
+   * so the client only needs to update its in-memory state.
+   *
+   * No-op if ``chatId`` doesn't match any local row (e.g., the chat
+   * list hasn't been refetched yet); the next refresh picks up the
+   * persisted title.
+   */
+  const renameChatLocal = useCallback((chatId, title) => {
+    setChats((prev) =>
+      prev.map((c) => (c.chat_id === chatId ? { ...c, title } : c)),
+    );
+  }, []);
+
   const archiveChat = useCallback(async (chatId) => {
     setChats((prev) => prev.filter((c) => c.chat_id !== chatId));
     await api.patchChat(chatId, { archived: true });
   }, []);
 
-  return { chats, status, refresh, createChat, renameChat, archiveChat };
+  return {
+    chats,
+    status,
+    refresh,
+    createChat,
+    renameChat,
+    renameChatLocal,
+    archiveChat,
+  };
 }

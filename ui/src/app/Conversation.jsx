@@ -5,6 +5,7 @@ import ChannelMark from "../components/ChannelMark.jsx";
 import Composer from "./Composer.jsx";
 import Icon from "../components/Icon.jsx";
 import { useChannelPrefs } from "../hooks/useChannelPrefs.js";
+import { useChats } from "../hooks/ChatsContext.jsx";
 import { useChatStream } from "../hooks/useChatStream.js";
 import { renderMarkdown } from "./renderMarkdown.jsx";
 import { MODELS } from "./data.js";
@@ -55,7 +56,13 @@ export default function Conversation() {
   const { id: chatId } = useParams();
   const location = useLocation();
   const navigate = useNavigate();
-  const { turns, send, regenerate, status } = useChatStream(chatId);
+  const chats = useChats();
+  const { turns, send, regenerate, status } = useChatStream(chatId, {
+    // Phase 7d: backend auto-titles fresh chats after the first reply
+    // and emits a ``title_suggested`` SSE event. Update the sidebar
+    // immediately (server already persisted via storage.patch_chat).
+    onTitleSuggested: (title) => chats.renameChatLocal(chatId, title),
+  });
   const prefs = useChannelPrefs();
   const ref = useRef(null);
   const sentFirstRef = useRef(false);

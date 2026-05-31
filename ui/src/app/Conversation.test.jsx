@@ -11,7 +11,20 @@ vi.mock("../hooks/useChatStream.js", () => ({
   useChatStream: vi.fn(),
 }));
 
+vi.mock("../hooks/ChatsContext.jsx", () => ({
+  useChats: vi.fn(() => ({
+    chats: [],
+    renameChatLocal: vi.fn(),
+    renameChat: vi.fn(),
+    archiveChat: vi.fn(),
+    createChat: vi.fn(),
+    refresh: vi.fn(),
+    status: "idle",
+  })),
+}));
+
 import * as useChatStreamModule from "../hooks/useChatStream.js";
+import * as useChatsModule from "../hooks/ChatsContext.jsx";
 
 function mockStream(overrides = {}) {
   const ret = {
@@ -60,7 +73,10 @@ describe("Conversation", () => {
   it("passes the URL :id through to useChatStream", () => {
     mockStream();
     renderAt("/app/c/c-123");
-    expect(useChatStreamModule.useChatStream).toHaveBeenCalledWith("c-123");
+    expect(useChatStreamModule.useChatStream).toHaveBeenCalledWith(
+      "c-123",
+      expect.objectContaining({ onTitleSuggested: expect.any(Function) }),
+    );
   });
 
   it("renders a user turn from useChatStream.turns", () => {
@@ -336,6 +352,31 @@ describe("Conversation", () => {
     const stream = mockStream();
     renderAt("/app/c/c1");
     expect(stream.send).not.toHaveBeenCalled();
+  });
+
+  it("forwards title_suggested via onTitleSuggested → ChatsContext.renameChatLocal", () => {
+    const renameChatLocal = vi.fn();
+    useChatsModule.useChats.mockReturnValueOnce({
+      chats: [],
+      renameChatLocal,
+      renameChat: vi.fn(),
+      archiveChat: vi.fn(),
+      createChat: vi.fn(),
+      refresh: vi.fn(),
+      status: "idle",
+    });
+    mockStream();
+    renderAt("/app/c/c-abc");
+
+    // Capture the options bag Conversation passed to useChatStream.
+    const args = useChatStreamModule.useChatStream.mock.calls[0];
+    expect(args[0]).toBe("c-abc");
+    const { onTitleSuggested } = args[1];
+
+    // Simulate the SSE event firing.
+    onTitleSuggested("Fresh title");
+
+    expect(renameChatLocal).toHaveBeenCalledWith("c-abc", "Fresh title");
   });
 
   it("does NOT send when chatId is falsy (route doesn't match)", () => {
