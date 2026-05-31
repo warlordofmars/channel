@@ -121,3 +121,123 @@ def test_get_or_create_memory_respects_override_env_var(monkeypatch):
 
     with patch("channel.agents.memory.boto3.client", return_value=fake_control):
         assert get_or_create_memory("jc") == "preexisting-mem-Q1"
+
+
+# ---------------------------------------------------------------------------
+# AgentCoreMemoryHook
+# ---------------------------------------------------------------------------
+
+from unittest.mock import AsyncMock  # noqa: E402
+
+from strands.hooks.events import AfterInvocationEvent  # noqa: E402
+
+from channel.agents.memory import AgentCoreMemoryHook  # noqa: E402
+
+
+def _fake_event_with_messages(messages: list[dict[str, Any]]) -> MagicMock:
+    fake_agent = MagicMock()
+    fake_agent.messages = messages
+    fake_event = MagicMock()
+    fake_event.agent = fake_agent
+    return fake_event
+
+
+def test_hook_registers_after_invocation_callback():
+    hook = AgentCoreMemoryHook(
+        memory_id="m-1", actor_id="user-abc", session_id="chat-xyz",
+    )
+
+    registry = MagicMock()
+    hook.register_hooks(registry)
+
+    registry.add_callback.assert_called_once()
+    args, _ = registry.add_callback.call_args
+    assert args[0] is AfterInvocationEvent
+
+
+@pytest.mark.asyncio
+async def test_hook_writes_create_event_on_after_invocation():
+    fake_client = MagicMock()
+    fake_client.create_event.return_value = {"event": {"eventId": "evt-1"}}
+
+    hook = AgentCoreMemoryHook(
+        memory_id="m-1",
+        actor_id="user-abc",
+        session_id="chat-xyz",
+        client=fake_client,
+    )
+
+    event = _fake_event_with_messages([
+        {"role": "user", "content": [{"text": "hi"}]},
+        {"role": "assistant", "content": [{"text": "hello"}]},
+    ])
+
+    with patch(
+        "channel.agents.memory.record_memory_write_outcome",
+        new=AsyncMock(),
+    ) as mock_record:
+        await hook._on_after_invocation_async(event)
+
+    fake_client.create_event.assert_called_once()
+    kwargs = fake_client.create_event.call_args.kwargs
+    assert kwargs["memoryId"] == "m-1"
+    assert kwargs["actorId"] == "user-abc"
+    assert kwargs["sessionId"] == "chat-xyz"
+    assert len(kwargs["payload"]) == 2
+    assert kwargs["payload"][0]["conversational"]["content"]["text"] == "hi"
+    mock_record.assert_awaited_once_with(success=True)
+
+
+@pytest.mark.asyncio
+async def test_hook_swallows_exceptions_and_emits_failure_metric():
+    fake_client = MagicMock()
+    fake_client.create_event.side_effect = RuntimeError("agentcore down")
+
+    hook = AgentCoreMemoryHook(
+        memory_id="m-1", actor_id="a", session_id="s", client=fake_client,
+    )
+
+    event = _fake_event_with_messages([
+        {"role": "user", "content": [{"text": "hi"}]},
+        {"role": "assistant", "content": [{"text": "hello"}]},
+    ])
+
+    with patch(
+        "channel.agents.memory.record_memory_write_outcome",
+        new=AsyncMock(),
+    ) as mock_record:
+        # MUST NOT raise — write failures are swallowed.
+        await hook._on_after_invocation_async(event)
+
+    mock_record.assert_awaited_once_with(success=False)
+
+
+def test_hook_after_invocation_fires_and_forgets():
+    """The sync callback must fire-and-forget via asyncio.create_task,
+    not block the agent loop."""
+    hook = AgentCoreMemoryHook(memory_id="m", actor_id="a", session_id="s")
+
+    event = _fake_event_with_messages([
+        {"role": "user", "content": [{"text": "hi"}]},
+        {"role": "assistant", "content": [{"text": "hello"}]},
+    ])
+
+    scheduled: list[Any] = []
+
+    def _record(coro: Any) -> Any:
+        scheduled.append(coro)
+        coro.close()  # silence "coroutine was never awaited"
+        return MagicMock()
+
+    with patch("channel.agents.memory.asyncio.create_task", side_effect=_record):
+        hook._on_after_invocation(event)
+
+    assert len(scheduled) == 1
+
+
+def test_hook_default_client_is_bedrock_agentcore():
+    """Sanity: the default client is bedrock-agentcore (not control plane)."""
+    with patch("channel.agents.memory.boto3.client") as mock_client:
+        AgentCoreMemoryHook(memory_id="m", actor_id="a", session_id="s")
+
+    mock_client.assert_called_once_with("bedrock-agentcore")
