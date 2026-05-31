@@ -3,7 +3,13 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import ProjectDetail from "./ProjectDetail.jsx";
-import { PROJECTS, PROJECT_DOCS, RECENTS } from "../data.js";
+import { PROJECTS, PROJECT_DOCS } from "../data.js";
+
+// Mirrors PROJECT_CHATS_PLACEHOLDER in ProjectDetail.jsx — first row only.
+// Kept local so the component remains free to evolve its placeholder list
+// without breaking these tests beyond the assertions that actually matter
+// (row count + first-row title + nav target).
+const FIRST_PROJECT_CHAT = { id: "r1", title: "Home server backup strategy" };
 import { __resetChannelPrefsForTest } from "../../hooks/useChannelPrefs.js";
 
 function renderAt(path) {
@@ -60,17 +66,17 @@ describe("ProjectDetail", () => {
     }
   });
 
-  it("renders the first 6 RECENTS as 'Chats in this project' entries", () => {
+  it("renders 6 placeholder 'Chats in this project' entries", () => {
     const { container } = renderAt("/app/projects/p1");
     const rows = container.querySelectorAll(".proj-chat");
     expect(rows.length).toBe(6);
-    expect(rows[0].textContent).toContain(RECENTS[0].title);
+    expect(rows[0].textContent).toContain(FIRST_PROJECT_CHAT.title);
   });
 
-  it("clicking a chat row navigates to /app/c/<that-recent-id>", () => {
+  it("clicking a chat row navigates to /app/c/<that-chat-id>", () => {
     const { getLastPath } = renderAt("/app/projects/p1");
-    fireEvent.click(screen.getByText(RECENTS[0].title));
-    expect(getLastPath()).toBe(`/app/c/${RECENTS[0].id}`);
+    fireEvent.click(screen.getByText(FIRST_PROJECT_CHAT.title));
+    expect(getLastPath()).toBe(`/app/c/${FIRST_PROJECT_CHAT.id}`);
   });
 
   it("clicking the back button navigates to /app/projects", () => {
@@ -88,7 +94,7 @@ describe("ProjectDetail", () => {
     expect(raw).toBeTruthy();
     const payload = JSON.parse(raw);
     expect(payload.text).toBe("kick off a new chat");
-    expect(payload.modelId).toBe("claude-opus-4-8");
+    expect(payload.modelId).toBe("claude-opus-4-7");
     expect(payload.effort).toBe("High");
     expect(getLastPath()).toBe("/app/c/new");
   });
@@ -136,20 +142,20 @@ describe("ProjectDetail", () => {
     __resetChannelPrefsForTest();
     renderAt("/app/projects/p1");
     // Sending should still work — Composer renders the first MODELS entry's short name.
-    expect(screen.getByRole("button", { name: /Opus 4.8/i })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Opus 4.7/i })).toBeTruthy();
     const ta = screen.getByRole("textbox");
     fireEvent.change(ta, { target: { value: "with fallback model" } });
     fireEvent.click(screen.getByTitle("Send"));
     const payload = JSON.parse(sessionStorage.getItem("channel-pending-send"));
-    expect(payload.modelId).toBe("claude-opus-4-8");
+    expect(payload.modelId).toBe("claude-opus-4-7");
   });
 
   it("picking a different model in the Composer persists via setModel", () => {
-    storage["channel-model"] = "claude-opus-4-8";
+    storage["channel-model"] = "claude-opus-4-7";
     __resetChannelPrefsForTest();
     renderAt("/app/projects/p1");
     // Open the ModelPicker via the current-model button in the Composer.
-    fireEvent.click(screen.getByRole("button", { name: /Opus 4.8/i }));
+    fireEvent.click(screen.getByRole("button", { name: /Opus 4.7/i }));
     fireEvent.click(screen.getByText("Claude Haiku 4.5"));
     expect(storage["channel-model"]).toBe("claude-haiku-4-5");
   });

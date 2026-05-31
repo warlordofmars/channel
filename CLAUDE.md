@@ -30,10 +30,13 @@ channel/
 │       │   └── mgmt_auth.py   # Management API authentication
 │       ├── agents/
 │       │   ├── __init__.py
-│       │   ├── bedrock.py     # Converse + converse_stream (raw Bedrock)
-│       │   └── inline_agent.py # invoke + invoke_stream (Bedrock inline agent)
+│       │   ├── chat_agent.py   # Strands Agent factory (build_agent / resolve_model_id)
+│       │   └── strands_sse.py  # Strands event → SSE byte translator
 │       └── api/
 │           ├── main.py        # FastAPI app + routes
+│           ├── _auth.py       # Shared mgmt-JWT dependency for /api/* routes
+│           ├── chats.py       # Chat CRUD + SSE streaming + regenerate
+│           ├── models.py      # GET /api/models — server allowlist
 │           └── csp.py         # CSP violation reporting endpoint
 ├── ui/
 │   ├── index.html             # Vite entry HTML
@@ -50,8 +53,10 @@ channel/
 │   │   │   ├── auth.js        # parseToken, isTokenValid, TOKEN_KEY
 │   │   │   └── utils.js       # cn (class-name join via clsx)
 │   │   ├── hooks/
-│   │   │   ├── useChannelPrefs.js  # theme/accent/density/shape/font/model/effort + siteTheme
-│   │   │   ├── useMockStream.js    # Mock chat streamer (Phase 6d; swapped for real Bedrock later)
+│   │   │   ├── useChannelPrefs.js   # theme/accent/density/shape/font/model/effort + siteTheme
+│   │   │   ├── useChatList.js       # Sidebar Recents + optimistic create/rename/archive
+│   │   │   ├── useChatStream.js     # SSE chat stream: history load, send, abort, status/error
+│   │   │   ├── ChatsContext.jsx     # ChatsProvider + useChats() — single useChatList instance app-wide
 │   │   │   └── useRelativeTime.js
 │   │   ├── components/
 │   │   │   ├── AuthGate.jsx       # Redirects /app/* visits to /app/login when no JWT
@@ -62,7 +67,7 @@ channel/
 │   │   │   ├── Nav.jsx, Footer.jsx, SiteLayout.jsx, ThemeToggle.jsx, ImageSlot.jsx
 │   │   │   └── pages/             # Home, Product, Models, Pricing, Download, About, Blog, Careers, Privacy, NotFound
 │   │   └── app/                   # Chat app routes (Phase 6c onward)
-│   │       ├── data.js                                       # MODELS, EFFORTS, RECENTS, QUICK_ACTIONS, SAMPLE_REPLY, SAMPLE_USER, PROJECTS, ARTIFACTS, PROJECT_DOCS
+│   │       ├── data.js                                       # MODELS, EFFORTS, QUICK_ACTIONS, PROJECTS, ARTIFACTS, PROJECT_DOCS
 │   │       ├── Login.jsx, GoogleG.jsx                        # Centered Google sign-in
 │   │       ├── Shell.jsx, Sidebar.jsx, AccountPopover.jsx    # Layout chrome
 │   │       ├── Composer.jsx, ModelPicker.jsx, AttachMenu.jsx # Composer + its popovers
@@ -133,8 +138,20 @@ require a valid Bearer mgmt JWT. JWT validation enforces `iss`,
 - User items: `PK=USER#{user_id}`, `SK=META`
 - Mgmt state items: `PK=MGMT_STATE#{state}`, `SK=META`
   (TTL enabled, used for the Google OAuth state parameter)
+- Chat-index items: `PK=USER#{user_id}`, `SK=CHAT#{created_at}#{chat_id}`
+  (one row per chat; sortable so the Recents query is a single
+  `Query(ScanIndexForward=False)`; also projects onto `ChatByIdIndex`)
+- Chat message items: `PK=CHAT#{chat_id}`, `SK=MSG#{created_at}#{msg_id}`
+  (one row per turn; UUID suffix prevents cross-Lambda-instance
+  collisions at the same microsecond)
+- Idempotency items: `PK=IDEMP#{user_id}`, `SK={key}`
+  (TTL = 1 hour after reserve; used for the streaming POST replay
+  short-circuit)
 - GSIs:
   - `UserEmailIndex` — `PK=EMAIL#{email}` (for user lookups by email)
+  - `ChatByIdIndex` — `PK=CHAT_ID#{chat_id}`, `SK=META`
+    (sparse; only chat-index rows project onto it; used for direct
+    chat-id → chat lookups without knowing `created_at`)
 
 ## Management UI
 
@@ -306,11 +323,14 @@ re-derive these during design review — cite them.
   take a `workspace_id` / `namespace` param on every call. Scope comes
   from the token claim; agents register a new DCR client per context and
   swap tokens to switch.
-- **Agent session IDs are user-namespaced** — the `inline_agent.py` wrapper
-  computes the Bedrock `sessionId` as `f"{jwt_sub}:{caller_session_id}"`.
-  Callers supply their own opaque `session_id`; the wrapper adds the user
-  prefix so sessions never bleed across users. The namespaced form is
-  internal — only the caller's `session_id` is echoed back in responses.
+- **Chat scope is enforced via the chat-index ownership check** — every
+  read/write of a chat goes through `_load_owned_chat(chat_id, jwt_sub)`
+  in `src/channel/api/chats.py` which compares the chat row's `user_id`
+  to the JWT `sub` claim. Mismatches return 404 (not 403) so chat
+  existence isn't leaked. This replaces the pre-Strands
+  `f"{jwt_sub}:{session_id}"` Bedrock sessionId namespacing — Strands'
+  `BedrockModel` doesn't expose Bedrock's session machinery, so the
+  cross-user guard happens at the API layer instead.
 
 ## UI conventions
 

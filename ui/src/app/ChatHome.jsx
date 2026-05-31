@@ -5,18 +5,22 @@ import { parseToken, TOKEN_KEY } from "../lib/auth.js";
 import ChannelMark from "../components/ChannelMark.jsx";
 import Icon from "../components/Icon.jsx";
 import { useChannelPrefs } from "../hooks/useChannelPrefs.js";
+import { useChats } from "../hooks/ChatsContext.jsx";
 import Composer from "./Composer.jsx";
 import { MODELS, QUICK_ACTIONS } from "./data.js";
 
 /**
  * Empty-state shown at /app when there's no active conversation.
  * Greeting + Composer + quick-action chips. Translated from
- * design-sources/app/chat.jsx `Home` function. Sending stashes the
- * draft in sessionStorage and navigates to /app/c/new, where
- * Conversation consumes it and kicks off the mock streamer.
+ * design-sources/app/chat.jsx `Home` function. Submitting the composer
+ * calls `createChat()` on the shared ChatsContext to mint a real chat
+ * row, then navigates to `/app/c/{chat_id}` with the first message in
+ * route state. Conversation reads `state.firstMessage` on mount and
+ * calls `useChatStream.send(...)` to kick off the first turn.
  */
 export default function ChatHome() {
   const prefs = useChannelPrefs();
+  const { createChat } = useChats();
   const token = localStorage.getItem(TOKEN_KEY) ?? "";
   const claims = parseToken(token) ?? {};
   // Prefer the Google display_name's first word ("John Carter" → "John");
@@ -32,24 +36,22 @@ export default function ChatHome() {
 
   const navigate = useNavigate();
 
-  // Hand the draft off to Conversation via sessionStorage and route to
-  // /app/c/new. Conversation reads the payload on mount, calls
-  // useMockStream.send(...), and clears the key.
-  function send(text, atts) {
-    try {
-      sessionStorage.setItem(
-        "channel-pending-send",
-        JSON.stringify({
-          text,
-          atts,
-          modelId: modelObj.id,
+  // Create a real chat row up-front, then route to /app/c/{chat_id} with
+  // the first user message in route state. Conversation picks up
+  // `state.firstMessage` on mount and calls useChatStream.send(...) to
+  // kick off the first turn.
+  async function send(text, atts) {
+    const chat = await createChat({ modelDefault: modelObj.id });
+    navigate(`/app/c/${chat.chat_id}`, {
+      state: {
+        firstMessage: {
+          message: text,
+          model: modelObj,
           effort: prefs.effort,
-        })
-      );
-    } catch {
-      /* private mode etc — Conversation just renders empty */
-    }
-    navigate("/app/c/new");
+          attachments: atts,
+        },
+      },
+    });
   }
 
   return (

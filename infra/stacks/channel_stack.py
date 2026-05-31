@@ -4,7 +4,7 @@ Channel CDK Stack — defines all AWS infrastructure.
 
 Resources:
   - DynamoDB table (single-table design) with GSIs and TTL
-  - Lambda function for the API (FastAPI + Mangum)
+  - Lambda function for the API (FastAPI + uvicorn behind AWSLWA)
   - Function URL for the Lambda (auth=NONE, TLS enforced)
   - IAM role scoped to DynamoDB table and SSM access
   - SSM Parameters for secrets
@@ -116,6 +116,14 @@ class ChannelStack(cdk.Stack):
         table.add_global_secondary_index(
             index_name="UserEmailIndex",
             partition_key=dynamodb.Attribute(name="GSI4PK", type=dynamodb.AttributeType.STRING),
+            projection_type=dynamodb.ProjectionType.ALL,
+        )
+
+        # GSI 4 — ChatByIdIndex: look up chat-index rows by chat_id
+        table.add_global_secondary_index(
+            index_name="ChatByIdIndex",
+            partition_key=dynamodb.Attribute(name="GSI3PK", type=dynamodb.AttributeType.STRING),
+            sort_key=dynamodb.Attribute(name="GSI3SK", type=dynamodb.AttributeType.STRING),
             projection_type=dynamodb.ProjectionType.ALL,
         )
 
@@ -287,8 +295,6 @@ class ChannelStack(cdk.Stack):
             "APP_VERSION": app_version,
             # Used by EMF metrics as the "Environment" dimension.
             "STARTER_ENV": env_name,
-            # Default Bedrock model for agent endpoints.
-            "BEDROCK_MODEL_ID": "anthropic.claude-sonnet-4-6",
         }
 
         # Tag every resource with the deployed version for operational visibility.
@@ -332,23 +338,17 @@ class ChannelStack(cdk.Stack):
             iam.PolicyStatement(
                 actions=["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
                 resources=[
+                    # Foundation models (delegated to by inference profiles)
                     f"arn:aws:bedrock:{self.region}::foundation-model/anthropic.claude-sonnet-4-6",
                     f"arn:aws:bedrock:{self.region}::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0",
+                    f"arn:aws:bedrock:{self.region}::foundation-model/anthropic.claude-opus-4-7",
+                    # US cross-region inference profiles (us-east-1 primary)
+                    f"arn:aws:bedrock:{self.region}:{self.account}:inference-profile/us.anthropic.claude-sonnet-4-6",
+                    f"arn:aws:bedrock:{self.region}:{self.account}:inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0",
+                    f"arn:aws:bedrock:{self.region}:{self.account}:inference-profile/us.anthropic.claude-opus-4-7",
                 ],
             )
         )
-        # bedrock:InvokeInlineAgent is required for invoke_inline_agent calls.
-        # Inline agents are ephemeral (no pre-provisioned agent resource), so
-        # the resource ARN pattern covers all inline agent invocations in the account.
-        api_role.add_to_policy(
-            iam.PolicyStatement(
-                actions=["bedrock:InvokeInlineAgent"],
-                resources=[
-                    f"arn:aws:bedrock:{self.region}:{self.account}:agent/*",
-                ],
-            )
-        )
-
         api_fn = lambda_.Function(
             self,
             "ApiFunction",
@@ -373,7 +373,10 @@ class ChannelStack(cdk.Stack):
             },
             layers=[awslwa_layer],
             memory_size=512,
-            timeout=cdk.Duration.seconds(30),
+            # 5 min for streaming chats — Bedrock responses on long prompts can
+            # exceed 30s. AWSLWA streams to the Function URL as bytes arrive, so
+            # the long handler runtime doesn't add user-perceived latency.
+            timeout=cdk.Duration.minutes(5),
             description=f"Channel management API (FastAPI + AWSLWA) [{env_name}]",
             tracing=lambda_.Tracing.ACTIVE,
         )
@@ -414,6 +417,14 @@ class ChannelStack(cdk.Stack):
             auto_delete_objects=not is_prod,
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
             enforce_ssl=True,
+            lifecycle_rules=[
+                s3.LifecycleRule(
+                    id="ExpireOldAutoUpdateBundles",
+                    enabled=True,
+                    expiration=cdk.Duration.days(30),
+                    tag_filters={"channel-asset-type": "versioned-zip"},
+                ),
+            ],
         )
 
         # API origin — strip "https://" prefix and trailing "/" from the function URL
@@ -705,6 +716,32 @@ function handler(event) {
             ],
         )
 
+        # Cache policy for /updates/*: short TTL for the manifest (latest-mac.yml),
+        # long immutable TTL for versioned binaries. Single behavior covers both —
+        # per-object Cache-Control headers set by the publish CI job dictate the
+        # effective TTL (60s for the manifest, 1y for the .zip + .blockmap).
+        updates_cache_policy = cloudfront.CachePolicy(
+            self,
+            "UpdatesCachePolicy",
+            cache_policy_name=f"channel-updates-{env_name}",
+            default_ttl=cdk.Duration.seconds(60),
+            min_ttl=cdk.Duration.seconds(0),
+            max_ttl=cdk.Duration.days(365),
+            cookie_behavior=cloudfront.CacheCookieBehavior.none(),
+            query_string_behavior=cloudfront.CacheQueryStringBehavior.none(),
+            header_behavior=cloudfront.CacheHeaderBehavior.none(),
+            enable_accept_encoding_gzip=False,
+            enable_accept_encoding_brotli=False,
+        )
+
+        updates_behavior = cloudfront.BehaviorOptions(
+            origin=ui_s3_origin,
+            viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+            cache_policy=updates_cache_policy,
+            response_headers_policy=security_headers_policy,
+            allowed_methods=cloudfront.AllowedMethods.ALLOW_GET_HEAD,
+        )
+
         distribution = cloudfront.Distribution(
             self,
             "UiDistribution",
@@ -725,6 +762,7 @@ function handler(event) {
                     response_headers_policy=security_headers_policy,
                 ),
                 "/docs*": docs_behavior,
+                "/updates/*": updates_behavior,
             },
             domain_names=[custom_domain],
             certificate=certificate,
@@ -818,6 +856,7 @@ function handler(event) {
             f"arn:aws:iam::{self.account}:oidc-provider/token.actions.githubusercontent.com",
         )
 
+        # AdministratorAccess covers s3:PutObject on updates/* and cloudfront:CreateInvalidation for the publish job — no statement-level additions needed.
         deploy_role = iam.Role(
             self,
             "GitHubActionsDeployRole",
@@ -1402,6 +1441,24 @@ function handler(event) {
             "DashboardUrl",
             value=f"https://{self.region}.console.aws.amazon.com/cloudwatch/home#dashboards:name={dashboard_name}",
             description="CloudWatch dashboard URL",
+        )
+        cdk.CfnOutput(
+            self,
+            "UpdatesFeedUrl",
+            value=f"https://{custom_domain}/updates",
+            description="Base URL for the desktop auto-update manifest tree (channel suffix appended at build time)",
+        )
+        cdk.CfnOutput(
+            self,
+            "UpdatesBucketName",
+            value=ui_bucket.bucket_name,
+            description="S3 bucket name for the `aws s3 sync` step in publish-desktop-mac",
+        )
+        cdk.CfnOutput(
+            self,
+            "UpdatesDistributionId",
+            value=distribution.distribution_id,
+            description="CloudFront distribution ID for the cache invalidation step",
         )
 
         # ----------------------------------------------------------------
