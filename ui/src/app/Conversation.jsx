@@ -13,6 +13,16 @@ function resolveModel(modelId) {
   return MODELS.find((m) => m.id === modelId) ?? MODELS[0];
 }
 
+// Bedrock returns model ids like `anthropic.claude-sonnet-4-6`; strip the
+// vendor prefix before looking up the friendly display name in MODELS.
+// Unknown ids fall back to the raw value (acceptable visual debug hint).
+function modelLabel(raw) {
+  if (!raw) return "";
+  const shortId = raw.replace(/^anthropic\./, "");
+  const display = MODELS.find((m) => m.id === shortId);
+  return display ? display.name : raw;
+}
+
 /**
  * Streaming conversation pane backed by the real SSE-driven
  * `useChatStream` hook. The URL `:id` is the canonical chat id; the hook
@@ -36,7 +46,7 @@ function resolveModel(modelId) {
 export default function Conversation() {
   const { id: chatId } = useParams();
   const location = useLocation();
-  const { turns, send, status } = useChatStream(chatId);
+  const { turns, send, regenerate, status } = useChatStream(chatId);
   const prefs = useChannelPrefs();
   const ref = useRef(null);
   const sentFirstRef = useRef(false);
@@ -73,8 +83,11 @@ export default function Conversation() {
               Something went wrong loading this conversation.
             </div>
           )}
-          {turns.map((t) =>
-            t.role === "user" ? (
+          {turns.map((t, i) => {
+            const isLast = i === turns.length - 1;
+            const showRegenerate =
+              isLast && t.role === "assistant" && !t.streaming;
+            return t.role === "user" ? (
               <div className="turn user" key={t.msg_id}>
                 {t.atts && t.atts.length > 0 && (
                   <div
@@ -96,7 +109,7 @@ export default function Conversation() {
                 <div className="assistant-head">
                   <ChannelMark size={20} />
                   <span className="nm">Channel</span>
-                  <span className="mdl">{t.model}</span>
+                  <span className="mdl">{modelLabel(t.model)}</span>
                 </div>
                 <div className="msg">{renderMarkdown(t.text, t.streaming)}</div>
                 {t.artifact && (
@@ -129,9 +142,18 @@ export default function Conversation() {
                     </button>
                   </div>
                 )}
+                {showRegenerate && (
+                  <button
+                    type="button"
+                    className="msg-action"
+                    onClick={() => regenerate({})}
+                  >
+                    Regenerate
+                  </button>
+                )}
               </div>
-            )
-          )}
+            );
+          })}
         </div>
       </div>
       <div className="bottom-composer">

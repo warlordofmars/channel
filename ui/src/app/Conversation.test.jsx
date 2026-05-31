@@ -318,4 +318,74 @@ describe("Conversation", () => {
     fireEvent.click(screen.getByTitle("Send"));
     expect(stream.send.mock.calls[0][0].model).toEqual(MODELS[0]);
   });
+
+  it("renders friendly model label, not raw ARN", () => {
+    mockStream({
+      turns: [
+        { role: "user", text: "hi", msg_id: "u1" },
+        {
+          role: "assistant",
+          text: "ok",
+          msg_id: "a1",
+          model: "anthropic.claude-sonnet-4-6",
+          streaming: false,
+        },
+      ],
+    });
+    renderAt("/app/c/c1");
+    expect(screen.getByText("Claude Sonnet 4.6")).toBeInTheDocument();
+    expect(screen.queryByText(/anthropic\./)).toBeNull();
+  });
+
+  it("regenerate button calls hook.regenerate on the last assistant turn", () => {
+    const regenerate = vi.fn();
+    mockStream({
+      turns: [
+        { role: "user", text: "hi", msg_id: "u1" },
+        { role: "assistant", text: "ok", msg_id: "a1", streaming: false },
+      ],
+      regenerate,
+    });
+    renderAt("/app/c/c1");
+    fireEvent.click(screen.getByText("Regenerate"));
+    expect(regenerate).toHaveBeenCalled();
+  });
+
+  it("regenerate button is hidden while streaming", () => {
+    mockStream({
+      turns: [
+        { role: "user", text: "hi", msg_id: "u1" },
+        { role: "assistant", text: "", msg_id: "a1", streaming: true },
+      ],
+      status: "streaming",
+    });
+    renderAt("/app/c/c1");
+    expect(screen.queryByText("Regenerate")).toBeNull();
+  });
+
+  it("regenerate button is hidden when last turn is a user message", () => {
+    mockStream({
+      turns: [
+        { role: "user", text: "hi", msg_id: "u1" },
+        { role: "assistant", text: "ok", msg_id: "a1", streaming: false },
+        { role: "user", text: "hi again", msg_id: "u2" },
+      ],
+    });
+    renderAt("/app/c/c1");
+    expect(screen.queryByText("Regenerate")).toBeNull();
+  });
+
+  it("regenerate button is hidden on earlier (non-last) assistant turns", () => {
+    mockStream({
+      turns: [
+        { role: "user", text: "hi", msg_id: "u1" },
+        { role: "assistant", text: "first", msg_id: "a1", streaming: false },
+        { role: "user", text: "hi again", msg_id: "u2" },
+        { role: "assistant", text: "second", msg_id: "a2", streaming: false },
+      ],
+    });
+    renderAt("/app/c/c1");
+    const buttons = screen.queryAllByText("Regenerate");
+    expect(buttons).toHaveLength(1);
+  });
 });
