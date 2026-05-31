@@ -281,6 +281,12 @@ def test_post_message_returns_sse_via_strands(
 
     monkeypatch.setattr("channel.api.chats.storage.put_message", fake_put)
     monkeypatch.setattr("channel.api.chats.storage.update_chat_index", lambda **_: None)
+    # _stream_bedrock_reply now loads prior history to seed the agent —
+    # stub it to "no prior context".
+    monkeypatch.setattr(
+        "channel.api.chats.storage.list_messages",
+        lambda *_a, **_kw: ([], None),
+    )
 
     # Fake Strands Agent that yields a deterministic event sequence.
     async def fake_stream(self, prompt):
@@ -315,10 +321,160 @@ def test_post_message_returns_sse_via_strands(
     assert '"input_tokens": 12' in body
     assert '"output_tokens": 5' in body
 
-    assert [m.role for m in persisted] == [MessageRole.USER, MessageRole.ASSISTANT]
     assert persisted[1].text == "Hello world"
     assert persisted[1].input_tokens == 12
     assert persisted[1].output_tokens == 5
+
+    assert [m.role for m in persisted] == [MessageRole.USER, MessageRole.ASSISTANT]
+
+
+def test_post_message_seeds_agent_with_prior_chat_history(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each turn must seed Strands with the chat's prior messages so
+    the agent doesn't restart from scratch — bug surfaced on Phase 7c
+    dev where multi-turn chats lost continuity."""
+    chat = Chat(
+        chat_id="c1",
+        user_id="u-1",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="claude-sonnet-4-6",
+    )
+    monkeypatch.setattr("channel.api.chats.storage.get_chat_by_id", lambda _: chat)
+    monkeypatch.setattr(
+        "channel.api.chats.storage.put_message",
+        lambda **kwargs: Message(
+            chat_id=kwargs["chat_id"],
+            msg_id="m1",
+            role=kwargs["role"],
+            text=kwargs["text"],
+            model=kwargs.get("model"),
+            created_at="t",
+        ),
+    )
+    monkeypatch.setattr("channel.api.chats.storage.update_chat_index", lambda **_: None)
+
+    prior = [
+        Message(chat_id="c1", msg_id="m0", role=MessageRole.USER, text="hi", created_at="t1"),
+        Message(
+            chat_id="c1",
+            msg_id="m1",
+            role=MessageRole.ASSISTANT,
+            text="hey",
+            model="us.anthropic.claude-sonnet-4-6",
+            created_at="t2",
+        ),
+    ]
+    monkeypatch.setattr(
+        "channel.api.chats.storage.list_messages",
+        lambda *_a, **_kw: (prior, None),
+    )
+
+    captured: dict[str, Any] = {}
+
+    async def fake_stream(self, prompt):
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+
+    class FakeAgent:
+        stream_async = fake_stream
+
+    def fake_build_agent(**kwargs):
+        captured["build_kwargs"] = kwargs
+        return FakeAgent()
+
+    monkeypatch.setattr("channel.api.chats.build_agent", fake_build_agent)
+
+    resp = client.post(
+        "/api/chats/c1/messages",
+        json={"message": "third turn", "model": "claude-sonnet-4-6", "effort": "medium"},
+    )
+    assert resp.status_code == 200
+
+    # build_agent must receive prior history translated to Strands shape.
+    prior_messages = captured["build_kwargs"]["prior_messages"]
+    assert prior_messages == [
+        {"role": "user", "content": [{"text": "hi"}]},
+        {"role": "assistant", "content": [{"text": "hey"}]},
+    ]
+
+
+def test_regenerate_drops_trailing_user_from_seeded_history(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regenerate path: the last user message in storage IS the one
+    being re-streamed via ``stream_async``. It must be dropped from
+    the seeded history so Strands doesn't see it twice."""
+    chat = Chat(
+        chat_id="c1",
+        user_id="u-1",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="claude-sonnet-4-6",
+    )
+    monkeypatch.setattr("channel.api.chats.storage.get_chat_by_id", lambda _: chat)
+    monkeypatch.setattr(
+        "channel.api.chats.storage.delete_last_assistant_message",
+        lambda _: None,
+    )
+    monkeypatch.setattr(
+        "channel.api.chats.storage.put_message",
+        lambda **kwargs: Message(
+            chat_id=kwargs["chat_id"],
+            msg_id="new-a",
+            role=kwargs["role"],
+            text=kwargs["text"],
+            model=kwargs.get("model"),
+            created_at="t",
+        ),
+    )
+    monkeypatch.setattr("channel.api.chats.storage.update_chat_index", lambda **_: None)
+
+    prior = [
+        Message(chat_id="c1", msg_id="m0", role=MessageRole.USER, text="round1-u", created_at="t1"),
+        Message(
+            chat_id="c1",
+            msg_id="m1",
+            role=MessageRole.ASSISTANT,
+            text="round1-a",
+            model="us.anthropic.claude-sonnet-4-6",
+            created_at="t2",
+        ),
+        Message(
+            chat_id="c1", msg_id="m2", role=MessageRole.USER, text="regen-this", created_at="t3"
+        ),
+    ]
+    monkeypatch.setattr(
+        "channel.api.chats.storage.list_messages",
+        lambda *_a, **_kw: (prior, None),
+    )
+
+    captured: dict[str, Any] = {}
+
+    async def fake_stream(self, prompt):
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+
+    class FakeAgent:
+        stream_async = fake_stream
+
+    def fake_build_agent(**kwargs):
+        captured["build_kwargs"] = kwargs
+        return FakeAgent()
+
+    monkeypatch.setattr("channel.api.chats.build_agent", fake_build_agent)
+
+    resp = client.post("/api/chats/c1/regenerate", json={})
+    assert resp.status_code == 200
+
+    # Trailing user ("regen-this") is excluded — it'll come back in via
+    # stream_async. Only the first two turns survive.
+    prior_messages = captured["build_kwargs"]["prior_messages"]
+    assert prior_messages == [
+        {"role": "user", "content": [{"text": "round1-u"}]},
+        {"role": "assistant", "content": [{"text": "round1-a"}]},
+    ]
 
 
 def test_post_message_returns_404_for_unowned_chat(
@@ -402,6 +558,10 @@ def test_post_message_stores_result_on_fresh_idempotency_key(
         ),
     )
     monkeypatch.setattr("channel.api.chats.storage.update_chat_index", lambda **_: None)
+    monkeypatch.setattr(
+        "channel.api.chats.storage.list_messages",
+        lambda *_a, **_kw: ([], None),
+    )
     # Fresh key — reserve returns None.
     monkeypatch.setattr("channel.api.chats.storage.reserve_idempotency_key", lambda **_: None)
 

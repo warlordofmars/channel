@@ -12,9 +12,11 @@ Recall is still disabled; that's 7d.
 from __future__ import annotations
 
 import os
+from typing import Any, cast
 
 from strands import Agent
 from strands.models import BedrockModel
+from strands.types.content import Messages
 
 from channel.agents.memory import AgentCoreMemoryHook, get_or_create_memory
 
@@ -55,6 +57,7 @@ def build_agent(
     model_id: str,
     user_id: str,
     chat_id: str,
+    prior_messages: list[dict[str, Any]] | None = None,
     system_prompt: str | None = None,
     max_tokens: int = DEFAULT_MAX_TOKENS,
 ) -> Agent:
@@ -64,6 +67,12 @@ def build_agent(
     AgentCore ``sessionId``.  The Memory resource itself is discovered
     (or created) once per Lambda cold-start, keyed off the
     ``STARTER_ENV`` env var.
+
+    ``prior_messages`` seeds the agent with the chat's stored history
+    so each turn doesn't restart from scratch.  Shape is Strands'
+    ``Messages``: ``[{"role": "user"|"assistant", "content": [{"text": "..."}]}, ...]``
+    in chronological order.  The new user message must NOT be included
+    — the caller passes it via ``agent.stream_async(user_message)``.
     """
 
     bedrock = BedrockModel(
@@ -79,4 +88,8 @@ def build_agent(
         model=bedrock,
         system_prompt=system_prompt or DEFAULT_SYSTEM_PROMPT,
         hooks=[memory_hook],
+        # Strands types ``messages`` as ``list[Message]`` (its TypedDict);
+        # at runtime the shape is plain dicts. ``cast`` keeps mypy happy
+        # without making consumers of build_agent import Strands types.
+        messages=cast(Messages, prior_messages or []),
     )
