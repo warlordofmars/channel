@@ -28,9 +28,12 @@ def client() -> TestClient:
     app.dependency_overrides.clear()
 
 
-def test_chats_router_is_mounted(client: TestClient) -> None:
+def test_chats_router_is_mounted(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "channel.api.chats.storage.list_chats_for_user",
+        lambda *_a, **_kw: ([], None),
+    )
     response = client.get("/api/chats")
-    # 200 (empty list) or 500 (storage not stubbed yet) — but NOT 404.
     assert response.status_code != 404
 
 
@@ -84,3 +87,47 @@ def test_post_chat_uses_default_model_when_unspecified(
     monkeypatch.setattr("channel.api.chats.storage.create_chat", fake_create_chat)
     client.post("/api/chats", json={})
     assert captured["model_default"] == "canned-stream-v1"
+
+
+def test_list_returns_chats_for_authenticated_user(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fake_list(user_id: str, *, limit: int, cursor: str | None):
+        assert user_id == "u-1"
+        assert limit == 50
+        return (
+            [
+                Chat(
+                    chat_id="c1",
+                    user_id=user_id,
+                    title="Hi",
+                    created_at="2026-05-30T00:00:00Z",
+                    last_message_at="2026-05-30T00:00:00Z",
+                    model_default="canned-stream-v1",
+                )
+            ],
+            None,
+        )
+
+    monkeypatch.setattr("channel.api.chats.storage.list_chats_for_user", fake_list)
+
+    response = client.get("/api/chats")
+    body = response.json()
+    assert response.status_code == 200
+    assert len(body["items"]) == 1
+    assert body["items"][0]["chat_id"] == "c1"
+    assert body["next_cursor"] is None
+
+
+def test_list_honors_limit_and_cursor(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_list(user_id: str, *, limit: int, cursor: str | None):
+        captured.update({"limit": limit, "cursor": cursor})
+        return ([], "next-cursor-token")
+
+    monkeypatch.setattr("channel.api.chats.storage.list_chats_for_user", fake_list)
+    response = client.get("/api/chats?limit=5&cursor=abc")
+    assert response.status_code == 200
+    assert captured == {"limit": 5, "cursor": "abc"}
+    assert response.json()["next_cursor"] == "next-cursor-token"

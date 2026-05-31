@@ -39,8 +39,14 @@ async def create_chat(
 
 @router.get("")
 async def list_chats(
-    _claims: dict[str, Any] = Depends(require_mgmt_user),
+    limit: int = 50,
+    cursor: str | None = None,
+    claims: dict[str, Any] = Depends(require_mgmt_user),
 ) -> dict[str, Any]:
-    """Placeholder — populated in Task 6."""
+    """List the authenticated user's chats, newest first."""
 
-    return {"items": [], "next_cursor": None}
+    chats, next_cursor = storage.list_chats_for_user(claims["sub"], limit=limit, cursor=cursor)
+    return {
+        "items": [c.model_dump() for c in chats],
+        "next_cursor": next_cursor,
+    }
