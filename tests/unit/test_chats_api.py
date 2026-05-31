@@ -195,3 +195,56 @@ def test_get_chat_returns_404_when_owner_mismatches(
     monkeypatch.setattr("channel.api.chats.storage.get_chat_by_id", lambda _: other)
     response = client.get("/api/chats/c1")
     assert response.status_code == 404
+
+
+def test_patch_renames_chat(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    chat = Chat(
+        chat_id="c1",
+        user_id="u-1",
+        title="Old",
+        created_at="t",
+        last_message_at="t",
+        model_default="m",
+    )
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setattr("channel.api.chats.storage.get_chat_by_id", lambda _: chat)
+
+    def fake_patch(*, user_id: str, chat: Chat, title, archived) -> None:
+        captured.update({"title": title, "archived": archived})
+
+    monkeypatch.setattr("channel.api.chats.storage.patch_chat", fake_patch)
+
+    response = client.patch("/api/chats/c1", json={"title": "New"})
+    assert response.status_code == 204
+    assert captured == {"title": "New", "archived": None}
+
+
+def test_patch_archives_chat(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    chat = Chat(
+        chat_id="c1",
+        user_id="u-1",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="m",
+    )
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setattr("channel.api.chats.storage.get_chat_by_id", lambda _: chat)
+    monkeypatch.setattr(
+        "channel.api.chats.storage.patch_chat",
+        lambda **kwargs: captured.update(kwargs),
+    )
+
+    response = client.patch("/api/chats/c1", json={"archived": True})
+    assert response.status_code == 204
+    assert captured["archived"] is True
+
+
+def test_patch_returns_404_for_unowned_chat(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("channel.api.chats.storage.get_chat_by_id", lambda _: None)
+    response = client.patch("/api/chats/x", json={"title": "y"})
+    assert response.status_code == 404

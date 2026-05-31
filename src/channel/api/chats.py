@@ -11,11 +11,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Path
+from fastapi import APIRouter, Depends, HTTPException, Path, Response
 
 from channel import storage
 from channel.api._auth import require_mgmt_user
-from channel.models import Chat, ChatCreate
+from channel.models import Chat, ChatCreate, ChatPatch
 
 _DEFAULT_MODEL = "canned-stream-v1"
 
@@ -77,3 +77,21 @@ async def get_chat(
         "messages": [m.model_dump(mode="json") for m in messages],
         "next_cursor": next_cursor,
     }
+
+
+@router.patch("/{chat_id}", status_code=204)
+async def patch_chat(
+    payload: ChatPatch,
+    chat_id: str = Path(...),
+    claims: dict[str, Any] = Depends(require_mgmt_user),
+) -> Response:
+    """Rename or archive a chat.  204 No Content on success."""
+
+    chat = await _load_owned_chat(chat_id, claims["sub"])
+    storage.patch_chat(
+        user_id=claims["sub"],
+        chat=chat,
+        title=payload.title,
+        archived=payload.archived,
+    )
+    return Response(status_code=204)
