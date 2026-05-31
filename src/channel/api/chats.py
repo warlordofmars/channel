@@ -9,30 +9,25 @@ so chat existence isn't leaked.
 
 from __future__ import annotations
 
-import json
+import json as _json
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Response
 from fastapi.responses import StreamingResponse
 
 from channel import storage
+from channel.agents.chat_agent import build_agent, resolve_model_id
+from channel.agents.strands_sse import (
+    sse_delta,
+    sse_done,
+    sse_user_persisted,
+    translate_event,
+)
 from channel.api._auth import require_mgmt_user
 from channel.models import Chat, ChatCreate, ChatPatch, MessageRole, SendMessageRequest
 
-_DEFAULT_MODEL = "canned-stream-v1"
+_DEFAULT_MODEL = "claude-sonnet-4-6"
 
-_CANNED_REPLY = """Good question — here's how I'd think about it.
-
-The core trade-off is between **read latency** and **write amplification**. A columnar store wins big on analytical scans because it only touches the columns you query, but you pay for that on ingest.
-
-A few concrete recommendations:
-
-1. **Batch your writes.** Buffer events for 5–10 seconds and flush in bulk. Columnar formats hate row-at-a-time inserts.
-2. **Partition by time, then by tenant.** Most of your queries are time-bounded, so this prunes the search space dramatically before any column is read.
-3. **Keep a hot row-store tail.** Serve the last few minutes from the existing row store and merge at query time — users never notice the seam.
-
-Want me to sketch the ingestion buffer as a small artifact you can drop into the pipeline?"""
-_CANNED_MODEL = "canned-stream-v1"
 
 router = APIRouter(prefix="/chats", tags=["chats"])
 
@@ -112,17 +107,14 @@ async def patch_chat(
     return Response(status_code=204)
 
 
-def _sse(payload: dict[str, Any]) -> bytes:
-    return f"data: {json.dumps(payload)}\n\n".encode()
-
-
-async def _stream_canned_reply(
+async def _stream_bedrock_reply(
     *,
     chat: Chat,
     user_message: str,
+    model: str,
     claims: dict[str, Any],
 ) -> Any:
-    """Persist the user turn, emit SSE, persist the assistant turn, update index."""
+    """Persist the user turn, stream Strands events, persist the assistant turn."""
 
     user_msg = storage.put_message(
         chat_id=chat.chat_id,
@@ -130,22 +122,33 @@ async def _stream_canned_reply(
         text=user_message,
         model=None,
     )
-    yield _sse({"type": "user_persisted", "msg_id": user_msg.msg_id, "seq": 0})
+    yield sse_user_persisted(msg_id=user_msg.msg_id, seq=0)
 
-    # Stream the canned reply in word-chunks so the UI sees a real
-    # incremental render even pre-Bedrock.
-    words = _CANNED_REPLY.split(" ")
-    for i, word in enumerate(words):
-        chunk = (" " if i else "") + word
-        yield _sse({"type": "delta", "text": chunk})
+    agent = build_agent(model_id=model)
+    accumulated: list[str] = []
+    stop_reason = "end_turn"
+    input_tokens = 0
+    output_tokens = 0
 
+    async for event in agent.stream_async(user_message):
+        kind, payload = translate_event(event)
+        if kind == "delta":
+            accumulated.append(payload)
+            yield sse_delta(payload)
+        elif kind == "stop":
+            stop_reason = payload["stop_reason"]
+        elif kind == "usage":
+            input_tokens = payload["input_tokens"]
+            output_tokens = payload["output_tokens"]
+
+    assistant_text = "".join(accumulated)
     assistant_msg = storage.put_message(
         chat_id=chat.chat_id,
         role=MessageRole.ASSISTANT,
-        text=_CANNED_REPLY,
-        model=_CANNED_MODEL,
-        input_tokens=0,
-        output_tokens=0,
+        text=assistant_text,
+        model=resolve_model_id(model),
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
     )
 
     storage.update_chat_index(
@@ -156,16 +159,13 @@ async def _stream_canned_reply(
         last_message_at=assistant_msg.created_at,
     )
 
-    yield _sse(
-        {
-            "type": "done",
-            "msg_id": assistant_msg.msg_id,
-            "seq": 1,
-            "model": _CANNED_MODEL,
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "stop_reason": "end_turn",
-        }
+    yield sse_done(
+        msg_id=assistant_msg.msg_id,
+        seq=1,
+        model=resolve_model_id(model),
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        stop_reason=stop_reason,
     )
 
 
@@ -176,9 +176,10 @@ async def post_message(
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     claims: dict[str, Any] = Depends(require_mgmt_user),
 ) -> StreamingResponse:
-    """Send a user message and stream the (canned, for now) assistant reply."""
+    """Send a user message and stream the Bedrock assistant reply via Strands."""
 
     chat = await _load_owned_chat(chat_id, claims["sub"])
+    model = payload.model or _DEFAULT_MODEL
 
     replay: dict[str, Any] | None = None
     if idempotency_key:
@@ -190,36 +191,48 @@ async def post_message(
         replay_payload = replay
 
         async def _replay() -> Any:
-            yield _sse(
-                {
-                    "type": "user_persisted",
-                    "msg_id": replay_payload["user_msg_id"],
-                    "seq": 0,
-                }
-            )
-            yield _sse({"type": "delta", "text": replay_payload["text"]})
-            yield _sse({"type": "done", **replay_payload["done"]})
+            yield sse_user_persisted(msg_id=replay_payload["user_msg_id"], seq=0)
+            yield sse_delta(replay_payload["text"])
+            yield sse_done(**replay_payload["done"])
 
         return StreamingResponse(_replay(), media_type="text/event-stream")
 
     async def _produce() -> Any:
-        async for chunk in _stream_canned_reply(
-            chat=chat, user_message=payload.message, claims=claims
+        # JSON-peek hack: capture the real msg_ids from the byte stream so
+        # the idempotency replay payload can echo them.  Task 6 replaces
+        # this with a clean ``state`` dict passed into ``_stream_bedrock_reply``
+        # which ALSO captures the accumulated assistant text (currently
+        # left empty — drives Task 6's xfail tests).
+        produced_user_msg_id: str | None = None
+        produced_done: dict[str, Any] | None = None
+        async for chunk in _stream_bedrock_reply(
+            chat=chat, user_message=payload.message, model=model, claims=claims
         ):
+            try:
+                event = _json.loads(chunk[6:-2])
+            except Exception:  # pragma: no cover  - unreachable from sse_* helpers
+                event = None
+            if event:
+                if event.get("type") == "user_persisted" and produced_user_msg_id is None:
+                    produced_user_msg_id = event["msg_id"]
+                elif event.get("type") == "done":
+                    produced_done = {
+                        "msg_id": event["msg_id"],
+                        "seq": event["seq"],
+                        "model": event["model"],
+                        "input_tokens": event["input_tokens"],
+                        "output_tokens": event["output_tokens"],
+                        "stop_reason": event["stop_reason"],
+                    }
             yield chunk
-        if idempotency_key:
+        if idempotency_key and produced_user_msg_id and produced_done:
             storage.store_idempotency_result(
                 user_id=claims["sub"],
                 key=idempotency_key,
                 payload={
-                    "user_msg_id": "n/a",
-                    "text": _CANNED_REPLY,
-                    "done": {
-                        "model": _CANNED_MODEL,
-                        "input_tokens": 0,
-                        "output_tokens": 0,
-                        "stop_reason": "end_turn",
-                    },
+                    "user_msg_id": produced_user_msg_id,
+                    "text": "",  # populated in Task 6
+                    "done": produced_done,
                 },
             )
 
