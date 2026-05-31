@@ -1,4 +1,5 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
+import { act } from "react";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
@@ -80,11 +81,6 @@ describe("Sidebar", () => {
     fireEvent.change(screen.getByPlaceholderText("Search chats"), { target: { value: "Postgres" } });
     expect(screen.getByText(/Postgres index not being used/i)).toBeTruthy();
     expect(screen.queryByText(/Weekend trail route/i)).toBeNull();
-  });
-
-  it("does NOT render the 'Relaunch to update' pill (Electron-only)", () => {
-    renderSidebar();
-    expect(screen.queryByText(/relaunch to update/i)).toBeNull();
   });
 
   it("does NOT render the 'Channel Max' plan label (deferred)", () => {
@@ -196,5 +192,81 @@ describe("Sidebar", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: new RegExp(label, "i") }));
     expect(lastPath).toBe(expected);
+  });
+});
+
+describe("Sidebar — update pill", () => {
+  let storage;
+
+  beforeEach(() => {
+    storage = { [TOKEN_KEY]: (() => {
+      const exp = Math.floor(Date.now() / 1000) + 3600;
+      const payload = btoa(JSON.stringify({ exp, sub: "u1", role: "user", email: "ada@example.com" }));
+      return `eyJhbGciOiJIUzI1NiJ9.${payload}.sig`;
+    })() };
+    vi.stubGlobal("localStorage", {
+      getItem: (k) => storage[k] ?? null,
+      setItem: (k, v) => { storage[k] = String(v); },
+      removeItem: (k) => { delete storage[k]; },
+    });
+    vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() }));
+    vi.stubGlobal("location", { ...globalThis.location, assign: vi.fn() });
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    delete window.channelDesktop;
+  });
+
+  function renderSidebar() {
+    return render(<MemoryRouter><Sidebar /></MemoryRouter>);
+  }
+
+  it("does not render the pill when window.channelDesktop is absent (web SPA)", () => {
+    renderSidebar();
+    expect(screen.queryByRole("button", { name: /relaunch to update/i })).toBeNull();
+  });
+
+  it("does not render the pill when no update event has fired yet (desktop, current)", () => {
+    window.channelDesktop = {
+      isDesktop: true,
+      onUpdateStatus: vi.fn(),                      // never invokes its cb
+      relaunchToUpdate: vi.fn(),
+    };
+    renderSidebar();
+    expect(screen.queryByRole("button", { name: /relaunch to update/i })).toBeNull();
+  });
+
+  it("renders the pill with version + click handler after update:downloaded fires", () => {
+    let registeredCb;
+    const relaunchToUpdate = vi.fn();
+    window.channelDesktop = {
+      isDesktop: true,
+      onUpdateStatus: (cb) => { registeredCb = cb; },
+      relaunchToUpdate,
+    };
+    renderSidebar();
+    expect(registeredCb).toBeTypeOf("function");
+
+    // Simulate the main process pushing an event.
+    act(() => registeredCb({ state: "downloaded", version: "0.2.1" }));
+
+    const pill = screen.getByRole("button", { name: /relaunch to update v0\.2\.1/i });
+    expect(pill).toBeTruthy();
+    fireEvent.click(pill);
+    expect(relaunchToUpdate).toHaveBeenCalled();
+  });
+
+  it("ignores non-downloaded states (checking/available/error)", () => {
+    let registeredCb;
+    window.channelDesktop = {
+      isDesktop: true,
+      onUpdateStatus: (cb) => { registeredCb = cb; },
+      relaunchToUpdate: vi.fn(),
+    };
+    renderSidebar();
+    act(() => registeredCb({ state: "checking" }));
+    act(() => registeredCb({ state: "available", version: "0.2.1" }));
+    act(() => registeredCb({ state: "error", message: "boom" }));
+    expect(screen.queryByRole("button", { name: /relaunch to update/i })).toBeNull();
   });
 });
