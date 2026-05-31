@@ -164,3 +164,43 @@ def test_build_agent_attaches_chat_id_to_agent_instance(monkeypatch):
         model_id="claude-sonnet-4-6", user_id="u", chat_id="chat-zzz",
     )
     assert agent.chat_id == "chat-zzz"
+
+
+def test_build_titler_agent_uses_haiku_with_no_hooks(monkeypatch):
+    from channel.agents.chat_agent import build_titler_agent
+
+    captured: dict[str, object] = {}
+
+    class FakeBedrockModel:
+        def __init__(self, **kwargs):
+            captured["model_kwargs"] = kwargs
+
+    class FakeAgent:
+        def __init__(self, **kwargs):
+            captured["agent_kwargs"] = kwargs
+
+    monkeypatch.setattr("channel.agents.chat_agent.BedrockModel", FakeBedrockModel)
+    monkeypatch.setattr("channel.agents.chat_agent.Agent", FakeAgent)
+
+    build_titler_agent()
+
+    assert "haiku" in captured["model_kwargs"]["model_id"].lower()
+    assert captured["model_kwargs"]["max_tokens"] == 20
+    assert captured["agent_kwargs"].get("hooks", []) == []
+
+
+def test_build_titler_agent_respects_starter_titler_model_override(monkeypatch):
+    from channel.agents.chat_agent import build_titler_agent
+
+    monkeypatch.setenv("STARTER_TITLER_MODEL", "claude-sonnet-4-6")
+    captured: dict[str, object] = {}
+
+    class FakeBedrockModel:
+        def __init__(self, **kwargs):
+            captured["model_kwargs"] = kwargs
+
+    monkeypatch.setattr("channel.agents.chat_agent.BedrockModel", FakeBedrockModel)
+    monkeypatch.setattr("channel.agents.chat_agent.Agent", lambda **_: object())
+
+    build_titler_agent()
+    assert captured["model_kwargs"]["model_id"] == "us.anthropic.claude-sonnet-4-6"

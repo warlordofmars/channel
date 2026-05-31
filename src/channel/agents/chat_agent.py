@@ -47,6 +47,15 @@ DEFAULT_SYSTEM_PROMPT = (
     "structure (lists, headings, code blocks) when it aids clarity."
 )
 
+_DEFAULT_TITLER_MODEL = "claude-haiku-4-5"
+_TITLER_MAX_TOKENS = 20
+
+_TITLER_SYSTEM_PROMPT = (
+    "Summarise the following exchange in 3-6 words, sentence case, no "
+    "quotes, no trailing punctuation. The summary becomes the chat's "
+    "title in the sidebar."
+)
+
 
 def resolve_model_id(short_id: str) -> str:
     """Map a caller-supplied short id to a full Bedrock model ARN."""
@@ -106,3 +115,23 @@ def build_agent(
     # a Channel-specific attribute).
     agent.chat_id = chat_id  # type: ignore[attr-defined]
     return agent
+
+
+def build_titler_agent() -> Agent:
+    """Build a one-shot Strands Agent for auto-title generation.
+
+    Cheap model (Haiku by default; ``STARTER_TITLER_MODEL`` overrides),
+    tight max_tokens, NO memory hooks — we don't want titling events
+    polluting AgentCore Memory. Caller invokes ``stream_async`` with
+    the user/assistant pair and reads the accumulated text.
+    """
+    titler_model_id = os.environ.get("STARTER_TITLER_MODEL", _DEFAULT_TITLER_MODEL)
+    bedrock = BedrockModel(
+        model_id=resolve_model_id(titler_model_id),
+        max_tokens=_TITLER_MAX_TOKENS,
+    )
+    return Agent(
+        model=bedrock,
+        system_prompt=_TITLER_SYSTEM_PROMPT,
+        hooks=[],
+    )
