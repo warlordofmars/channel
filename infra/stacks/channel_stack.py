@@ -853,6 +853,7 @@ function handler(event) {
             f"arn:aws:iam::{self.account}:oidc-provider/token.actions.githubusercontent.com",
         )
 
+        # AdministratorAccess covers s3:PutObject on updates/* and cloudfront:CreateInvalidation for the publish job — no statement-level additions needed.
         deploy_role = iam.Role(
             self,
             "GitHubActionsDeployRole",
@@ -1437,6 +1438,24 @@ function handler(event) {
             "DashboardUrl",
             value=f"https://{self.region}.console.aws.amazon.com/cloudwatch/home#dashboards:name={dashboard_name}",
             description="CloudWatch dashboard URL",
+        )
+        cdk.CfnOutput(
+            self,
+            "UpdatesFeedUrl",
+            value=f"https://{custom_domain}/updates",
+            description="Base URL for the desktop auto-update manifest tree (channel suffix appended at build time)",
+        )
+        cdk.CfnOutput(
+            self,
+            "UpdatesBucketName",
+            value=ui_bucket.bucket_name,
+            description="S3 bucket name for the `aws s3 sync` step in publish-desktop-mac",
+        )
+        cdk.CfnOutput(
+            self,
+            "UpdatesDistributionId",
+            value=distribution.distribution_id,
+            description="CloudFront distribution ID for the cache invalidation step",
         )
 
         # ----------------------------------------------------------------
