@@ -279,7 +279,7 @@ def desktop_test(ctx, coverage=False):
 @task(
     help={
         "platform": "mac | win | linux | current",
-        "api_base": "VITE_API_BASE for the SPA build",
+        "api_base": "API base URL — used for both the SPA (VITE_API_BASE) AND the desktop main process (baked in via CHANNEL_API_BASE)",
     }
 )
 def desktop_build(ctx, platform="current", api_base="https://channel.warlordofmars.net"):
@@ -290,8 +290,11 @@ def desktop_build(ctx, platform="current", api_base="https://channel.warlordofma
     """
     # Build SPA with the Electron-specific API base URL
     ctx.run(f"cd {UI} && VITE_API_BASE={api_base} npm run build", pty=True)
-    # Bundle main + preload via esbuild
-    ctx.run(f"cd {DESKTOP} && npm run build:main", pty=True)
+    # Bundle main + preload via esbuild. CHANNEL_API_BASE is read by
+    # desktop/scripts/build-main.js and baked into the bundle so the
+    # packaged main process uses the same URL as the SPA (otherwise the
+    # OAuth flow would split — SPA at dev, main process at prod).
+    ctx.run(f"cd {DESKTOP} && CHANNEL_API_BASE={api_base} npm run build:main", pty=True)
     # Copy SPA bundle into desktop/dist-renderer/
     ctx.run(f"cd {DESKTOP} && npm run build:renderer", pty=True)
     # Package for the target platform via electron-builder

@@ -496,12 +496,27 @@ jobs:
         with:
           node-version: "20"
 
+      - name: Resolve API base URL per branch
+        id: api-base
+        shell: bash
+        run: |
+          # main → prod, anything else (development, PRs) → dev. The SPA
+          # build picks this up via VITE_API_BASE; the desktop main process
+          # gets it baked in by scripts/build-main.js's esbuild --define.
+          # Without this, packaged dev builds connect to prod URLs that
+          # don't exist for the early-life project.
+          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            echo "url=https://channel.warlordofmars.net" >> "$GITHUB_OUTPUT"
+          else
+            echo "url=https://channel-dev.warlordofmars.net" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Install ui deps + build SPA
         shell: bash
         run: |
           cd ui
           npm ci
-          VITE_API_BASE=https://channel.warlordofmars.net npm run build
+          VITE_API_BASE=${{ steps.api-base.outputs.url }} npm run build
 
       - name: Install desktop deps
         shell: bash
@@ -521,9 +536,10 @@ jobs:
           # electron-builder expands `publish.url: "${env.UPDATES_FEED_URL}"`
           # at config-parse time even when --publish=never is set; without
           # a value the matrix build errors. The real signed+published flow
-          # in `publish-desktop-mac` overrides this env to the channel URL
-          # (https://channel{,-dev}.warlordofmars.net/updates/{channel}).
+          # in `publish-desktop-mac` overrides this env to the channel URL.
           UPDATES_FEED_URL: https://example.invalid
+          # Baked into the main process bundle by scripts/build-main.js.
+          CHANNEL_API_BASE: ${{ steps.api-base.outputs.url }}
         run: |
           cd desktop
           npm run build:main
@@ -756,6 +772,10 @@ jobs:
         working-directory: desktop
         env:
           UPDATES_FEED_URL: https://${{ steps.env.outputs.domain }}/updates/${{ steps.env.outputs.channel }}
+          # Baked into the main-process bundle so the packaged app connects
+          # to the channel-specific API (channel.warlordofmars.net for main,
+          # channel-dev.warlordofmars.net for development).
+          CHANNEL_API_BASE: https://${{ steps.env.outputs.domain }}
           APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
