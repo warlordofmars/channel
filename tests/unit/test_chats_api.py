@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient
 
 from channel.api._auth import require_mgmt_user
 from channel.api.main import app
-from channel.models import Chat
+from channel.models import Chat, Message, MessageRole
 
 
 @pytest.fixture
@@ -131,3 +131,67 @@ def test_list_honors_limit_and_cursor(client: TestClient, monkeypatch: pytest.Mo
     assert response.status_code == 200
     assert captured == {"limit": 5, "cursor": "abc"}
     assert response.json()["next_cursor"] == "next-cursor-token"
+
+
+def test_get_chat_returns_chat_and_messages(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    chat = Chat(
+        chat_id="c1",
+        user_id="u-1",
+        title="t",
+        created_at="2026-05-30T00:00:00Z",
+        last_message_at="2026-05-30T00:00:00Z",
+        model_default="canned-stream-v1",
+    )
+
+    def fake_get(chat_id: str) -> Chat | None:
+        return chat if chat_id == "c1" else None
+
+    def fake_msgs(chat_id: str, *, limit: int, cursor: str | None):
+        return (
+            [
+                Message(
+                    chat_id="c1",
+                    msg_id="m1",
+                    role=MessageRole.USER,
+                    text="hi",
+                    created_at="2026-05-30T00:00:00Z",
+                )
+            ],
+            None,
+        )
+
+    monkeypatch.setattr("channel.api.chats.storage.get_chat_by_id", fake_get)
+    monkeypatch.setattr("channel.api.chats.storage.list_messages", fake_msgs)
+
+    response = client.get("/api/chats/c1")
+    body = response.json()
+    assert response.status_code == 200
+    assert body["chat"]["chat_id"] == "c1"
+    assert body["messages"][0]["text"] == "hi"
+    assert body["next_cursor"] is None
+
+
+def test_get_chat_returns_404_for_unknown(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("channel.api.chats.storage.get_chat_by_id", lambda _: None)
+    response = client.get("/api/chats/does-not-exist")
+    assert response.status_code == 404
+
+
+def test_get_chat_returns_404_when_owner_mismatches(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    other = Chat(
+        chat_id="c1",
+        user_id="u-other",
+        title="t",
+        created_at="2026-05-30T00:00:00Z",
+        last_message_at="2026-05-30T00:00:00Z",
+        model_default="m",
+    )
+    monkeypatch.setattr("channel.api.chats.storage.get_chat_by_id", lambda _: other)
+    response = client.get("/api/chats/c1")
+    assert response.status_code == 404
