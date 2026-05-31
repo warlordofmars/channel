@@ -544,7 +544,19 @@ jobs:
           cd desktop
           npm run build:main
           npm run build:renderer
-          npx electron-builder ${{ matrix.target }} --publish=never
+          # --config.mac.hardenedRuntime=false overrides the YAML default
+          # (which is true to satisfy notarisation in the publish-desktop-mac
+          # job). The matrix builds are unsigned — electron-builder falls
+          # back to ad-hoc signing the outer .app, leaving the Electron
+          # Framework's original signature in place. On macOS 15 (Sequoia),
+          # hardenedRuntime: true triggers strict Team ID consistency
+          # validation across the bundle, which an ad-hoc outer + Electron-
+          # signed inner can't satisfy → SIGABRT at launch. Turning the
+          # flag off matches sub-project A's behaviour: testers can install
+          # the unsigned dev .dmg and it opens.
+          npx electron-builder ${{ matrix.target }} --publish=never \
+            --config.mac.hardenedRuntime=false \
+            --config.mac.gatekeeperAssess=false
 
       - name: Smoke test (Linux uses xvfb)
         shell: bash
