@@ -135,8 +135,20 @@ require a valid Bearer mgmt JWT. JWT validation enforces `iss`,
 - User items: `PK=USER#{user_id}`, `SK=META`
 - Mgmt state items: `PK=MGMT_STATE#{state}`, `SK=META`
   (TTL enabled, used for the Google OAuth state parameter)
+- Chat-index items: `PK=USER#{user_id}`, `SK=CHAT#{created_at}#{chat_id}`
+  (one row per chat; sortable so the Recents query is a single
+  `Query(ScanIndexForward=False)`; also projects onto `ChatByIdIndex`)
+- Chat message items: `PK=CHAT#{chat_id}`, `SK=MSG#{created_at}#{msg_id}`
+  (one row per turn; UUID suffix prevents cross-Lambda-instance
+  collisions at the same microsecond)
+- Idempotency items: `PK=IDEMP#{user_id}`, `SK={key}`
+  (TTL = 1 hour after reserve; used for the streaming POST replay
+  short-circuit)
 - GSIs:
   - `UserEmailIndex` — `PK=EMAIL#{email}` (for user lookups by email)
+  - `ChatByIdIndex` — `PK=CHAT_ID#{chat_id}`, `SK=META`
+    (sparse; only chat-index rows project onto it; used for direct
+    chat-id → chat lookups without knowing `created_at`)
 
 ## Management UI
 
