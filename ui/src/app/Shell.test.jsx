@@ -6,10 +6,10 @@ import { __resetChannelPrefsForTest } from "../hooks/useChannelPrefs.js";
 import { TOKEN_KEY } from "../lib/auth.js";
 
 const mockCreateChat = vi.fn();
-const mockUseChatList = vi.fn();
+const mockUseChats = vi.fn();
 
-vi.mock("../hooks/useChatList.js", () => ({
-  useChatList: () => mockUseChatList(),
+vi.mock("../hooks/ChatsContext.jsx", () => ({
+  useChats: () => mockUseChats(),
 }));
 
 // Import Shell AFTER the mock is set up so the import sees the mock.
@@ -38,8 +38,8 @@ describe("Shell", () => {
     document.documentElement.removeAttribute("data-theme");
     __resetChannelPrefsForTest();
     mockCreateChat.mockReset();
-    mockUseChatList.mockReset();
-    mockUseChatList.mockReturnValue({
+    mockUseChats.mockReset();
+    mockUseChats.mockReturnValue({
       chats: [],
       createChat: mockCreateChat,
     });
@@ -124,7 +124,7 @@ describe("Shell", () => {
   });
 
   it("renders chats from useChatList into the Sidebar Recents list", () => {
-    mockUseChatList.mockReturnValue({
+    mockUseChats.mockReturnValue({
       chats: [
         {
           chat_id: "abc",

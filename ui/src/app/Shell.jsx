@@ -4,7 +4,7 @@ import { useNavigate } from "react-router-dom";
 import Sidebar from "./Sidebar.jsx";
 import Icon from "../components/Icon.jsx";
 import { useChannelPrefs } from "../hooks/useChannelPrefs.js";
-import { useChatList } from "../hooks/useChatList.js";
+import { useChats } from "../hooks/ChatsContext.jsx";
 
 /**
  * Wraps every authenticated chat-app route with the persistent Sidebar.
@@ -31,7 +31,7 @@ export default function Shell({ children }) {
   const { theme } = useChannelPrefs();
   const [collapsed, setCollapsed] = useState(false);
   const navigate = useNavigate();
-  const { chats, createChat } = useChatList();
+  const { chats, createChat } = useChats();
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
   }, [theme]);
