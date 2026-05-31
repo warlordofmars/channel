@@ -25,10 +25,15 @@ mac:
       arch: [universal]
     - target: zip
       arch: [universal]
-  dmg:
-    artifactName: "Channel-${os}.${ext}"
-  zip:
-    artifactName: "Channel-${version}-${os}.${ext}"
+  # The .zip is the auto-update artefact (electron-updater downloads it by
+  # name from the manifest), so it carries the version. `dmg.artifactName`
+  # below overrides this for the .dmg only — that one stays at the stable
+  # `Channel-mac.dmg` name so releases/latest/download/Channel-mac.dmg
+  # always resolves.
+  artifactName: "Channel-${version}-${os}.${ext}"
+# dmg and zip are TOP-LEVEL configs in electron-builder, not nested under mac.
+dmg:
+  artifactName: "Channel-${os}.${ext}"
 win:
   target:
     - target: nsis

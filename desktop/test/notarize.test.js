@@ -1,5 +1,6 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { join } from "node:path";
 
 vi.mock("@electron/notarize", () => ({ notarize: vi.fn(() => Promise.resolve()) }));
 
@@ -47,7 +48,9 @@ describe("notarize afterSign hook", () => {
       packager: { appInfo: { productFilename: "Channel" } },
     });
     expect(notarize).toHaveBeenCalledWith(expect.objectContaining({
-      appPath: "/tmp/build/Channel.app",
+      // notarize.js uses node:path's `join`, so the expected path uses the
+      // platform separator (forward slash on POSIX, backslash on win32).
+      appPath: join("/tmp/build", "Channel.app"),
       appleApiKey: expect.stringMatching(/AuthKey_.*\.p8$/),
       appleApiKeyId: "ABCDEFGHIJ",
       appleApiIssuer: "00000000-0000-0000-0000-000000000000",
