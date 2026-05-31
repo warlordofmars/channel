@@ -473,7 +473,7 @@ jobs:
         include:
           - os: macos-14
             target: --mac
-            binary: desktop/release/mac-arm64/Channel.app/Contents/MacOS/Channel
+            binary: desktop/release/mac/Channel.app/Contents/MacOS/Channel
           - os: windows-latest
             target: --win
             binary: desktop/release/win-unpacked/Channel.exe

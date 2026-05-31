@@ -9,21 +9,33 @@ files:
   - dist-renderer/**/*
   - package.json
 asar: true
+afterSign: scripts/notarize.js
 mac:
   category: public.app-category.productivity
+  hardenedRuntime: true
+  gatekeeperAssess: true
+  entitlements: resources/entitlements.mac.plist
+  entitlementsInherit: resources/entitlements.mac.plist
+  # Universal2 binaries: one artefact that runs on both Apple Silicon and Intel.
+  # Doubles binary size (~280MB) but means a single stable URL for Channel-mac.dmg
+  # and a single latest-mac.yml manifest. Audience is small enough that bandwidth
+  # is not a constraint; URL simplicity wins.
   target:
     - target: dmg
-      arch: [arm64, x64]
+      arch: [universal]
     - target: zip
-      arch: [arm64, x64]
-  hardenedRuntime: false
-  gatekeeperAssess: false
+      arch: [universal]
+  dmg:
+    artifactName: "Channel-${os}.${ext}"
+  zip:
+    artifactName: "Channel-${version}-${os}.${ext}"
 win:
   target:
     - target: nsis
       arch: [x64]
     - target: portable
       arch: [x64]
+  artifactName: "Channel-Setup.${ext}"
 linux:
   # Pin the executable name so the binary inside linux-unpacked/ matches
   # the CI smoke step's CHANNEL_DESKTOP_BIN path. Default on Linux is
@@ -35,3 +47,7 @@ linux:
     - deb
     - rpm
   category: Office
+  artifactName: "Channel-linux.${ext}"
+publish:
+  - provider: generic
+    url: "${env.UPDATES_FEED_URL}"
