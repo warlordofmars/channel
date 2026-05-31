@@ -3,7 +3,10 @@
 
 import pytest
 
-from channel.metrics import NAMESPACE, emit_metric
+import inspect
+from unittest.mock import AsyncMock, patch
+
+from channel.metrics import NAMESPACE, emit_metric, record_memory_write_outcome
 
 
 def test_namespace_is_correct():
@@ -19,3 +22,32 @@ async def test_emit_metric_does_not_raise():
 @pytest.mark.asyncio
 async def test_emit_metric_with_dimensions():
     await emit_metric("TestMetric", operation="test", environment="unit")
+
+
+@pytest.mark.asyncio
+async def test_record_memory_write_outcome_success_emits_success_counter():
+    with patch("channel.metrics.emit_metric", new=AsyncMock()) as mock_emit:
+        await record_memory_write_outcome(success=True)
+
+    mock_emit.assert_awaited_once_with("MemoryWriteSuccesses")
+
+
+@pytest.mark.asyncio
+async def test_record_memory_write_outcome_failure_emits_failure_counter():
+    with patch("channel.metrics.emit_metric", new=AsyncMock()) as mock_emit:
+        await record_memory_write_outcome(success=False)
+
+    mock_emit.assert_awaited_once_with("MemoryWriteFailures")
+
+
+def test_record_memory_write_outcome_signature_locks_out_dimensions():
+    """Per spec Risk #3: cardinality blowup. Signature must accept only
+    ``success`` — no kwargs path for a future caller to slip an
+    ``actor_id`` dimension through."""
+    sig = inspect.signature(record_memory_write_outcome)
+    assert list(sig.parameters.keys()) == ["success"]
+    param = sig.parameters["success"]
+    assert param.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+    # ``from __future__ import annotations`` stringifies annotations,
+    # so we compare to the string ``"bool"``.
+    assert param.annotation == "bool"
