@@ -16,12 +16,14 @@ production it returns the real boto3 ``Table`` resource.
 from __future__ import annotations
 
 import os
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any
 
 import boto3
 from boto3.dynamodb.conditions import Key
+from botocore.exceptions import ClientError
 
 from channel.models import Chat, Message, MessageRole
 
@@ -230,6 +232,45 @@ def patch_chat(
         },
         UpdateExpression="SET " + ", ".join(sets),
         ExpressionAttributeValues=values,
+    )
+
+
+def reserve_idempotency_key(*, user_id: str, key: str) -> dict[str, Any] | None:
+    """Reserve a key via ConditionalPut.  Returns stored payload if already used.
+
+    Returns None on a fresh reservation (caller proceeds to produce the
+    reply).  Returns the existing DDB item if the key has been used
+    within the TTL window — the caller can short-circuit and replay
+    the stored result.
+    """
+
+    now = int(time.time())
+    ttl = now + 3600
+    try:
+        _get_table().put_item(
+            Item={
+                "PK": f"IDEMP#{user_id}",
+                "SK": key,
+                "reserved_at": now,
+                "ttl": ttl,
+            },
+            ConditionExpression="attribute_not_exists(PK)",
+        )
+        return None
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        if code != "ConditionalCheckFailedException":
+            raise
+        return _get_table().get_item(Key={"PK": f"IDEMP#{user_id}", "SK": key}).get("Item")
+
+
+def store_idempotency_result(*, user_id: str, key: str, payload: dict[str, Any]) -> None:
+    """Store the produced result on the previously-reserved idempotency key."""
+
+    _get_table().update_item(
+        Key={"PK": f"IDEMP#{user_id}", "SK": key},
+        UpdateExpression="SET result = :r",
+        ExpressionAttributeValues={":r": payload},
     )
 
 

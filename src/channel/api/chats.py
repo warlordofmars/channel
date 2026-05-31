@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Path, Response
 from fastapi.responses import StreamingResponse
 
 from channel import storage
@@ -173,16 +173,54 @@ async def _stream_canned_reply(
 async def post_message(
     payload: SendMessageRequest,
     chat_id: str = Path(...),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     claims: dict[str, Any] = Depends(require_mgmt_user),
 ) -> StreamingResponse:
     """Send a user message and stream the (canned, for now) assistant reply."""
 
     chat = await _load_owned_chat(chat_id, claims["sub"])
-    return StreamingResponse(
-        _stream_canned_reply(
-            chat=chat,
-            user_message=payload.message,
-            claims=claims,
-        ),
-        media_type="text/event-stream",
-    )
+
+    replay: dict[str, Any] | None = None
+    if idempotency_key:
+        existing = storage.reserve_idempotency_key(user_id=claims["sub"], key=idempotency_key)
+        if existing is not None and existing.get("result"):
+            replay = existing["result"]
+
+    if replay is not None:
+        replay_payload = replay
+
+        async def _replay() -> Any:
+            yield _sse(
+                {
+                    "type": "user_persisted",
+                    "msg_id": replay_payload["user_msg_id"],
+                    "seq": 0,
+                }
+            )
+            yield _sse({"type": "delta", "text": replay_payload["text"]})
+            yield _sse({"type": "done", **replay_payload["done"]})
+
+        return StreamingResponse(_replay(), media_type="text/event-stream")
+
+    async def _produce() -> Any:
+        async for chunk in _stream_canned_reply(
+            chat=chat, user_message=payload.message, claims=claims
+        ):
+            yield chunk
+        if idempotency_key:
+            storage.store_idempotency_result(
+                user_id=claims["sub"],
+                key=idempotency_key,
+                payload={
+                    "user_msg_id": "n/a",
+                    "text": _CANNED_REPLY,
+                    "done": {
+                        "model": _CANNED_MODEL,
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "stop_reason": "end_turn",
+                    },
+                },
+            )
+
+    return StreamingResponse(_produce(), media_type="text/event-stream")

@@ -58,7 +58,10 @@ class FakeTable:
     def __init__(self) -> None:
         self.items: dict[tuple[str, str], dict[str, Any]] = {}
 
-    def put_item(self, Item: dict[str, Any]) -> dict[str, Any]:
+    def put_item(self, Item: dict[str, Any], **_kwargs: Any) -> dict[str, Any]:
+        # Extra kwargs (e.g. ``ConditionExpression``) are accepted but not
+        # enforced — Task 11's integration test against DDB Local covers
+        # the real ConditionalCheck semantics.
         self.items[(Item["PK"], Item["SK"])] = dict(Item)
         return {}
 
@@ -317,6 +320,71 @@ def test_patch_chat_updates_title_and_archived(table: FakeTable) -> None:
     stored = table.items[(pk, sk)]
     assert stored["title"] == "renamed"
     assert stored["archived"] is True
+
+
+def test_idempotency_reserve_then_replay(table: FakeTable) -> None:
+    from channel import storage as st
+
+    first = st.reserve_idempotency_key(user_id="u-1", key="k1")
+    assert first is None
+
+    st.store_idempotency_result(user_id="u-1", key="k1", payload={"text": "hello"})
+
+    # FakeTable doesn't simulate ConditionExpression, so we mimic the
+    # "already exists" path by exercising the get directly.
+    existing = table.get_item(Key={"PK": "IDEMP#u-1", "SK": "k1"}).get("Item")
+    assert existing is not None
+    assert existing["result"] == {"text": "hello"}
+
+
+def test_idempotency_reserve_returns_existing_on_conflict(
+    table: FakeTable, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from botocore.exceptions import ClientError
+
+    from channel import storage as st
+
+    # Pre-populate the IDEMP item so get_item returns it on the replay path.
+    table.put_item(
+        Item={
+            "PK": "IDEMP#u-1",
+            "SK": "k2",
+            "reserved_at": 0,
+            "ttl": 9999,
+            "result": {"text": "prior"},
+        }
+    )
+
+    def fake_put_item(**_kwargs: Any) -> dict[str, Any]:
+        raise ClientError(
+            error_response={"Error": {"Code": "ConditionalCheckFailedException"}},
+            operation_name="PutItem",
+        )
+
+    monkeypatch.setattr(table, "put_item", fake_put_item)
+
+    result = st.reserve_idempotency_key(user_id="u-1", key="k2")
+    assert result is not None
+    assert result["result"] == {"text": "prior"}
+
+
+def test_idempotency_reserve_re_raises_other_client_errors(
+    table: FakeTable, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from botocore.exceptions import ClientError
+
+    from channel import storage as st
+
+    def fake_put_item(**_kwargs: Any) -> dict[str, Any]:
+        raise ClientError(
+            error_response={"Error": {"Code": "ThrottlingException"}},
+            operation_name="PutItem",
+        )
+
+    monkeypatch.setattr(table, "put_item", fake_put_item)
+
+    with pytest.raises(ClientError):
+        st.reserve_idempotency_key(user_id="u-1", key="k3")
 
 
 def test_patch_chat_with_no_fields_is_noop(table: FakeTable) -> None:
