@@ -41,7 +41,7 @@
 | `.github/workflows/ci.yml` | Add `publish-desktop-mac` job (macos-14, on push to `main` or `development`, `needs: [desktop]`). |
 | `ui/src/app/Sidebar.jsx` | Replace tombstone comment with the "Relaunch to update v…" pill (3 states). |
 | `ui/src/app/Sidebar.test.jsx` | Cover the 3 pill states (no-electron / electron-no-update / electron-update-ready). |
-| `ui/src/marketing/pages/Download.jsx` | Replace `href="#"` with `releases/latest/download/` URLs; tweak the auto-update paragraph. |
+| `ui/src/marketing/pages/Download.jsx` | Swap `releases/download/dev/*` URLs (from PR #30) for `releases/latest/download/*`; remove the "Dev preview" banner; collapse Apple Silicon/Intel dual-button to single universal `.dmg`; tweak the auto-update paragraph. |
 | `ui/src/marketing/pages/Download.test.jsx` | Assert the 5 link destinations. |
 | `docs/adr/README.md` (or index) | Link the new ADR. |
 
@@ -1896,7 +1896,7 @@ EOF
 
 **Branch:** `feat/electron-subB-ui-restorations-#<n>`. Depends on #2 merged (consumes the preload bridge).
 
-**Goal:** Restore the "Relaunch to update v…" pill in the Sidebar (3 states gated on `window.channelDesktop?.onUpdateStatus`) and replace the `href="#"` placeholders in `Download.jsx` with real GitHub Release URLs.
+**Goal:** Restore the "Relaunch to update v…" pill in the Sidebar (3 states gated on `window.channelDesktop?.onUpdateStatus`) and update `Download.jsx` to point at the `releases/latest/download/*` signed-release URLs (replacing the `releases/download/dev/*` dev-tag URLs PR #30 added).
 
 ### Task 5.1 — Sidebar pill (TDD)
 
@@ -2080,52 +2080,76 @@ git commit -m "feat(ui): restore Relaunch-to-update pill (3 states)"
 ### Task 5.2 — Download.jsx URLs (TDD)
 
 **Files:**
-- Modify: `ui/src/marketing/pages/Download.jsx`, `ui/src/marketing/pages/Download.test.jsx`
+- Modify: `ui/src/marketing/pages/Download.jsx`, `ui/src/marketing/pages/Download.test.jsx`, `ui/src/styles/site.css`
 
-- [ ] **Step 1: Read the existing Download.test.jsx**
+**Starting state (per PR #30, already on `development`):** `Download.jsx` defines `RELEASE_BASE = "https://github.com/warlordofmars/channel/releases/download/dev"` and `RELEASES_PAGE = "https://github.com/warlordofmars/channel/releases/tag/dev"`, has a `<div className="dev-preview-banner" data-testid="dev-preview-banner">…</div>`, and renders six download links: Apple Silicon `.dmg` (primary) + Intel `.dmg` (secondary `dl-alt`); Windows `.exe`; Linux `.AppImage` (primary) + `.deb` + `.rpm` (secondary `dl-alt`). Auto-update paragraph reads "Channel updates itself automatically — you'll see a 'Relaunch to update' prompt…"
+
+**Target state:** Single `RELEASE_BASE = "https://github.com/warlordofmars/channel/releases/latest/download"`. No dev-preview banner (signed builds, no scary OS warnings). Single universal `Channel-mac.dmg` for macOS (drop the Intel-vs-Apple-Silicon split; universal binary handles both). Windows + Linux structure preserved. Auto-update paragraph rewritten to acknowledge macOS-only auto-update.
+
+- [ ] **Step 1: Read the current Download.test.jsx + Download.jsx**
 
 ```bash
 cat ui/src/marketing/pages/Download.test.jsx
+cat ui/src/marketing/pages/Download.jsx
 ```
 
-- [ ] **Step 2: Write failing tests for the 5 link destinations**
+This is essential — PR #30 may have introduced assertions about the dev banner or the Intel-secondary link that need to be removed or rewritten.
 
-Append (or replace existing link assertions):
+- [ ] **Step 2: Update Download.test.jsx — assert new state and remove dev-state assertions**
+
+Remove or rewrite any test that asserts:
+- `data-testid="dev-preview-banner"` is rendered
+- The Apple Silicon vs Intel split exists
+- Links contain `releases/download/dev/`
+
+Add assertions for the new state:
 
 ```jsx
-describe("Download — real release URLs", () => {
+describe("Download — signed-release URLs", () => {
   const releasesBase = "https://github.com/warlordofmars/channel/releases/latest/download";
 
   it.each([
     ["Download .dmg",      `${releasesBase}/Channel-mac.dmg`],
     ["Download .exe",      `${releasesBase}/Channel-Setup.exe`],
-    ["Download .deb",      `${releasesBase}/Channel.deb`],
-    ["Download .rpm",      `${releasesBase}/Channel.rpm`],
-    ["Download .AppImage", `${releasesBase}/Channel.AppImage`],
-  ])("button %s links to %s", (label, expectedHref) => {
+    ["Download AppImage",  `${releasesBase}/Channel-linux.AppImage`],
+  ])("primary button %s links to %s", (label, expectedHref) => {
     render(<MemoryRouter><Download /></MemoryRouter>);
     const link = screen.getByRole("link", { name: new RegExp(label, "i") });
     expect(link.getAttribute("href")).toBe(expectedHref);
   });
 
-  it("no link has href=\"#\"", () => {
+  it.each([
+    [".deb", `${releasesBase}/Channel-linux.deb`],
+    [".rpm", `${releasesBase}/Channel-linux.rpm`],
+  ])("secondary Linux link %s points at %s", (label, expectedHref) => {
     render(<MemoryRouter><Download /></MemoryRouter>);
-    const links = screen.getAllByRole("link");
-    for (const link of links) {
-      expect(link.getAttribute("href")).not.toBe("#");
-    }
+    const link = screen.getByRole("link", { name: new RegExp(`^\\${label}$`, "i") });
+    expect(link.getAttribute("href")).toBe(expectedHref);
+  });
+
+  it("does not render the dev-preview banner", () => {
+    render(<MemoryRouter><Download /></MemoryRouter>);
+    expect(screen.queryByTestId("dev-preview-banner")).toBeNull();
+  });
+
+  it("does not render an Intel-specific Mac download link (universal binary)", () => {
+    render(<MemoryRouter><Download /></MemoryRouter>);
+    expect(screen.queryByText(/intel mac/i)).toBeNull();
   });
 
   it("notes the macOS-only auto-update story", () => {
     render(<MemoryRouter><Download /></MemoryRouter>);
-    expect(
-      screen.getByText(/macOS auto-updates in the background/i),
-    ).toBeTruthy();
+    expect(screen.getByText(/macOS auto-updates in the background/i)).toBeTruthy();
+  });
+
+  it("no link points at releases/download/dev/", () => {
+    render(<MemoryRouter><Download /></MemoryRouter>);
+    for (const link of screen.getAllByRole("link")) {
+      expect(link.getAttribute("href") ?? "").not.toContain("releases/download/dev/");
+    }
   });
 });
 ```
-
-If the existing tests had a single "Download" button for Linux, refactor Download.jsx to split it into three explicit buttons (.deb / .rpm / .AppImage). The tests above assume that split.
 
 - [ ] **Step 3: Run to confirm failure**
 
@@ -2133,65 +2157,92 @@ If the existing tests had a single "Download" button for Linux, refactor Downloa
 npx vitest run ui/src/marketing/pages/Download.test.jsx
 ```
 
-Expected: link-related tests fail (current `href="#"`); auto-update text test fails (current text is "Channel updates itself automatically").
+Expected: the new assertions fail (current Download.jsx still points at the dev tag, banner present, Intel link present, old auto-update text).
 
 - [ ] **Step 4: Update Download.jsx**
 
-Replace the three buttons and the auto-update paragraph:
+Edit the constants at the top:
 
 ```jsx
-// macOS card
-<a
-  className="btn btn-primary"
-  href="https://github.com/warlordofmars/channel/releases/latest/download/Channel-mac.dmg"
-  style={{ width: "100%" }}
->
-  Download .dmg
-</a>
+const RELEASE_BASE = "https://github.com/warlordofmars/channel/releases/latest/download";
+// (RELEASES_PAGE constant removed — no longer needed)
+```
 
-// Windows card
-<a
-  className="btn btn-ghost"
-  href="https://github.com/warlordofmars/channel/releases/latest/download/Channel-Setup.exe"
-  style={{ width: "100%" }}
->
-  Download .exe
-</a>
+Delete the dev-preview banner section entirely:
 
-// Linux card — replace single button with three
-<div className="dl-linux-buttons">
-  <a className="btn btn-ghost" href="https://github.com/warlordofmars/channel/releases/latest/download/Channel.deb">
-    Download .deb
-  </a>
-  <a className="btn btn-ghost" href="https://github.com/warlordofmars/channel/releases/latest/download/Channel.rpm">
-    Download .rpm
-  </a>
-  <a className="btn btn-ghost" href="https://github.com/warlordofmars/channel/releases/latest/download/Channel.AppImage">
-    Download .AppImage
+```jsx
+// REMOVE:
+//   <section className="section wrap" style={{ paddingTop: "24px" }}>
+//     <div className="dev-preview-banner" data-testid="dev-preview-banner">
+//       …
+//     </div>
+//   </section>
+```
+
+Adjust the first `.dl-grid` section's `paddingTop` back to its natural value (the banner section is gone, so the grid can sit closer to the page head):
+
+```jsx
+<section className="section wrap" style={{ paddingTop: "44px" }}>
+  <div className="dl-grid">
+```
+
+Collapse the macOS card to a single universal dmg button (drop the `.dl-alt` Intel link):
+
+```jsx
+<div className="dl-card feat">
+  <div className="dlic">
+    {/* unchanged Apple SVG */}
+  </div>
+  <h3>macOS</h3>
+  <div className="dlv">Universal · macOS 14+</div>
+  <a className="btn btn-primary" href={`${RELEASE_BASE}/Channel-mac.dmg`} style={{ width: "100%" }}>
+    Download .dmg
   </a>
 </div>
 ```
 
-Replace the auto-update paragraph in the system-requirements section:
+Update the Windows button URL:
+
+```jsx
+<a className="btn btn-ghost" href={`${RELEASE_BASE}/Channel-Setup.exe`} style={{ width: "100%" }}>
+  Download .exe
+</a>
+```
+
+Update the Linux button URLs (preserve PR #30's primary + dl-alt structure, just swap the URLs):
+
+```jsx
+<a className="btn btn-ghost" href={`${RELEASE_BASE}/Channel-linux.AppImage`} style={{ width: "100%" }}>
+  Download AppImage
+</a>
+<div className="dl-alt">
+  <a href={`${RELEASE_BASE}/Channel-linux.deb`}>.deb</a>
+  {" · "}
+  <a href={`${RELEASE_BASE}/Channel-linux.rpm`}>.rpm</a>
+</div>
+```
+
+Replace the auto-update paragraph in the System requirements section (currently reads "Channel updates itself automatically — you'll see a 'Relaunch to update' prompt in the sidebar when a new build is ready."):
 
 ```jsx
 <p>
-  macOS auto-updates in the background. Windows and Linux: reinstall from
-  this page when a new build lands.
+  macOS auto-updates in the background — you'll see a "Relaunch to
+  update" prompt in the sidebar when a new build is ready. Windows and
+  Linux: re-download from this page when a new build lands.
 </p>
 ```
 
-Add `.dl-linux-buttons` style in `ui/src/styles/site.css`:
+- [ ] **Step 5: Remove the `.dev-preview-banner` CSS rule from `ui/src/styles/site.css`**
 
-```css
-.dl-linux-buttons {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
+PR #30 added a `.dev-preview-banner` rule. Search:
+
+```bash
+grep -n "dev-preview-banner" ui/src/styles/site.css
 ```
 
-- [ ] **Step 5: Run Download tests**
+Delete the rule. No new CSS needed for this task — the existing `.dl-alt` styling handles the Linux secondary links.
+
+- [ ] **Step 6: Run Download tests**
 
 ```bash
 npx vitest run ui/src/marketing/pages/Download.test.jsx
@@ -2211,7 +2262,7 @@ Expected: all pass.
 
 ```bash
 git add ui/src/marketing/pages/Download.jsx ui/src/marketing/pages/Download.test.jsx ui/src/styles/site.css
-git commit -m "feat(ui): real download URLs + macOS-only auto-update note"
+git commit -m "feat(ui): point Download.jsx at signed-release URLs + drop dev banner"
 ```
 
 ### Task 5.3 — Local verify (inv dev + mocked desktop)
@@ -2278,8 +2329,9 @@ git push -u origin feat/electron-subB-ui-restorations-#<n>:feat/electron-subB-ui
 gh pr create --base development --title "feat(ui): restore update pill + real download URLs (#<n>)" --body "$(cat <<'EOF'
 ## Summary
 - Restores the "Relaunch to update v…" pill in `Sidebar.jsx`, gated on `window.channelDesktop?.onUpdateStatus`. Three states (no-electron / no-event / downloaded).
-- Replaces all five `href="#"` placeholders in `Download.jsx` with `releases/latest/download/<file>` URLs.
-- Splits the Linux download into three explicit buttons (.deb / .rpm / .AppImage).
+- Swaps `Download.jsx`'s `releases/download/dev/*` URLs (from PR #30) for `releases/latest/download/*` signed-release URLs.
+- Removes the "Dev preview" banner — signed builds no longer warrant the OS-warning advisory.
+- Collapses the Apple Silicon / Intel dual-button on macOS to a single universal `.dmg`.
 - Rewrites the auto-update paragraph to acknowledge the macOS-only-now reality.
 
 Closes #<n>
