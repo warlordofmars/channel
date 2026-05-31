@@ -142,14 +142,18 @@ async def _drive_chat_as_user(
         jwt,
     )
     await page.goto(f"{ui_url}/app")
-    await page.wait_for_url(re.compile(r".*/app(/.*)?$"), timeout=10_000)
+    # Predicate callables avoid ReDoS-shaped regex (Sonar S5852) — the URL
+    # set is small and known so a substring check is both simpler and safer.
+    await page.wait_for_url(lambda url: "/app" in url, timeout=10_000)
 
     chat_id: str | None = None
     for i, msg in enumerate(messages):
         await _send_one_message(page, msg)
         if chat_id is None:
             # First message creates the chat; URL flips to /app/c/<id>.
-            await page.wait_for_url(re.compile(r".*/app/c/[^/]+$"), timeout=15_000)
+            await page.wait_for_url(
+                lambda url: "/app/c/" in url, timeout=15_000,
+            )
             chat_id = page.url.rsplit("/", 1)[-1]
         # Wait for THIS turn's assistant reply to settle. We can't just
         # count testids because earlier replies already have it; we
