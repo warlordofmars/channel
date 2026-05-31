@@ -15,6 +15,8 @@ from urllib.parse import urlparse
 import boto3
 import pytest
 
+from channel._table_schema import provision
+
 # Hosts that are safe targets for the destructive drop+recreate in
 # starter_table. Anything else (including hostnames that merely contain
 # "localhost" as a substring, e.g. ``localhost.evil.com``) must be
@@ -89,67 +91,7 @@ def starter_table(dynamodb_resource: Any, table_name: str) -> Any:
         dynamodb_resource.Table(table_name).delete()
         dynamodb_resource.Table(table_name).wait_until_not_exists()
 
-    dynamodb_resource.create_table(
-        TableName=table_name,
-        AttributeDefinitions=[
-            {"AttributeName": "PK", "AttributeType": "S"},
-            {"AttributeName": "SK", "AttributeType": "S"},
-            {"AttributeName": "GSI1PK", "AttributeType": "S"},
-            {"AttributeName": "GSI1SK", "AttributeType": "S"},
-            {"AttributeName": "GSI2PK", "AttributeType": "S"},
-            {"AttributeName": "GSI2SK", "AttributeType": "S"},
-            {"AttributeName": "GSI3PK", "AttributeType": "S"},
-            {"AttributeName": "GSI3SK", "AttributeType": "S"},
-            {"AttributeName": "GSI4PK", "AttributeType": "S"},
-        ],
-        KeySchema=[
-            {"AttributeName": "PK", "KeyType": "HASH"},
-            {"AttributeName": "SK", "KeyType": "RANGE"},
-        ],
-        BillingMode="PAY_PER_REQUEST",
-        GlobalSecondaryIndexes=[
-            {
-                "IndexName": "KeyIndex",
-                "KeySchema": [
-                    {"AttributeName": "GSI1PK", "KeyType": "HASH"},
-                    {"AttributeName": "GSI1SK", "KeyType": "RANGE"},
-                ],
-                "Projection": {"ProjectionType": "ALL"},
-            },
-            {
-                "IndexName": "TagIndex",
-                "KeySchema": [
-                    {"AttributeName": "GSI2PK", "KeyType": "HASH"},
-                    {"AttributeName": "GSI2SK", "KeyType": "RANGE"},
-                ],
-                "Projection": {"ProjectionType": "ALL"},
-            },
-            {
-                "IndexName": "UserEmailIndex",
-                "KeySchema": [{"AttributeName": "GSI4PK", "KeyType": "HASH"}],
-                "Projection": {"ProjectionType": "ALL"},
-            },
-            {
-                "IndexName": "ChatByIdIndex",
-                "KeySchema": [
-                    {"AttributeName": "GSI3PK", "KeyType": "HASH"},
-                    {"AttributeName": "GSI3SK", "KeyType": "RANGE"},
-                ],
-                "Projection": {"ProjectionType": "ALL"},
-            },
-        ],
-    )
-
+    provision(dynamodb_resource.meta.client, table_name)
     table = dynamodb_resource.Table(table_name)
-    table.wait_until_exists()
-
-    # DynamoDB Local doesn't enforce TTL but the API call succeeds. We
-    # set it for parity with the production schema so any test that
-    # asserts on the ``ttl`` attribute name still works the same way.
-    client = dynamodb_resource.meta.client
-    client.update_time_to_live(
-        TableName=table_name,
-        TimeToLiveSpecification={"Enabled": True, "AttributeName": "ttl"},
-    )
 
     yield table
