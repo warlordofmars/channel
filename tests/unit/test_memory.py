@@ -180,6 +180,7 @@ def test_hook_registers_after_invocation_callback():
         memory_id="m-1",
         actor_id="user-abc",
         session_id="chat-xyz",
+        client=MagicMock(),  # Avoid real boto3.client (no AWS region in CI).
     )
 
     registry = MagicMock()
@@ -257,7 +258,12 @@ async def test_hook_swallows_exceptions_and_emits_failure_metric():
 def test_hook_after_invocation_fires_and_forgets():
     """The sync callback must fire-and-forget via asyncio.create_task,
     not block the agent loop."""
-    hook = AgentCoreMemoryHook(memory_id="m", actor_id="a", session_id="s")
+    hook = AgentCoreMemoryHook(
+        memory_id="m",
+        actor_id="a",
+        session_id="s",
+        client=MagicMock(),  # Avoid real boto3.client (no AWS region in CI).
+    )
 
     event = _fake_event_with_messages(
         [
