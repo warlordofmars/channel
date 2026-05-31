@@ -30,10 +30,13 @@ channel/
 │       │   └── mgmt_auth.py   # Management API authentication
 │       ├── agents/
 │       │   ├── __init__.py
-│       │   ├── bedrock.py     # Converse + converse_stream (raw Bedrock)
-│       │   └── inline_agent.py # invoke + invoke_stream (Bedrock inline agent)
+│       │   ├── chat_agent.py   # Strands Agent factory (build_agent / resolve_model_id)
+│       │   └── strands_sse.py  # Strands event → SSE byte translator
 │       └── api/
 │           ├── main.py        # FastAPI app + routes
+│           ├── _auth.py       # Shared mgmt-JWT dependency for /api/* routes
+│           ├── chats.py       # Chat CRUD + SSE streaming + regenerate
+│           ├── models.py      # GET /api/models — server allowlist
 │           └── csp.py         # CSP violation reporting endpoint
 ├── ui/
 │   ├── index.html             # Vite entry HTML
