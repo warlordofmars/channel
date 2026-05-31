@@ -70,7 +70,11 @@ def _format_recall_addendum(records: list[dict[str, Any]]) -> str:
 
 def _extract_user_message(event: BeforeInvocationEvent) -> str:
     """Read the most recent user-turn text off the event's messages."""
-    for msg in reversed(event.messages):
+    # Strands types ``event.messages`` as ``list[Message] | None`` but in
+    # practice the agent loop always populates it before the hook fires.
+    # Guard defensively anyway.
+    messages = event.messages or []
+    for msg in reversed(messages):
         if msg.get("role") == "user":
             for block in msg.get("content", []):
                 if "text" in block:
@@ -86,7 +90,10 @@ def _append_to_system_prompt(event: BeforeInvocationEvent, addendum: str) -> Non
     message has no text block (shouldn't happen with our prompt), we
     create one.
     """
-    sys_msg = event.messages[0]
+    messages = event.messages or []
+    if not messages:
+        return
+    sys_msg = messages[0]
     content = sys_msg.setdefault("content", [])
     if content and "text" in content[0]:
         content[0]["text"] = content[0]["text"] + "\n\n" + addendum
