@@ -1,3 +1,4 @@
+# src/channel/api/chats.py
 # Copyright (c) 2026 John Carter. All rights reserved.
 """Chat REST + SSE API.
 
@@ -13,9 +14,28 @@ from typing import Any
 
 from fastapi import APIRouter, Depends
 
+from channel import storage
 from channel.api._auth import require_mgmt_user
+from channel.models import ChatCreate
+
+_DEFAULT_MODEL = "canned-stream-v1"
 
 router = APIRouter(prefix="/chats", tags=["chats"])
+
+
+@router.post("", status_code=201)
+async def create_chat(
+    payload: ChatCreate,
+    claims: dict[str, Any] = Depends(require_mgmt_user),
+) -> dict[str, Any]:
+    """Create a new chat for the authenticated user."""
+
+    chat = storage.create_chat(
+        user_id=claims["sub"],
+        title=payload.title,
+        model_default=payload.model_default or _DEFAULT_MODEL,
+    )
+    return chat.model_dump()
 
 
 @router.get("")
