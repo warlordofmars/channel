@@ -3,9 +3,13 @@ import { useCallback, useEffect, useState } from "react";
 import * as api from "../api.js";
 
 /**
- * Drives the sidebar Recents list and exposes optimistic chat-lifecycle
- * actions (create / rename / archive). Failures revert state and set
- * `status === "error"` for the caller to display.
+ * Drives the sidebar Recents list and exposes chat-lifecycle actions
+ * (create / rename / archive). Mutations apply optimistic local state
+ * BEFORE awaiting the API; failures of the mutation API call do NOT
+ * revert local state — callers should `try/catch` on the returned
+ * promise if they want to surface the error. `status === "error"` is
+ * only set when the initial fetch (or `refresh()`) fails; mutation
+ * failures keep `status === "idle"`.
  */
 export function useChatList() {
   const [chats, setChats] = useState([]);
