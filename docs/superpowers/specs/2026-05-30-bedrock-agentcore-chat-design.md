@@ -15,9 +15,18 @@ recall and learned user preferences at inference time. The two systems
 are decoupled — transcript reads never hit AgentCore; AgentCore failures
 never break a chat.
 
+**Agent layer:** [Strands Agents](https://strandsagents.com/) (AWS's
+open-source Apache-2.0 agent SDK) on top of Bedrock, replacing direct
+use of `InvokeInlineAgent`. Strands provides first-class AgentCore
+Memory integration, normalised streaming events, and ready-for-tools
+plumbing. The existing `src/channel/agents/inline_agent.py` and
+`src/channel/agents/bedrock.py` wrappers are superseded by a new thin
+Strands construction helper.
+
 This is the first phase past the UI-only MVP. It introduces persistent
-chat state, real model calls, the first DynamoDB schema for chats, and
-the first AgentCore Memory wiring in the project.
+chat state, real model calls, the first DynamoDB schema for chats, the
+first AgentCore Memory wiring in the project, and Strands as the
+agentic-runtime substrate that future tool-using features will build on.
 
 ## Scope
 
@@ -26,13 +35,18 @@ the first AgentCore Memory wiring in the project.
 - DynamoDB schema for chats (chat-index rows + message rows + one GSI).
 - New `/api/chats/*` REST + SSE endpoints.
 - Replacement of `useMockStream` with a real SSE-driven hook.
-- Real Bedrock inline-agent streaming via the existing
-  `src/channel/agents/inline_agent.py` wrapper, with a small extension
-  for memory wiring and recall context.
-- AgentCore Memory: lazy per-user memory creation, event auto-write
-  during invocation, explicit fallback writes, three memory strategies
-  (summary / user preferences / semantic), retrieval at inference time
-  with system-prompt injection.
+- **Strands Agents** as the agent runtime. New
+  `src/channel/agents/chat_agent.py` constructs a Strands `Agent` per
+  turn with `BedrockModel`, system prompt, and (from 7c) an
+  `AgentCoreMemory` adapter. `inline_agent.py` is **deleted** —
+  Strands replaces its responsibilities. `bedrock.py` is kept only if
+  needed for the Haiku title call (see §4); otherwise also deleted.
+- AgentCore Memory: lazy per-user memory creation, writes via Strands'
+  `AgentCoreMemory` adapter, three memory strategies (summary / user
+  preferences / semantic). Recall injection format is owned by Strands
+  if the spike confirms acceptable visibility; otherwise we set Strands'
+  memory adapter to write-only and inject recall ourselves via system
+  prompt (escape hatch documented in §3).
 - Sidebar Recents driven by real chat list; chat archive + rename.
 - Server-side model allowlist via `GET /api/models`.
 - Auto-titling of new chats via a separate cheap-model call.
@@ -78,19 +92,26 @@ the first AgentCore Memory wiring in the project.
    completed turn is written as an event (`actorId = user_id`,
    `sessionId = chat_id`). Three memory strategies run over the events.
    Retrieval is **only** at inference time — never for display.
-3. **Bedrock `InvokeInlineAgent`** — per-turn inference, already
-   wrapped by `src/channel/agents/inline_agent.py`. Extended to accept
-   a recall-augmented system prompt and to wire `memoryConfiguration`
-   for automatic event writes.
+3. **Strands `Agent` over Bedrock** — per-turn inference. New
+   `src/channel/agents/chat_agent.py` constructs a `strands.Agent`
+   with `BedrockModel(model_id=...)`, a system prompt, and an
+   `AgentCoreMemory` adapter wired with `memory_id`, `actor_id`, and
+   `session_id`. Strands handles tool-use, streaming, AgentCore Memory
+   read/write, and (in future phases) MCP tool plumbing. The agent is
+   constructed fresh per turn — Strands `Agent` instances are
+   lightweight config wrappers, not long-lived state.
 
 ### Identity mapping
 
 - `user_id` (JWT `sub`) → `memoryId` (1-to-1, cached on the user row)
 - `chat_id` (UUID) → both DDB `PK=CHAT#{id}` AND AgentCore Memory
-  `sessionId`. The user-namespacing for Bedrock Agents' own session
-  tracking (`f"{user_id}:{chat_id}"`) stays inside the inline-agent
-  wrapper.
-- `actorId = user_id` inside AgentCore Memory.
+  `session_id` passed to Strands' `AgentCoreMemory` adapter. Strands
+  doesn't expose Bedrock Agents' own session-id semantics directly, so
+  the user-namespacing pattern from `inline_agent.py` no longer
+  applies — AgentCore Memory's `actor_id` + `session_id` pair is
+  scoped by `memory_id` (which is per-user), so cross-user bleed is
+  prevented at the memory boundary.
+- `actor_id = user_id` inside AgentCore Memory.
 
 ### Per-turn flow
 
@@ -99,16 +120,22 @@ client POST /api/chats/{id}/messages
   → write user msg row to DDB                              (W1)
   → update chat-index row last_message_at + count          (W2, atomic with W1)
   → SSE: user_persisted
-  → RetrieveMemories(memoryId, /users/{u}, query=text)
-  → invoke_inline_agent(message, sessionId=chat_id, augmented_system_prompt,
-                        memoryConfiguration=auto-write events)
-  → stream SSE deltas to client AND to internal buffer
+  → construct strands.Agent(
+        model=BedrockModel(model_id=request.model),
+        system_prompt=base_prompt,
+        memory=AgentCoreMemory(memory_id, actor_id, session_id=chat_id),
+    )
+  → async for event in agent.stream_async(user_message):
+      → translate Strands events → SSE delta / artifact / done
+      → accumulate text into internal buffer
+      → Strands' AgentCoreMemory adapter handles user+assistant event
+        writes to AgentCore (W3/W6 — owned by Strands; we monitor for
+        adapter errors via metric)
   → on stream complete:
       → write assistant msg row to DDB                     (W4)
       → update chat-index row last_message_at + count      (W5, atomic with W4)
       → SSE: done
   → async post-response:
-      → fallback CreateEvent if Bedrock auto-write missed   (W3/W6)
       → if new chat: auto-title via Haiku invoke + UpdateItem (W7)
 ```
 
@@ -187,17 +214,22 @@ is one extra write per chat (not per message).
 - **`message_count` is denormalized** — updated atomically with
   `last_message_at` in the same transaction.
 
-## AgentCore Memory
+## AgentCore Memory (via Strands)
 
 ### Lifecycle
 
 One memory per user, created lazily on first chat (asynchronously
-after user-record bootstrap). `memoryId` cached on the user row. First
-chat tolerates missing `memoryId` and skips recall; subsequent chats
-get full memory.
+after user-record bootstrap). `memory_id` cached on the user row.
+First chat tolerates missing `memory_id` and skips memory wiring;
+subsequent chats get full memory.
+
+Memory creation uses the raw AgentCore Memory API (boto3) since this
+is a one-shot bootstrap operation, not a per-turn concern. Strands
+does NOT manage memory creation — only memory **usage**:
 
 ```python
-client.create_memory(
+client = boto3.client("bedrock-agentcore-control")
+response = client.create_memory(
     name=f"channel-user-{user_id[:8]}",
     description=f"Long-term memory for Channel user {user_id}",
     eventExpiryDuration=90,
@@ -215,57 +247,82 @@ client.create_memory(
 The exact `memoryStrategies` field shapes must be verified against
 current `boto3` at implementation time — the strategy objects' nested
 field names have shifted across preview → GA. The architectural shape
-(three strategies, namespaces parameterised by `actorId` / `sessionId`)
-is the load-bearing part.
+(three strategies, namespaces parameterised by `actor_id` /
+`session_id`) is the load-bearing part.
 
 ### Three strategies, three purposes
 
-| Strategy | Namespace | Purpose | Read when |
+| Strategy | Namespace | Purpose | Used by |
 |---|---|---|---|
-| `summaryMemoryStrategy` | `/users/{actorId}/sessions/{sessionId}` | Rolling per-chat summary | Resuming a long chat |
-| `userPreferenceMemoryStrategy` | `/users/{actorId}` | Extracted user facts | Every turn |
-| `semanticMemoryStrategy` | `/users/{actorId}` | Embedded past turns | Every turn, top-K by score threshold |
+| `summaryMemoryStrategy` | `/users/{actorId}/sessions/{sessionId}` | Rolling per-chat summary | Strands' adapter on long-chat resume |
+| `userPreferenceMemoryStrategy` | `/users/{actorId}` | Extracted user facts | Strands' adapter every turn |
+| `semanticMemoryStrategy` | `/users/{actorId}` | Embedded past turns | Strands' adapter every turn |
 
-### Event-write shape
+### Strands `AgentCoreMemory` adapter — primary path
 
-Per turn, one event in the conversational shape (so strategies
-recognise it):
+Strands' `AgentCoreMemory` adapter is wired into the per-turn `Agent`
+construction:
 
 ```python
-client.create_event(
-    memoryId=memory_id,
-    actorId=user_id,
-    sessionId=chat_id,
-    eventTimestamp=datetime.now(UTC),
-    payload=[{
-        "conversational": {
-            "role": "USER",  # or "ASSISTANT"
-            "content": [{"text": text}],
-        }
-    }],
+from strands import Agent
+from strands.memory import AgentCoreMemory   # API verification at impl time
+from strands.models import BedrockModel
+
+agent = Agent(
+    model=BedrockModel(model_id=request.model),
+    system_prompt=base_prompt,
+    memory=AgentCoreMemory(
+        memory_id=user_memory_id,
+        actor_id=user_id,
+        session_id=chat_id,
+    ),
 )
+
+async for event in agent.stream_async(user_message):
+    ...   # translate to SSE
 ```
 
-Display metadata (artifacts, model, attachments) is NOT packed into
-the event payload — that's DynamoDB's job.
+On each `stream_async`, Strands' adapter:
+- Calls `retrieve_memories` against the configured namespaces (or
+  similar) and injects results into the model context.
+- Persists the user message and the assistant reply as events via
+  `create_event`.
 
-### Inference-time recall
+Display metadata (artifacts, model, attachments) is NOT routed through
+AgentCore at all — that's DynamoDB's job and lives on the message row.
+
+### Escape hatch — manual recall injection
+
+If the 7b spike reveals that Strands' `AgentCoreMemory` adapter
+either (a) auto-injects in a format we can't inspect or tune, or
+(b) doesn't gate semantic recall by score, we fall back to a
+**write-only** memory adapter configuration and inject recall
+ourselves via `system_prompt`:
 
 ```python
-results = client.retrieve_memories(
-    memoryId=memory_id,
+# Manual recall (escape hatch)
+results = boto3_agentcore.retrieve_memories(
+    memoryId=user_memory_id,
     namespace=f"/users/{user_id}",
     searchCriteria={"searchQuery": user_message, "topK": 5},
 )
-prefs = client.retrieve_memories(
-    memoryId=memory_id,
+prefs = boto3_agentcore.retrieve_memories(
+    memoryId=user_memory_id,
     namespace=f"/users/{user_id}/preferences",
     searchCriteria={"searchQuery": "", "topK": 10},
 )
+
+augmented_prompt = base_prompt + format_recall_block(results, prefs)
+
+agent = Agent(
+    model=BedrockModel(model_id=request.model),
+    system_prompt=augmented_prompt,
+    memory=AgentCoreMemory(..., mode="write_only"),  # if supported
+    # else: omit memory= entirely and write events ourselves post-turn
+)
 ```
 
-Results render into a system-prompt suffix that the wrapper appends to
-the caller's `instruction`:
+Where `format_recall_block` produces:
 
 ```text
 <long_term_memory>
@@ -282,18 +339,20 @@ unless asked.
 </long_term_memory>
 ```
 
-### Why not use Bedrock Agents' built-in recall
+Both paths share the same write-side semantics (events go to the same
+memory; same three strategies process them). The escape hatch only
+changes read-side injection. We commit to one path in 7d, after the
+7b spike.
 
-`InvokeInlineAgent`'s native `memoryConfiguration` can both write
-events AND auto-recall. We use it for **writes only** because:
-- We want to log what was injected for debugging.
-- We want to tune the prompt template ourselves.
-- We want preferences on every turn but semantic recall gated on a
-  score threshold.
+### Cost shape (order of magnitude)
 
-If at implementation time the API can't be configured as "write but
-don't recall", we fall back to explicit `CreateEvent` (operational
-shape is identical) and disable `memoryConfiguration` entirely.
+- `create_event` — ~$1 per million turns. Negligible.
+- Strategy compute (summarization + extraction) — ~$0.50–2.00 per
+  active user per month. **Dominant cost.**
+- `retrieve_memories` — ~$0.20 per million turns. Negligible.
+
+First lever if cost becomes a concern: drop the semantic strategy
+(keep summary + preferences).
 
 ### Cost shape (order of magnitude)
 
@@ -342,6 +401,25 @@ on new untitled chats once enough text is in to title from. `done`'s
 `model` field reports the **actual** model Bedrock used (post any
 fallback routing).
 
+### SSE event translation from Strands
+
+Strands' `agent.stream_async()` yields a typed event stream — at
+minimum text deltas, tool-use events (future), and completion
+metadata. The SSE producer is a thin translator:
+
+| Strands event | Our SSE event |
+|---|---|
+| `text_delta` (or equivalent) | `delta` |
+| `message_stop` / completion | `done` (with `model`, `input_tokens`, `output_tokens`, `stop_reason` populated from Strands' metadata) |
+| `error` | `error` |
+| `tool_use` (future phases) | `artifact` or reserved `tool_use` event |
+
+Exact Strands event names verified at 7b implementation time (the
+streaming event schema is documented at
+`https://strandsagents.com/` and in the `strands` Python package).
+This translation layer replaces the manual `_stream_chunks` byte
+parsing from the old `inline_agent.py`.
+
 ### Why `/regenerate` is a separate endpoint
 
 Different write semantics (must delete last assistant row + AgentCore
@@ -363,7 +441,9 @@ plan time.
 
 ## Write path & dual-write semantics
 
-Seven writes per turn:
+Seven writes per turn — three owned by Strands' memory adapter (W3,
+W6) or Strands itself (the model invocation), four owned by our code
+(W1, W2, W4, W5, W7):
 
 ```text
 Phase 1 — accept
@@ -371,10 +451,11 @@ Phase 1 — accept
   W2  Update CHAT index row            → atomic with W1
                                         ↑ SSE: user_persisted
 
-Phase 2 — invoke
-  W3  CreateEvent (user)               → AgentCore (Bedrock auto-write
-                                                    via memoryConfiguration)
-  →   stream deltas to client + buffer
+Phase 2 — invoke (Strands)
+  W3  AgentCoreMemory.create_event     → AgentCore (Strands adapter,
+       (user)                                       per turn)
+  →   agent.stream_async(message)
+  →   translate Strands events → SSE deltas + buffer
 
 Phase 3 — finalise
   W4  Put MSG row (assistant)          → DDB TransactWriteItems
@@ -382,8 +463,8 @@ Phase 3 — finalise
                                         ↑ SSE: done
 
 Phase 4 — async
-  W6  CreateEvent (assistant)          → AgentCore (Bedrock auto;
-                                                    fallback explicit)
+  W6  AgentCoreMemory.create_event     → AgentCore (Strands adapter)
+       (assistant)
   W7  Title chat (new + first turn)    → Haiku invoke + UpdateItem
 ```
 
@@ -392,12 +473,21 @@ Phase 4 — async
 | Failure | Behavior |
 |---|---|
 | W1+W2 | 5xx; client preserves draft |
-| W3 (Bedrock auto-write disabled / errors) | Explicit fallback in Phase 4; otherwise log + metric |
-| Bedrock invoke fails mid-stream | SSE `error`; user message stays persisted |
+| W3 (Strands adapter user-event write fails) | Adapter raises; we catch + log + metric; turn proceeds (adapter must support throw-vs-swallow knob, else we wrap it) |
+| Strands `stream_async` fails mid-stream | SSE `error`; user message stays persisted |
 | W4+W5 | Retry x3 with backoff; if all fail: SSE `error` + dead-letter row |
-| W6 | Log + metric; accept divergence |
+| W6 (Strands adapter assistant-event write fails) | Caught + log + metric; transcript intact |
 | W7 | No retry; next turn re-titles |
-| Client disconnect mid-stream | Lambda continues; W4+W5 still run |
+| Client disconnect mid-stream | Lambda continues; `stream_async` drains; W4+W5 still run |
+
+### Preserving the asymmetric write semantics under Strands
+
+Goal: AgentCore Memory failures must NEVER fail a chat turn (memory is
+allowed to drift; transcript is not). If Strands' `AgentCoreMemory`
+adapter raises on write failure, we wrap it with a swallowing
+decorator that logs + increments `AgentCoreWriteFailures` and lets
+the agent continue. Verified at 7c implementation — if the adapter
+doesn't expose hooks for this, we subclass it.
 
 ### Idempotency
 
@@ -423,8 +513,8 @@ Plus structured log lines per turn: `chat_id`, hashed `user_id`,
 Considered: have DDB Streams trigger a Lambda that writes to
 AgentCore, eliminating dual-write from the request path. Decided
 against — adds a Lambda, extra IAM, and a second failure surface;
-Bedrock's `memoryConfiguration` already gives us auto-write. Revisit
-if auto-write proves unreliable.
+Strands' adapter already gives us in-band write. Revisit if the
+adapter proves unreliable.
 
 ## UI changes
 
@@ -507,8 +597,12 @@ const { chats, status, refresh, createChat, archiveChat, renameChat } = useChatL
   (DDB ok), DDB transaction fail (5xx + dead-letter).
 - `tests/unit/test_memory.py` — lazy memory create, retrieval prompt
   format, namespace construction, no-memory graceful degrade.
-- `tests/unit/test_inline_agent.py` — extended for `recall_context`,
-  `memoryConfiguration` plumbing, fallback `CreateEvent`.
+- `tests/unit/test_chat_agent.py` — Strands `Agent` construction:
+  correct `BedrockModel(model_id=...)`, system prompt assembly,
+  `AgentCoreMemory` adapter wired when `memory_id` present and skipped
+  when absent, stream-event translation to SSE shapes. Strands' `Agent`
+  is mocked at the construction boundary; we don't run real model
+  calls in unit tests.
 - `ui/src/hooks/useChatStream.test.js` — history load, SSE parse
   (every event type), optimistic render + server msg_id swap, abort,
   error display, regenerate.
@@ -548,37 +642,63 @@ Too large for one PR. Four shippable phases; each ships green-CI to
 
 | Phase | Ships | User-visible change | Boundary rationale |
 |---|---|---|---|
-| **7a. DDB chats + CRUD API** | DDB schema, GSI, `POST/GET/PATCH /api/chats`, `POST /messages` returns SSE backed by a **fake deterministic stream** (canned reply, server-side). Sidebar uses real `useChatList`; chats persist across reloads. | Sidebar shows real chats; reload restores conversation; send still returns canned text. | Decouples persistence from Bedrock — biggest schema + API risk in its own PR. |
-| **7b. Real Bedrock streaming** | Replace fake stream with `invoke_inline_agent`. CDK: `RESPONSE_STREAM` mode + Bedrock IAM. `/api/models` endpoint + real model picker. `/regenerate`. | Send returns real model output; model picker actually switches models. | Bedrock is the second-biggest risk surface; orthogonal to persistence. |
-| **7c. AgentCore Memory writes** | `CreateMemory` (lazy + async on user bootstrap); `memoryConfiguration` on invoke; fallback `CreateEvent`. **No recall yet.** | Invisible to users; metrics + logs show events flowing. | Validate write path in real traffic before agent behavior depends on it. |
-| **7d. AgentCore Memory recall + auto-title** | `RetrieveMemories` per turn; system-prompt injection; `title_suggested` SSE + cheap-model title call. | Agent remembers preferences and past chats; new chats auto-title within the first reply. | "Magic" features; built on memory that's been accumulating since 7c shipped. |
+| **7a. DDB chats + CRUD API** | DDB schema, GSI, `POST/GET/PATCH /api/chats`, `POST /messages` returns SSE backed by a **fake deterministic stream** (canned reply, server-side). Sidebar uses real `useChatList`; chats persist across reloads. | Sidebar shows real chats; reload restores conversation; send still returns canned text. | Decouples persistence from Bedrock + Strands — biggest schema + API risk in its own PR. |
+| **7b. Strands + real Bedrock streaming** | Add `strands` dep + `strands-tools` if needed. New `chat_agent.py` constructs a Strands `Agent` with `BedrockModel`. Delete `inline_agent.py`. SSE producer translates Strands events. `/api/models` endpoint + real model picker. `/regenerate`. CDK: Lambda timeout 30s → 5min; IAM adds `bedrock:InvokeInlineAgent` (Strands' BedrockModel may use it); switch FastAPI adapter from Mangum to `aws-lambda-web-adapter` if Mangum can't stream. **No memory wiring yet** — `memory=None` on the Agent. **Strands recall-injection spike happens here** (see Open Questions). | Send returns real model output; model picker actually switches models; regenerate works. | Bedrock + Strands is the second-biggest risk surface; orthogonal to persistence. Memory wiring deferred so a Strands integration bug doesn't entangle a memory bug. |
+| **7c. AgentCore Memory writes via Strands adapter** | `CreateMemory` (lazy + async on user bootstrap; raw boto3). `chat_agent.py` wires `AgentCoreMemory` adapter on each Agent construction. Wrap the adapter (or subclass) to swallow write failures into a metric per §5. **Read-side behavior depends on 7b spike outcome** — either let Strands auto-inject (do nothing extra) or set adapter to write-only and skip recall this phase. | Invisible to users if recall stays disabled; if Strands auto-injection is acceptable per 7b spike, agent starts remembering immediately. Metrics + logs show events flowing. | Validate write path in real traffic before agent behavior depends on it heavily. |
+| **7d. Memory recall finalised + auto-titling** | Lock in recall behavior: either confirm Strands' auto-injection is good (no code change) or implement the manual-injection escape hatch from §3 (system-prompt format + `retrieve_memories` calls). `title_suggested` SSE + cheap-model title call via `BedrockModel(model_id="anthropic.claude-haiku-...")` invoked through a small Strands `Agent` (no memory). | Agent remembers preferences and past chats reliably; new chats auto-title within the first reply. | "Magic" features; built on memory that's been accumulating since 7c shipped. |
 
 Each phase has its own GitHub issue with a `## Files to touch`
-section. 7a is `size:l`; 7b–7d are each `size:m`.
+section. 7a is `size:l`; 7b is `size:l` (Strands integration +
+adapter switch + spike); 7c is `size:m`; 7d is `size:s` to `size:m`
+depending on spike outcome.
 
 ## Open questions / decisions
 
-- **AgentCore Memory API verification.** Strategy field shapes and the
-  exact `memoryConfiguration` semantics for "write-only" mode need
-  verification against current `boto3` at plan time. Fallback plan
-  documented (explicit `CreateEvent`).
+- **Strands recall-injection spike (7b plan-time).** Two things to
+  verify on the Strands `AgentCoreMemory` adapter:
+  (a) **Visibility** — can we log / inspect what the adapter injected
+  into the model context per turn? If not, debugging memory behavior
+  is opaque and we lean toward the manual-injection escape hatch.
+  (b) **Gating** — does the adapter let us threshold semantic recall
+  by relevance score, or does it always inject top-K? If only the
+  latter, irrelevant memories may pollute every turn.
+  Outcome drives whether 7c+7d use Strands' built-in recall or the
+  manual escape hatch from §3.
+- **Strands swallow-vs-throw on memory write failure.** Need to
+  verify whether the `AgentCoreMemory` adapter exposes a
+  swallow-failure mode, or whether we must wrap/subclass it to
+  preserve the §5 asymmetric semantics (transcript loud, memory quiet).
+- **Strands API stability.** Strands shipped Q2 2025 and is on an
+  active release cadence. Pin to a known-good version in
+  `pyproject.toml`; review the changelog at each version bump.
+- **AgentCore Memory boto3 API verification.** Strategy field shapes
+  on `CreateMemory` need verification at 7c plan time. Fallback plan
+  documented (the architectural shape — three strategies, namespaced
+  events — is what matters).
 - **Lambda timeout.** Currently 30s (`channel_stack.py` line 376);
   must be raised to 5 min for streaming chats in 7b.
 - **Mangum vs. alternate adapter.** Mangum doesn't pass SSE through
   streaming Function URLs cleanly; plan to switch to
   `aws-lambda-web-adapter` in 7b. Spike at 7b plan time to confirm.
-- **Bedrock IAM extensions.** `bedrock:InvokeModel{,WithResponseStream}`
-  is already granted (`channel_stack.py` line 333). 7b adds
-  `bedrock:InvokeInlineAgent`; 7c adds AgentCore Memory actions
-  (`bedrock-agentcore:CreateMemory`, `:CreateEvent`,
-  `:RetrieveMemories`, `:GetMemory`, scoped to the per-env memory
-  resource).
+- **Bedrock + AgentCore IAM extensions.**
+  `bedrock:InvokeModel{,WithResponseStream}` is already granted
+  (`channel_stack.py` line 333).
+  - 7b adds `bedrock:InvokeInlineAgent` if Strands' BedrockModel
+    routes through inline-agent runtime, or remains unchanged if it
+    uses the converse API directly (verify at spike time).
+  - 7c adds AgentCore Memory actions: `bedrock-agentcore:CreateMemory`,
+    `:CreateEvent`, `:RetrieveMemories`, `:GetMemory`, scoped to the
+    per-env memory resource ARN pattern.
 
 ## References
 
 - Predecessor spec: `2026-05-29-channel-mvp-design.md`
-- Existing agent wrapper: `src/channel/agents/inline_agent.py`
-- Existing Bedrock wrapper: `src/channel/agents/bedrock.py`
+- Strands Agents — `https://strandsagents.com/` (Apache-2.0; AWS-maintained)
+- Existing agent wrapper being replaced: `src/channel/agents/inline_agent.py`
+- Existing Bedrock wrapper (kept or trimmed in 7b): `src/channel/agents/bedrock.py`
 - Existing mock stream being replaced: `ui/src/hooks/useMockStream.js`
 - CLAUDE.md "Product decisions" — workspaces as tenancy root, agents
-  swap tokens for context, agent session IDs are user-namespaced.
+  swap tokens for context, agent session IDs are user-namespaced (the
+  last decision is restated in §1 — Strands' `AgentCoreMemory` adapter
+  takes `actor_id`+`session_id` and cross-user bleed is prevented at
+  the `memory_id` boundary, not at the session-id format).
