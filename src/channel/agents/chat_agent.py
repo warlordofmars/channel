@@ -12,10 +12,11 @@ Recall is still disabled; that's 7d.
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import Any, cast
 
 from strands import Agent
 from strands.models import BedrockModel
+from strands.types.content import Messages
 
 from channel.agents.memory import AgentCoreMemoryHook, get_or_create_memory
 
@@ -87,5 +88,8 @@ def build_agent(
         model=bedrock,
         system_prompt=system_prompt or DEFAULT_SYSTEM_PROMPT,
         hooks=[memory_hook],
-        messages=prior_messages or [],
+        # Strands types ``messages`` as ``list[Message]`` (its TypedDict);
+        # at runtime the shape is plain dicts. ``cast`` keeps mypy happy
+        # without making consumers of build_agent import Strands types.
+        messages=cast(Messages, prior_messages or []),
     )
