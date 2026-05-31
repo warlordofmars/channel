@@ -336,21 +336,30 @@ def test_post_message_returns_sse_via_strands(
 def _stub_first_round_trip_chat(monkeypatch: pytest.MonkeyPatch) -> Chat:
     """Common shape: fresh chat (message_count=0), all storage mocked."""
     chat = Chat(
-        chat_id="c1", user_id="u-1", title="New chat",
-        created_at="t", last_message_at="t",
-        model_default="claude-sonnet-4-6", message_count=0,
+        chat_id="c1",
+        user_id="u-1",
+        title="New chat",
+        created_at="t",
+        last_message_at="t",
+        model_default="claude-sonnet-4-6",
+        message_count=0,
     )
     monkeypatch.setattr("channel.api.chats.storage.get_chat_by_id", lambda _: chat)
     monkeypatch.setattr(
         "channel.api.chats.storage.put_message",
         lambda **kwargs: Message(
-            chat_id=kwargs["chat_id"], msg_id="m", role=kwargs["role"],
-            text=kwargs["text"], model=kwargs.get("model"), created_at="t",
+            chat_id=kwargs["chat_id"],
+            msg_id="m",
+            role=kwargs["role"],
+            text=kwargs["text"],
+            model=kwargs.get("model"),
+            created_at="t",
         ),
     )
     monkeypatch.setattr("channel.api.chats.storage.update_chat_index", lambda **_: None)
     monkeypatch.setattr(
-        "channel.api.chats.storage.list_messages", lambda *_a, **_kw: ([], None),
+        "channel.api.chats.storage.list_messages",
+        lambda *_a, **_kw: ([], None),
     )
     return chat
 
@@ -405,21 +414,29 @@ def test_post_message_skips_titler_on_non_first_round_trip(
 ) -> None:
     """Chat with message_count > 0 must NOT emit title_suggested."""
     chat = Chat(
-        chat_id="c1", user_id="u-1", title="Existing title",
-        created_at="t", last_message_at="t",
-        model_default="claude-sonnet-4-6", message_count=4,
+        chat_id="c1",
+        user_id="u-1",
+        title="Existing title",
+        created_at="t",
+        last_message_at="t",
+        model_default="claude-sonnet-4-6",
+        message_count=4,
     )
     monkeypatch.setattr("channel.api.chats.storage.get_chat_by_id", lambda _: chat)
     monkeypatch.setattr(
         "channel.api.chats.storage.put_message",
         lambda **kwargs: Message(
-            chat_id=kwargs["chat_id"], msg_id="m", role=kwargs["role"],
-            text=kwargs["text"], created_at="t",
+            chat_id=kwargs["chat_id"],
+            msg_id="m",
+            role=kwargs["role"],
+            text=kwargs["text"],
+            created_at="t",
         ),
     )
     monkeypatch.setattr("channel.api.chats.storage.update_chat_index", lambda **_: None)
     monkeypatch.setattr(
-        "channel.api.chats.storage.list_messages", lambda *_a, **_kw: ([], None),
+        "channel.api.chats.storage.list_messages",
+        lambda *_a, **_kw: ([], None),
     )
 
     titler_built: list[bool] = []

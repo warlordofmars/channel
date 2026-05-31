@@ -131,7 +131,11 @@ def get_or_create_memory(env: str) -> str:
 
 
 def _wait_for_memory_active(
-    control: Any, memory_id: str, *, timeout_seconds: int = 360, poll_seconds: int = 5,
+    control: Any,
+    memory_id: str,
+    *,
+    timeout_seconds: int = 360,
+    poll_seconds: int = 5,
 ) -> None:
     """Poll ``GetMemory`` until status is ``ACTIVE`` or timeout."""
     deadline = time.monotonic() + timeout_seconds
@@ -141,9 +145,7 @@ def _wait_for_memory_active(
         if status == "ACTIVE":
             return
         if status in ("FAILED", "DELETING", "DELETED"):
-            raise RuntimeError(
-                f"AgentCore Memory {memory_id} reached terminal status {status!r}"
-            )
+            raise RuntimeError(f"AgentCore Memory {memory_id} reached terminal status {status!r}")
         time.sleep(poll_seconds)
     raise TimeoutError(
         f"AgentCore Memory {memory_id} did not reach ACTIVE within {timeout_seconds}s"

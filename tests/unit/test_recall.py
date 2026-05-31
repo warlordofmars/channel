@@ -85,7 +85,9 @@ def test_hook_registers_before_invocation_callback_only():
     """Recall hook subscribes ONLY to BeforeInvocationEvent — NOT
     AfterInvocationEvent (that's the write hook's job)."""
     hook = AgentCoreRecallHook(
-        memory_id="m-1", actor_id="alice", client=MagicMock(),
+        memory_id="m-1",
+        actor_id="alice",
+        client=MagicMock(),
     )
     registry = MagicMock()
     hook.register_hooks(registry)
@@ -105,7 +107,9 @@ async def test_hook_injects_records_into_system_prompt_on_first_turn():
         ],
     }
     hook = AgentCoreRecallHook(
-        memory_id="m-1", actor_id="alice_example_com", client=fake_client,
+        memory_id="m-1",
+        actor_id="alice_example_com",
+        client=fake_client,
     )
     event = _fake_before_event(user_text="what colour do i like?")
 
@@ -141,7 +145,9 @@ async def test_hook_filters_records_below_score_threshold():
         ],
     }
     hook = AgentCoreRecallHook(
-        memory_id="m", actor_id="a", client=fake_client,
+        memory_id="m",
+        actor_id="a",
+        client=fake_client,
     )
     event = _fake_before_event(user_text="...")
     with patch("channel.agents.recall.record_recall_outcome", new=AsyncMock()):
@@ -162,7 +168,9 @@ async def test_hook_reuses_cached_records_for_next_5_turns():
         ],
     }
     hook = AgentCoreRecallHook(
-        memory_id="m", actor_id="a", client=fake_client,
+        memory_id="m",
+        actor_id="a",
+        client=fake_client,
     )
     with patch("channel.agents.recall.record_recall_outcome", new=AsyncMock()):
         for _ in range(5):
@@ -180,7 +188,9 @@ async def test_hook_refreshes_cache_after_5_turns():
         "memoryRecordSummaries": [{"content": {"text": "x"}, "score": 0.9}],
     }
     hook = AgentCoreRecallHook(
-        memory_id="m", actor_id="a", client=fake_client,
+        memory_id="m",
+        actor_id="a",
+        client=fake_client,
     )
     with patch("channel.agents.recall.record_recall_outcome", new=AsyncMock()):
         for _ in range(6):  # 1 cold + 4 cached + 1 refresh
@@ -197,14 +207,18 @@ async def test_hook_per_chat_cache_keys():
     fake_client = MagicMock()
     fake_client.retrieve_memory_records.return_value = {"memoryRecordSummaries": []}
     hook = AgentCoreRecallHook(
-        memory_id="m", actor_id="a", client=fake_client,
+        memory_id="m",
+        actor_id="a",
+        client=fake_client,
     )
     with patch("channel.agents.recall.record_recall_outcome", new=AsyncMock()):
         await hook._on_before_invocation_async(
-            _fake_before_event("q1"), chat_id="A",
+            _fake_before_event("q1"),
+            chat_id="A",
         )
         await hook._on_before_invocation_async(
-            _fake_before_event("q2"), chat_id="B",
+            _fake_before_event("q2"),
+            chat_id="B",
         )
     # Two distinct chats → two cold-cache RPCs.
     assert fake_client.retrieve_memory_records.call_count == 2
@@ -215,7 +229,9 @@ async def test_hook_swallows_retrieve_failures_and_emits_failure_metric():
     fake_client = MagicMock()
     fake_client.retrieve_memory_records.side_effect = RuntimeError("agentcore down")
     hook = AgentCoreRecallHook(
-        memory_id="m", actor_id="a", client=fake_client,
+        memory_id="m",
+        actor_id="a",
+        client=fake_client,
     )
     event = _fake_before_event(user_text="...")
     original_sys = event.messages[0]["content"][0]["text"]
@@ -234,7 +250,9 @@ async def test_hook_short_circuits_when_kill_switch_off(monkeypatch):
     monkeypatch.setenv("STARTER_RECALL_ENABLED", "0")
     fake_client = MagicMock()
     hook = AgentCoreRecallHook(
-        memory_id="m", actor_id="a", client=fake_client,
+        memory_id="m",
+        actor_id="a",
+        client=fake_client,
     )
     event = _fake_before_event(user_text="...")
     await hook._on_before_invocation_async(event, chat_id="chat-1")

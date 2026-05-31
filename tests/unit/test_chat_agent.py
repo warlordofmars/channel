@@ -80,7 +80,9 @@ def test_build_agent_uses_custom_system_prompt_when_provided(monkeypatch):
     monkeypatch.setattr("channel.agents.chat_agent.BedrockModel", lambda **_: object())
     monkeypatch.setattr(
         "channel.agents.chat_agent.Agent",
-        lambda model, system_prompt=None, **kw: captured.update({"system_prompt": system_prompt}) or MagicMock(),
+        lambda model, system_prompt=None, **kw: (
+            captured.update({"system_prompt": system_prompt}) or MagicMock()
+        ),
     )
     monkeypatch.setattr("channel.agents.chat_agent.get_or_create_memory", lambda env: "mem-test")
     monkeypatch.setattr("channel.agents.chat_agent.AgentCoreMemoryHook", lambda **kw: object())
@@ -125,7 +127,9 @@ def test_build_agent_attaches_recall_hook_before_write_hook(monkeypatch):
     )
 
     build_agent(
-        model_id="claude-sonnet-4-6", user_id="user-abc", chat_id="chat-xyz",
+        model_id="claude-sonnet-4-6",
+        user_id="user-abc",
+        chat_id="chat-xyz",
     )
 
     # Recall hook built with memory_id + actor_id (NO session_id —
@@ -151,7 +155,8 @@ def test_build_agent_attaches_chat_id_to_agent_instance(monkeypatch):
     monkeypatch.setattr("channel.agents.chat_agent.AgentCoreMemoryHook", lambda **_: object())
     monkeypatch.setattr("channel.agents.chat_agent.AgentCoreRecallHook", lambda **_: object())
     monkeypatch.setattr(
-        "channel.agents.chat_agent.get_or_create_memory", lambda env: "m",
+        "channel.agents.chat_agent.get_or_create_memory",
+        lambda env: "m",
     )
 
     class FakeAgent:
@@ -161,7 +166,9 @@ def test_build_agent_attaches_chat_id_to_agent_instance(monkeypatch):
     monkeypatch.setattr("channel.agents.chat_agent.Agent", FakeAgent)
 
     agent = build_agent(
-        model_id="claude-sonnet-4-6", user_id="u", chat_id="chat-zzz",
+        model_id="claude-sonnet-4-6",
+        user_id="u",
+        chat_id="chat-zzz",
     )
     assert agent.chat_id == "chat-zzz"
 

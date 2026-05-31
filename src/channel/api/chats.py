@@ -252,16 +252,10 @@ async def _stream_bedrock_reply(
     # close — the SPA's readSse loop iterates until reader is done.
     # Fail-soft: titler errors log + EMF + swallow; the user's stream
     # has already completed by this point.
-    if (
-        was_first_round_trip
-        and os.environ.get("STARTER_AUTO_TITLE_ENABLED", "1") == "1"
-    ):
+    if was_first_round_trip and os.environ.get("STARTER_AUTO_TITLE_ENABLED", "1") == "1":
         try:
             titler = build_titler_agent()
-            titler_prompt = (
-                f"User: {user_message}\n"
-                f"Assistant: {assistant_text[:500]}"
-            )
+            titler_prompt = f"User: {user_message}\nAssistant: {assistant_text[:500]}"
             title_chunks: list[str] = []
             async for event in titler.stream_async(titler_prompt):
                 kind, payload = translate_event(event)

@@ -138,14 +138,15 @@ class AgentCoreRecallHook:
         attribute.
         """
         chat_id = getattr(event.agent, "chat_id", None) or ""
-        task = asyncio.create_task(
-            self._on_before_invocation_async(event, chat_id=chat_id)
-        )
+        task = asyncio.create_task(self._on_before_invocation_async(event, chat_id=chat_id))
         self._pending_recalls.add(task)
         task.add_done_callback(self._pending_recalls.discard)
 
     async def _on_before_invocation_async(
-        self, event: BeforeInvocationEvent, *, chat_id: str,
+        self,
+        event: BeforeInvocationEvent,
+        *,
+        chat_id: str,
     ) -> None:
         """Async recall path. Log + swallow on failure."""
         if os.environ.get("STARTER_RECALL_ENABLED", "1") != "1":
@@ -153,7 +154,8 @@ class AgentCoreRecallHook:
 
         try:
             records = await self._get_or_fetch_records(
-                user_message=_extract_user_message(event), chat_id=chat_id,
+                user_message=_extract_user_message(event),
+                chat_id=chat_id,
             )
             addendum = _format_recall_addendum(records)
             if addendum:
@@ -170,7 +172,10 @@ class AgentCoreRecallHook:
             await record_recall_outcome(success=False)
 
     async def _get_or_fetch_records(
-        self, *, user_message: str, chat_id: str,
+        self,
+        *,
+        user_message: str,
+        chat_id: str,
     ) -> list[dict[str, Any]]:
         """Return cached records when fresh; refetch when stale or missing.
 

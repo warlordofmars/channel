@@ -72,9 +72,7 @@ async def test_recall_hook_runs_without_error() -> None:
             # AgentCore CreateEvent eventual consistency window.
             await asyncio.sleep(5)
             events = _list_events(api_url, jwt, chat_a_id, limit=10)
-            assert len(events) == 2, (
-                f"expected 2 events for chat A, got {len(events)}"
-            )
+            assert len(events) == 2, f"expected 2 events for chat A, got {len(events)}"
 
             # Chat B — recall hook fires. If the strategy has had time to
             # ingest events from previous runs, the agent may surface
@@ -123,14 +121,17 @@ async def test_auto_title_fires_on_first_round_trip_only() -> None:
                 "Help me debug a flaky pytest fixture that uses tmp_path.",
             )
             await page.wait_for_url(
-                lambda url: "/app/c/" in url, timeout=15_000,
+                lambda url: "/app/c/" in url,
+                timeout=15_000,
             )
             chat_id = page.url.rsplit("/", 1)[-1]
             await _wait_for_assistant_idle(page, n=1, timeout_ms=90_000)
 
             # Poll the sidebar for a title change (away from "New chat").
             title_after_first = await _wait_for_sidebar_title_change(
-                page, default_text="New chat", timeout_ms=8_000,
+                page,
+                default_text="New chat",
+                timeout_ms=8_000,
             )
             assert title_after_first != "New chat"
             keywords = {"pytest", "fixture", "tmp_path", "debug"}
@@ -142,8 +143,7 @@ async def test_auto_title_fires_on_first_round_trip_only() -> None:
             # 3-6 words.
             word_count = len(title_after_first.split())
             assert 3 <= word_count <= 6, (
-                f"title word count {word_count} outside 3-6 range: "
-                f"{title_after_first!r}"
+                f"title word count {word_count} outside 3-6 range: {title_after_first!r}"
             )
 
             # Verify persistence via API.
@@ -217,14 +217,13 @@ async def _drive_chat(
         await _send_one_message(page, msg)
         if chat_id is None:
             await page.wait_for_url(
-                lambda url: "/app/c/" in url, timeout=15_000,
+                lambda url: "/app/c/" in url,
+                timeout=15_000,
             )
             chat_id = page.url.rsplit("/", 1)[-1]
         await _wait_for_assistant_idle(page, n=i + 1, timeout_ms=90_000)
         # Grab the latest assistant turn text.
-        turns = await page.locator(
-            '[data-testid="assistant-turn-idle"] .msg'
-        ).all_text_contents()
+        turns = await page.locator('[data-testid="assistant-turn-idle"] .msg').all_text_contents()
         if turns:
             replies.append(turns[-1])
 
@@ -240,7 +239,10 @@ async def _send_one_message(page: Page, text: str) -> None:
 
 
 async def _wait_for_assistant_idle(
-    page: Page, *, n: int, timeout_ms: int,
+    page: Page,
+    *,
+    n: int,
+    timeout_ms: int,
 ) -> None:
     await page.wait_for_function(
         "(want) => document.querySelectorAll('[data-testid=\"assistant-turn-idle\"]').length >= want",
@@ -250,7 +252,10 @@ async def _wait_for_assistant_idle(
 
 
 async def _wait_for_sidebar_title_change(
-    page: Page, *, default_text: str, timeout_ms: int,
+    page: Page,
+    *,
+    default_text: str,
+    timeout_ms: int,
 ) -> str:
     """Poll the active sidebar row until its text differs from default."""
     deadline = time.time() + timeout_ms / 1000
