@@ -15,6 +15,8 @@ from pydantic import BaseModel, Field, field_validator
 
 
 class MessageRole(str, Enum):
+    """Roles for chat turns. ``system`` and other roles are rejected at validation time so they can't accidentally be stored."""
+
     USER = "user"
     ASSISTANT = "assistant"
 
@@ -35,6 +37,7 @@ class Chat(BaseModel):
     @field_validator("last_user_preview")
     @classmethod
     def _cap_preview(cls, value: str) -> str:
+        """Cap to 120 chars at construction time. Pydantic v2 does not validate on assignment, so direct attribute mutation bypasses this."""
         return value[:120]
 
 

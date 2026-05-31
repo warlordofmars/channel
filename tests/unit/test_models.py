@@ -12,6 +12,7 @@ from channel.models import (
     ChatPatch,
     Message,
     MessageRole,
+    SendMessageRequest,
 )
 
 
@@ -57,9 +58,10 @@ def test_message_assistant_carries_token_usage():
     assert msg.input_tokens == 12
 
 
-def test_chat_create_defaults_title():
+def test_chat_create_defaults_both_optionals_to_none():
     payload = ChatCreate()
     assert payload.title is None  # server will substitute "New chat"
+    assert payload.model_default is None
 
 
 def test_chat_patch_allows_partial_updates():
@@ -67,9 +69,16 @@ def test_chat_patch_allows_partial_updates():
     assert patch.title == "Renamed"
     assert patch.archived is None
 
+    # Symmetric case — set only archived, title stays None.
+    patch2 = ChatPatch(archived=True)
+    assert patch2.archived is True
+    assert patch2.title is None
+
 
 def test_last_user_preview_caps_at_120_chars():
-    long = "x" * 500
+    # Distinguishable prefix so the assertion proves we cap from the head
+    # (value[:120]) rather than from the tail (value[-120:]).
+    long = "abc" + "x" * 200
     chat = Chat(
         chat_id="abc",
         user_id="u-1",
@@ -82,3 +91,19 @@ def test_last_user_preview_caps_at_120_chars():
         archived=False,
     )
     assert len(chat.last_user_preview) == 120
+    assert chat.last_user_preview.startswith("abc")
+
+
+def test_send_message_request_accepts_valid_message():
+    req = SendMessageRequest(message="hello")
+    assert req.message == "hello"
+
+
+def test_send_message_request_rejects_empty_message():
+    with pytest.raises(ValidationError):
+        SendMessageRequest(message="")
+
+
+def test_send_message_request_rejects_oversized_message():
+    with pytest.raises(ValidationError):
+        SendMessageRequest(message="x" * 100_001)
