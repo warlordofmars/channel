@@ -338,10 +338,17 @@ class ChannelStack(cdk.Stack):
             iam.PolicyStatement(
                 actions=["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
                 resources=[
-                    # Foundation models (delegated to by inference profiles)
-                    f"arn:aws:bedrock:{self.region}::foundation-model/anthropic.claude-sonnet-4-6",
-                    f"arn:aws:bedrock:{self.region}::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0",
-                    f"arn:aws:bedrock:{self.region}::foundation-model/anthropic.claude-opus-4-6-v1",
+                    # Foundation models — wildcarded across regions because the
+                    # ``us.*`` cross-region inference profiles below fan invocations
+                    # out to whichever member region has capacity (us-east-1,
+                    # us-east-2, or us-west-2). Bedrock authorizes against BOTH
+                    # the inference-profile ARN and the underlying foundation-model
+                    # ARN it routes to, so a region-pinned foundation-model ARN
+                    # fails with AccessDeniedException whenever Bedrock picks a
+                    # region other than ``self.region``.
+                    "arn:aws:bedrock:*::foundation-model/anthropic.claude-sonnet-4-6",
+                    "arn:aws:bedrock:*::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0",
+                    "arn:aws:bedrock:*::foundation-model/anthropic.claude-opus-4-6-v1",
                     # US cross-region inference profiles (us-east-1 primary)
                     f"arn:aws:bedrock:{self.region}:{self.account}:inference-profile/us.anthropic.claude-sonnet-4-6",
                     f"arn:aws:bedrock:{self.region}:{self.account}:inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0",
