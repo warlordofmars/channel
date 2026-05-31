@@ -51,3 +51,57 @@ def test_record_memory_write_outcome_signature_locks_out_dimensions():
     # ``from __future__ import annotations`` stringifies annotations,
     # so we compare to the string ``"bool"``.
     assert param.annotation == "bool"
+
+
+@pytest.mark.asyncio
+async def test_record_recall_outcome_success_emits_success_counter():
+    from channel.metrics import record_recall_outcome
+
+    with patch("channel.metrics.emit_metric", new=AsyncMock()) as mock_emit:
+        await record_recall_outcome(success=True)
+    mock_emit.assert_awaited_once_with("RecallSuccesses")
+
+
+@pytest.mark.asyncio
+async def test_record_recall_outcome_failure_emits_failure_counter():
+    from channel.metrics import record_recall_outcome
+
+    with patch("channel.metrics.emit_metric", new=AsyncMock()) as mock_emit:
+        await record_recall_outcome(success=False)
+    mock_emit.assert_awaited_once_with("RecallFailures")
+
+
+def test_record_recall_outcome_signature_locks_out_dimensions():
+    """Same cardinality guard as record_memory_write_outcome."""
+    from channel.metrics import record_recall_outcome
+
+    sig = inspect.signature(record_recall_outcome)
+    assert list(sig.parameters.keys()) == ["success"]
+    assert sig.parameters["success"].annotation == "bool"
+
+
+@pytest.mark.asyncio
+async def test_record_auto_title_outcome_success_emits_success_counter():
+    from channel.metrics import record_auto_title_outcome
+
+    with patch("channel.metrics.emit_metric", new=AsyncMock()) as mock_emit:
+        await record_auto_title_outcome(success=True)
+    mock_emit.assert_awaited_once_with("AutoTitleSuccesses")
+
+
+@pytest.mark.asyncio
+async def test_record_auto_title_outcome_failure_emits_failure_counter():
+    from channel.metrics import record_auto_title_outcome
+
+    with patch("channel.metrics.emit_metric", new=AsyncMock()) as mock_emit:
+        await record_auto_title_outcome(success=False)
+    mock_emit.assert_awaited_once_with("AutoTitleFailures")
+
+
+def test_record_auto_title_outcome_signature_locks_out_dimensions():
+    """Same cardinality guard."""
+    from channel.metrics import record_auto_title_outcome
+
+    sig = inspect.signature(record_auto_title_outcome)
+    assert list(sig.parameters.keys()) == ["success"]
+    assert sig.parameters["success"].annotation == "bool"

@@ -60,3 +60,23 @@ async def record_memory_write_outcome(success: bool) -> None:
     """
     metric = "MemoryWriteSuccesses" if success else "MemoryWriteFailures"
     await emit_metric(metric)
+
+
+async def record_recall_outcome(success: bool) -> None:
+    """Emit a CloudWatch counter for one RetrieveMemoryRecords attempt.
+
+    Counter-only — same cardinality-risk rationale as
+    :func:`record_memory_write_outcome`. Per Phase 7d spec Risk #6.
+    """
+    metric = "RecallSuccesses" if success else "RecallFailures"
+    await emit_metric(metric)
+
+
+async def record_auto_title_outcome(success: bool) -> None:
+    """Emit a CloudWatch counter for one auto-title attempt.
+
+    Counter-only — same cardinality-risk rationale as
+    :func:`record_memory_write_outcome`. Per Phase 7d spec Risk #6.
+    """
+    metric = "AutoTitleSuccesses" if success else "AutoTitleFailures"
+    await emit_metric(metric)
