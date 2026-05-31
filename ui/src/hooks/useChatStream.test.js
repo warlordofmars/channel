@@ -5,6 +5,7 @@ import { renderHook, act, waitFor } from "@testing-library/react";
 vi.mock("../api.js", () => ({
   getChat: vi.fn(),
   streamMessage: vi.fn(),
+  regenerate: vi.fn(),
 }));
 
 import * as api from "../api.js";
@@ -444,5 +445,117 @@ describe("useChatStream", () => {
       streaming: false,
       text: "ok",
     });
+  });
+
+  it("regenerate drops last assistant turn and re-streams", async () => {
+    api.getChat.mockResolvedValue({
+      chat: { chat_id: "c1" },
+      messages: [
+        { msg_id: "u1", role: "user", text: "hi" },
+        { msg_id: "a1", role: "assistant", text: "first reply" },
+      ],
+      next_cursor: null,
+    });
+    api.regenerate.mockResolvedValue({
+      ok: true,
+      body: makeMockResponseBody([
+        // Note: NO user_persisted event for regenerate.
+        { type: "delta", text: "second" },
+        {
+          type: "done",
+          msg_id: "a2",
+          seq: 1,
+          model: "anthropic.claude-sonnet-4-6",
+          input_tokens: 0,
+          output_tokens: 0,
+          stop_reason: "end_turn",
+        },
+      ]),
+    });
+
+    const { result } = renderHook(() => useChatStream("c1"));
+    await waitFor(() => expect(result.current.status).toBe("idle"));
+
+    await act(async () => {
+      await result.current.regenerate({ model: "claude-opus-4-7" });
+    });
+
+    // User turn UNCHANGED + new assistant turn with the re-streamed text.
+    expect(result.current.turns).toHaveLength(2);
+    expect(result.current.turns[0]).toMatchObject({
+      role: "user",
+      msg_id: "u1",
+    });
+    expect(result.current.turns[1]).toMatchObject({
+      role: "assistant",
+      text: "second",
+      streaming: false,
+    });
+    expect(api.regenerate).toHaveBeenCalledWith(
+      "c1",
+      expect.objectContaining({ model: "claude-opus-4-7" }),
+    );
+  });
+
+  it("regenerate handles error from api.regenerate", async () => {
+    api.getChat.mockResolvedValue({
+      chat: { chat_id: "c1" },
+      messages: [],
+      next_cursor: null,
+    });
+    api.regenerate.mockRejectedValue(new Error("500"));
+
+    const { result } = renderHook(() => useChatStream("c1"));
+    await waitFor(() => expect(result.current.status).toBe("idle"));
+
+    await act(async () => {
+      await result.current.regenerate({});
+    });
+
+    expect(result.current.status).toBe("error");
+  });
+
+  it("regenerate does nothing when chatId is null", async () => {
+    const { result } = renderHook(() => useChatStream(null));
+    await act(async () => {
+      await result.current.regenerate({});
+    });
+    expect(api.regenerate).not.toHaveBeenCalled();
+  });
+
+  it("regenerate handles empty turns (no assistant to drop)", async () => {
+    api.getChat.mockResolvedValue({
+      chat: { chat_id: "c1" },
+      messages: [],
+      next_cursor: null,
+    });
+    api.regenerate.mockResolvedValue({
+      ok: true,
+      body: makeMockResponseBody([
+        { type: "delta", text: "ok" },
+        {
+          type: "done",
+          msg_id: "a1",
+          seq: 1,
+          model: "m",
+          input_tokens: 0,
+          output_tokens: 0,
+          stop_reason: "end_turn",
+        },
+      ]),
+    });
+
+    const { result } = renderHook(() => useChatStream("c1"));
+    await waitFor(() => expect(result.current.status).toBe("idle"));
+
+    await act(async () => {
+      await result.current.regenerate({});
+    });
+
+    // The empty-array branch in `prev.slice(0, -1)` should just be a
+    // no-op for the "no assistant" case — only the new empty streaming
+    // row is added.
+    expect(result.current.turns).toHaveLength(1);
+    expect(result.current.turns[0].role).toBe("assistant");
   });
 });
