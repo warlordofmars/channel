@@ -26,8 +26,8 @@ function resolveModel(modelId) {
  * double-effect, etc.).
  *
  * The follow-up Composer at the bottom of the pane wraps the hook's
- * `send` so that the Composer's `onSend(text, atts)` shape stays the
- * same as it was under `useMockStream`.
+ * `send` so that the Composer's `onSend(text, atts)` shape is
+ * preserved.
  *
  * Message-actions row (copy/retry/thumbs) is rendered per assistant
  * turn once that turn is no longer streaming. Buttons are no-ops at

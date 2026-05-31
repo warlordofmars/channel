@@ -4,9 +4,9 @@ import * as api from "../api.js";
 import { makeSseDecoder } from "../lib/sseParser.js";
 
 /**
- * Real SSE-driven replacement for useMockStream. Loads chat history on
- * mount, optimistically renders new turns on send, parses streamed
- * deltas, and finalises turns on the done event.
+ * Real SSE-driven chat hook. Loads chat history on mount, optimistically
+ * renders new turns on send, parses streamed deltas, and finalises turns
+ * on the done event.
  *
  * Lifecycle states exposed via `status`:
  *   - "idle"             — no in-flight work
