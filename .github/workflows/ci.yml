@@ -655,7 +655,15 @@ jobs:
   publish-desktop-mac:
     name: Publish desktop (macOS)
     needs: [desktop]
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/development')
+    # TEMPORARILY DISABLED — see backlog issue for context.
+    # Apple's notary is holding our brand-new Developer ID account's
+    # hardened-runtime submissions for ramp-up review (3 stuck submissions
+    # 15h+ old as of the disable). Continuing to push to development was
+    # firing more notarytool requests, which can compound the throttling.
+    # Re-enable by restoring the original condition once Apple clears a
+    # submission and processing returns to normal (< 15 min verdicts):
+    #   if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/development')
+    if: false
     runs-on: macos-14
     # GitHub environment picks up the right AWS_*_DEPLOY_ROLE_ARN secret
     # per branch (development pushes use the development env's secret,
