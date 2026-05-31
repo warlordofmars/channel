@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Real Bedrock streaming via Strands Agents — replaces the canned reply
-  that 7a shipped. Three models served: Sonnet 4.6, Haiku 4.5, Opus 4.7.
+  that 7a shipped. Three models served: Sonnet 4.6, Haiku 4.5, Opus 4.6.
 - `GET /api/models` — server-side allowlist drives the ModelPicker.
 - `POST /api/chats/{id}/regenerate` — drop the last assistant turn and
   re-stream from the same user message. New "Regenerate" button on the
@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Lambda timeout raised from 30s to 5 min for streaming chats.
-- Bedrock IAM extended to allowlist Opus 4.7 and to grant invocation on
+- Bedrock IAM extended to allowlist Opus 4.6 and to grant invocation on
   the US cross-region inference profiles (required for on-demand
   throughput on Sonnet/Haiku/Opus).
 - Assistant turn header renders the friendly model label (e.g. "Claude
@@ -33,3 +33,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   — superseded by Strands.
 - Stale `(FastAPI + Mangum)` comment in the CDK stack docstring (the
   project has been on AWSLWA since pre-7a).
+
+### Fixed
+
+- `useChatStream` no longer aborts the in-flight stream during React
+  StrictMode dev double-effect cleanup. The `useEffect(() => () =>
+  abort(), [chatId])` pattern fired during the initial mount's cleanup
+  and killed the first POST before the body could be sent. Replaced
+  with a ref-based prev-chatId check that only aborts on a real
+  chatId change.
+- SPA was POSTing the full picker object as `model` (e.g.
+  `{"id":"claude-sonnet-4-6","name":"Claude Sonnet 4.6", ...}`) but
+  the backend's `SendMessageRequest.model` is a short id string.
+  `ChatHome.handleSend` and `Conversation.followUp` now extract
+  `model.id` before forwarding.
+- `inv dev` no longer overrides `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`
+  to fake values. The override was a convenience for DDB Local (which
+  accepts any non-empty credentials), but it also masked the developer's
+  real AWS credentials from Bedrock. Now ambient credentials flow
+  through; DDB Local still works.
+- Swapped Opus 4.7 for Opus 4.6 across the model allowlist, IAM grants,
+  and SPA defaults. Opus 4.7 requires contacting AWS Sales for account
+  enablement, which is not a realistic prerequisite for a dev iteration
+  loop. Opus 4.6 is the latest model available via the standard model-
+  access self-serve UI in the Bedrock console.
+
+### Added
+
+- `scripts/reset_dev_table.py` — drop+recreate the local DDB table with
+  the current schema (incl. `ChatByIdIndex` GSI). DDB Local is in-memory
+  and `inv dev --seed` doesn't create the table yet; this is the
+  stopgap. Run with `uv run python scripts/reset_dev_table.py`.

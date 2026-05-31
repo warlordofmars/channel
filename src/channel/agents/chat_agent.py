@@ -25,7 +25,7 @@ from strands.models import BedrockModel
 _MODEL_ID_MAP = {
     "claude-sonnet-4-6": "us.anthropic.claude-sonnet-4-6",
     "claude-haiku-4-5": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
-    "claude-opus-4-7": "us.anthropic.claude-opus-4-7",
+    "claude-opus-4-6": "us.anthropic.claude-opus-4-6-v1",
 }
 
 DEFAULT_MAX_TOKENS = 4096

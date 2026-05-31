@@ -269,7 +269,10 @@ def store_idempotency_result(*, user_id: str, key: str, payload: dict[str, Any])
 
     _get_table().update_item(
         Key={"PK": f"IDEMP#{user_id}", "SK": key},
-        UpdateExpression="SET result = :r",
+        # ``result`` is a DynamoDB reserved keyword; alias it via
+        # ExpressionAttributeNames so the UpdateExpression doesn't 400.
+        UpdateExpression="SET #r = :r",
+        ExpressionAttributeNames={"#r": "result"},
         ExpressionAttributeValues={":r": payload},
     )
 

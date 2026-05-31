@@ -341,11 +341,11 @@ class ChannelStack(cdk.Stack):
                     # Foundation models (delegated to by inference profiles)
                     f"arn:aws:bedrock:{self.region}::foundation-model/anthropic.claude-sonnet-4-6",
                     f"arn:aws:bedrock:{self.region}::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0",
-                    f"arn:aws:bedrock:{self.region}::foundation-model/anthropic.claude-opus-4-7",
+                    f"arn:aws:bedrock:{self.region}::foundation-model/anthropic.claude-opus-4-6-v1",
                     # US cross-region inference profiles (us-east-1 primary)
                     f"arn:aws:bedrock:{self.region}:{self.account}:inference-profile/us.anthropic.claude-sonnet-4-6",
                     f"arn:aws:bedrock:{self.region}:{self.account}:inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0",
-                    f"arn:aws:bedrock:{self.region}:{self.account}:inference-profile/us.anthropic.claude-opus-4-7",
+                    f"arn:aws:bedrock:{self.region}:{self.account}:inference-profile/us.anthropic.claude-opus-4-6-v1",
                 ],
             )
         )

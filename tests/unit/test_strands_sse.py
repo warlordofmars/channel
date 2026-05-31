@@ -20,11 +20,14 @@ def test_translate_content_block_delta_returns_delta():
     assert payload == "Hello"
 
 
-def test_translate_data_shortcut_returns_delta():
+def test_translate_data_shortcut_is_skipped():
+    """The ``data`` shorthand is a Strands duplicate of contentBlockDelta;
+    we skip it so the SPA doesn't see deltas twice."""
+
     event = {"data": "world"}
     kind, payload = translate_event(event)
-    assert kind == "delta"
-    assert payload == "world"
+    assert kind == "skip"
+    assert payload is None
 
 
 def test_translate_message_stop_returns_stop():

@@ -46,7 +46,10 @@ export default function ChatHome() {
       state: {
         firstMessage: {
           message: text,
-          model: modelObj,
+          // Backend `SendMessageRequest.model` is a short id string, not
+          // the client display object. The picker emits the full record,
+          // so extract the id here before stashing.
+          model: modelObj.id,
           effort: prefs.effort,
           attachments: atts,
         },

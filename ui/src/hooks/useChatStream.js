@@ -27,19 +27,37 @@ export function useChatStream(chatId) {
   const [error, setError] = useState(null);
   const abortRef = useRef(null);
 
+  // Tracks the chatId of the most-recently-applied history install.
+  // Used to distinguish a real chatId change (user clicked a different
+  // chat in the sidebar — clear stale turns) from React StrictMode dev
+  // mode's intentional double-effect (cleanup → re-setup with the SAME
+  // chatId — must NOT clear, otherwise we wipe whatever optimistic
+  // turns send() just pushed and the SSE deltas land on nothing).
+  const loadedChatIdRef = useRef(null);
   useEffect(() => {
     if (!chatId) {
       setTurns([]);
       setStatus("idle");
+      loadedChatIdRef.current = null;
       return;
     }
+    if (
+      loadedChatIdRef.current !== null &&
+      loadedChatIdRef.current !== chatId
+    ) {
+      setTurns([]);
+    }
+    loadedChatIdRef.current = chatId;
     let cancelled = false;
     setStatus("loading-history");
     api
       .getChat(chatId)
       .then(({ messages }) => {
         if (cancelled) return;
-        setTurns(messages);
+        // Only install loaded history if the caller hasn't already
+        // pushed optimistic turns (the first-message-creates-chat flow
+        // calls send() during the same mount).
+        setTurns((prev) => (prev.length === 0 ? messages : prev));
         setStatus("idle");
       })
       .catch((err) => {
@@ -52,15 +70,17 @@ export function useChatStream(chatId) {
     };
   }, [chatId]);
 
-  // Separate effect: abort any in-flight stream when chatId changes or
-  // the component unmounts. Without this, the reader loop below would
-  // keep writing setTurns against the previous chat's optimistic IDs
-  // after the user navigates away.
-  useEffect(() => {
-    return () => {
-      abortRef.current?.abort();
-    };
-  }, [chatId]);
+  // Abort the previous chat's in-flight stream when chatId actually
+  // changes. We can't use a `useEffect(() => () => abortRef.current?.
+  // abort(), [chatId])` cleanup because React StrictMode dev mode
+  // double-invokes effect cleanups during the initial mount — which
+  // would immediately abort the first send() the moment it fires. We
+  // track the previous chatId in a ref and abort only on real change.
+  const prevChatIdRef = useRef(chatId);
+  if (prevChatIdRef.current !== chatId) {
+    abortRef.current?.abort();
+    prevChatIdRef.current = chatId;
+  }
 
   // Hook-local SSE reader loop. Shared by send() and regenerate().
   //

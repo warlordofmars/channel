@@ -31,14 +31,18 @@ export default function Shell({ children }) {
   const { theme } = useChannelPrefs();
   const [collapsed, setCollapsed] = useState(false);
   const navigate = useNavigate();
-  const { chats, createChat } = useChats();
+  const { chats } = useChats();
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
   }, [theme]);
   const toggleSidebar = () => setCollapsed((c) => !c);
-  const handleNewChat = async () => {
-    const chat = await createChat();
-    navigate(`/app/c/${chat.chat_id}`);
+  // Match Claude Desktop's behaviour: "+ New chat" takes you to the
+  // welcome / greeting screen at /app. The actual chat record is
+  // created lazily by ChatHome when the user sends their first
+  // message — so the sidebar never accumulates empty "New chat"
+  // zombies.
+  const handleNewChat = () => {
+    navigate("/app");
   };
   return (
     <div className="stage full">
