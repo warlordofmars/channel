@@ -17,6 +17,7 @@ function mockStream(overrides = {}) {
   const ret = {
     turns: [],
     send: vi.fn(),
+    regenerate: vi.fn(),
     abort: vi.fn(),
     status: "idle",
     error: null,
