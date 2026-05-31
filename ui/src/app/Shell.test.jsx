@@ -1,10 +1,19 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { MemoryRouter } from "react-router-dom";
-import Shell from "./Shell.jsx";
-import { TOKEN_KEY } from "../lib/auth.js";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { __resetChannelPrefsForTest } from "../hooks/useChannelPrefs.js";
+import { TOKEN_KEY } from "../lib/auth.js";
+
+const mockCreateChat = vi.fn();
+const mockUseChats = vi.fn();
+
+vi.mock("../hooks/ChatsContext.jsx", () => ({
+  useChats: () => mockUseChats(),
+}));
+
+// Import Shell AFTER the mock is set up so the import sees the mock.
+const { default: Shell } = await import("./Shell.jsx");
 
 function makeToken() {
   const exp = Math.floor(Date.now() / 1000) + 3600;
@@ -28,6 +37,12 @@ describe("Shell", () => {
     }));
     document.documentElement.removeAttribute("data-theme");
     __resetChannelPrefsForTest();
+    mockCreateChat.mockReset();
+    mockUseChats.mockReset();
+    mockUseChats.mockReturnValue({
+      chats: [],
+      createChat: mockCreateChat,
+    });
   });
   afterEach(() => vi.unstubAllGlobals());
 
@@ -106,5 +121,50 @@ describe("Shell", () => {
     fireEvent.click(screen.getByTitle("Show sidebar"));
     expect(container.querySelector(".sb.collapsed")).toBeNull();
     expect(container.querySelector(".main-top")).toBeNull();
+  });
+
+  it("renders chats from useChatList into the Sidebar Recents list", () => {
+    mockUseChats.mockReturnValue({
+      chats: [
+        {
+          chat_id: "abc",
+          title: "Hello from the hook",
+          last_message_at: new Date().toISOString(),
+          archived: false,
+        },
+      ],
+      createChat: mockCreateChat,
+    });
+    render(
+      <MemoryRouter><Shell><div /></Shell></MemoryRouter>
+    );
+    expect(screen.getByText("Hello from the hook")).toBeTruthy();
+  });
+
+  it("clicking 'New chat' calls createChat and navigates to /app/c/<new_id>", async () => {
+    mockCreateChat.mockResolvedValue({ chat_id: "new-123" });
+    let lastPath = null;
+    function PathCatcher() {
+      const { pathname } = useLocation();
+      lastPath = pathname;
+      return null;
+    }
+    render(
+      <MemoryRouter initialEntries={["/app"]}>
+        <Routes>
+          <Route
+            path="*"
+            element={
+              <Shell>
+                <PathCatcher />
+              </Shell>
+            }
+          />
+        </Routes>
+      </MemoryRouter>
+    );
+    fireEvent.click(screen.getByRole("button", { name: /new chat/i }));
+    await waitFor(() => expect(mockCreateChat).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(lastPath).toBe("/app/c/new-123"));
   });
 });

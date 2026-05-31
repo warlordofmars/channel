@@ -50,8 +50,10 @@ channel/
 │   │   │   ├── auth.js        # parseToken, isTokenValid, TOKEN_KEY
 │   │   │   └── utils.js       # cn (class-name join via clsx)
 │   │   ├── hooks/
-│   │   │   ├── useChannelPrefs.js  # theme/accent/density/shape/font/model/effort + siteTheme
-│   │   │   ├── useMockStream.js    # Mock chat streamer (Phase 6d; swapped for real Bedrock later)
+│   │   │   ├── useChannelPrefs.js   # theme/accent/density/shape/font/model/effort + siteTheme
+│   │   │   ├── useChatList.js       # Sidebar Recents + optimistic create/rename/archive
+│   │   │   ├── useChatStream.js     # SSE chat stream: history load, send, abort, status/error
+│   │   │   ├── ChatsContext.jsx     # ChatsProvider + useChats() — single useChatList instance app-wide
 │   │   │   └── useRelativeTime.js
 │   │   ├── components/
 │   │   │   ├── AuthGate.jsx       # Redirects /app/* visits to /app/login when no JWT
@@ -62,7 +64,7 @@ channel/
 │   │   │   ├── Nav.jsx, Footer.jsx, SiteLayout.jsx, ThemeToggle.jsx, ImageSlot.jsx
 │   │   │   └── pages/             # Home, Product, Models, Pricing, Download, About, Blog, Careers, Privacy, NotFound
 │   │   └── app/                   # Chat app routes (Phase 6c onward)
-│   │       ├── data.js                                       # MODELS, EFFORTS, RECENTS, QUICK_ACTIONS, SAMPLE_REPLY, SAMPLE_USER, PROJECTS, ARTIFACTS, PROJECT_DOCS
+│   │       ├── data.js                                       # MODELS, EFFORTS, QUICK_ACTIONS, PROJECTS, ARTIFACTS, PROJECT_DOCS
 │   │       ├── Login.jsx, GoogleG.jsx                        # Centered Google sign-in
 │   │       ├── Shell.jsx, Sidebar.jsx, AccountPopover.jsx    # Layout chrome
 │   │       ├── Composer.jsx, ModelPicker.jsx, AttachMenu.jsx # Composer + its popovers
@@ -133,8 +135,20 @@ require a valid Bearer mgmt JWT. JWT validation enforces `iss`,
 - User items: `PK=USER#{user_id}`, `SK=META`
 - Mgmt state items: `PK=MGMT_STATE#{state}`, `SK=META`
   (TTL enabled, used for the Google OAuth state parameter)
+- Chat-index items: `PK=USER#{user_id}`, `SK=CHAT#{created_at}#{chat_id}`
+  (one row per chat; sortable so the Recents query is a single
+  `Query(ScanIndexForward=False)`; also projects onto `ChatByIdIndex`)
+- Chat message items: `PK=CHAT#{chat_id}`, `SK=MSG#{created_at}#{msg_id}`
+  (one row per turn; UUID suffix prevents cross-Lambda-instance
+  collisions at the same microsecond)
+- Idempotency items: `PK=IDEMP#{user_id}`, `SK={key}`
+  (TTL = 1 hour after reserve; used for the streaming POST replay
+  short-circuit)
 - GSIs:
   - `UserEmailIndex` — `PK=EMAIL#{email}` (for user lookups by email)
+  - `ChatByIdIndex` — `PK=CHAT_ID#{chat_id}`, `SK=META`
+    (sparse; only chat-index rows project onto it; used for direct
+    chat-id → chat lookups without knowing `created_at`)
 
 ## Management UI
 

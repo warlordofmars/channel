@@ -1,11 +1,20 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, Routes, Route, useLocation } from "react-router-dom";
-import ChatHome from "./ChatHome.jsx";
 import { TOKEN_KEY } from "../lib/auth.js";
 import { QUICK_ACTIONS } from "./data.js";
 import { __resetChannelPrefsForTest } from "../hooks/useChannelPrefs.js";
+
+const mockCreateChat = vi.fn();
+const mockUseChats = vi.fn();
+
+vi.mock("../hooks/ChatsContext.jsx", () => ({
+  useChats: () => mockUseChats(),
+}));
+
+// Import ChatHome AFTER the mock is set up so the import sees the mock.
+const { default: ChatHome } = await import("./ChatHome.jsx");
 
 function makeToken({ email = "ada@example.com", display_name } = {}) {
   const exp = Math.floor(Date.now() / 1000) + 3600;
@@ -25,9 +34,11 @@ function renderChatHome() {
 
 function renderChatHomeWithLocationCatcher() {
   let lastPath = null;
+  let lastState = null;
   function PathCatcher() {
-    const { pathname } = useLocation();
-    lastPath = pathname;
+    const loc = useLocation();
+    lastPath = loc.pathname;
+    lastState = loc.state;
     return null;
   }
   const result = render(
@@ -38,7 +49,11 @@ function renderChatHomeWithLocationCatcher() {
       </Routes>
     </MemoryRouter>
   );
-  return { ...result, getLastPath: () => lastPath };
+  return {
+    ...result,
+    getLastPath: () => lastPath,
+    getLastState: () => lastState,
+  };
 }
 
 describe("ChatHome", () => {
@@ -52,12 +67,11 @@ describe("ChatHome", () => {
       removeItem: (k) => { delete storage[k]; },
     });
     vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() }));
-    vi.stubGlobal("sessionStorage", {
-      getItem: (k) => storage[`s:${k}`] ?? null,
-      setItem: (k, v) => { storage[`s:${k}`] = String(v); },
-      removeItem: (k) => { delete storage[`s:${k}`]; },
-    });
     __resetChannelPrefsForTest();
+    mockCreateChat.mockReset();
+    mockCreateChat.mockResolvedValue({ chat_id: "new-1" });
+    mockUseChats.mockReset();
+    mockUseChats.mockReturnValue({ createChat: mockCreateChat });
   });
   afterEach(() => vi.unstubAllGlobals());
 
@@ -78,27 +92,33 @@ describe("ChatHome", () => {
     }
   });
 
-  it("sending a typed message stashes the payload in sessionStorage and navigates to /app/c/new", () => {
-    const { getLastPath } = renderChatHomeWithLocationCatcher();
+  it("submitting a typed message calls createChat and navigates to /app/c/{id} with firstMessage state", async () => {
+    const { getLastPath, getLastState } = renderChatHomeWithLocationCatcher();
     const ta = screen.getByRole("textbox");
     fireEvent.change(ta, { target: { value: "hi there" } });
     fireEvent.click(screen.getByTitle("Send"));
-    const raw = sessionStorage.getItem("channel-pending-send");
-    expect(raw).toBeTruthy();
-    const payload = JSON.parse(raw);
-    expect(payload.text).toBe("hi there");
-    expect(payload.atts).toEqual([]);
-    expect(payload.modelId).toBe("claude-opus-4-8");
-    expect(payload.effort).toBe("High");
-    expect(getLastPath()).toBe("/app/c/new");
+
+    await waitFor(() => expect(mockCreateChat).toHaveBeenCalledTimes(1));
+    expect(mockCreateChat).toHaveBeenCalledWith({ modelDefault: "claude-opus-4-8" });
+    await waitFor(() => expect(getLastPath()).toBe("/app/c/new-1"));
+    expect(getLastState()).toEqual({
+      firstMessage: {
+        message: "hi there",
+        model: expect.objectContaining({ id: "claude-opus-4-8" }),
+        effort: "High",
+        attachments: [],
+      },
+    });
   });
 
-  it("clicking a quick-action stashes the prefilled prompt and navigates to /app/c/new", () => {
-    const { getLastPath } = renderChatHomeWithLocationCatcher();
+  it("clicking a quick-action creates a chat and navigates with a prefilled firstMessage", async () => {
+    const { getLastPath, getLastState } = renderChatHomeWithLocationCatcher();
     fireEvent.click(screen.getByRole("button", { name: "Write" }));
-    const payload = JSON.parse(sessionStorage.getItem("channel-pending-send"));
-    expect(payload.text).toMatch(/help me write something/i);
-    expect(getLastPath()).toBe("/app/c/new");
+
+    await waitFor(() => expect(mockCreateChat).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(getLastPath()).toBe("/app/c/new-1"));
+    expect(getLastState().firstMessage.message).toMatch(/help me write something/i);
+    expect(getLastState().firstMessage.attachments).toEqual([]);
   });
 
   it("falls back to default name 'You' when token is absent", () => {
@@ -135,19 +155,5 @@ describe("ChatHome", () => {
     fireEvent.click(screen.getByText("Claude Haiku 4.5"));
     // The storage key should be updated
     expect(storage["channel-model"]).toBe("claude-haiku-4-5");
-  });
-
-  it("send silently degrades when sessionStorage.setItem throws", () => {
-    vi.stubGlobal("sessionStorage", {
-      getItem: () => null,
-      setItem: () => { throw new Error("private mode"); },
-      removeItem: () => {},
-    });
-    const { getLastPath } = renderChatHomeWithLocationCatcher();
-    const ta = screen.getByRole("textbox");
-    fireEvent.change(ta, { target: { value: "hi" } });
-    expect(() => fireEvent.click(screen.getByTitle("Send"))).not.toThrow();
-    // Still navigates even though the stash failed.
-    expect(getLastPath()).toBe("/app/c/new");
   });
 });

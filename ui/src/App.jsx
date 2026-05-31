@@ -1,9 +1,10 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
 import React from "react";
-import { BrowserRouter, Route, Routes } from "react-router-dom";
+import { BrowserRouter, Outlet, Route, Routes } from "react-router-dom";
 import AuthGate from "./components/AuthGate.jsx";
 import ErrorBoundary from "./components/ErrorBoundary.jsx";
 import { useChannelPrefs } from "./hooks/useChannelPrefs.js";
+import { ChatsProvider } from "./hooks/ChatsContext.jsx";
 import Artifacts from "./app/views/Artifacts.jsx";
 import ChatHome from "./app/ChatHome.jsx";
 import Conversation from "./app/Conversation.jsx";
@@ -24,6 +25,25 @@ import Privacy from "./marketing/pages/Privacy.jsx";
 import Product from "./marketing/pages/Product.jsx";
 
 
+/**
+ * Layout for every authenticated `/app/*` route. Mounts the AuthGate +
+ * ChatsProvider exactly once so the chat-list hook instance persists
+ * across route navigations (no double-fetch when moving between
+ * `/app`, `/app/c/{id}`, `/app/projects`, etc.) and Sidebar / ChatHome /
+ * Conversation all read the same in-memory chat-list state.
+ */
+function AppLayout() {
+  return (
+    <AuthGate>
+      <ChatsProvider>
+        <Shell>
+          <Outlet />
+        </Shell>
+      </ChatsProvider>
+    </AuthGate>
+  );
+}
+
 export default function App() {
   useChannelPrefs();
   return (
@@ -43,12 +63,14 @@ export default function App() {
 
           {/* App — /app/login is public; everything else gates on the JWT */}
           <Route path="/app/login"          element={<Login />} />
-          <Route path="/app"                element={<AuthGate><Shell><ChatHome /></Shell></AuthGate>} />
-          <Route path="/app/c/:id"          element={<AuthGate><Shell><Conversation /></Shell></AuthGate>} />
-          <Route path="/app/projects"       element={<AuthGate><Shell><Projects /></Shell></AuthGate>} />
-          <Route path="/app/projects/:id"   element={<AuthGate><Shell><ProjectDetail /></Shell></AuthGate>} />
-          <Route path="/app/artifacts"      element={<AuthGate><Shell><Artifacts /></Shell></AuthGate>} />
-          <Route path="/app/customize"      element={<AuthGate><Shell><Customize /></Shell></AuthGate>} />
+          <Route element={<AppLayout />}>
+            <Route path="/app"                element={<ChatHome />} />
+            <Route path="/app/c/:id"          element={<Conversation />} />
+            <Route path="/app/projects"       element={<Projects />} />
+            <Route path="/app/projects/:id"   element={<ProjectDetail />} />
+            <Route path="/app/artifacts"      element={<Artifacts />} />
+            <Route path="/app/customize"      element={<Customize />} />
+          </Route>
 
           {/* Anything else → branded 404 */}
           <Route path="*" element={<NotFound />} />

@@ -3,7 +3,7 @@ import { act } from "react";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
-import Sidebar from "./Sidebar.jsx";
+import Sidebar, { groupNameFor } from "./Sidebar.jsx";
 import { TOKEN_KEY } from "../lib/auth.js";
 
 function makeToken({ email = "ada@example.com", display_name } = {}) {
@@ -12,6 +12,58 @@ function makeToken({ email = "ada@example.com", display_name } = {}) {
   if (display_name !== undefined) claims.display_name = display_name;
   const payload = btoa(JSON.stringify(claims));
   return `eyJhbGciOiJIUzI1NiJ9.${payload}.sig`;
+}
+
+// Fixed reference time used by the test fixtures. The Sidebar reads
+// `Date.now()` inside the grouping memo; tests pin it to this value so
+// time-bucket assertions are deterministic.
+const NOW = new Date("2026-05-30T12:00:00Z").getTime();
+const HOUR = 60 * 60 * 1000;
+const DAY = 24 * HOUR;
+
+function isoAgo(ms) {
+  return new Date(NOW - ms).toISOString();
+}
+
+function makeChats() {
+  return [
+    {
+      chat_id: "c1",
+      title: "Home server backup strategy",
+      last_message_at: isoAgo(2 * HOUR),
+      archived: false,
+    },
+    {
+      chat_id: "c1b",
+      title: "Another chat from today",
+      last_message_at: isoAgo(5 * HOUR),
+      archived: false,
+    },
+    {
+      chat_id: "c2",
+      title: "Postgres index not being used",
+      last_message_at: isoAgo(30 * HOUR),
+      archived: false,
+    },
+    {
+      chat_id: "c3",
+      title: "Reading list for systems design",
+      last_message_at: isoAgo(3 * DAY),
+      archived: false,
+    },
+    {
+      chat_id: "c4",
+      title: "Tax documents checklist",
+      last_message_at: isoAgo(20 * DAY),
+      archived: false,
+    },
+    {
+      chat_id: "c5",
+      title: "Archived secret chat",
+      last_message_at: isoAgo(1 * HOUR),
+      archived: true,
+    },
+  ];
 }
 
 describe("Sidebar", () => {
@@ -28,11 +80,19 @@ describe("Sidebar", () => {
     vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() }));
     assignSpy = vi.fn();
     vi.stubGlobal("location", { ...globalThis.location, assign: assignSpy });
+    vi.spyOn(Date, "now").mockReturnValue(NOW);
   });
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
 
-  function renderSidebar() {
-    return render(<MemoryRouter><Sidebar /></MemoryRouter>);
+  function renderSidebar(props = {}) {
+    return render(
+      <MemoryRouter>
+        <Sidebar chats={makeChats()} {...props} />
+      </MemoryRouter>
+    );
   }
 
   it("renders four primary nav items (New chat, Projects, Artifacts, Customize)", () => {
@@ -43,10 +103,68 @@ describe("Sidebar", () => {
     expect(screen.getByRole("button", { name: /^customize/i })).toBeTruthy();
   });
 
-  it("renders time-grouped recents (Today, Yesterday, …)", () => {
+  it("renders time-grouped recents (Today, Yesterday, …) from the chats prop", () => {
     renderSidebar();
     expect(screen.getByText("Today")).toBeTruthy();
     expect(screen.getByText("Yesterday")).toBeTruthy();
+    expect(screen.getByText("Previous 7 days")).toBeTruthy();
+    expect(screen.getByText("Older")).toBeTruthy();
+    // And a chat from each bucket renders
+    expect(screen.getByText("Home server backup strategy")).toBeTruthy();
+    expect(screen.getByText("Postgres index not being used")).toBeTruthy();
+    expect(screen.getByText("Reading list for systems design")).toBeTruthy();
+    expect(screen.getByText("Tax documents checklist")).toBeTruthy();
+  });
+
+  it("filters out archived chats", () => {
+    renderSidebar();
+    expect(screen.queryByText("Archived secret chat")).toBeNull();
+  });
+
+  it("renders safely with an empty chats array (no recents, no error)", () => {
+    render(
+      <MemoryRouter><Sidebar chats={[]} /></MemoryRouter>
+    );
+    expect(screen.queryByText("Today")).toBeNull();
+    expect(screen.queryByText("Yesterday")).toBeNull();
+  });
+
+  it("renders safely with no chats prop at all (default = [])", () => {
+    render(<MemoryRouter><Sidebar /></MemoryRouter>);
+    expect(screen.queryByText("Today")).toBeNull();
+    // Primary nav is still present
+    expect(screen.getByRole("button", { name: /new chat/i })).toBeTruthy();
+  });
+
+  it("renders chats with a missing title without throwing", () => {
+    render(
+      <MemoryRouter>
+        <Sidebar
+          chats={[
+            { chat_id: "x", last_message_at: isoAgo(HOUR), archived: false },
+          ]}
+        />
+      </MemoryRouter>
+    );
+    expect(screen.getByText("Today")).toBeTruthy();
+  });
+
+  it("clicking 'New chat' triggers the onNewChat callback (not navigate)", () => {
+    const onNewChat = vi.fn();
+    render(
+      <MemoryRouter>
+        <Sidebar chats={makeChats()} onNewChat={onNewChat} />
+      </MemoryRouter>
+    );
+    fireEvent.click(screen.getByRole("button", { name: /new chat/i }));
+    expect(onNewChat).toHaveBeenCalledTimes(1);
+  });
+
+  it("clicking 'New chat' is safe when no onNewChat prop is passed (default noop)", () => {
+    renderSidebar();
+    expect(() =>
+      fireEvent.click(screen.getByRole("button", { name: /new chat/i }))
+    ).not.toThrow();
   });
 
   it("renders the account row with the email", () => {
@@ -80,7 +198,7 @@ describe("Sidebar", () => {
     fireEvent.click(screen.getByTitle("Search"));
     fireEvent.change(screen.getByPlaceholderText("Search chats"), { target: { value: "Postgres" } });
     expect(screen.getByText(/Postgres index not being used/i)).toBeTruthy();
-    expect(screen.queryByText(/Weekend trail route/i)).toBeNull();
+    expect(screen.queryByText(/Home server backup strategy/i)).toBeNull();
   });
 
   it("does NOT render the 'Channel Max' plan label (deferred)", () => {
@@ -93,6 +211,11 @@ describe("Sidebar", () => {
     fireEvent.click(screen.getByTitle("Search"));
     fireEvent.change(screen.getByPlaceholderText("Search chats"), { target: { value: "zzzz-no-such-thing" } });
     expect(screen.getByText(/no chats match/i)).toBeTruthy();
+  });
+
+  it("does NOT show 'no chats match' fallback when search is empty and chats are empty", () => {
+    render(<MemoryRouter><Sidebar chats={[]} /></MemoryRouter>);
+    expect(screen.queryByText(/no chats match/i)).toBeNull();
   });
 
   it("falls back to default name 'You' when token is absent", () => {
@@ -129,30 +252,32 @@ describe("Sidebar", () => {
 
   it("clicking 'Toggle sidebar' calls the onToggle prop", () => {
     const onToggle = vi.fn();
-    render(<MemoryRouter><Sidebar collapsed={false} onToggle={onToggle} /></MemoryRouter>);
+    render(
+      <MemoryRouter><Sidebar collapsed={false} onToggle={onToggle} chats={[]} /></MemoryRouter>
+    );
     fireEvent.click(screen.getByTitle("Toggle sidebar"));
     expect(onToggle).toHaveBeenCalledTimes(1);
   });
 
   it("applies .collapsed class to .sb when the collapsed prop is true", () => {
     const { container } = render(
-      <MemoryRouter><Sidebar collapsed={true} onToggle={() => {}} /></MemoryRouter>
+      <MemoryRouter><Sidebar collapsed={true} onToggle={() => {}} chats={[]} /></MemoryRouter>
     );
     expect(container.querySelector(".sb.collapsed")).toBeTruthy();
   });
 
   it("omits .collapsed class when the collapsed prop is false (or default)", () => {
-    const { container } = render(<MemoryRouter><Sidebar /></MemoryRouter>);
+    const { container } = render(<MemoryRouter><Sidebar chats={[]} /></MemoryRouter>);
     expect(container.querySelector(".sb.collapsed")).toBeNull();
     expect(container.querySelector(".sb")).toBeTruthy();
   });
 
   it("clicking the toggle button is safe when no onToggle prop is passed (default noop)", () => {
-    render(<MemoryRouter><Sidebar /></MemoryRouter>);
+    render(<MemoryRouter><Sidebar chats={[]} /></MemoryRouter>);
     expect(() => fireEvent.click(screen.getByTitle("Toggle sidebar"))).not.toThrow();
   });
 
-  it("clicking a recent navigates to /app/c/<that-id>", () => {
+  it("clicking a recent navigates to /app/c/<that-chat_id>", () => {
     let lastPath = null;
     function PathCatcher() {
       const { pathname } = useLocation();
@@ -162,17 +287,16 @@ describe("Sidebar", () => {
     render(
       <MemoryRouter initialEntries={["/app"]}>
         <Routes>
-          <Route path="/app" element={<><Sidebar /><PathCatcher /></>} />
+          <Route path="/app" element={<><Sidebar chats={makeChats()} /><PathCatcher /></>} />
           <Route path="/app/c/:id" element={<PathCatcher />} />
         </Routes>
       </MemoryRouter>
     );
     fireEvent.click(screen.getByText("Home server backup strategy"));
-    expect(lastPath).toBe("/app/c/r1");
+    expect(lastPath).toBe("/app/c/c1");
   });
 
   it.each([
-    ["New chat", "/app"],
     ["Projects", "/app/projects"],
     ["Artifacts", "/app/artifacts"],
     ["Customize", "/app/customize"],
@@ -186,7 +310,7 @@ describe("Sidebar", () => {
     render(
       <MemoryRouter initialEntries={["/app/c/r1"]}>
         <Routes>
-          <Route path="*" element={<><Sidebar /><PathCatcher /></>} />
+          <Route path="*" element={<><Sidebar chats={makeChats()} /><PathCatcher /></>} />
         </Routes>
       </MemoryRouter>
     );
@@ -268,5 +392,22 @@ describe("Sidebar — update pill", () => {
     act(() => registeredCb({ state: "available", version: "0.2.1" }));
     act(() => registeredCb({ state: "error", message: "boom" }));
     expect(screen.queryByRole("button", { name: /relaunch to update/i })).toBeNull();
+  });
+});
+
+describe("groupNameFor", () => {
+  const now = new Date("2026-05-30T12:00:00Z").getTime();
+
+  it.each([
+    [1 * HOUR, "Today"],
+    [23 * HOUR, "Today"],
+    [25 * HOUR, "Yesterday"],
+    [47 * HOUR, "Yesterday"],
+    [49 * HOUR, "Previous 7 days"],
+    [6 * DAY, "Previous 7 days"],
+    [8 * DAY, "Older"],
+    [60 * DAY, "Older"],
+  ])("ageMs=%i ms → %s", (ageMs, expected) => {
+    expect(groupNameFor(new Date(now - ageMs).toISOString(), now)).toBe(expected);
   });
 });

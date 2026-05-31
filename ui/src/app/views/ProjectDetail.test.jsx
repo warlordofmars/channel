@@ -3,7 +3,13 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import ProjectDetail from "./ProjectDetail.jsx";
-import { PROJECTS, PROJECT_DOCS, RECENTS } from "../data.js";
+import { PROJECTS, PROJECT_DOCS } from "../data.js";
+
+// Mirrors PROJECT_CHATS_PLACEHOLDER in ProjectDetail.jsx — first row only.
+// Kept local so the component remains free to evolve its placeholder list
+// without breaking these tests beyond the assertions that actually matter
+// (row count + first-row title + nav target).
+const FIRST_PROJECT_CHAT = { id: "r1", title: "Home server backup strategy" };
 import { __resetChannelPrefsForTest } from "../../hooks/useChannelPrefs.js";
 
 function renderAt(path) {
@@ -60,17 +66,17 @@ describe("ProjectDetail", () => {
     }
   });
 
-  it("renders the first 6 RECENTS as 'Chats in this project' entries", () => {
+  it("renders 6 placeholder 'Chats in this project' entries", () => {
     const { container } = renderAt("/app/projects/p1");
     const rows = container.querySelectorAll(".proj-chat");
     expect(rows.length).toBe(6);
-    expect(rows[0].textContent).toContain(RECENTS[0].title);
+    expect(rows[0].textContent).toContain(FIRST_PROJECT_CHAT.title);
   });
 
-  it("clicking a chat row navigates to /app/c/<that-recent-id>", () => {
+  it("clicking a chat row navigates to /app/c/<that-chat-id>", () => {
     const { getLastPath } = renderAt("/app/projects/p1");
-    fireEvent.click(screen.getByText(RECENTS[0].title));
-    expect(getLastPath()).toBe(`/app/c/${RECENTS[0].id}`);
+    fireEvent.click(screen.getByText(FIRST_PROJECT_CHAT.title));
+    expect(getLastPath()).toBe(`/app/c/${FIRST_PROJECT_CHAT.id}`);
   });
 
   it("clicking the back button navigates to /app/projects", () => {
