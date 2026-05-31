@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 
 from channel.api._auth import require_mgmt_user
 from channel.api.main import app
+from channel.models import Chat
 
 
 @pytest.fixture
@@ -36,8 +37,6 @@ def test_chats_router_is_mounted(client: TestClient) -> None:
 def test_post_creates_chat_and_returns_metadata(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from channel.models import Chat
-
     created: list[Chat] = []
 
     def fake_create_chat(*, user_id: str, title: str | None, model_default: str) -> Chat:
@@ -71,9 +70,7 @@ def test_post_chat_uses_default_model_when_unspecified(
 ) -> None:
     captured: dict[str, Any] = {}
 
-    def fake_create_chat(**kwargs: Any):
-        from channel.models import Chat
-
+    def fake_create_chat(**kwargs: Any) -> Chat:
         captured.update(kwargs)
         return Chat(
             chat_id="c",
