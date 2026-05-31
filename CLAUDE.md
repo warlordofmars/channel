@@ -30,8 +30,9 @@ channel/
 │       │   └── mgmt_auth.py   # Management API authentication
 │       ├── agents/
 │       │   ├── __init__.py
-│       │   ├── chat_agent.py   # Strands Agent factory (build_agent / resolve_model_id)
+│       │   ├── chat_agent.py   # Strands Agent factory + build_titler_agent (7c/7d)
 │       │   ├── memory.py       # AgentCoreMemoryHook + get_or_create_memory (Phase 7c)
+│       │   ├── recall.py       # AgentCoreRecallHook + cache (Phase 7d)
 │       │   └── strands_sse.py  # Strands event → SSE byte translator
 │       └── api/
 │           ├── main.py        # FastAPI app + routes
@@ -159,7 +160,10 @@ require a valid Bearer mgmt JWT. JWT validation enforces `iss`,
 
 Phase 7c onward, every chat turn is persisted to a Bedrock AgentCore
 Memory resource via a Strands `AfterInvocationEvent` hook
-(`src/channel/agents/memory.py`). Recall stays off until Phase 7d.
+(`src/channel/agents/memory.py`). Phase 7d adds the read side: a
+`BeforeInvocationEvent` recall hook (`src/channel/agents/recall.py`)
+injects relevant cross-session context into the system prompt, plus
+auto-titling of fresh chats via a Haiku one-shot Agent.
 
 - **One Memory resource per environment** — named `channel_{env}`
   (underscores, not hyphens — AgentCore's name validator rejects
@@ -192,6 +196,47 @@ Dev-only `GET /api/_debug/memory/events?chat_id=...&limit=...` and
 verification. Mounted only when `STARTER_ENABLE_DEBUG_ENDPOINTS=1`;
 prod never sets the flag (CDK assertion test in
 `tests/unit/test_channel_stack.py` guards this).
+
+### Recall (Phase 7d)
+
+- **`AgentCoreRecallHook`** (`src/channel/agents/recall.py`) subscribes
+  to `BeforeInvocationEvent`. Per turn, calls `RetrieveMemoryRecords`
+  with `namespace="/actors/{actor_id}"` (cross-session same user),
+  filters records to `score >= 0.7`, caps at top 5, and appends a
+  Markdown addendum (`## What I remember about previous conversations\n\n- ...`)
+  to the system prompt.
+- **5-turn cache** — keyed by `(actor_id, chat_id)`, module-level.
+  Cold-start invalidates. Reduces RPC volume to ~one
+  `RetrieveMemoryRecords` per 5 turns.
+- **Memory must be configured with a strategy** — `get_or_create_memory`
+  attaches a `SemanticMemoryStrategy` at creation time so AgentCore
+  derives queryable records from raw events. Without a strategy,
+  recall always returns empty.
+- **`SemanticMemoryStrategy` is async** — newly-written events take
+  minutes (not seconds) to appear as queryable recall records. The
+  recall path won't surface a fact you just mentioned in another chat
+  five seconds ago; it matures on AgentCore's ingestion schedule.
+- **Memory ACTIVE wait** — `CreateMemory` returns immediately with
+  status `CREATING`; subsequent `CreateEvent` / `RetrieveMemoryRecords`
+  calls reject until the memory becomes `ACTIVE` (2-3 min). The
+  bootstrap polls `GetMemory` until ACTIVE (360s timeout) so the
+  first chat doesn't lose events.
+- **Kill-switch** — `STARTER_RECALL_ENABLED=0` short-circuits the
+  hook. Default `"1"`.
+
+### Auto-titling (Phase 7d)
+
+- After the first assistant `done` event lands (and
+  `chat.message_count == 0` at function entry), `_stream_bedrock_reply`
+  invokes a small Haiku Strands `Agent` (from `build_titler_agent()`)
+  with NO memory hooks and `max_tokens=20`.
+- Persists the title via `storage.patch_chat`, then emits
+  `sse_title_suggested(chat_id, title)` SSE frame before stream close.
+  The SPA's `useChatStream` forwards via `onTitleSuggested` to
+  `ChatsContext.renameChatLocal`.
+- **Kill-switch** — `STARTER_AUTO_TITLE_ENABLED=0` skips the titler
+  block. Default `"1"`.
+- **Model override** — `STARTER_TITLER_MODEL` (default `claude-haiku-4-5`).
 
 ## Management UI
 
