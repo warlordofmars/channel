@@ -1,6 +1,6 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
 import React, { useEffect, useRef } from "react";
-import { useLocation, useParams } from "react-router-dom";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
 import ChannelMark from "../components/ChannelMark.jsx";
 import Composer from "./Composer.jsx";
 import Icon from "../components/Icon.jsx";
@@ -54,6 +54,7 @@ function modelLabel(raw) {
 export default function Conversation() {
   const { id: chatId } = useParams();
   const location = useLocation();
+  const navigate = useNavigate();
   const { turns, send, regenerate, status } = useChatStream(chatId);
   const prefs = useChannelPrefs();
   const ref = useRef(null);
@@ -66,15 +67,20 @@ export default function Conversation() {
   }, [turns]);
 
   // First-message kick-off from route state. ChatHome stashes the user's
-  // initial message in `location.state.firstMessage`; we forward it once.
+  // initial message in `location.state.firstMessage`; we forward it once
+  // and IMMEDIATELY clear it from history so a back-navigation or remount
+  // (e.g. clicking the same chat in the sidebar later) doesn't re-fire
+  // the send and ask the agent to respond to its own historical first
+  // user message.
   useEffect(() => {
     if (sentFirstRef.current) return;
     const first = location.state?.firstMessage;
     if (chatId && first) {
       sentFirstRef.current = true;
+      navigate(location.pathname, { replace: true, state: null });
       send(first);
     }
-  }, [chatId, location.state, send]);
+  }, [chatId, location.state, location.pathname, navigate, send]);
 
   const modelObj = resolveModel(prefs.model);
   const setModelObj = (m) => prefs.setModel(m.id);
