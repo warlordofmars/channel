@@ -23,6 +23,7 @@ Run:
 
 from __future__ import annotations
 
+import contextlib
 import html as html_lib
 import os
 import re
@@ -33,7 +34,6 @@ from typing import Any
 import httpx
 import pytest
 from playwright.async_api import Browser, Page, async_playwright
-
 
 pytestmark = pytest.mark.asyncio
 
@@ -61,31 +61,31 @@ async def test_memory_writes_land_per_turn_and_isolate_per_actor() -> None:
         browser = await p.chromium.launch()
         try:
             chat_a_id = await _drive_chat_as_user(
-                browser, ui_url, jwt_a, messages=("hello A", "second A", "third A"),
+                browser,
+                ui_url,
+                jwt_a,
+                messages=("hello A", "second A", "third A"),
             )
             chat_b_id = await _drive_chat_as_user(
-                browser, ui_url, jwt_b, messages=("hello B",),
+                browser,
+                ui_url,
+                jwt_b,
+                messages=("hello B",),
             )
         finally:
             await browser.close()
 
     # User A's chat — exactly 3 events.
     events_a = _list_events(api_url, jwt_a, chat_a_id, limit=10)
-    assert len(events_a) == 3, (
-        f"expected 3 events for chat A ({chat_a_id}), got {len(events_a)}"
-    )
+    assert len(events_a) == 3, f"expected 3 events for chat A ({chat_a_id}), got {len(events_a)}"
 
     # User B's chat — exactly 1 event.
     events_b = _list_events(api_url, jwt_b, chat_b_id, limit=10)
-    assert len(events_b) == 1, (
-        f"expected 1 event for chat B ({chat_b_id}), got {len(events_b)}"
-    )
+    assert len(events_b) == 1, f"expected 1 event for chat B ({chat_b_id}), got {len(events_b)}"
 
     # Cross-actor isolation: user B looking at user A's chat sees zero.
     events_a_from_b = _list_events(api_url, jwt_b, chat_a_id, limit=10)
-    assert events_a_from_b == [], (
-        "user B must not see user A's events — actorId scoping broke"
-    )
+    assert events_a_from_b == [], "user B must not see user A's events — actorId scoping broke"
 
     # Cleanup — best-effort.
     for evt in events_a:
@@ -173,7 +173,10 @@ async def _send_one_message(page: Page, text: str) -> None:
 
 
 def _list_events(
-    api_url: str, jwt: str, chat_id: str, limit: int,
+    api_url: str,
+    jwt: str,
+    chat_id: str,
+    limit: int,
 ) -> list[dict[str, Any]]:
     resp = httpx.get(
         f"{api_url}/api/_debug/memory/events",
@@ -187,12 +190,10 @@ def _list_events(
 
 def _delete_event(api_url: str, jwt: str, chat_id: str, event_id: str) -> None:
     """Best-effort cleanup — ignore failures (test already asserted)."""
-    try:
+    with contextlib.suppress(httpx.HTTPError):  # pragma: no cover — cleanup only
         httpx.delete(
             f"{api_url}/api/_debug/memory/events/{event_id}",
             params={"chat_id": chat_id},
             headers={"Authorization": f"Bearer {jwt}"},
             timeout=10.0,
         )
-    except httpx.HTTPError:  # pragma: no cover — cleanup only
-        pass

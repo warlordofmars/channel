@@ -1,10 +1,10 @@
 # Copyright (c) 2026 John Carter. All rights reserved.
 """Unit tests for CloudWatch EMF metrics helpers."""
 
-import pytest
-
 import inspect
 from unittest.mock import AsyncMock, patch
+
+import pytest
 
 from channel.metrics import NAMESPACE, emit_metric, record_memory_write_outcome
 

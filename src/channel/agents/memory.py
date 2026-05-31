@@ -18,7 +18,7 @@ import asyncio
 import logging
 import os
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, cast
 
 import boto3
 from strands.hooks.events import AfterInvocationEvent
@@ -111,8 +111,11 @@ class AgentCoreMemoryHook:
         """Async write path. Log + swallow on failure."""
         try:
             # Last two messages on the agent are the just-completed
-            # user+assistant pair.
-            messages = list(event.agent.messages)[-2:]
+            # user+assistant pair. Strands types these as ``Message``
+            # (a TypedDict); ``_payload_from_messages`` reads them as
+            # plain dicts. ``cast`` keeps mypy happy without forcing
+            # consumers of this private helper to import Strands types.
+            messages = cast(list[dict[str, Any]], list(event.agent.messages)[-2:])
             payload = _payload_from_messages(messages)
             await asyncio.to_thread(
                 self._client.create_event,
@@ -152,8 +155,6 @@ def _payload_from_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any
         role = _ROLE_MAP.get(msg["role"])
         if role is None:
             raise ValueError(f"unsupported role: {msg['role']!r}")
-        text = "".join(
-            block["text"] for block in msg.get("content", []) if "text" in block
-        )
+        text = "".join(block["text"] for block in msg.get("content", []) if "text" in block)
         out.append({"conversational": {"role": role, "content": {"text": text}}})
     return out

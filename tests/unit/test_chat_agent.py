@@ -58,15 +58,13 @@ def test_build_agent_constructs_strands_agent_with_bedrock_model(monkeypatch):
 
     monkeypatch.setattr("channel.agents.chat_agent.BedrockModel", FakeBedrockModel)
     monkeypatch.setattr("channel.agents.chat_agent.Agent", FakeAgent)
-    monkeypatch.setattr(
-        "channel.agents.chat_agent.get_or_create_memory", lambda env: "mem-test"
-    )
-    monkeypatch.setattr(
-        "channel.agents.chat_agent.AgentCoreMemoryHook", lambda **kw: object()
-    )
+    monkeypatch.setattr("channel.agents.chat_agent.get_or_create_memory", lambda env: "mem-test")
+    monkeypatch.setattr("channel.agents.chat_agent.AgentCoreMemoryHook", lambda **kw: object())
 
     agent = build_agent(
-        model_id="claude-sonnet-4-6", user_id="u-1", chat_id="c-1",
+        model_id="claude-sonnet-4-6",
+        user_id="u-1",
+        chat_id="c-1",
     )
 
     assert isinstance(agent, FakeAgent)
@@ -83,12 +81,8 @@ def test_build_agent_uses_custom_system_prompt_when_provided(monkeypatch):
         "channel.agents.chat_agent.Agent",
         lambda model, system_prompt=None, **kw: captured.update({"system_prompt": system_prompt}),
     )
-    monkeypatch.setattr(
-        "channel.agents.chat_agent.get_or_create_memory", lambda env: "mem-test"
-    )
-    monkeypatch.setattr(
-        "channel.agents.chat_agent.AgentCoreMemoryHook", lambda **kw: object()
-    )
+    monkeypatch.setattr("channel.agents.chat_agent.get_or_create_memory", lambda env: "mem-test")
+    monkeypatch.setattr("channel.agents.chat_agent.AgentCoreMemoryHook", lambda **kw: object())
 
     build_agent(
         model_id="claude-sonnet-4-6",
@@ -117,7 +111,8 @@ def test_build_agent_attaches_agentcore_memory_hook(monkeypatch):
     monkeypatch.setattr("channel.agents.chat_agent.BedrockModel", lambda **_: object())
     monkeypatch.setattr("channel.agents.chat_agent.Agent", FakeAgent)
     monkeypatch.setattr(
-        "channel.agents.chat_agent.AgentCoreMemoryHook", fake_hook_factory,
+        "channel.agents.chat_agent.AgentCoreMemoryHook",
+        fake_hook_factory,
     )
     monkeypatch.setattr(
         "channel.agents.chat_agent.get_or_create_memory",
@@ -125,7 +120,9 @@ def test_build_agent_attaches_agentcore_memory_hook(monkeypatch):
     )
 
     build_agent(
-        model_id="claude-sonnet-4-6", user_id="user-abc", chat_id="chat-xyz",
+        model_id="claude-sonnet-4-6",
+        user_id="user-abc",
+        chat_id="chat-xyz",
     )
 
     assert captured["hook_kwargs"] == {

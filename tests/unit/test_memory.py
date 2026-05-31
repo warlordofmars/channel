@@ -3,12 +3,18 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from strands.hooks.events import AfterInvocationEvent
 
 from channel.agents import memory as memory_module
-from channel.agents.memory import _payload_from_messages, get_or_create_memory
+from channel.agents.memory import (
+    AgentCoreMemoryHook,
+    _payload_from_messages,
+    get_or_create_memory,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -127,12 +133,6 @@ def test_get_or_create_memory_respects_override_env_var(monkeypatch):
 # AgentCoreMemoryHook
 # ---------------------------------------------------------------------------
 
-from unittest.mock import AsyncMock  # noqa: E402
-
-from strands.hooks.events import AfterInvocationEvent  # noqa: E402
-
-from channel.agents.memory import AgentCoreMemoryHook  # noqa: E402
-
 
 def _fake_event_with_messages(messages: list[dict[str, Any]]) -> MagicMock:
     fake_agent = MagicMock()
@@ -144,7 +144,9 @@ def _fake_event_with_messages(messages: list[dict[str, Any]]) -> MagicMock:
 
 def test_hook_registers_after_invocation_callback():
     hook = AgentCoreMemoryHook(
-        memory_id="m-1", actor_id="user-abc", session_id="chat-xyz",
+        memory_id="m-1",
+        actor_id="user-abc",
+        session_id="chat-xyz",
     )
 
     registry = MagicMock()
@@ -167,10 +169,12 @@ async def test_hook_writes_create_event_on_after_invocation():
         client=fake_client,
     )
 
-    event = _fake_event_with_messages([
-        {"role": "user", "content": [{"text": "hi"}]},
-        {"role": "assistant", "content": [{"text": "hello"}]},
-    ])
+    event = _fake_event_with_messages(
+        [
+            {"role": "user", "content": [{"text": "hi"}]},
+            {"role": "assistant", "content": [{"text": "hello"}]},
+        ]
+    )
 
     with patch(
         "channel.agents.memory.record_memory_write_outcome",
@@ -194,13 +198,18 @@ async def test_hook_swallows_exceptions_and_emits_failure_metric():
     fake_client.create_event.side_effect = RuntimeError("agentcore down")
 
     hook = AgentCoreMemoryHook(
-        memory_id="m-1", actor_id="a", session_id="s", client=fake_client,
+        memory_id="m-1",
+        actor_id="a",
+        session_id="s",
+        client=fake_client,
     )
 
-    event = _fake_event_with_messages([
-        {"role": "user", "content": [{"text": "hi"}]},
-        {"role": "assistant", "content": [{"text": "hello"}]},
-    ])
+    event = _fake_event_with_messages(
+        [
+            {"role": "user", "content": [{"text": "hi"}]},
+            {"role": "assistant", "content": [{"text": "hello"}]},
+        ]
+    )
 
     with patch(
         "channel.agents.memory.record_memory_write_outcome",
@@ -217,10 +226,12 @@ def test_hook_after_invocation_fires_and_forgets():
     not block the agent loop."""
     hook = AgentCoreMemoryHook(memory_id="m", actor_id="a", session_id="s")
 
-    event = _fake_event_with_messages([
-        {"role": "user", "content": [{"text": "hi"}]},
-        {"role": "assistant", "content": [{"text": "hello"}]},
-    ])
+    event = _fake_event_with_messages(
+        [
+            {"role": "user", "content": [{"text": "hi"}]},
+            {"role": "assistant", "content": [{"text": "hello"}]},
+        ]
+    )
 
     scheduled: list[Any] = []
 

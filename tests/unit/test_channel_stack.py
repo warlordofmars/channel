@@ -73,9 +73,7 @@ def dev_template() -> assertions.Template:
 
 def _api_function(template: assertions.Template) -> dict:
     funcs = template.find_resources("AWS::Lambda::Function")
-    api_fns = {
-        key: val for key, val in funcs.items() if "ApiFunction" in key
-    }
+    api_fns = {key: val for key, val in funcs.items() if "ApiFunction" in key}
     assert len(api_fns) == 1, f"expected exactly one ApiFunction, got {list(api_fns)}"
     return next(iter(api_fns.values()))
 
