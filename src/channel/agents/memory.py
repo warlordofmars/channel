@@ -14,9 +14,54 @@ so this module talks to AgentCore directly via boto3.
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
+import boto3
+
 _ROLE_MAP: dict[str, str] = {"user": "USER", "assistant": "ASSISTANT"}
+
+# Module-level cache keyed by env. Resets on Lambda cold-start; value is
+# the AgentCore-assigned memoryId (which includes an opaque suffix).
+_memory_id_cache: dict[str, str] = {}
+
+
+def get_or_create_memory(env: str) -> str:
+    """Return the AgentCore Memory id for ``env``, creating it if absent.
+
+    Lazy + idempotent. First call within a Lambda instance pays a
+    ``ListMemories`` RPC (~200ms) to find an existing Memory by name;
+    subsequent calls hit the module-level cache. If no match exists,
+    falls through to ``CreateMemory``.
+
+    AgentCore appends an opaque suffix to ``memoryId`` (e.g.
+    ``channel-dev-A1B2C3D4``). Look up by **name**, not by id, or
+    re-deploys against an existing Memory will create duplicates.
+
+    Override the default ``channel-{env}`` naming via
+    ``STARTER_AGENTCORE_MEMORY_NAME`` — useful for pointing a personal
+    dev environment at a pre-existing Memory resource.
+    """
+    if env in _memory_id_cache:
+        return _memory_id_cache[env]
+
+    name = os.environ.get("STARTER_AGENTCORE_MEMORY_NAME") or f"channel-{env}"
+    control = boto3.client("bedrock-agentcore-control")
+
+    existing = control.list_memories()
+    for mem in existing.get("memorySummaries", []):
+        if mem["name"] == name:
+            _memory_id_cache[env] = mem["id"]
+            return mem["id"]
+
+    created = control.create_memory(
+        name=name,
+        memoryStrategies=[],
+        eventExpiryDuration=90,
+    )
+    memory_id = created["memory"]["id"]
+    _memory_id_cache[env] = memory_id
+    return memory_id
 
 
 def _payload_from_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
