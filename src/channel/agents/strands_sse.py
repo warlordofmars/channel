@@ -71,6 +71,16 @@ def sse_delta(text: str) -> bytes:
     return _sse({"type": "delta", "text": text})
 
 
+def sse_title_suggested(*, chat_id: str, title: str) -> bytes:
+    """Emit a ``title_suggested`` SSE event.
+
+    Phase 7d auto-title trigger. The SPA's useChatStream parses the
+    payload and forwards the title to ChatsContext.renameChat for the
+    sidebar.
+    """
+    return _sse({"type": "title_suggested", "chat_id": chat_id, "title": title})
+
+
 def sse_done(
     *,
     msg_id: str,
