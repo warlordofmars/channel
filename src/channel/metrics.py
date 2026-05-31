@@ -47,3 +47,16 @@ async def emit_metric(
     logger.set_dimensions(dims)  # type: ignore[arg-type]
     logger.put_metric(name, value, unit)
     await logger.flush()
+
+
+async def record_memory_write_outcome(success: bool) -> None:
+    """Emit a CloudWatch counter for one AgentCore Memory write attempt.
+
+    Counter-only — the signature deliberately accepts no dimensions so a
+    future caller cannot accidentally add per-actor or per-session
+    dimensions. Per-actor context belongs in structured logs, not
+    metric dimensions: cardinality scales with active users, which
+    blows up CloudWatch metric volume. See Phase 7c spec Risk #3.
+    """
+    metric = "MemoryWriteSuccesses" if success else "MemoryWriteFailures"
+    await emit_metric(metric)

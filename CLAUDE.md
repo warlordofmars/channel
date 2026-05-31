@@ -31,10 +31,12 @@ channel/
 │       ├── agents/
 │       │   ├── __init__.py
 │       │   ├── chat_agent.py   # Strands Agent factory (build_agent / resolve_model_id)
+│       │   ├── memory.py       # AgentCoreMemoryHook + get_or_create_memory (Phase 7c)
 │       │   └── strands_sse.py  # Strands event → SSE byte translator
 │       └── api/
 │           ├── main.py        # FastAPI app + routes
 │           ├── _auth.py       # Shared mgmt-JWT dependency for /api/* routes
+│           ├── _debug.py      # /api/_debug/* — dev-only, gated by STARTER_ENABLE_DEBUG_ENDPOINTS
 │           ├── chats.py       # Chat CRUD + SSE streaming + regenerate
 │           ├── models.py      # GET /api/models — server allowlist
 │           └── csp.py         # CSP violation reporting endpoint
@@ -152,6 +154,44 @@ require a valid Bearer mgmt JWT. JWT validation enforces `iss`,
   - `ChatByIdIndex` — `PK=CHAT_ID#{chat_id}`, `SK=META`
     (sparse; only chat-index rows project onto it; used for direct
     chat-id → chat lookups without knowing `created_at`)
+
+## AgentCore Memory
+
+Phase 7c onward, every chat turn is persisted to a Bedrock AgentCore
+Memory resource via a Strands `AfterInvocationEvent` hook
+(`src/channel/agents/memory.py`). Recall stays off until Phase 7d.
+
+- **One Memory resource per environment** — named `channel_{env}`
+  (underscores, not hyphens — AgentCore's name validator rejects
+  hyphens). Discovered or created lazily on Lambda cold-start; the
+  module-level cache means subsequent requests in the same instance
+  pay zero overhead.
+- **`STARTER_AGENTCORE_MEMORY_NAME`** overrides the default name —
+  useful for pointing a personal dev environment at a pre-existing
+  Memory resource.
+- **`actorId = sanitize(jwt.sub)`** — one actor per Channel user.
+  Disallowed characters (anything outside `[a-zA-Z0-9_/-]`) are
+  replaced with `_` so email-form JWT subs (containing `@` and `.`)
+  satisfy AgentCore's regex. Per-workspace partitioning (per the
+  "workspaces are the tenancy root" product decision) will eventually
+  become `actorId = f"{workspace_id}/{user_id}"`.
+- **`sessionId = chat_id`** — one AgentCore session per Channel chat.
+  Chat ids are UUIDs so no sanitization needed.
+- **Failure mode**: log + EMF counter (`MemoryWriteFailures`) +
+  swallow. Memory writes must not break chats. Loss-on-Lambda-freeze
+  is acceptable (recall in 7d treats missing recall as "no memory").
+- **`MemoryWriteSuccesses` / `MemoryWriteFailures`** are CloudWatch
+  counters under namespace `Channel`, with NO per-actor or per-session
+  dimensions (cardinality blowup risk — codified by the
+  `_signature_locks_out_dimensions` test on
+  `record_memory_write_outcome`).
+
+Dev-only `GET /api/_debug/memory/events?chat_id=...&limit=...` and
+`DELETE /api/_debug/memory/events?chat_id=...&event_id=...`
+(`src/channel/api/_debug.py`) surface writes for Playwright e2e
+verification. Mounted only when `STARTER_ENABLE_DEBUG_ENDPOINTS=1`;
+prod never sets the flag (CDK assertion test in
+`tests/unit/test_channel_stack.py` guards this).
 
 ## Management UI
 
