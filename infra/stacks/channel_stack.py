@@ -4,7 +4,7 @@ Channel CDK Stack — defines all AWS infrastructure.
 
 Resources:
   - DynamoDB table (single-table design) with GSIs and TTL
-  - Lambda function for the API (FastAPI + Mangum)
+  - Lambda function for the API (FastAPI + uvicorn behind AWSLWA)
   - Function URL for the Lambda (auth=NONE, TLS enforced)
   - IAM role scoped to DynamoDB table and SSM access
   - SSM Parameters for secrets
@@ -342,6 +342,7 @@ class ChannelStack(cdk.Stack):
                 resources=[
                     f"arn:aws:bedrock:{self.region}::foundation-model/anthropic.claude-sonnet-4-6",
                     f"arn:aws:bedrock:{self.region}::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0",
+                    f"arn:aws:bedrock:{self.region}::foundation-model/anthropic.claude-opus-4-7",
                 ],
             )
         )
@@ -381,7 +382,10 @@ class ChannelStack(cdk.Stack):
             },
             layers=[awslwa_layer],
             memory_size=512,
-            timeout=cdk.Duration.seconds(30),
+            # 5 min for streaming chats — Bedrock responses on long prompts can
+            # exceed 30s. AWSLWA streams to the Function URL as bytes arrive, so
+            # the long handler runtime doesn't add user-perceived latency.
+            timeout=cdk.Duration.minutes(5),
             description=f"Channel management API (FastAPI + AWSLWA) [{env_name}]",
             tracing=lambda_.Tracing.ACTIVE,
         )
