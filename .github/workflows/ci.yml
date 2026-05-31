@@ -727,6 +727,13 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
           rm -f /tmp/cert.p12
 
+      - name: Install ui deps + build SPA
+        shell: bash
+        run: |
+          cd ui
+          npm ci
+          VITE_API_BASE=https://${{ steps.env.outputs.domain }} npm run build
+
       - name: Install desktop deps
         working-directory: desktop
         run: npm ci
