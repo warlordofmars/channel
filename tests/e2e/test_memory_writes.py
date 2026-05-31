@@ -152,7 +152,8 @@ async def _drive_chat_as_user(
         if chat_id is None:
             # First message creates the chat; URL flips to /app/c/<id>.
             await page.wait_for_url(
-                lambda url: "/app/c/" in url, timeout=15_000,
+                lambda url: "/app/c/" in url,
+                timeout=15_000,
             )
             chat_id = page.url.rsplit("/", 1)[-1]
         # Wait for THIS turn's assistant reply to settle. We can't just
