@@ -9,15 +9,26 @@ so chat existence isn't leaked.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Response
+from fastapi.responses import StreamingResponse
 
 from channel import storage
 from channel.api._auth import require_mgmt_user
-from channel.models import Chat, ChatCreate, ChatPatch
+from channel.models import Chat, ChatCreate, ChatPatch, MessageRole, SendMessageRequest
 
 _DEFAULT_MODEL = "canned-stream-v1"
+
+_CANNED_REPLY = (
+    "Here's how I'd think about it. "
+    "**First**, the ingestion buffer drains in roughly constant time. "
+    "**Second**, the consumer-side fan-out can be parallelised cheaply. "
+    "**Third**, retries should be idempotent or you'll double-count. "
+    "Want me to sketch the buffer interface?"
+)
+_CANNED_MODEL = "canned-stream-v1"
 
 router = APIRouter(prefix="/chats", tags=["chats"])
 
@@ -95,3 +106,79 @@ async def patch_chat(
         archived=payload.archived,
     )
     return Response(status_code=204)
+
+
+def _sse(payload: dict[str, Any]) -> bytes:
+    return f"data: {json.dumps(payload)}\n\n".encode()
+
+
+async def _stream_canned_reply(
+    *,
+    chat: Chat,
+    user_message: str,
+    claims: dict[str, Any],
+) -> Any:
+    """Persist the user turn, emit SSE, persist the assistant turn, update index."""
+
+    user_msg = storage.put_message(
+        chat_id=chat.chat_id,
+        role=MessageRole.USER,
+        text=user_message,
+        model=None,
+    )
+    yield _sse({"type": "user_persisted", "msg_id": user_msg.msg_id, "seq": 0})
+
+    # Stream the canned reply in word-chunks so the UI sees a real
+    # incremental render even pre-Bedrock.
+    words = _CANNED_REPLY.split(" ")
+    for i, word in enumerate(words):
+        chunk = (" " if i else "") + word
+        yield _sse({"type": "delta", "text": chunk})
+
+    assistant_msg = storage.put_message(
+        chat_id=chat.chat_id,
+        role=MessageRole.ASSISTANT,
+        text=_CANNED_REPLY,
+        model=_CANNED_MODEL,
+        input_tokens=0,
+        output_tokens=0,
+    )
+
+    storage.update_chat_index(
+        user_id=claims["sub"],
+        chat=chat,
+        last_user_preview=user_message,
+        delta_count=2,
+        last_message_at=assistant_msg.created_at,
+    )
+
+    yield _sse(
+        {
+            "type": "done",
+            "msg_id": assistant_msg.msg_id,
+            "seq": 1,
+            "model": _CANNED_MODEL,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "stop_reason": "end_turn",
+        }
+    )
+
+
+@router.post("/{chat_id}/messages")
+async def post_message(
+    payload: SendMessageRequest,
+    chat_id: str = Path(...),
+    claims: dict[str, Any] = Depends(require_mgmt_user),
+) -> StreamingResponse:
+    """Send a user message and stream the (canned, for now) assistant reply."""
+
+    chat = await _load_owned_chat(chat_id, claims["sub"])
+    return StreamingResponse(
+        _stream_canned_reply(
+            chat=chat,
+            user_message=payload.message,
+            claims=claims,
+        ),
+        media_type="text/event-stream",
+    )

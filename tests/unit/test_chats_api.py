@@ -248,3 +248,75 @@ def test_patch_returns_404_for_unowned_chat(
     monkeypatch.setattr("channel.api.chats.storage.get_chat_by_id", lambda _: None)
     response = client.patch("/api/chats/x", json={"title": "y"})
     assert response.status_code == 404
+
+
+def test_post_message_returns_sse_with_canned_stream(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    chat = Chat(
+        chat_id="c1",
+        user_id="u-1",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="canned-stream-v1",
+    )
+
+    monkeypatch.setattr("channel.api.chats.storage.get_chat_by_id", lambda _: chat)
+
+    persisted: list[Message] = []
+
+    def fake_put(**kwargs: Any) -> Message:
+        msg = Message(
+            chat_id=kwargs["chat_id"],
+            msg_id=f"m-{len(persisted)}",
+            role=kwargs["role"],
+            text=kwargs["text"],
+            model=kwargs.get("model"),
+            created_at="t",
+        )
+        persisted.append(msg)
+        return msg
+
+    monkeypatch.setattr("channel.api.chats.storage.put_message", fake_put)
+    monkeypatch.setattr("channel.api.chats.storage.update_chat_index", lambda **_: None)
+
+    response = client.post("/api/chats/c1/messages", json={"message": "hello"})
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    body = response.text
+
+    # SSE shape: at least one user_persisted, at least one delta, one done.
+    assert "user_persisted" in body
+    assert '"type": "delta"' in body
+    assert '"type": "done"' in body
+
+    # Two messages persisted: the user turn, then the assistant turn.
+    assert [m.role for m in persisted] == [MessageRole.USER, MessageRole.ASSISTANT]
+    assert persisted[1].text  # non-empty canned reply
+
+
+def test_post_message_returns_404_for_unowned_chat(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("channel.api.chats.storage.get_chat_by_id", lambda _: None)
+    response = client.post("/api/chats/x/messages", json={"message": "hi"})
+    assert response.status_code == 404
+
+
+def test_post_message_rejects_empty_message(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "channel.api.chats.storage.get_chat_by_id",
+        lambda _: Chat(
+            chat_id="c1",
+            user_id="u-1",
+            title="t",
+            created_at="t",
+            last_message_at="t",
+            model_default="m",
+        ),
+    )
+    response = client.post("/api/chats/c1/messages", json={"message": ""})
+    assert response.status_code == 422  # Pydantic min_length=1
