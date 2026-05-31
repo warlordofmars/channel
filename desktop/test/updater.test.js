@@ -71,3 +71,57 @@ describe("updater.init feed URL mapping", () => {
     ).toThrow(/unknown channel: beta/);
   });
 });
+
+describe("updater.init IPC push events", () => {
+  beforeEach(() => setPlatform("darwin"));
+
+  it("subscribes to autoUpdater events with handlers that forward to webContents", async () => {
+    const { autoUpdater } = await import("electron-updater");
+    const send = vi.fn();
+    init({ channel: "latest", webContents: { send } });
+
+    const eventNames = autoUpdater.on.mock.calls.map(([name]) => name);
+    expect(eventNames).toEqual(
+      expect.arrayContaining(["checking-for-update", "update-available", "update-downloaded", "error"]),
+    );
+
+    // Fire each registered handler and assert the IPC payload shape.
+    const handlerByEvent = Object.fromEntries(autoUpdater.on.mock.calls);
+    handlerByEvent["checking-for-update"]();
+    expect(send).toHaveBeenLastCalledWith("desktop:update-status", { state: "checking" });
+
+    handlerByEvent["update-available"]({ version: "0.2.1" });
+    expect(send).toHaveBeenLastCalledWith("desktop:update-status", { state: "available", version: "0.2.1" });
+
+    handlerByEvent["update-downloaded"]({ version: "0.2.1" });
+    expect(send).toHaveBeenLastCalledWith("desktop:update-status", { state: "downloaded", version: "0.2.1" });
+
+    handlerByEvent["error"](new Error("notary down"));
+    expect(send).toHaveBeenLastCalledWith("desktop:update-status", { state: "error", message: "notary down" });
+  });
+
+  it("exposes relaunchToUpdate which calls autoUpdater.quitAndInstall", async () => {
+    const { autoUpdater } = await import("electron-updater");
+    const { relaunchToUpdate } = await import("../main/updater.js");
+    relaunchToUpdate();
+    expect(autoUpdater.quitAndInstall).toHaveBeenCalled();
+  });
+});
+
+describe("updater.init periodic check", () => {
+  beforeEach(() => {
+    setPlatform("darwin");
+    vi.useFakeTimers();
+  });
+  afterEach(() => vi.useRealTimers());
+
+  it("schedules a checkForUpdates every 4 hours after initial call", async () => {
+    const { autoUpdater } = await import("electron-updater");
+    init({ channel: "latest", webContents: { send: vi.fn() } });
+    expect(autoUpdater.checkForUpdates).toHaveBeenCalledTimes(1); // initial
+    vi.advanceTimersByTime(4 * 60 * 60 * 1000);
+    expect(autoUpdater.checkForUpdates).toHaveBeenCalledTimes(2);
+    vi.advanceTimersByTime(4 * 60 * 60 * 1000);
+    expect(autoUpdater.checkForUpdates).toHaveBeenCalledTimes(3);
+  });
+});
