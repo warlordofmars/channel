@@ -462,6 +462,11 @@ def dev(ctx, seed=False):
         # via STARTER_AGENTCORE_MEMORY_NAME if pointing at a shared
         # pre-existing Memory.
         "STARTER_ENV": os.environ.get("STARTER_ENV", "jc"),
+        # Phase 7d: both kill-switches explicit-on for local-dev so
+        # behaviour mirrors the prod default and the env vars are
+        # discoverable. Set to "0" to disable either feature.
+        "STARTER_RECALL_ENABLED": "1",
+        "STARTER_AUTO_TITLE_ENABLED": "1",
     }
     ui_env = {
         **os.environ,
