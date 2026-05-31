@@ -146,12 +146,13 @@ async def test_auto_title_fires_on_first_round_trip_only() -> None:
                 f"title word count {word_count} outside 3-6 range: {title_after_first!r}"
             )
 
-            # Verify persistence via API.
-            resp = httpx.get(
-                f"{api_url}/api/chats/{chat_id}",
-                headers={"Authorization": f"Bearer {jwt}"},
-                timeout=10.0,
-            )
+            # Verify persistence via API. Async client to avoid blocking
+            # the event loop (Sonar S7499).
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(
+                    f"{api_url}/api/chats/{chat_id}",
+                    headers={"Authorization": f"Bearer {jwt}"},
+                )
             assert resp.status_code == 200
             persisted_title = resp.json()["chat"]["title"]
             assert persisted_title == title_after_first

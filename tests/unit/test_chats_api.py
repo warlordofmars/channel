@@ -483,8 +483,12 @@ def test_post_message_titler_failure_is_swallowed_and_stream_completes(
 
     class FakeTitler:
         async def stream_async(self, prompt):
+            # Yield in an unreachable branch keeps this an async generator
+            # while still raising. ``if False: yield`` makes Sonar S1763
+            # happy (no syntactically-unreachable statement after a raise).
+            if False:  # pragma: no cover
+                yield None
             raise RuntimeError("haiku unavailable")
-            yield  # pragma: no cover  # unreachable; satisfies generator typing
 
     monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
     monkeypatch.setattr("channel.api.chats.build_titler_agent", lambda: FakeTitler())
