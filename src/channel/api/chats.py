@@ -125,6 +125,7 @@ async def _stream_bedrock_reply(
 
     state = state if state is not None else {}
     resolved_model = resolve_model_id(model)
+    state["resolved_model"] = resolved_model
 
     user_msg = storage.put_message(
         chat_id=chat.chat_id,
@@ -234,7 +235,7 @@ async def post_message(
                     "done": {
                         "msg_id": state["assistant_msg_id"],
                         "seq": 1,
-                        "model": resolve_model_id(model),
+                        "model": state["resolved_model"],
                         "input_tokens": state["input_tokens"],
                         "output_tokens": state["output_tokens"],
                         "stop_reason": state["stop_reason"],
