@@ -3,69 +3,134 @@ import { render } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { renderMarkdown } from "./renderMarkdown.jsx";
 
-function wrap(nodes) {
-  // renderMarkdown returns an array of <p>/<ol> elements — wrap them in a
-  // <div> so testing-library can render the array.
-  return render(<div>{nodes}</div>);
+function wrap(node) {
+  return render(<div>{node}</div>);
 }
 
 describe("renderMarkdown", () => {
-  it("renders a single paragraph as a <p>", () => {
+  it("renders a paragraph as a <p>", () => {
     const { container } = wrap(renderMarkdown("hello world", false));
-    expect(container.querySelectorAll("p").length).toBe(1);
-    expect(container.querySelector("p").textContent).toBe("hello world");
-  });
-
-  it("splits paragraphs on \\n\\n", () => {
-    const { container } = wrap(renderMarkdown("one\n\ntwo\n\nthree", false));
     const ps = container.querySelectorAll("p");
-    expect(ps.length).toBe(3);
-    expect([ps[0].textContent, ps[1].textContent, ps[2].textContent]).toEqual(["one", "two", "three"]);
+    expect(ps.length).toBe(1);
+    expect(ps[0].textContent).toBe("hello world");
   });
 
-  it("renders **bold** inline as <strong>", () => {
+  it("renders **bold** as <strong>", () => {
     const { container } = wrap(renderMarkdown("hi **there** friend", false));
     const strong = container.querySelector("strong");
     expect(strong).toBeTruthy();
     expect(strong.textContent).toBe("there");
-    expect(container.querySelector("p").textContent).toBe("hi there friend");
   });
 
-  it("renders an ordered-list block as <ol><li>", () => {
-    const md = "1. first\n2. second\n3. third";
-    const { container } = wrap(renderMarkdown(md, false));
-    const ol = container.querySelector("ol");
-    expect(ol).toBeTruthy();
-    const lis = ol.querySelectorAll("li");
+  it("renders *italic* as <em>", () => {
+    const { container } = wrap(renderMarkdown("see *italics* here", false));
+    expect(container.querySelector("em").textContent).toBe("italics");
+  });
+
+  it("renders headings", () => {
+    const { container } = wrap(
+      renderMarkdown("# H1\n\n## H2\n\n### H3", false),
+    );
+    expect(container.querySelector("h1").textContent).toBe("H1");
+    expect(container.querySelector("h2").textContent).toBe("H2");
+    expect(container.querySelector("h3").textContent).toBe("H3");
+  });
+
+  it("renders ordered lists as <ol><li>", () => {
+    const { container } = wrap(
+      renderMarkdown("1. first\n2. second\n3. third", false),
+    );
+    const lis = container.querySelectorAll("ol > li");
     expect(lis.length).toBe(3);
     expect(lis[0].textContent).toBe("first");
     expect(lis[2].textContent).toBe("third");
   });
 
-  it("renders bold inside list items", () => {
-    const { container } = wrap(renderMarkdown("1. **batch** writes", false));
-    expect(container.querySelector("ol li strong").textContent).toBe("batch");
+  it("renders unordered lists as <ul><li>", () => {
+    const { container } = wrap(
+      renderMarkdown("- one\n- two\n- three", false),
+    );
+    const lis = container.querySelectorAll("ul > li");
+    expect(lis.length).toBe(3);
+    expect(lis[0].textContent).toBe("one");
   });
 
-  it("appends a blinking .cursor span to the last paragraph only when streaming", () => {
-    const { container: streaming } = wrap(renderMarkdown("one\n\ntwo", true));
-    const ps = streaming.querySelectorAll("p");
-    expect(ps[0].querySelector(".cursor")).toBeNull();
-    expect(ps[1].querySelector(".cursor")).toBeTruthy();
-
-    const { container: done } = wrap(renderMarkdown("one\n\ntwo", false));
-    expect(done.querySelector(".cursor")).toBeNull();
+  it("renders fenced code blocks as <pre><code>", () => {
+    const md = "```python\nprint('hi')\n```";
+    const { container } = wrap(renderMarkdown(md, false));
+    const code = container.querySelector("pre code");
+    expect(code).toBeTruthy();
+    expect(code.textContent).toContain("print('hi')");
   });
 
-  it("does not append the cursor inside an ordered-list block", () => {
-    // The last block is an OL — streaming cursor only attaches to <p>.
-    const { container } = wrap(renderMarkdown("intro\n\n1. one\n2. two", true));
+  it("renders inline code as <code>", () => {
+    const { container } = wrap(renderMarkdown("use `foo()` here", false));
+    const code = container.querySelector("code");
+    expect(code.textContent).toBe("foo()");
+    // Inline code is not wrapped in <pre>.
+    expect(container.querySelector("pre")).toBeNull();
+  });
+
+  it("renders links as <a> with the right href", () => {
+    const { container } = wrap(
+      renderMarkdown("[home](https://example.com)", false),
+    );
+    const a = container.querySelector("a");
+    expect(a.textContent).toBe("home");
+    expect(a.getAttribute("href")).toBe("https://example.com");
+  });
+
+  it("renders blockquotes as <blockquote>", () => {
+    const { container } = wrap(renderMarkdown("> quoted text", false));
+    expect(container.querySelector("blockquote")).toBeTruthy();
+    expect(container.querySelector("blockquote").textContent).toContain(
+      "quoted text",
+    );
+  });
+
+  it("renders GFM tables", () => {
+    const md = "| A | B |\n|---|---|\n| 1 | 2 |";
+    const { container } = wrap(renderMarkdown(md, false));
+    const headers = container.querySelectorAll("th");
+    expect(headers.length).toBe(2);
+    expect(headers[0].textContent).toBe("A");
+    expect(container.querySelectorAll("td").length).toBe(2);
+  });
+
+  it("renders GFM strikethrough as <del>", () => {
+    const { container } = wrap(renderMarkdown("see ~~old~~ note", false));
+    expect(container.querySelector("del").textContent).toBe("old");
+  });
+
+  it("renders GFM task lists", () => {
+    const md = "- [x] done\n- [ ] todo";
+    const { container } = wrap(renderMarkdown(md, false));
+    const boxes = container.querySelectorAll('input[type="checkbox"]');
+    expect(boxes.length).toBe(2);
+    expect(boxes[0].checked).toBe(true);
+    expect(boxes[1].checked).toBe(false);
+  });
+
+  it("appends a blinking .cursor span when streaming", () => {
+    const { container } = wrap(renderMarkdown("partial", true));
+    expect(container.querySelector(".cursor")).toBeTruthy();
+  });
+
+  it("omits the .cursor span when not streaming", () => {
+    const { container } = wrap(renderMarkdown("done", false));
     expect(container.querySelector(".cursor")).toBeNull();
   });
 
-  it("renders an empty string as a single empty paragraph", () => {
+  it("renders empty input without throwing", () => {
     const { container } = wrap(renderMarkdown("", false));
-    expect(container.querySelectorAll("p").length).toBe(1);
-    expect(container.querySelector("p").textContent).toBe("");
+    // react-markdown produces no children for empty input.
+    expect(container.textContent).toBe("");
+  });
+
+  it("drops raw HTML (security: react-markdown default-sanitizes)", () => {
+    const { container } = wrap(
+      renderMarkdown("<script>alert('xss')</script> safe", false),
+    );
+    expect(container.querySelector("script")).toBeNull();
   });
 });
