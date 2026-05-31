@@ -664,6 +664,22 @@ class ChannelStack(cdk.Stack):
                                         count={},
                                     ),
                                 ),
+                                # EC2MetaDataSSRF_QUERYARGUMENTS flags query
+                                # strings containing the EC2 metadata IP
+                                # (169.254.169.254) but ALSO matches localhost
+                                # loopback patterns (127.0.0.1:<port>) as
+                                # potential SSRF targets. The desktop OAuth
+                                # callback `http://127.0.0.1:<port>/callback`
+                                # trips this rule too. Same trade-off as
+                                # GenericRFI_QUERYARGUMENTS: downgrade to
+                                # count so legitimate loopback callbacks pass
+                                # while CloudWatch still records matches.
+                                wafv2.CfnWebACL.RuleActionOverrideProperty(
+                                    name="EC2MetaDataSSRF_QUERYARGUMENTS",
+                                    action_to_use=wafv2.CfnWebACL.RuleActionProperty(
+                                        count={},
+                                    ),
+                                ),
                             ],
                         ),
                     ),
