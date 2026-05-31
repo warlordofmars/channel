@@ -67,9 +67,14 @@ class FakeTable:
         return {"Item": item} if item else {}
 
     def query(self, **kwargs: Any) -> dict[str, Any]:
+        # IndexName is ignored: chat-index items carry both their primary
+        # (PK/SK) and GSI (GSI3PK/GSI3SK) keys on the same item, so the
+        # condition tree alone is sufficient to find them whether the
+        # caller meant the main table or the GSI.
         conds = _extract_conditions(kwargs["KeyConditionExpression"])
         limit = kwargs.get("Limit")
         scan_forward = kwargs.get("ScanIndexForward", True)
+        exclusive_start = kwargs.get("ExclusiveStartKey")
 
         def matches(item: dict[str, Any]) -> bool:
             for attr, (op, value) in conds.items():
@@ -89,9 +94,29 @@ class FakeTable:
             key=lambda i: i["SK"],
             reverse=not scan_forward,
         )
-        if limit is not None:
+        if exclusive_start is not None:
+            # Drop everything up to AND including the item whose
+            # (PK, SK) matches the cursor — mirrors DynamoDB pagination.
+            cursor_pk = exclusive_start.get("PK")
+            cursor_sk = exclusive_start.get("SK")
+            for idx, item in enumerate(items):
+                if item["PK"] == cursor_pk and item["SK"] == cursor_sk:
+                    items = items[idx + 1 :]
+                    break
+            else:
+                # Cursor doesn't match any item — DynamoDB would return
+                # nothing; mirror that.
+                items = []
+        result: dict[str, Any] = {}
+        if limit is not None and len(items) > limit:
+            returned = items[:limit]
+            last = returned[-1]
+            result["LastEvaluatedKey"] = {"PK": last["PK"], "SK": last["SK"]}
+            items = returned
+        elif limit is not None:
             items = items[:limit]
-        return {"Items": items}
+        result["Items"] = items
+        return result
 
     def update_item(self, Key: dict[str, str], **kwargs: Any) -> dict[str, Any]:
         item = self.items.setdefault((Key["PK"], Key["SK"]), {**Key})
@@ -119,7 +144,7 @@ class FakeTable:
 @pytest.fixture
 def table(monkeypatch: pytest.MonkeyPatch) -> FakeTable:
     fake = FakeTable()
-    monkeypatch.setattr("channel.storage._table", lambda: fake)
+    monkeypatch.setattr("channel.storage._get_table", lambda: fake)
     return fake
 
 
@@ -162,15 +187,31 @@ def test_list_chats_returns_newest_first(table: FakeTable) -> None:
     assert cursor is None
 
 
-def test_list_chats_passes_cursor(table: FakeTable) -> None:
-    create_chat(user_id="u-1", title=None, model_default="m")
-    chats, _ = list_chats_for_user("u-1", limit=10, cursor={"PK": "USER#u-1", "SK": "CHAT#x"})
-    # Fake table doesn't actually honor ExclusiveStartKey; we just need
-    # the code path that forwards a non-None cursor to be exercised.
-    assert isinstance(chats, list)
+def test_list_chats_paginates_with_cursor(table: FakeTable) -> None:
+    """Walk through 5 chats two-at-a-time, verifying cursors round-trip.
+
+    The fake table now honors ``ExclusiveStartKey`` end-to-end, so each
+    page must return distinct items and ``LastEvaluatedKey`` must point
+    at the page's tail item.
+    """
+    created = [create_chat(user_id="u-1", title=None, model_default="m") for _ in range(5)]
+    # Newest-first: reversed creation order.
+    expected_order = list(reversed([c.chat_id for c in created]))
+
+    page1, cursor1 = list_chats_for_user("u-1", limit=2, cursor=None)
+    assert [c.chat_id for c in page1] == expected_order[:2]
+    assert cursor1 is not None
+
+    page2, cursor2 = list_chats_for_user("u-1", limit=2, cursor=cursor1)
+    assert [c.chat_id for c in page2] == expected_order[2:4]
+    assert cursor2 is not None
+
+    page3, cursor3 = list_chats_for_user("u-1", limit=2, cursor=cursor2)
+    assert [c.chat_id for c in page3] == expected_order[4:]
+    assert cursor3 is None
 
 
-def test_put_message_writes_sequenced_row(table: FakeTable) -> None:
+def test_put_message_writes_row_with_msg_id_suffix(table: FakeTable) -> None:
     chat = create_chat(user_id="u-1", title=None, model_default="m")
     msg = put_message(
         chat_id=chat.chat_id,
@@ -182,6 +223,10 @@ def test_put_message_writes_sequenced_row(table: FakeTable) -> None:
     assert stored["text"] == "hello"
     assert stored["role"] == "user"
     assert stored["SK"].startswith("MSG#")
+    # The SK now uses msg_id as the uniqueness tiebreaker instead of a
+    # per-process counter — pin the new format so a regression to the
+    # old `seq:05d` shape is caught.
+    assert msg.msg_id in stored["SK"]
     assert msg.role is MessageRole.USER
 
 
@@ -219,15 +264,28 @@ def test_list_messages_returns_chronological_order(table: FakeTable) -> None:
     assert [m.text for m in msgs] == ["one", "two"]
 
 
-def test_list_messages_passes_cursor(table: FakeTable) -> None:
+def test_list_messages_paginates_with_cursor(table: FakeTable) -> None:
+    """Walk through 5 messages two-at-a-time, verifying cursor round-trips.
+
+    Mirrors the chats pagination test — same end-to-end assertion shape
+    over the messages SK (``MSG#{created_at}#{msg_id}``).
+    """
     chat = create_chat(user_id="u-1", title=None, model_default="m")
-    put_message(chat_id=chat.chat_id, role=MessageRole.USER, text="one", model=None)
-    msgs, _ = list_messages(
-        chat.chat_id,
-        limit=10,
-        cursor={"PK": f"CHAT#{chat.chat_id}", "SK": "MSG#x"},
-    )
-    assert isinstance(msgs, list)
+    texts = ["one", "two", "three", "four", "five"]
+    for text in texts:
+        put_message(chat_id=chat.chat_id, role=MessageRole.USER, text=text, model=None)
+
+    page1, cursor1 = list_messages(chat.chat_id, limit=2, cursor=None)
+    assert [m.text for m in page1] == ["one", "two"]
+    assert cursor1 is not None
+
+    page2, cursor2 = list_messages(chat.chat_id, limit=2, cursor=cursor1)
+    assert [m.text for m in page2] == ["three", "four"]
+    assert cursor2 is not None
+
+    page3, cursor3 = list_messages(chat.chat_id, limit=2, cursor=cursor2)
+    assert [m.text for m in page3] == ["five"]
+    assert cursor3 is None
 
 
 def test_update_chat_index_bumps_count_and_preview(table: FakeTable) -> None:
@@ -262,6 +320,12 @@ def test_patch_chat_updates_title_and_archived(table: FakeTable) -> None:
 
 
 def test_patch_chat_with_no_fields_is_noop(table: FakeTable) -> None:
+    """Empty PATCH payloads silently no-op — deliberate, not a bug.
+
+    PATCH /api/chats/{id} with `{}` should not produce a useless
+    UpdateItem call.  The API layer is responsible for rejecting
+    empty payloads if it cares to (it doesn't, in 7a).
+    """
     chat = create_chat(user_id="u-1", title=None, model_default="m")
     pk = "USER#u-1"
     sk = f"CHAT#{chat.created_at}#{chat.chat_id}"
