@@ -638,9 +638,147 @@ jobs:
           sarif_file: trivy-iac.sarif
           category: trivy-iac
 
+# ── Publish signed mac auto-update artefacts (push to main|development only) ──
+
+  publish-desktop-mac:
+    name: Publish desktop (macOS)
+    needs: [desktop]
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/development')
+    runs-on: macos-14
+    permissions:
+      id-token: write
+      contents: write   # for `gh release upload` on the main branch path
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: "20"
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4
+        with:
+          role-to-assume: ${{ vars.AWS_OIDC_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Resolve channel + env
+        id: env
+        run: |
+          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            echo "channel=latest" >> "$GITHUB_OUTPUT"
+            echo "cdk_env=prod"   >> "$GITHUB_OUTPUT"
+            echo "domain=channel.warlordofmars.net" >> "$GITHUB_OUTPUT"
+          else
+            echo "channel=dev"    >> "$GITHUB_OUTPUT"
+            echo "cdk_env=dev"    >> "$GITHUB_OUTPUT"
+            echo "domain=channel-dev.warlordofmars.net" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Read CDK outputs
+        id: cdk
+        run: |
+          CDK_ENV="${{ steps.env.outputs.cdk_env }}"
+          STACK="ChannelStack$([[ "$CDK_ENV" == "dev" ]] && echo "-dev")"
+          BUCKET=$(aws cloudformation describe-stacks --stack-name "$STACK" --query "Stacks[0].Outputs[?OutputKey=='UpdatesBucketName'].OutputValue" --output text)
+          DIST=$(aws cloudformation describe-stacks --stack-name "$STACK" --query "Stacks[0].Outputs[?OutputKey=='UpdatesDistributionId'].OutputValue" --output text)
+          echo "bucket=$BUCKET" >> "$GITHUB_OUTPUT"
+          echo "distribution=$DIST" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve version
+        id: version
+        working-directory: desktop
+        run: |
+          BASE=$(node -p "require('./package.json').version")
+          CHANNEL="${{ steps.env.outputs.channel }}"
+          if [[ "$CHANNEL" == "dev" ]]; then
+            VERSION="${BASE}-dev.${{ github.run_number }}"
+          else
+            VERSION="${BASE}"
+          fi
+          npm version --no-git-tag-version "$VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Import Apple signing cert
+        env:
+          APPLE_CERT_P12_BASE64: ${{ secrets.APPLE_CERT_P12_BASE64 }}
+          APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+        run: |
+          KEYCHAIN=channel-signing.keychain-db
+          KEYCHAIN_PASSWORD=$(openssl rand -hex 16)
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          echo "$APPLE_CERT_P12_BASE64" | base64 -d > /tmp/cert.p12
+          security import /tmp/cert.p12 -k "$KEYCHAIN" -P "$APPLE_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          rm -f /tmp/cert.p12
+
+      - name: Install desktop deps
+        working-directory: desktop
+        run: npm ci
+
+      - name: Build + sign + notarise
+        working-directory: desktop
+        env:
+          UPDATES_FEED_URL: https://${{ steps.env.outputs.domain }}/updates/${{ steps.env.outputs.channel }}
+          APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          npm run build:main
+          npm run build:renderer
+          npx electron-builder --mac --publish=never
+
+      - name: Sync versioned auto-update bundles to S3 (tagged for lifecycle)
+        run: |
+          aws s3 sync desktop/release/ s3://${{ steps.cdk.outputs.bucket }}/updates/${{ steps.env.outputs.channel }}/ \
+            --exclude '*' \
+            --include '*.zip' --include '*.blockmap' \
+            --tagging "channel-asset-type=versioned-zip"
+
+      - name: Sync stable artefacts (dmg + manifest) to S3 (untagged)
+        run: |
+          aws s3 cp desktop/release/Channel-mac.dmg \
+            s3://${{ steps.cdk.outputs.bucket }}/updates/${{ steps.env.outputs.channel }}/Channel-mac.dmg \
+            --cache-control "public, max-age=300"
+          aws s3 cp desktop/release/latest-mac.yml \
+            s3://${{ steps.cdk.outputs.bucket }}/updates/${{ steps.env.outputs.channel }}/latest-mac.yml \
+            --cache-control "public, max-age=60"
+
+      - name: Invalidate CloudFront for the manifest + stable dmg
+        run: |
+          aws cloudfront create-invalidation \
+            --distribution-id ${{ steps.cdk.outputs.distribution }} \
+            --paths "/updates/${{ steps.env.outputs.channel }}/latest-mac.yml" \
+                    "/updates/${{ steps.env.outputs.channel }}/Channel-mac.dmg"
+
+      - name: Upload signed assets to GitHub release (main only)
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          # Wait up to 5 min for the release to be created by the `release` job.
+          for i in {1..30}; do
+            if gh release view "v$VERSION" >/dev/null 2>&1; then break; fi
+            echo "Waiting for release v$VERSION to exist... ($i/30)"
+            sleep 10
+          done
+          gh release upload "v$VERSION" \
+            desktop/release/Channel-mac.dmg \
+            desktop/release/*.exe \
+            desktop/release/*.deb \
+            desktop/release/*.rpm \
+            desktop/release/*.AppImage \
+            --clobber
+
   notify-pipeline-failure:
     name: Notify Slack — CI Failure
-    needs: [lint-typecheck, audit, unit-tests, integration-tests, coverage, frontend, desktop, infra-synth]
+    needs: [lint-typecheck, audit, unit-tests, integration-tests, coverage, frontend, desktop, infra-synth, publish-desktop-mac]
     if: >-
       always() &&
       contains(needs.*.result, 'failure') &&
