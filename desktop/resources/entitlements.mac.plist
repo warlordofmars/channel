@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Copyright (c) 2026 John Carter. All rights reserved. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Electron + V8 need a JIT page allocator -->
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+  <!-- V8 emits executable bytecode that is not signed by Apple -->
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+  <!-- Allow outbound TCP/HTTP to the FastAPI backend -->
+  <key>com.apple.security.network.client</key>
+  <true/>
+</dict>
+</plist>

@@ -20,7 +20,13 @@ function resolveModel(modelId) {
 // to the raw value (acceptable visual debug hint).
 function modelLabel(raw) {
   if (!raw) return "";
-  const shortId = raw.replace(/^(us|global)\.anthropic\.|^anthropic\./, "");
+  // Strip inference-profile prefix (us./global.) + vendor namespace +
+  // the trailing date-and-version suffix (e.g. ``-20251001-v1:0`` or
+  // ``-v1``) so we can match on the short id the SPA's MODELS array
+  // is keyed by (e.g. ``claude-opus-4-6``).
+  const shortId = raw
+    .replace(/^(us|global)\.anthropic\.|^anthropic\./, "")
+    .replace(/(-\d{8})?-v\d+(:\d+)?$/, "");
   const display = MODELS.find((m) => m.id === shortId);
   return display ? display.name : raw;
 }
@@ -73,7 +79,8 @@ export default function Conversation() {
   const modelObj = resolveModel(prefs.model);
   const setModelObj = (m) => prefs.setModel(m.id);
   const followUp = (text, atts) =>
-    send({ message: text, model: modelObj, effort: prefs.effort, attachments: atts });
+    // Backend expects model as a short id string, not the picker's display object.
+    send({ message: text, model: modelObj.id, effort: prefs.effort, attachments: atts });
   const noop = () => {};
 
   return (

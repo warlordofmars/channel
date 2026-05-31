@@ -80,14 +80,14 @@ describe("Conversation", () => {
           msg_id: "a1",
           role: "assistant",
           text: "**bold reply**",
-          model: "Claude Opus 4.7 · High",
+          model: "Claude Opus 4.6 · High",
           streaming: false,
         },
       ],
     });
     renderAt("/app/c/c1");
     expect(screen.getByText("Channel")).toBeTruthy();
-    expect(screen.getByText("Claude Opus 4.7 · High")).toBeTruthy();
+    expect(screen.getByText("Claude Opus 4.6 · High")).toBeTruthy();
     expect(screen.getByText("bold reply")).toBeTruthy();
   });
 
@@ -137,7 +137,7 @@ describe("Conversation", () => {
           msg_id: "a1",
           role: "assistant",
           text: "done",
-          model: "Claude Opus 4.7 · High",
+          model: "Claude Opus 4.6 · High",
           streaming: false,
         },
       ],
@@ -297,7 +297,7 @@ describe("Conversation", () => {
     storage["channel-model"] = MODELS[0].id;
     __resetChannelPrefsForTest();
     renderAt("/app/c/c1");
-    fireEvent.click(screen.getByRole("button", { name: /Opus 4.7/i }));
+    fireEvent.click(screen.getByRole("button", { name: /Opus 4.6/i }));
     fireEvent.click(screen.getByText("Claude Haiku 4.5"));
     expect(storage["channel-model"]).toBe("claude-haiku-4-5");
   });
@@ -316,7 +316,9 @@ describe("Conversation", () => {
     const ta = screen.getByPlaceholderText("Reply…");
     fireEvent.change(ta, { target: { value: "hi" } });
     fireEvent.click(screen.getByTitle("Send"));
-    expect(stream.send.mock.calls[0][0].model).toEqual(MODELS[0]);
+    // followUp passes the short id (`model.id`), not the full picker
+    // object — backend expects `model: str | None`.
+    expect(stream.send.mock.calls[0][0].model).toBe(MODELS[0].id);
   });
 
   it("renders friendly model label, not raw ARN", () => {
@@ -335,6 +337,48 @@ describe("Conversation", () => {
     renderAt("/app/c/c1");
     expect(screen.getByText("Claude Sonnet 4.6")).toBeInTheDocument();
     expect(screen.queryByText(/^us\.anthropic\.|^anthropic\./)).toBeNull();
+  });
+
+  it.each([
+    ["us.anthropic.claude-sonnet-4-6", "Claude Sonnet 4.6"],
+    ["us.anthropic.claude-opus-4-6-v1", "Claude Opus 4.6"],
+    ["us.anthropic.claude-haiku-4-5-20251001-v1:0", "Claude Haiku 4.5"],
+    ["anthropic.claude-sonnet-4-6", "Claude Sonnet 4.6"],
+    ["global.anthropic.claude-haiku-4-5-20251001-v1:0", "Claude Haiku 4.5"],
+  ])("modelLabel strips %s -> %s", (raw, expected) => {
+    mockStream({
+      turns: [
+        { role: "user", text: "hi", msg_id: "u1" },
+        {
+          role: "assistant",
+          text: "ok",
+          msg_id: "a1",
+          model: raw,
+          streaming: false,
+        },
+      ],
+    });
+    renderAt("/app/c/c1");
+    expect(screen.getByText(expected)).toBeInTheDocument();
+  });
+
+  it("falls back to raw model id when not found in MODELS", () => {
+    mockStream({
+      turns: [
+        { role: "user", text: "hi", msg_id: "u1" },
+        {
+          role: "assistant",
+          text: "ok",
+          msg_id: "a1",
+          model: "anthropic.totally-unknown-model",
+          streaming: false,
+        },
+      ],
+    });
+    renderAt("/app/c/c1");
+    expect(
+      screen.getByText("anthropic.totally-unknown-model"),
+    ).toBeInTheDocument();
   });
 
   it("regenerate button calls hook.regenerate on the last assistant turn", () => {
