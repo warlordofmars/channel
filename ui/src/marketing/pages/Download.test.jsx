@@ -37,10 +37,11 @@ describe("Download page", () => {
   });
 });
 
-describe("Download — signed-release URLs", () => {
+describe("Download — release-tagged URLs", () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  const releasesBase = "https://github.com/warlordofmars/channel/releases/latest/download";
+  // Default tag (no ``VITE_RELEASE_TAG`` set) — dev pre-release.
+  const releasesBase = "https://github.com/warlordofmars/channel/releases/download/dev";
 
   function renderPage() {
     vi.stubGlobal("localStorage", { getItem: () => null, setItem: vi.fn(), removeItem: vi.fn() });
@@ -82,10 +83,14 @@ describe("Download — signed-release URLs", () => {
     expect(screen.getByText(/macOS auto-updates in the background/i)).toBeTruthy();
   });
 
-  it("no link points at releases/download/dev/", () => {
+  it("links never point at the broken releases/latest/ URL while no stable release exists", () => {
+    // Regression guard against the bug we just fixed: pointing at
+    // ``releases/latest/download/...`` returns 404 because the only
+    // published release is the ``dev`` pre-release (and ``latest``
+    // ignores pre-releases + drafts).
     renderPage();
     for (const link of screen.getAllByRole("link")) {
-      expect(link.getAttribute("href") ?? "").not.toContain("releases/download/dev/");
+      expect(link.getAttribute("href") ?? "").not.toContain("releases/latest/");
     }
   });
 });
