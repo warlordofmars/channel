@@ -414,6 +414,14 @@ class ChannelStack(cdk.Stack):
             auto_delete_objects=not is_prod,
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
             enforce_ssl=True,
+            lifecycle_rules=[
+                s3.LifecycleRule(
+                    id="ExpireOldAutoUpdateBundles",
+                    enabled=True,
+                    expiration=cdk.Duration.days(30),
+                    tag_filters={"channel-asset-type": "versioned-zip"},
+                ),
+            ],
         )
 
         # API origin — strip "https://" prefix and trailing "/" from the function URL
@@ -705,6 +713,32 @@ function handler(event) {
             ],
         )
 
+        # Cache policy for /updates/*: short TTL for the manifest (latest-mac.yml),
+        # long immutable TTL for versioned binaries. Single behavior covers both —
+        # per-object Cache-Control headers set by the publish CI job dictate the
+        # effective TTL (60s for the manifest, 1y for the .zip + .blockmap).
+        updates_cache_policy = cloudfront.CachePolicy(
+            self,
+            "UpdatesCachePolicy",
+            cache_policy_name=f"channel-updates-{env_name}",
+            default_ttl=cdk.Duration.seconds(60),
+            min_ttl=cdk.Duration.seconds(0),
+            max_ttl=cdk.Duration.days(365),
+            cookie_behavior=cloudfront.CacheCookieBehavior.none(),
+            query_string_behavior=cloudfront.CacheQueryStringBehavior.none(),
+            header_behavior=cloudfront.CacheHeaderBehavior.none(),
+            enable_accept_encoding_gzip=False,
+            enable_accept_encoding_brotli=False,
+        )
+
+        updates_behavior = cloudfront.BehaviorOptions(
+            origin=ui_s3_origin,
+            viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+            cache_policy=updates_cache_policy,
+            response_headers_policy=security_headers_policy,
+            allowed_methods=cloudfront.AllowedMethods.ALLOW_GET_HEAD,
+        )
+
         distribution = cloudfront.Distribution(
             self,
             "UiDistribution",
@@ -725,6 +759,7 @@ function handler(event) {
                     response_headers_policy=security_headers_policy,
                 ),
                 "/docs*": docs_behavior,
+                "/updates/*": updates_behavior,
             },
             domain_names=[custom_domain],
             certificate=certificate,
