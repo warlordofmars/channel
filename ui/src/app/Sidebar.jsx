@@ -1,5 +1,5 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { parseToken, TOKEN_KEY } from "../lib/auth.js";
 import Icon from "../components/Icon.jsx";
@@ -24,6 +24,25 @@ export default function Sidebar({ collapsed = false, onToggle = () => {} }) {
   const [searching, setSearching] = useState(false);
   const [search, setSearch] = useState("");
   const [acctOpen, setAcctOpen] = useState(false);
+  const [pendingUpdateVersion, setPendingUpdateVersion] = useState(null);
+
+  useEffect(() => {
+    const desktop = window.channelDesktop;
+    if (!desktop?.onUpdateStatus) return;
+    desktop.onUpdateStatus(handleUpdateStatus);
+    // No cleanup — desktop ipcRenderer.on listeners persist for the app lifetime
+    // and the Sidebar mounts once per signed-in session.
+  }, []);
+
+  function handleUpdateStatus(payload) {
+    if (payload?.state === "downloaded" && payload.version) {
+      setPendingUpdateVersion(payload.version);
+    }
+  }
+
+  function handleRelaunch() {
+    window.channelDesktop?.relaunchToUpdate?.();
+  }
 
   const token = localStorage.getItem(TOKEN_KEY) ?? "";
   const claims = parseToken(token) ?? {};
@@ -129,6 +148,15 @@ export default function Sidebar({ collapsed = false, onToggle = () => {} }) {
       </div>
 
       <div className="sb-foot">
+        {pendingUpdateVersion && (
+          <button
+            type="button"
+            className="update-pill"
+            onClick={handleRelaunch}
+          >
+            Relaunch to update v{pendingUpdateVersion}
+          </button>
+        )}
         <div className="account-wrap">
           {acctOpen && (
             <>
