@@ -23,7 +23,14 @@ from channel.agents.strands_sse import (
     translate_event,
 )
 from channel.api._auth import require_mgmt_user
-from channel.models import Chat, ChatCreate, ChatPatch, MessageRole, SendMessageRequest
+from channel.models import (
+    Chat,
+    ChatCreate,
+    ChatPatch,
+    MessageRole,
+    RegenerateRequest,
+    SendMessageRequest,
+)
 
 _DEFAULT_MODEL = "claude-sonnet-4-6"
 
@@ -244,3 +251,34 @@ async def post_message(
             )
 
     return StreamingResponse(_produce(), media_type="text/event-stream")
+
+
+@router.post("/{chat_id}/regenerate")
+async def regenerate(
+    payload: RegenerateRequest,
+    chat_id: str = Path(...),
+    claims: dict[str, Any] = Depends(require_mgmt_user),
+) -> StreamingResponse:
+    """Drop the last assistant message and re-stream from the last user message."""
+
+    chat = await _load_owned_chat(chat_id, claims["sub"])
+    model = payload.model or chat.model_default or _DEFAULT_MODEL
+
+    storage.delete_last_assistant_message(chat_id)
+
+    msgs, _ = storage.list_messages(chat_id, limit=50, cursor=None)
+    last_user = next((m for m in reversed(msgs) if m.role == MessageRole.USER), None)
+    if last_user is None:
+        raise HTTPException(
+            status_code=400, detail="Cannot regenerate — chat has no user messages."
+        )
+
+    return StreamingResponse(
+        _stream_bedrock_reply(
+            chat=chat,
+            user_message=last_user.text,
+            model=model,
+            claims=claims,
+        ),
+        media_type="text/event-stream",
+    )

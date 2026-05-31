@@ -274,6 +274,26 @@ def store_idempotency_result(*, user_id: str, key: str, payload: dict[str, Any])
     )
 
 
+def delete_last_assistant_message(chat_id: str) -> Message | None:
+    """Drop the most recent assistant message in a chat.
+
+    Returns the deleted message, or None if the chat had no assistant
+    messages.  Used by ``POST /api/chats/{id}/regenerate``.
+    """
+
+    msgs, _ = list_messages(chat_id, limit=50, cursor=None)
+    for msg in reversed(msgs):
+        if msg.role == MessageRole.ASSISTANT:
+            _get_table().delete_item(
+                Key={
+                    "PK": f"CHAT#{chat_id}",
+                    "SK": f"MSG#{msg.created_at}#{msg.msg_id}",
+                }
+            )
+            return msg
+    return None
+
+
 def _chat_from_item(item: dict[str, Any]) -> Chat:
     return Chat(
         chat_id=item["chat_id"],

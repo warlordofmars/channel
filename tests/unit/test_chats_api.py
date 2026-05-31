@@ -458,3 +458,93 @@ def test_post_message_rejects_empty_message(
     )
     response = client.post("/api/chats/c1/messages", json={"message": ""})
     assert response.status_code == 422  # Pydantic min_length=1
+
+
+def test_regenerate_drops_last_assistant_and_restreams(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    chat = Chat(
+        chat_id="c1",
+        user_id="u-1",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="claude-sonnet-4-6",
+    )
+    monkeypatch.setattr("channel.api.chats.storage.get_chat_by_id", lambda _: chat)
+
+    deleted_calls = []
+    monkeypatch.setattr(
+        "channel.api.chats.storage.delete_last_assistant_message",
+        lambda chat_id: deleted_calls.append(chat_id),
+    )
+    monkeypatch.setattr(
+        "channel.api.chats.storage.list_messages",
+        lambda *_a, **_kw: (
+            [
+                Message(
+                    chat_id="c1",
+                    msg_id="u-1",
+                    role=MessageRole.USER,
+                    text="redo",
+                    created_at="t",
+                )
+            ],
+            None,
+        ),
+    )
+
+    async def fake_stream(self, prompt):
+        assert prompt == "redo"
+        yield {"event": {"contentBlockDelta": {"delta": {"text": "again"}}}}
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+
+    class FakeAgent:
+        stream_async = fake_stream
+
+    monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
+    monkeypatch.setattr(
+        "channel.api.chats.storage.put_message",
+        lambda **kw: Message(
+            chat_id=kw["chat_id"],
+            msg_id="m-new",
+            role=kw["role"],
+            text=kw["text"],
+            created_at="t",
+        ),
+    )
+    monkeypatch.setattr("channel.api.chats.storage.update_chat_index", lambda **_: None)
+
+    response = client.post("/api/chats/c1/regenerate", json={})
+    assert response.status_code == 200
+    assert "again" in response.text
+    assert deleted_calls == ["c1"]
+
+
+def test_regenerate_returns_400_when_no_user_messages(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "channel.api.chats.storage.get_chat_by_id",
+        lambda _: Chat(
+            chat_id="c1",
+            user_id="u-1",
+            title="t",
+            created_at="t",
+            last_message_at="t",
+            model_default="m",
+        ),
+    )
+    monkeypatch.setattr("channel.api.chats.storage.delete_last_assistant_message", lambda _: None)
+    monkeypatch.setattr("channel.api.chats.storage.list_messages", lambda *_a, **_kw: ([], None))
+
+    response = client.post("/api/chats/c1/regenerate", json={})
+    assert response.status_code == 400
+
+
+def test_regenerate_returns_404_for_unowned_chat(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("channel.api.chats.storage.get_chat_by_id", lambda _: None)
+    response = client.post("/api/chats/x/regenerate", json={})
+    assert response.status_code == 404
