@@ -359,12 +359,17 @@ def test_post_message_seeds_agent_with_prior_chat_history(
     prior = [
         Message(chat_id="c1", msg_id="m0", role=MessageRole.USER, text="hi", created_at="t1"),
         Message(
-            chat_id="c1", msg_id="m1", role=MessageRole.ASSISTANT, text="hey",
-            model="us.anthropic.claude-sonnet-4-6", created_at="t2",
+            chat_id="c1",
+            msg_id="m1",
+            role=MessageRole.ASSISTANT,
+            text="hey",
+            model="us.anthropic.claude-sonnet-4-6",
+            created_at="t2",
         ),
     ]
     monkeypatch.setattr(
-        "channel.api.chats.storage.list_messages", lambda *_a, **_kw: (prior, None),
+        "channel.api.chats.storage.list_messages",
+        lambda *_a, **_kw: (prior, None),
     )
 
     captured: dict[str, Any] = {}
@@ -411,7 +416,8 @@ def test_regenerate_drops_trailing_user_from_seeded_history(
     )
     monkeypatch.setattr("channel.api.chats.storage.get_chat_by_id", lambda _: chat)
     monkeypatch.setattr(
-        "channel.api.chats.storage.delete_last_assistant_message", lambda _: None,
+        "channel.api.chats.storage.delete_last_assistant_message",
+        lambda _: None,
     )
     monkeypatch.setattr(
         "channel.api.chats.storage.put_message",
@@ -429,13 +435,20 @@ def test_regenerate_drops_trailing_user_from_seeded_history(
     prior = [
         Message(chat_id="c1", msg_id="m0", role=MessageRole.USER, text="round1-u", created_at="t1"),
         Message(
-            chat_id="c1", msg_id="m1", role=MessageRole.ASSISTANT, text="round1-a",
-            model="us.anthropic.claude-sonnet-4-6", created_at="t2",
+            chat_id="c1",
+            msg_id="m1",
+            role=MessageRole.ASSISTANT,
+            text="round1-a",
+            model="us.anthropic.claude-sonnet-4-6",
+            created_at="t2",
         ),
-        Message(chat_id="c1", msg_id="m2", role=MessageRole.USER, text="regen-this", created_at="t3"),
+        Message(
+            chat_id="c1", msg_id="m2", role=MessageRole.USER, text="regen-this", created_at="t3"
+        ),
     ]
     monkeypatch.setattr(
-        "channel.api.chats.storage.list_messages", lambda *_a, **_kw: (prior, None),
+        "channel.api.chats.storage.list_messages",
+        lambda *_a, **_kw: (prior, None),
     )
 
     captured: dict[str, Any] = {}

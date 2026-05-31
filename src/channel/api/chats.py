@@ -49,9 +49,7 @@ def _to_strands_messages(messages: list[Message]) -> list[dict[str, Any]]:
     in chronological order. ``storage.list_messages`` returns the same
     chronological order (``ScanIndexForward=True``), so no reordering.
     """
-    return [
-        {"role": m.role.value, "content": [{"text": m.text}]} for m in messages
-    ]
+    return [{"role": m.role.value, "content": [{"text": m.text}]} for m in messages]
 
 
 router = APIRouter(prefix="/chats", tags=["chats"])
@@ -168,9 +166,7 @@ async def _stream_bedrock_reply(
     # already the user turn we're about to re-stream; drop it so
     # Strands doesn't see it twice (once in ``messages=`` history,
     # once via ``stream_async(user_message)``).
-    prior_msgs, _ = storage.list_messages(
-        chat.chat_id, limit=_HISTORY_TURNS_LIMIT, cursor=None
-    )
+    prior_msgs, _ = storage.list_messages(chat.chat_id, limit=_HISTORY_TURNS_LIMIT, cursor=None)
     if not persist_user and prior_msgs and prior_msgs[-1].role == MessageRole.USER:
         prior_msgs = prior_msgs[:-1]
     prior_messages = _to_strands_messages(prior_msgs)
