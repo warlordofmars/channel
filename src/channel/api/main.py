@@ -18,6 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from channel.api._auth import require_admin  # noqa: F401 — re-exported for route use
 from channel.api.chats import router as chats_router
 from channel.api.csp import router as csp_router
+from channel.api.models import router as models_router
 from channel.auth.mgmt_auth import router as mgmt_auth_router
 from channel.logging_config import (
     configure_logging,
@@ -133,6 +134,10 @@ app.include_router(csp_router, prefix="/api")
 
 # Chat REST + SSE API — all endpoints require a valid mgmt JWT
 app.include_router(chats_router, prefix="/api")
+
+# Models allowlist — served at /api/models (separate router so the
+# /models path isn't nested under chats_router's "/chats" prefix)
+app.include_router(models_router, prefix="/api")
 
 
 @app.get("/health", include_in_schema=False)
