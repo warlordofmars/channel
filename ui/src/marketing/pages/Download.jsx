@@ -4,12 +4,18 @@ import { Link } from "react-router-dom";
 import SiteLayout from "../SiteLayout.jsx";
 
 /**
- * Marketing Download page. Download URLs point at the signed GitHub release
- * via the `releases/latest/download` stable URL pattern so links never need
- * updating when new versions land. macOS builds are signed + notarised
- * (sub-project B); Windows and Linux are unsigned in this round.
+ * Marketing Download page. Download URLs point at a GitHub release tag.
+ *
+ * The tag itself is build-time configurable via the ``VITE_RELEASE_TAG``
+ * env var (default ``dev``) — dev deploys default to the rolling ``dev``
+ * pre-release, prod deploys can set ``VITE_RELEASE_TAG=latest`` once a
+ * non-prerelease ships. This matters because GitHub's ``releases/latest``
+ * resolver ignores pre-releases and drafts; with only a ``dev``
+ * pre-release published, ``latest`` 404s. macOS builds are signed +
+ * notarised (sub-project B); Windows and Linux are unsigned in this round.
  */
-const RELEASE_BASE = "https://github.com/warlordofmars/channel/releases/latest/download";
+const RELEASE_TAG = import.meta.env.VITE_RELEASE_TAG || "dev";
+const RELEASE_BASE = `https://github.com/warlordofmars/channel/releases/download/${RELEASE_TAG}`;
 
 export default function Download() {
   return (
