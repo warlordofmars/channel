@@ -1,8 +1,10 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
 import React, { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import Sidebar from "./Sidebar.jsx";
 import Icon from "../components/Icon.jsx";
 import { useChannelPrefs } from "../hooks/useChannelPrefs.js";
+import { useChatList } from "../hooks/useChatList.js";
 
 /**
  * Wraps every authenticated chat-app route with the persistent Sidebar.
@@ -28,15 +30,26 @@ import { useChannelPrefs } from "../hooks/useChannelPrefs.js";
 export default function Shell({ children }) {
   const { theme } = useChannelPrefs();
   const [collapsed, setCollapsed] = useState(false);
+  const navigate = useNavigate();
+  const { chats, createChat } = useChatList();
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
   }, [theme]);
   const toggleSidebar = () => setCollapsed((c) => !c);
+  const handleNewChat = async () => {
+    const chat = await createChat();
+    navigate(`/app/c/${chat.chat_id}`);
+  };
   return (
     <div className="stage full">
       <div className="win">
         <div className="body">
-          <Sidebar collapsed={collapsed} onToggle={toggleSidebar} />
+          <Sidebar
+            collapsed={collapsed}
+            onToggle={toggleSidebar}
+            chats={chats}
+            onNewChat={handleNewChat}
+          />
           <main className="main">
             {collapsed && (
               <div className="main-top">

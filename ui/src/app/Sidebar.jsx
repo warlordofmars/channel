@@ -1,14 +1,31 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { parseToken, TOKEN_KEY } from "../lib/auth.js";
 import Icon from "../components/Icon.jsx";
 import AccountPopover from "./AccountPopover.jsx";
-import { RECENTS } from "./data.js";
+
+/**
+ * Bucket a chat into a recents group based on `last_message_at`.
+ *
+ * `now` is injected for deterministic tests; production callers pass
+ * `Date.now()`.
+ */
+export function groupNameFor(lastMessageAt, now) {
+  const ts = new Date(lastMessageAt).getTime();
+  const ageMs = now - ts;
+  const ONE_DAY = 24 * 60 * 60 * 1000;
+  if (ageMs < ONE_DAY) return "Today";
+  if (ageMs < 2 * ONE_DAY) return "Yesterday";
+  if (ageMs < 7 * ONE_DAY) return "Previous 7 days";
+  return "Older";
+}
+
+const GROUP_ORDER = ["Today", "Yesterday", "Previous 7 days", "Older"];
 
 /**
  * 264px left nav. Primary items (New chat / Projects / Artifacts / Customize)
- * + a Search input that filters RECENTS + time-grouped Recents + an account
+ * + a Search input that filters chats + time-grouped Recents + an account
  * row at the bottom.
  *
  * Translated from design-sources/app/shell.jsx `Sidebar` function. Per
@@ -18,8 +35,20 @@ import { RECENTS } from "./data.js";
  * mgmt JWT.
  *
  * Sign out clears the JWT and sends the user back to the marketing site at /.
+ *
+ * The `chats` prop holds API-shaped chats `{chat_id, title,
+ * last_message_at, archived, ...}`. Archived chats are filtered out
+ * here (not in the hook) so the Recents list never shows them while
+ * `useChatList` still owns the full set for rename / unarchive flows.
+ * `onNewChat` fires when the user clicks the "New chat" primary action —
+ * Shell wires this to `createChat()` + `navigate(/app/c/{id})`.
  */
-export default function Sidebar({ collapsed = false, onToggle = () => {} }) {
+export default function Sidebar({
+  collapsed = false,
+  onToggle = () => {},
+  chats = [],
+  onNewChat = () => {},
+}) {
   const navigate = useNavigate();
   const [searching, setSearching] = useState(false);
   const [search, setSearch] = useState("");
@@ -60,15 +89,23 @@ export default function Sidebar({ collapsed = false, onToggle = () => {} }) {
     return userName.slice(0, 2).toUpperCase();
   })();
 
-  const filtered = RECENTS.filter((r) =>
-    r.title.toLowerCase().includes(search.toLowerCase())
-  );
-  const groups = [];
-  filtered.forEach((r) => {
-    let g = groups.find((x) => x.name === r.group);
-    if (!g) { g = { name: r.group, items: [] }; groups.push(g); }
-    g.items.push(r);
-  });
+  const groups = useMemo(() => {
+    const now = Date.now();
+    const visible = chats.filter((c) => !c.archived);
+    const filtered = visible.filter((c) =>
+      (c.title ?? "").toLowerCase().includes(search.toLowerCase())
+    );
+    const byName = new Map();
+    filtered.forEach((c) => {
+      const name = groupNameFor(c.last_message_at, now);
+      if (!byName.has(name)) byName.set(name, []);
+      byName.get(name).push(c);
+    });
+    return GROUP_ORDER
+      .filter((name) => byName.has(name))
+      .map((name) => ({ name, items: byName.get(name) }));
+  }, [chats, search]);
+  const hasResults = groups.some((g) => g.items.length > 0);
 
   function signOut() {
     localStorage.removeItem(TOKEN_KEY);
@@ -112,7 +149,7 @@ export default function Sidebar({ collapsed = false, onToggle = () => {} }) {
           </div>
         )}
 
-        <button type="button" className="nav-item primary" onClick={() => navigate("/app")}>
+        <button type="button" className="nav-item primary" onClick={onNewChat}>
           <span className="ic"><Icon name="plus" size={18} /></span> New chat
         </button>
         <button type="button" className="nav-item" onClick={() => navigate("/app/projects")}>
@@ -128,19 +165,19 @@ export default function Sidebar({ collapsed = false, onToggle = () => {} }) {
         {groups.map((g) => (
           <div key={g.name}>
             <div className="sb-section">{g.name}</div>
-            {g.items.map((r) => (
+            {g.items.map((c) => (
               <button
                 type="button"
-                key={r.id}
+                key={c.chat_id}
                 className="recent"
-                onClick={() => navigate(`/app/c/${r.id}`)}
+                onClick={() => navigate(`/app/c/${c.chat_id}`)}
               >
-                {r.title}
+                {c.title}
               </button>
             ))}
           </div>
         ))}
-        {filtered.length === 0 && (
+        {!hasResults && search && (
           <div style={{ padding: "20px 10px", fontSize: 13, color: "var(--ink-faint)" }}>
             No chats match &ldquo;{search}&rdquo;.
           </div>
