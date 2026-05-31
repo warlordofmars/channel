@@ -119,6 +119,14 @@ class ChannelStack(cdk.Stack):
             projection_type=dynamodb.ProjectionType.ALL,
         )
 
+        # GSI 4 — ChatByIdIndex: look up chat-index rows by chat_id
+        table.add_global_secondary_index(
+            index_name="ChatByIdIndex",
+            partition_key=dynamodb.Attribute(name="GSI3PK", type=dynamodb.AttributeType.STRING),
+            sort_key=dynamodb.Attribute(name="GSI3SK", type=dynamodb.AttributeType.STRING),
+            projection_type=dynamodb.ProjectionType.ALL,
+        )
+
         # ----------------------------------------------------------------
         # SSM Parameters
         # ----------------------------------------------------------------
