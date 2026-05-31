@@ -29,9 +29,10 @@ def translate_event(event: dict[str, Any]) -> tuple[str, Any]:
       etc.); ``payload`` is ``None``.
     """
 
-    if "data" in event and isinstance(event["data"], str):
-        return ("delta", event["data"])
-
+    # Strands emits each text chunk twice: once as a top-level ``data``
+    # shorthand and once inside the canonical ``event.contentBlockDelta``
+    # envelope.  We process the canonical form only so the SPA doesn't
+    # see duplicated deltas.
     inner = event.get("event") or {}
 
     if "contentBlockDelta" in inner:

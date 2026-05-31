@@ -39,7 +39,12 @@ export function useChatStream(chatId) {
       .getChat(chatId)
       .then(({ messages }) => {
         if (cancelled) return;
-        setTurns(messages);
+        // Only install loaded history if the caller hasn't already
+        // pushed optimistic turns (the first-message-creates-chat flow
+        // calls send() during the same mount; without this guard the
+        // empty-history response wipes the optimistic user + assistant
+        // turns and the SSE deltas land on rows that no longer exist).
+        setTurns((prev) => (prev.length === 0 ? messages : prev));
         setStatus("idle");
       })
       .catch((err) => {
@@ -52,15 +57,17 @@ export function useChatStream(chatId) {
     };
   }, [chatId]);
 
-  // Separate effect: abort any in-flight stream when chatId changes or
-  // the component unmounts. Without this, the reader loop below would
-  // keep writing setTurns against the previous chat's optimistic IDs
-  // after the user navigates away.
-  useEffect(() => {
-    return () => {
-      abortRef.current?.abort();
-    };
-  }, [chatId]);
+  // Abort the previous chat's in-flight stream when chatId actually
+  // changes. We can't use a `useEffect(() => () => abortRef.current?.
+  // abort(), [chatId])` cleanup because React StrictMode dev mode
+  // double-invokes effect cleanups during the initial mount — which
+  // would immediately abort the first send() the moment it fires. We
+  // track the previous chatId in a ref and abort only on real change.
+  const prevChatIdRef = useRef(chatId);
+  if (prevChatIdRef.current !== chatId) {
+    abortRef.current?.abort();
+    prevChatIdRef.current = chatId;
+  }
 
   // Hook-local SSE reader loop. Shared by send() and regenerate().
   //

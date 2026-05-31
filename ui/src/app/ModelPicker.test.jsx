@@ -28,7 +28,7 @@ describe("ModelPicker", () => {
   it("renders the trigger button with the current model's short name and effort", () => {
     render(<ModelPicker model={opus} effort="High" onModel={vi.fn()} onEffort={vi.fn()} />);
     const btn = screen.getByRole("button");
-    expect(btn.textContent).toContain("Opus 4.7");
+    expect(btn.textContent).toContain("Opus 4.6");
     expect(btn.textContent).toContain("High");
   });
 
@@ -111,7 +111,7 @@ describe("ModelPicker", () => {
       expect(screen.getByText(/Sonnet 4\.6/i)).toBeTruthy();
     });
     // Models NOT in the server allowlist must NOT render in the list.
-    expect(screen.queryByText("Claude Opus 4.7")).toBeNull();
+    expect(screen.queryByText("Claude Opus 4.6")).toBeNull();
     expect(screen.queryByText("Claude Haiku 4.5")).toBeNull();
   });
 

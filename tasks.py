@@ -427,13 +427,20 @@ def dev(ctx, seed=False):
     # Allow all localhost Vite ports (5173–5179) so CORS doesn't break when
     # 5173 is already occupied by another project and Vite picks the next port.
     cors_origins = ",".join(f"http://localhost:{p}" for p in range(5173, 5180))
+    # DDB Local accepts any credentials (including those from
+    # ~/.aws/credentials), so we don't override AWS_ACCESS_KEY_ID /
+    # AWS_SECRET_ACCESS_KEY. That lets Bedrock-backed endpoints
+    # authenticate against real AWS using the developer's profile,
+    # while DDB Local still works through the DYNAMODB_ENDPOINT override.
+    # If the developer has NO AWS credentials at all, boto3 will raise
+    # NoCredentialsError on the first DDB call; in that case set
+    # AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY to anything before
+    # running `inv dev`.
     dev_env = {
         **os.environ,
         "STARTER_JWT_SECRET": jwt_secret,
         "STARTER_TABLE_NAME": "channel",
         "DYNAMODB_ENDPOINT": f"http://localhost:{DYNAMO_PORT}",
-        "AWS_ACCESS_KEY_ID": "local",
-        "AWS_SECRET_ACCESS_KEY": "local",
         "AWS_DEFAULT_REGION": "us-east-1",
         "CORS_ORIGINS": cors_origins,
         # Prevents VectorStore instantiation from crashing on every request;

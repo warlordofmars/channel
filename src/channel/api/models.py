@@ -18,8 +18,8 @@ router = APIRouter(tags=["models"])
 
 _MODEL_DISPLAY: list[dict[str, Any]] = [
     {
-        "id": "claude-opus-4-7",
-        "label": "Claude Opus 4.7",
+        "id": "claude-opus-4-6",
+        "label": "Claude Opus 4.6",
         "family": "anthropic",
         "tier": "Flagship",
         "supports_streaming": True,

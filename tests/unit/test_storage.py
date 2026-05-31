@@ -129,7 +129,13 @@ class FakeTable:
     def update_item(self, Key: dict[str, str], **kwargs: Any) -> dict[str, Any]:
         item = self.items.setdefault((Key["PK"], Key["SK"]), {**Key})
         values = kwargs.get("ExpressionAttributeValues") or {}
+        names = kwargs.get("ExpressionAttributeNames") or {}
         expression = kwargs.get("UpdateExpression", "")
+
+        def resolve(attr: str) -> str:
+            # Map ``#alias`` → real attribute name when present.
+            return names.get(attr, attr)
+
         # Parse "SET a = :p, b = :q" and "ADD c :r" clauses just well
         # enough for the storage-helper UpdateExpressions in this module.
         set_clause = ""
@@ -142,10 +148,12 @@ class FakeTable:
             set_clause = expression[3:].strip()
         for assignment in [s.strip() for s in set_clause.split(",") if s.strip()]:
             attr, _, placeholder = assignment.partition("=")
-            item[attr.strip()] = values[placeholder.strip()]
+            item[resolve(attr.strip())] = values[placeholder.strip()]
         for addition in [s.strip() for s in add_clause.split(",") if s.strip()]:
             attr, _, placeholder = addition.partition(" ")
-            item[attr.strip()] = item.get(attr.strip(), 0) + values[placeholder.strip()]
+            item[resolve(attr.strip())] = (
+                item.get(resolve(attr.strip()), 0) + values[placeholder.strip()]
+            )
         return {"Attributes": item}
 
 

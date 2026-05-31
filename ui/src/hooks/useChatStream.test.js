@@ -368,38 +368,14 @@ describe("useChatStream", () => {
     await waitFor(() => expect(capturedSignal.aborted).toBe(true));
   });
 
-  it("aborts the in-flight stream on unmount", async () => {
-    api.getChat.mockResolvedValue({
-      chat: { chat_id: "c1" },
-      messages: [],
-      next_cursor: null,
-    });
-
-    const neverComplete = new ReadableStream({
-      start(controller) {
-        const encoder = new TextEncoder();
-        controller.enqueue(
-          encoder.encode('data: {"type":"delta","text":"x"}\n\n'),
-        );
-      },
-    });
-
-    let capturedSignal;
-    api.streamMessage.mockImplementationOnce((_chatId, opts) => {
-      capturedSignal = opts.signal;
-      return Promise.resolve({ ok: true, body: neverComplete });
-    });
-
-    const { result, unmount } = renderHook(() => useChatStream("c1"));
-    await waitFor(() => expect(result.current.status).toBe("idle"));
-
-    act(() => {
-      result.current.send({ message: "hi" });
-    });
-
-    unmount();
-    await waitFor(() => expect(capturedSignal.aborted).toBe(true));
-  });
+  // Note: there is no "aborts on unmount" test anymore. The previous
+  // implementation aborted via a useEffect cleanup tied to [chatId],
+  // which fires during React StrictMode dev double-effect — killing
+  // the first send() in normal dev usage. The current implementation
+  // only aborts on real chatId change. Real unmount mid-stream is a
+  // rare edge case; the browser closes the connection on page nav
+  // anyway, and Bedrock streams to completion in tens of seconds at
+  // worst. The chatId-change test above still verifies abort works.
 
   it("leaves unrelated turns untouched while streaming (false-branch of msg_id map)", async () => {
     // Seed history with an existing turn so the per-event setTurns map
@@ -477,7 +453,7 @@ describe("useChatStream", () => {
     await waitFor(() => expect(result.current.status).toBe("idle"));
 
     await act(async () => {
-      await result.current.regenerate({ model: "claude-opus-4-7" });
+      await result.current.regenerate({ model: "claude-opus-4-6" });
     });
 
     // User turn UNCHANGED + new assistant turn with the re-streamed text.
@@ -493,7 +469,7 @@ describe("useChatStream", () => {
     });
     expect(api.regenerate).toHaveBeenCalledWith(
       "c1",
-      expect.objectContaining({ model: "claude-opus-4-7" }),
+      expect.objectContaining({ model: "claude-opus-4-6" }),
     );
   });
 

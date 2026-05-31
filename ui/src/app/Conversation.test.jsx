@@ -80,14 +80,14 @@ describe("Conversation", () => {
           msg_id: "a1",
           role: "assistant",
           text: "**bold reply**",
-          model: "Claude Opus 4.7 · High",
+          model: "Claude Opus 4.6 · High",
           streaming: false,
         },
       ],
     });
     renderAt("/app/c/c1");
     expect(screen.getByText("Channel")).toBeTruthy();
-    expect(screen.getByText("Claude Opus 4.7 · High")).toBeTruthy();
+    expect(screen.getByText("Claude Opus 4.6 · High")).toBeTruthy();
     expect(screen.getByText("bold reply")).toBeTruthy();
   });
 
@@ -137,7 +137,7 @@ describe("Conversation", () => {
           msg_id: "a1",
           role: "assistant",
           text: "done",
-          model: "Claude Opus 4.7 · High",
+          model: "Claude Opus 4.6 · High",
           streaming: false,
         },
       ],
@@ -297,7 +297,7 @@ describe("Conversation", () => {
     storage["channel-model"] = MODELS[0].id;
     __resetChannelPrefsForTest();
     renderAt("/app/c/c1");
-    fireEvent.click(screen.getByRole("button", { name: /Opus 4.7/i }));
+    fireEvent.click(screen.getByRole("button", { name: /Opus 4.6/i }));
     fireEvent.click(screen.getByText("Claude Haiku 4.5"));
     expect(storage["channel-model"]).toBe("claude-haiku-4-5");
   });
@@ -316,7 +316,9 @@ describe("Conversation", () => {
     const ta = screen.getByPlaceholderText("Reply…");
     fireEvent.change(ta, { target: { value: "hi" } });
     fireEvent.click(screen.getByTitle("Send"));
-    expect(stream.send.mock.calls[0][0].model).toEqual(MODELS[0]);
+    // followUp passes the short id (`model.id`), not the full picker
+    // object — backend expects `model: str | None`.
+    expect(stream.send.mock.calls[0][0].model).toBe(MODELS[0].id);
   });
 
   it("renders friendly model label, not raw ARN", () => {

@@ -17,7 +17,7 @@ export const DEFAULTS = Object.freeze({
   density:   "cozy",
   shape:     "soft",
   font:      "figtree",
-  model:     "claude-opus-4-7",
+  model:     "claude-opus-4-6",
   effort:    "High",
 });
 

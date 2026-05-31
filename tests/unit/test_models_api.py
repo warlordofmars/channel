@@ -28,7 +28,7 @@ def test_list_models_returns_allowlist(client: TestClient) -> None:
     body = response.json()
     assert "models" in body
     ids = {m["id"] for m in body["models"]}
-    assert ids == {"claude-sonnet-4-6", "claude-haiku-4-5", "claude-opus-4-7"}
+    assert ids == {"claude-sonnet-4-6", "claude-haiku-4-5", "claude-opus-4-6"}
     sonnet = next(m for m in body["models"] if m["id"] == "claude-sonnet-4-6")
     assert sonnet["family"] == "anthropic"
     assert sonnet["supports_streaming"] is True
