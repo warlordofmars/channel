@@ -18,8 +18,8 @@ src/starter/
 │   ├── google.py        # Google OAuth integration (management UI login)
 │   └── mgmt_auth.py     # Management UI auth routes (/auth/login, /auth/callback)
 ├── agents/
-│   ├── bedrock.py       # Converse + converse_stream (raw Bedrock)
-│   └── inline_agent.py  # invoke + invoke_stream (Bedrock inline agent)
+│   ├── chat_agent.py    # Strands Agent factory (build_agent / resolve_model_id)
+│   └── strands_sse.py   # Strands event → SSE byte translator
 └── api/
     ├── main.py          # FastAPI app wiring (CORS, middleware, routers, /health)
     ├── _auth.py         # require_mgmt_user / require_admin FastAPI dependencies

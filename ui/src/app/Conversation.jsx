@@ -1,70 +1,57 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
 import React, { useEffect, useRef } from "react";
-import { useParams } from "react-router-dom";
+import { useLocation, useParams } from "react-router-dom";
 import ChannelMark from "../components/ChannelMark.jsx";
 import Composer from "./Composer.jsx";
 import Icon from "../components/Icon.jsx";
 import { useChannelPrefs } from "../hooks/useChannelPrefs.js";
-import { useMockStream } from "../hooks/useMockStream.js";
+import { useChatStream } from "../hooks/useChatStream.js";
 import { renderMarkdown } from "./renderMarkdown.jsx";
-import { MODELS, RECENTS } from "./data.js";
-
-const PENDING_KEY = "channel-pending-send";
+import { MODELS } from "./data.js";
 
 function resolveModel(modelId) {
   return MODELS.find((m) => m.id === modelId) ?? MODELS[0];
 }
 
-function consumePendingSend() {
-  let raw;
-  try {
-    raw = sessionStorage.getItem(PENDING_KEY);
-  } catch {
-    return null;
-  }
-  if (!raw) return null;
-  try {
-    sessionStorage.removeItem(PENDING_KEY);
-  } catch {
-    /* private mode etc — best-effort */
-  }
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return null;
-  }
+// Bedrock returns model ids like `us.anthropic.claude-sonnet-4-6`
+// (cross-region inference profile) or `anthropic.claude-sonnet-4-6`
+// (base foundation-model). Strip whichever prefix is present before
+// looking up the friendly display name in MODELS. Unknown ids fall back
+// to the raw value (acceptable visual debug hint).
+function modelLabel(raw) {
+  if (!raw) return "";
+  const shortId = raw.replace(/^(us|global)\.anthropic\.|^anthropic\./, "");
+  const display = MODELS.find((m) => m.id === shortId);
+  return display ? display.name : raw;
 }
 
 /**
- * Streaming conversation pane. Translated from
- * design-sources/app/chat.jsx `Conversation`. The URL `:id` decides what
- * happens on mount AND on route-param change:
+ * Streaming conversation pane backed by the real SSE-driven
+ * `useChatStream` hook. The URL `:id` is the canonical chat id; the hook
+ * loads history on mount and exposes `{ turns, send, abort, status }`.
  *
- *   - id === "new"  → consume sessionStorage[channel-pending-send] and
- *                     kick off send() once (ChatHome handed us a draft).
- *   - id ∈ RECENTS  → loadSample(title, model) — canned SAMPLE_USER +
- *                     SAMPLE_REPLY pair instantly.
- *   - otherwise     → empty conversation.
+ * First-message kick-off: when ChatHome navigates here it stashes the
+ * first user message in `location.state.firstMessage` (shape:
+ * `{ message, model, effort, attachments }`). On mount we forward that
+ * directly to `useChatStream.send(...)`. `sentFirstRef` guards against
+ * re-firing on subsequent renders (React state changes, StrictMode
+ * double-effect, etc.).
  *
- * `kickedIdRef` tracks the most recent id we acted on, so:
- *   • StrictMode's double-effect on mount short-circuits on the second fire
- *     (kickedIdRef.current already equals the id).
- *   • Clicking another sidebar Recent while still mounted (id changes from
- *     r1 → r5) DOES re-fire because kickedIdRef.current !== new id.
+ * The follow-up Composer at the bottom of the pane wraps the hook's
+ * `send` so that the Composer's `onSend(text, atts)` shape is
+ * preserved.
  *
- * Message-actions row (copy/retry/thumbs) is rendered per assistant turn
- * once that turn is no longer streaming. Buttons are no-ops at Phase 6d.
- *
- * A persistent Composer sits at the bottom of the pane so the user can
- * follow up; calling its onSend appends another user turn + a fresh
- * streaming assistant turn via useMockStream.send.
+ * Message-actions row (copy/retry/thumbs) is rendered per assistant
+ * turn once that turn is no longer streaming. Buttons are no-ops at
+ * Phase 7a.
  */
 export default function Conversation() {
-  const { id } = useParams();
-  const { turns, send, loadSample } = useMockStream();
+  const { id: chatId } = useParams();
+  const location = useLocation();
+  const { turns, send, regenerate, status } = useChatStream(chatId);
   const prefs = useChannelPrefs();
   const ref = useRef(null);
-  const kickedIdRef = useRef(null);
+  const sentFirstRef = useRef(false);
 
   // Auto-scroll to the bottom on any turns change (catches each stream tick).
   useEffect(() => {
@@ -72,34 +59,38 @@ export default function Conversation() {
     el.scrollTop = el.scrollHeight;
   }, [turns]);
 
+  // First-message kick-off from route state. ChatHome stashes the user's
+  // initial message in `location.state.firstMessage`; we forward it once.
   useEffect(() => {
-    if (kickedIdRef.current === id) return;
-    kickedIdRef.current = id;
-    if (id === "new") {
-      const pending = consumePendingSend();
-      if (!pending) return;
-      const model = resolveModel(pending.modelId);
-      send(pending.text, pending.atts || [], model, pending.effort);
-      return;
+    if (sentFirstRef.current) return;
+    const first = location.state?.firstMessage;
+    if (chatId && first) {
+      sentFirstRef.current = true;
+      send(first);
     }
-    const recent = RECENTS.find((r) => r.id === id);
-    if (recent) {
-      loadSample(recent.title, MODELS[0]);
-    }
-  }, [id, send, loadSample]);
+  }, [chatId, location.state, send]);
 
   const modelObj = resolveModel(prefs.model);
   const setModelObj = (m) => prefs.setModel(m.id);
-  const followUp = (text, atts) => send(text, atts, modelObj, prefs.effort);
+  const followUp = (text, atts) =>
+    send({ message: text, model: modelObj, effort: prefs.effort, attachments: atts });
   const noop = () => {};
 
   return (
     <>
       <div className="convo" ref={ref}>
         <div className="convo-inner">
-          {turns.map((t, i) =>
-            t.role === "user" ? (
-              <div className="turn user" key={i}>
+          {status === "error" && (
+            <div className="convo-error" role="alert">
+              Something went wrong loading this conversation.
+            </div>
+          )}
+          {turns.map((t, i) => {
+            const isLast = i === turns.length - 1;
+            const showRegenerate =
+              isLast && t.role === "assistant" && !t.streaming;
+            return t.role === "user" ? (
+              <div className="turn user" key={t.msg_id}>
                 {t.atts && t.atts.length > 0 && (
                   <div
                     className="attaches"
@@ -116,11 +107,11 @@ export default function Conversation() {
                 <div className="bubble">{t.text}</div>
               </div>
             ) : (
-              <div className="turn" key={i}>
+              <div className="turn" key={t.msg_id}>
                 <div className="assistant-head">
                   <ChannelMark size={20} />
                   <span className="nm">Channel</span>
-                  <span className="mdl">{t.model}</span>
+                  <span className="mdl">{modelLabel(t.model)}</span>
                 </div>
                 <div className="msg">{renderMarkdown(t.text, t.streaming)}</div>
                 {t.artifact && (
@@ -153,9 +144,18 @@ export default function Conversation() {
                     </button>
                   </div>
                 )}
+                {showRegenerate && (
+                  <button
+                    type="button"
+                    className="msg-action"
+                    onClick={() => regenerate({})}
+                  >
+                    Regenerate
+                  </button>
+                )}
               </div>
-            )
-          )}
+            );
+          })}
         </div>
       </div>
       <div className="bottom-composer">

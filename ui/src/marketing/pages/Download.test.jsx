@@ -35,24 +35,57 @@ describe("Download page", () => {
     renderPage();
     expect(document.querySelectorAll('a[href*="Channel "]').length).toBe(0);
   });
+});
 
-  it("renders the dev-preview banner explaining unsigned builds", () => {
+describe("Download — signed-release URLs", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const releasesBase = "https://github.com/warlordofmars/channel/releases/latest/download";
+
+  function renderPage() {
+    vi.stubGlobal("localStorage", { getItem: () => null, setItem: vi.fn(), removeItem: vi.fn() });
+    vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() }));
+    return render(<MemoryRouter><Download /></MemoryRouter>);
+  }
+
+  it.each([
+    ["Download .dmg",      `${releasesBase}/Channel-mac.dmg`],
+    ["Download .exe",      `${releasesBase}/Channel-Setup.exe`],
+    ["Download AppImage",  `${releasesBase}/Channel-linux.AppImage`],
+  ])("primary button %s links to %s", (label, expectedHref) => {
     renderPage();
-    const banner = screen.getByTestId("dev-preview-banner");
-    expect(banner).toBeTruthy();
-    expect(banner.textContent || "").toMatch(/dev preview/i);
-    expect(banner.textContent || "").toMatch(/unsigned/i);
+    const link = screen.getByRole("link", { name: new RegExp(label, "i") });
+    expect(link.getAttribute("href")).toBe(expectedHref);
   });
 
-  it("points each platform download at the dev GitHub release", () => {
+  it.each([
+    [".deb", `${releasesBase}/Channel-linux.deb`],
+    [".rpm", `${releasesBase}/Channel-linux.rpm`],
+  ])("secondary Linux link %s points at %s", (label, expectedHref) => {
     renderPage();
-    const base = "https://github.com/warlordofmars/channel/releases/download/dev";
-    const hrefs = Array.from(document.querySelectorAll("a")).map((a) => a.getAttribute("href"));
-    expect(hrefs).toContain(`${base}/Channel-mac-arm64.dmg`);
-    expect(hrefs).toContain(`${base}/Channel-mac-x64.dmg`);
-    expect(hrefs).toContain(`${base}/Channel-Setup-win.exe`);
-    expect(hrefs).toContain(`${base}/Channel-linux.AppImage`);
-    expect(hrefs).toContain(`${base}/Channel-linux.deb`);
-    expect(hrefs).toContain(`${base}/Channel-linux.rpm`);
+    const link = screen.getByRole("link", { name: new RegExp(`^\\${label}$`, "i") });
+    expect(link.getAttribute("href")).toBe(expectedHref);
+  });
+
+  it("does not render the dev-preview banner", () => {
+    renderPage();
+    expect(screen.queryByTestId("dev-preview-banner")).toBeNull();
+  });
+
+  it("does not render an Intel-specific Mac download link (universal binary)", () => {
+    renderPage();
+    expect(screen.queryByText(/intel mac/i)).toBeNull();
+  });
+
+  it("notes the macOS-only auto-update story", () => {
+    renderPage();
+    expect(screen.getByText(/macOS auto-updates in the background/i)).toBeTruthy();
+  });
+
+  it("no link points at releases/download/dev/", () => {
+    renderPage();
+    for (const link of screen.getAllByRole("link")) {
+      expect(link.getAttribute("href") ?? "").not.toContain("releases/download/dev/");
+    }
   });
 });

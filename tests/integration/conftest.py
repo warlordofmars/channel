@@ -99,6 +99,7 @@ def starter_table(dynamodb_resource: Any, table_name: str) -> Any:
             {"AttributeName": "GSI2PK", "AttributeType": "S"},
             {"AttributeName": "GSI2SK", "AttributeType": "S"},
             {"AttributeName": "GSI3PK", "AttributeType": "S"},
+            {"AttributeName": "GSI3SK", "AttributeType": "S"},
             {"AttributeName": "GSI4PK", "AttributeType": "S"},
         ],
         KeySchema=[
@@ -124,13 +125,16 @@ def starter_table(dynamodb_resource: Any, table_name: str) -> Any:
                 "Projection": {"ProjectionType": "ALL"},
             },
             {
-                "IndexName": "ClientIndex",
-                "KeySchema": [{"AttributeName": "GSI3PK", "KeyType": "HASH"}],
+                "IndexName": "UserEmailIndex",
+                "KeySchema": [{"AttributeName": "GSI4PK", "KeyType": "HASH"}],
                 "Projection": {"ProjectionType": "ALL"},
             },
             {
-                "IndexName": "UserEmailIndex",
-                "KeySchema": [{"AttributeName": "GSI4PK", "KeyType": "HASH"}],
+                "IndexName": "ChatByIdIndex",
+                "KeySchema": [
+                    {"AttributeName": "GSI3PK", "KeyType": "HASH"},
+                    {"AttributeName": "GSI3SK", "KeyType": "RANGE"},
+                ],
                 "Projection": {"ProjectionType": "ALL"},
             },
         ],

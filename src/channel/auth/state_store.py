@@ -48,8 +48,7 @@ def _get_table() -> Any:
     Region resolution follows boto3 precedence: ``AWS_REGION`` →
     ``AWS_DEFAULT_REGION`` → ``~/.aws/config``. We only pass
     ``region_name`` when one of the env vars is explicitly set so
-    local dev and CI inherit the configured default naturally —
-    matches the pattern in :mod:`starter.agents.bedrock`.
+    local dev and CI inherit the configured default naturally.
     """
     table_name = os.environ.get("STARTER_TABLE_NAME", "channel-dev")
     endpoint_url = os.environ.get("DYNAMODB_ENDPOINT")  # set for DynamoDB Local

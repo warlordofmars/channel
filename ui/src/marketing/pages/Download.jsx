@@ -4,17 +4,12 @@ import { Link } from "react-router-dom";
 import SiteLayout from "../SiteLayout.jsx";
 
 /**
- * Marketing Download page. Translated from pages/download.body.html per
- * §Translation rules.
- *
- * Download URLs point at the `dev` pre-release tag on GitHub, which CI
- * force-updates on every push to `development`. The artifacts are
- * unsigned (no Apple Developer ID, no Windows code-signing cert) so
- * users will see OS-level warnings — the dev-preview banner above the
- * cards calls this out. Real signed distribution lands in sub-project B.
+ * Marketing Download page. Download URLs point at the signed GitHub release
+ * via the `releases/latest/download` stable URL pattern so links never need
+ * updating when new versions land. macOS builds are signed + notarised
+ * (sub-project B); Windows and Linux are unsigned in this round.
  */
-const RELEASE_BASE = "https://github.com/warlordofmars/channel/releases/download/dev";
-const RELEASES_PAGE = "https://github.com/warlordofmars/channel/releases/tag/dev";
+const RELEASE_BASE = "https://github.com/warlordofmars/channel/releases/latest/download";
 
 export default function Download() {
   return (
@@ -29,21 +24,7 @@ export default function Download() {
         </p>
       </section>
 
-      <section className="section wrap" style={{ paddingTop: "24px" }}>
-        <div className="dev-preview-banner" data-testid="dev-preview-banner">
-          <strong>Dev preview.</strong> These are <em>unsigned development
-          builds</em> from the latest <code>development</code> branch.
-          You&apos;ll see a {" "}
-          <a href="https://support.apple.com/guide/mac-help/mh40616/mac" target="_blank" rel="noreferrer">
-            macOS &ldquo;unidentified developer&rdquo;
-          </a>{" "}
-          warning or a Windows SmartScreen prompt — both can be bypassed.
-          Linux AppImage needs <code>chmod +x</code> after download. No
-          auto-update; re-download for the latest dev build.
-        </div>
-      </section>
-
-      <section className="section wrap" style={{ paddingTop: "16px" }}>
+      <section className="section wrap" style={{ paddingTop: "44px" }}>
         <div className="dl-grid">
           <div className="dl-card feat">
             <div className="dlic">
@@ -52,13 +33,10 @@ export default function Download() {
               </svg>
             </div>
             <h3>macOS</h3>
-            <div className="dlv">Apple Silicon · macOS 14+</div>
-            <a className="btn btn-primary" href={`${RELEASE_BASE}/Channel-mac-arm64.dmg`} style={{ width: "100%" }}>
+            <div className="dlv">Universal · macOS 14+</div>
+            <a className="btn btn-primary" href={`${RELEASE_BASE}/Channel-mac.dmg`} style={{ width: "100%" }}>
               Download .dmg
             </a>
-            <div className="dl-alt">
-              <a href={`${RELEASE_BASE}/Channel-mac-x64.dmg`}>Intel Mac (.dmg)</a>
-            </div>
           </div>
 
           <div className="dl-card">
@@ -69,7 +47,7 @@ export default function Download() {
             </div>
             <h3>Windows</h3>
             <div className="dlv">Windows 10 · 11</div>
-            <a className="btn btn-ghost" href={`${RELEASE_BASE}/Channel-Setup-win.exe`} style={{ width: "100%" }}>
+            <a className="btn btn-ghost" href={`${RELEASE_BASE}/Channel-Setup.exe`} style={{ width: "100%" }}>
               Download .exe
             </a>
           </div>
@@ -145,8 +123,9 @@ export default function Download() {
             <li>.deb, .rpm, and AppImage builds available</li>
           </ul>
           <p>
-            Channel updates itself automatically — you&apos;ll see a &ldquo;Relaunch
-            to update&rdquo; prompt in the sidebar when a new build is ready.
+            macOS auto-updates in the background — you&apos;ll see a &ldquo;Relaunch
+            to update&rdquo; prompt in the sidebar when a new build is ready. Windows and
+            Linux: re-download from this page when a new build lands.
           </p>
         </div>
       </section>

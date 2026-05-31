@@ -81,11 +81,9 @@ describe("App routing", () => {
     storage[TOKEN_KEY] = makeToken();
     window.history.pushState({}, "", "/app/c/r1");
     await act(async () => render(<App />));
-    // The real component renders the canned SAMPLE_USER prompt, which the
-    // placeholder never did.
-    const matches = screen.getAllByText(/columnar store/i);
-    expect(matches.length).toBeGreaterThan(0);
-    // And the placeholder testid is no longer in the tree.
+    // The real Conversation mounts the follow-up Composer at the bottom
+    // (placeholder="Reply…"); the placeholder testid is no longer present.
+    expect(screen.getByPlaceholderText("Reply…")).toBeTruthy();
     expect(screen.queryByTestId("app-conversation")).toBeNull();
   });
 

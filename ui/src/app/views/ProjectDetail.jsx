@@ -4,18 +4,31 @@ import { useNavigate, useParams } from "react-router-dom";
 import Composer from "../Composer.jsx";
 import Icon from "../../components/Icon.jsx";
 import { useChannelPrefs } from "../../hooks/useChannelPrefs.js";
-import { MODELS, PROJECTS, PROJECT_DOCS, RECENTS } from "../data.js";
+import { MODELS, PROJECTS, PROJECT_DOCS } from "../data.js";
 import { colorFor, inkFor } from "./artifactHelpers.js";
 
 const PENDING_KEY = "channel-pending-send";
+
+// Placeholder list of "chats in this project". Project-scoped chats are
+// not yet a backend feature (Phase 7a wires up unscoped chats only), so
+// we render a static 6-entry mock until a follow-up phase teaches the
+// chats API about project scoping.
+const PROJECT_CHATS_PLACEHOLDER = [
+  { id: "r1", title: "Home server backup strategy" },
+  { id: "r2", title: "Weekend trail route near Asheville" },
+  { id: "r3", title: "Refactoring the auth middleware" },
+  { id: "r4", title: "Q3 board deck — narrative pass" },
+  { id: "r5", title: "Sourdough hydration troubleshooting" },
+  { id: "r6", title: "Postgres index not being used" },
+];
 
 /**
  * `/app/projects/:id` view. Translated from design-sources/app/views.jsx
  * `ProjectDetail`. Composer follows the same stash-and-navigate pattern
  * as ChatHome — Phase 6e doesn't scope the conversation to the project
  * (no backend persistence yet); we just kick off /app/c/new with the
- * user's draft. Recents are the first 6 mock entries — clicking one
- * opens its canned conversation.
+ * user's draft. The "Chats in this project" list is a static
+ * placeholder until project-scoped chats land on the backend.
  */
 export default function ProjectDetail() {
   const { id } = useParams();
@@ -43,7 +56,7 @@ export default function ProjectDetail() {
     );
   }
 
-  const chats = RECENTS.slice(0, 6);
+  const chats = PROJECT_CHATS_PLACEHOLDER;
   const modelObj = MODELS.find((m) => m.id === prefs.model) ?? MODELS[0];
   const setModelObj = (m) => prefs.setModel(m.id);
 
