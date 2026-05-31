@@ -175,13 +175,18 @@ class AgentCoreMemoryHook:
             )
             await record_memory_write_outcome(success=True)
         except Exception as exc:
+            # ``error_type`` + ``error_message`` are in the JSON formatter's
+            # allowed-extras list (channel.logging_config._JsonFormatter);
+            # ``actor_id`` / ``session_id`` aren't, so they're folded into
+            # the message text. ``exc_info=True`` makes the formatter emit
+            # ``stack_trace`` so we can actually diagnose AgentCore
+            # validation failures instead of seeing a bare warning line.
             logger.warning(
-                "agentcore.create_event_failed",
-                extra={
-                    "err": str(exc),
-                    "actor_id": self._actor_id,
-                    "session_id": self._session_id,
-                },
+                "agentcore.create_event_failed actor_id=%s session_id=%s",
+                self._actor_id,
+                self._session_id,
+                extra={"error_type": type(exc).__name__, "error_message": str(exc)},
+                exc_info=True,
             )
             await record_memory_write_outcome(success=False)
 
