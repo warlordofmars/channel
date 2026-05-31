@@ -120,7 +120,11 @@ async def test_hook_injects_records_into_system_prompt_on_first_turn():
     fake_client.retrieve_memory_records.assert_called_once()
     kwargs = fake_client.retrieve_memory_records.call_args.kwargs
     assert kwargs["memoryId"] == "m-1"
-    assert kwargs["actorId"] == "alice_example_com"
+    # AgentCore takes ``namespace`` (a path prefix encoding the actor),
+    # NOT ``actorId``. ``/actors/<actorId>`` is the prefix that matches
+    # all strategies' records for this actor.
+    assert kwargs["namespace"] == "/actors/alice_example_com"
+    assert "actorId" not in kwargs
     assert kwargs["searchCriteria"]["searchQuery"] == "what colour do i like?"
     assert kwargs["searchCriteria"]["topK"] == _RECALL_TOP_K
     mock_record.assert_awaited_once_with(success=True)

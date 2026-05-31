@@ -24,6 +24,7 @@ from typing import Any
 import boto3
 from strands.hooks.events import BeforeInvocationEvent
 
+from channel.agents.memory import _sanitize_actor_id
 from channel.metrics import record_recall_outcome
 
 logger = logging.getLogger(__name__)
@@ -116,7 +117,10 @@ class AgentCoreRecallHook:
         client: Any | None = None,
     ) -> None:
         self._memory_id = memory_id
-        self._actor_id = actor_id
+        # Sanitize at the hook boundary so callers can pass raw JWT
+        # sub (email-form or otherwise) — same pattern as the write
+        # hook. AgentCore's actorId/namespace regex rejects ``@`` and ``.``.
+        self._actor_id = _sanitize_actor_id(actor_id)
         self._client = client if client is not None else boto3.client("bedrock-agentcore")
         # Strong refs to in-flight recall tasks (Sonar python:S7502, same
         # pattern as the 7c write hook).
@@ -181,10 +185,23 @@ class AgentCoreRecallHook:
             cache_entry.age += 1
             return cache_entry.records
 
+        # AgentCore's RetrieveMemoryRecords takes ``namespace`` (a
+        # prefix), NOT ``actorId``. The actor is encoded INTO the
+        # namespace per the strategy's namespace template configured at
+        # CreateMemory time. The default SemanticMemoryStrategy uses
+        # ``/strategies/{memoryStrategyId}/actors/{actorId}`` — we use
+        # ``/actors/{actorId}`` as a prefix which matches all strategies
+        # for this actor (lets us evolve strategy configuration without
+        # changing this query).
+        #
+        # Records are async — there's a multi-minute lag between
+        # CreateEvent and the strategy emitting a queryable record. Early
+        # turns in a new chat will see empty recall; subsequent turns
+        # surface what's been ingested.
         resp = await asyncio.to_thread(
             self._client.retrieve_memory_records,
             memoryId=self._memory_id,
-            actorId=self._actor_id,
+            namespace=f"/actors/{self._actor_id}",
             searchCriteria={"searchQuery": user_message, "topK": _RECALL_TOP_K},
         )
         records = [
