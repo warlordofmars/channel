@@ -370,19 +370,27 @@ class ChannelStack(cdk.Stack):
         api_role.add_to_policy(
             iam.PolicyStatement(
                 actions=[
+                    # NOTE: IAM action prefix is ``bedrock-agentcore:`` for
+                    # BOTH the data plane (CreateEvent / ListEvents / etc.)
+                    # AND the control plane (CreateMemory / GetMemory /
+                    # ListMemories). The boto3 client distinction
+                    # (``bedrock-agentcore`` vs ``bedrock-agentcore-control``)
+                    # is a client-library convenience; AWS service
+                    # authorization uses the single ``bedrock-agentcore``
+                    # prefix per the Service Authorization Reference.
                     "bedrock-agentcore:CreateEvent",
                     "bedrock-agentcore:ListEvents",
                     "bedrock-agentcore:GetEvent",
                     "bedrock-agentcore:DeleteEvent",
-                    "bedrock-agentcore-control:CreateMemory",
-                    "bedrock-agentcore-control:GetMemory",
+                    "bedrock-agentcore:CreateMemory",
+                    "bedrock-agentcore:GetMemory",
                 ],
                 resources=[agentcore_memory_arn],
             )
         )
         api_role.add_to_policy(
             iam.PolicyStatement(
-                actions=["bedrock-agentcore-control:ListMemories"],
+                actions=["bedrock-agentcore:ListMemories"],
                 resources=["*"],
             )
         )
