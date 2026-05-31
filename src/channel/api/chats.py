@@ -120,6 +120,8 @@ async def _stream_bedrock_reply(
     model: str,
     claims: dict[str, Any],
     state: dict[str, Any] | None = None,
+    persist_user: bool = True,
+    index_delta_count: int = 2,
 ) -> Any:
     """Persist the user turn, stream Strands events, persist the assistant turn.
 
@@ -127,21 +129,29 @@ async def _stream_bedrock_reply(
     accumulated assistant text, the user/assistant msg ids, and the final
     done-event fields.  ``post_message`` uses it to build the idempotency
     replay payload after the stream completes.  Callers that don't need
-    capture (e.g. future ``regenerate`` handler) can omit it.
+    capture (e.g. the ``regenerate`` handler) can omit it.
+
+    ``persist_user`` controls whether the user message is written to
+    DynamoDB and announced via ``user_persisted``.  Regenerate sets this
+    to ``False`` because the user turn already exists.  ``index_delta_count``
+    is the net change to ``message_count`` on the chat-index row — 2 for a
+    fresh send (user + assistant), 0 for regenerate (deleted assistant +
+    new assistant cancel out).
     """
 
     state = state if state is not None else {}
     resolved_model = resolve_model_id(model)
     state["resolved_model"] = resolved_model
 
-    user_msg = storage.put_message(
-        chat_id=chat.chat_id,
-        role=MessageRole.USER,
-        text=user_message,
-        model=None,
-    )
-    state["user_msg_id"] = user_msg.msg_id
-    yield sse_user_persisted(msg_id=user_msg.msg_id, seq=0)
+    if persist_user:
+        user_msg = storage.put_message(
+            chat_id=chat.chat_id,
+            role=MessageRole.USER,
+            text=user_message,
+            model=None,
+        )
+        state["user_msg_id"] = user_msg.msg_id
+        yield sse_user_persisted(msg_id=user_msg.msg_id, seq=0)
 
     agent = build_agent(model_id=model)
     accumulated: list[str] = []
@@ -180,7 +190,7 @@ async def _stream_bedrock_reply(
         user_id=claims["sub"],
         chat=chat,
         last_user_preview=user_message,
-        delta_count=2,
+        delta_count=index_delta_count,
         last_message_at=assistant_msg.created_at,
     )
 
@@ -279,6 +289,8 @@ async def regenerate(
             user_message=last_user.text,
             model=model,
             claims=claims,
+            persist_user=False,
+            index_delta_count=0,
         ),
         media_type="text/event-stream",
     )

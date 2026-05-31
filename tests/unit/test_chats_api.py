@@ -503,22 +503,40 @@ def test_regenerate_drops_last_assistant_and_restreams(
         stream_async = fake_stream
 
     monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
-    monkeypatch.setattr(
-        "channel.api.chats.storage.put_message",
-        lambda **kw: Message(
+
+    put_calls: list[dict[str, Any]] = []
+
+    def fake_put(**kw: Any) -> Message:
+        put_calls.append(kw)
+        return Message(
             chat_id=kw["chat_id"],
             msg_id="m-new",
             role=kw["role"],
             text=kw["text"],
             created_at="t",
-        ),
+        )
+
+    monkeypatch.setattr("channel.api.chats.storage.put_message", fake_put)
+
+    update_index_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "channel.api.chats.storage.update_chat_index",
+        lambda **kw: update_index_calls.append(kw),
     )
-    monkeypatch.setattr("channel.api.chats.storage.update_chat_index", lambda **_: None)
 
     response = client.post("/api/chats/c1/regenerate", json={})
     assert response.status_code == 200
     assert "again" in response.text
     assert deleted_calls == ["c1"]
+
+    # Regenerate must NOT persist a new user message — only the assistant turn.
+    assert [c["role"] for c in put_calls] == [MessageRole.ASSISTANT], (
+        "regenerate must not persist a new user message"
+    )
+    # And must NOT emit a user_persisted SSE event (no temp turn to match).
+    assert "user_persisted" not in response.text
+    # Chat-index delta_count is 0 (deleted assistant + new assistant cancel out).
+    assert update_index_calls[0]["delta_count"] == 0
 
 
 def test_regenerate_returns_400_when_no_user_messages(
