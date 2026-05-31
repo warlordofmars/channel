@@ -60,6 +60,7 @@ def test_build_agent_constructs_strands_agent_with_bedrock_model(monkeypatch):
     monkeypatch.setattr("channel.agents.chat_agent.Agent", FakeAgent)
     monkeypatch.setattr("channel.agents.chat_agent.get_or_create_memory", lambda env: "mem-test")
     monkeypatch.setattr("channel.agents.chat_agent.AgentCoreMemoryHook", lambda **kw: object())
+    monkeypatch.setattr("channel.agents.chat_agent.AgentCoreRecallHook", lambda **kw: object())
 
     agent = build_agent(
         model_id="claude-sonnet-4-6",
@@ -79,10 +80,11 @@ def test_build_agent_uses_custom_system_prompt_when_provided(monkeypatch):
     monkeypatch.setattr("channel.agents.chat_agent.BedrockModel", lambda **_: object())
     monkeypatch.setattr(
         "channel.agents.chat_agent.Agent",
-        lambda model, system_prompt=None, **kw: captured.update({"system_prompt": system_prompt}),
+        lambda model, system_prompt=None, **kw: captured.update({"system_prompt": system_prompt}) or MagicMock(),
     )
     monkeypatch.setattr("channel.agents.chat_agent.get_or_create_memory", lambda env: "mem-test")
     monkeypatch.setattr("channel.agents.chat_agent.AgentCoreMemoryHook", lambda **kw: object())
+    monkeypatch.setattr("channel.agents.chat_agent.AgentCoreRecallHook", lambda **kw: object())
 
     build_agent(
         model_id="claude-sonnet-4-6",
@@ -93,16 +95,21 @@ def test_build_agent_uses_custom_system_prompt_when_provided(monkeypatch):
     assert captured["system_prompt"] == "Be brief."
 
 
-def test_build_agent_attaches_agentcore_memory_hook(monkeypatch):
-    """Hook must be constructed with caller's user_id+chat_id and passed
-    in via ``hooks=[hook]``."""
+def test_build_agent_attaches_recall_hook_before_write_hook(monkeypatch):
+    """Both hooks must be attached. Order: recall (BeforeInvocationEvent)
+    FIRST, write (AfterInvocationEvent) SECOND."""
 
     captured: dict[str, object] = {}
-    sentinel_hook = MagicMock(name="memory_hook")
+    fake_recall = MagicMock(name="recall_hook")
+    fake_write = MagicMock(name="write_hook")
 
-    def fake_hook_factory(**kwargs):
-        captured["hook_kwargs"] = kwargs
-        return sentinel_hook
+    def recall_factory(**kwargs):
+        captured["recall_kwargs"] = kwargs
+        return fake_recall
+
+    def write_factory(**kwargs):
+        captured["write_kwargs"] = kwargs
+        return fake_write
 
     class FakeAgent:
         def __init__(self, **kwargs):
@@ -110,24 +117,50 @@ def test_build_agent_attaches_agentcore_memory_hook(monkeypatch):
 
     monkeypatch.setattr("channel.agents.chat_agent.BedrockModel", lambda **_: object())
     monkeypatch.setattr("channel.agents.chat_agent.Agent", FakeAgent)
-    monkeypatch.setattr(
-        "channel.agents.chat_agent.AgentCoreMemoryHook",
-        fake_hook_factory,
-    )
+    monkeypatch.setattr("channel.agents.chat_agent.AgentCoreRecallHook", recall_factory)
+    monkeypatch.setattr("channel.agents.chat_agent.AgentCoreMemoryHook", write_factory)
     monkeypatch.setattr(
         "channel.agents.chat_agent.get_or_create_memory",
         lambda env: f"channel_{env}_MEMID",
     )
 
     build_agent(
-        model_id="claude-sonnet-4-6",
-        user_id="user-abc",
-        chat_id="chat-xyz",
+        model_id="claude-sonnet-4-6", user_id="user-abc", chat_id="chat-xyz",
     )
 
-    assert captured["hook_kwargs"] == {
+    # Recall hook built with memory_id + actor_id (NO session_id —
+    # recall is cross-session within an actor).
+    assert captured["recall_kwargs"] == {
+        "memory_id": "channel_test_MEMID",
+        "actor_id": "user-abc",
+    }
+    # Write hook built with memory_id + actor_id + session_id.
+    assert captured["write_kwargs"] == {
         "memory_id": "channel_test_MEMID",
         "actor_id": "user-abc",
         "session_id": "chat-xyz",
     }
-    assert captured["agent_kwargs"]["hooks"] == [sentinel_hook]
+    # Order: recall before write.
+    assert captured["agent_kwargs"]["hooks"] == [fake_recall, fake_write]
+
+
+def test_build_agent_attaches_chat_id_to_agent_instance(monkeypatch):
+    """Recall hook reads chat_id off ``event.agent.chat_id``; set it at
+    construction time."""
+    monkeypatch.setattr("channel.agents.chat_agent.BedrockModel", lambda **_: object())
+    monkeypatch.setattr("channel.agents.chat_agent.AgentCoreMemoryHook", lambda **_: object())
+    monkeypatch.setattr("channel.agents.chat_agent.AgentCoreRecallHook", lambda **_: object())
+    monkeypatch.setattr(
+        "channel.agents.chat_agent.get_or_create_memory", lambda env: "m",
+    )
+
+    class FakeAgent:
+        def __init__(self, **kwargs):
+            self._kwargs = kwargs
+
+    monkeypatch.setattr("channel.agents.chat_agent.Agent", FakeAgent)
+
+    agent = build_agent(
+        model_id="claude-sonnet-4-6", user_id="u", chat_id="chat-zzz",
+    )
+    assert agent.chat_id == "chat-zzz"

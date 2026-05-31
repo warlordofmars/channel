@@ -2,11 +2,15 @@
 """Strands ``Agent`` factory for the chat router.
 
 The factory constructs a fresh ``strands.Agent`` per turn with a
-``BedrockModel`` and an optional system prompt.  Phase 7c attaches an
-``AgentCoreMemoryHook`` to every Agent so each round-trip is persisted
-to Bedrock AgentCore Memory — see
-``docs/superpowers/specs/2026-05-31-phase-7c-agentcore-memory-writes-design.md``.
-Recall is still disabled; that's 7d.
+``BedrockModel`` and an optional system prompt. Both AgentCore Memory
+hooks attach to every Agent — recall (``BeforeInvocationEvent``, Phase
+7d) and write (``AfterInvocationEvent``, Phase 7c). Recall runs first
+so the injected system-prompt addendum is available downstream; write
+runs last so the just-completed turn lands in AgentCore.
+
+See:
+- ``docs/superpowers/specs/2026-05-31-phase-7c-agentcore-memory-writes-design.md``
+- ``docs/superpowers/specs/2026-05-31-phase-7d-memory-recall-auto-titling-design.md``
 """
 
 from __future__ import annotations
@@ -19,6 +23,7 @@ from strands.models import BedrockModel
 from strands.types.content import Messages
 
 from channel.agents.memory import AgentCoreMemoryHook, get_or_create_memory
+from channel.agents.recall import AgentCoreRecallHook
 
 # Caller-supplied short ids (``claude-sonnet-4-6``) → Bedrock cross-region
 # inference-profile IDs.  Strands' BedrockModel calls ``converse_stream``,
@@ -79,17 +84,25 @@ def build_agent(
         model_id=resolve_model_id(model_id),
         max_tokens=max_tokens,
     )
+    memory_id = get_or_create_memory(os.environ["STARTER_ENV"])
+    recall_hook = AgentCoreRecallHook(memory_id=memory_id, actor_id=user_id)
     memory_hook = AgentCoreMemoryHook(
-        memory_id=get_or_create_memory(os.environ["STARTER_ENV"]),
+        memory_id=memory_id,
         actor_id=user_id,
         session_id=chat_id,
     )
-    return Agent(
+    agent = Agent(
         model=bedrock,
         system_prompt=system_prompt or DEFAULT_SYSTEM_PROMPT,
-        hooks=[memory_hook],
+        # Recall (Before) first, write (After) second.
+        hooks=[recall_hook, memory_hook],
         # Strands types ``messages`` as ``list[Message]`` (its TypedDict);
         # at runtime the shape is plain dicts. ``cast`` keeps mypy happy
         # without making consumers of build_agent import Strands types.
         messages=cast(Messages, prior_messages or []),
     )
+    # The recall hook reads chat_id off ``event.agent.chat_id`` (Strands'
+    # BeforeInvocationEvent doesn't carry chat context natively; this is
+    # a Channel-specific attribute).
+    agent.chat_id = chat_id  # type: ignore[attr-defined]
+    return agent
