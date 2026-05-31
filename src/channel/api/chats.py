@@ -9,7 +9,6 @@ so chat existence isn't leaked.
 
 from __future__ import annotations
 
-import json as _json
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Response
@@ -113,8 +112,19 @@ async def _stream_bedrock_reply(
     user_message: str,
     model: str,
     claims: dict[str, Any],
+    state: dict[str, Any] | None = None,
 ) -> Any:
-    """Persist the user turn, stream Strands events, persist the assistant turn."""
+    """Persist the user turn, stream Strands events, persist the assistant turn.
+
+    ``state`` is an opt-in dict the caller passes in to capture the
+    accumulated assistant text, the user/assistant msg ids, and the final
+    done-event fields.  ``post_message`` uses it to build the idempotency
+    replay payload after the stream completes.  Callers that don't need
+    capture (e.g. future ``regenerate`` handler) can omit it.
+    """
+
+    state = state if state is not None else {}
+    resolved_model = resolve_model_id(model)
 
     user_msg = storage.put_message(
         chat_id=chat.chat_id,
@@ -122,6 +132,7 @@ async def _stream_bedrock_reply(
         text=user_message,
         model=None,
     )
+    state["user_msg_id"] = user_msg.msg_id
     yield sse_user_persisted(msg_id=user_msg.msg_id, seq=0)
 
     agent = build_agent(model_id=model)
@@ -142,14 +153,20 @@ async def _stream_bedrock_reply(
             output_tokens = payload["output_tokens"]
 
     assistant_text = "".join(accumulated)
+    state["assistant_text"] = assistant_text
+    state["input_tokens"] = input_tokens
+    state["output_tokens"] = output_tokens
+    state["stop_reason"] = stop_reason
+
     assistant_msg = storage.put_message(
         chat_id=chat.chat_id,
         role=MessageRole.ASSISTANT,
         text=assistant_text,
-        model=resolve_model_id(model),
+        model=resolved_model,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
     )
+    state["assistant_msg_id"] = assistant_msg.msg_id
 
     storage.update_chat_index(
         user_id=claims["sub"],
@@ -162,7 +179,7 @@ async def _stream_bedrock_reply(
     yield sse_done(
         msg_id=assistant_msg.msg_id,
         seq=1,
-        model=resolve_model_id(model),
+        model=resolved_model,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         stop_reason=stop_reason,
@@ -198,41 +215,30 @@ async def post_message(
         return StreamingResponse(_replay(), media_type="text/event-stream")
 
     async def _produce() -> Any:
-        # JSON-peek hack: capture the real msg_ids from the byte stream so
-        # the idempotency replay payload can echo them.  Task 6 replaces
-        # this with a clean ``state`` dict passed into ``_stream_bedrock_reply``
-        # which ALSO captures the accumulated assistant text (currently
-        # left empty — drives Task 6's xfail tests).
-        produced_user_msg_id: str | None = None
-        produced_done: dict[str, Any] | None = None
+        state: dict[str, Any] = {}
         async for chunk in _stream_bedrock_reply(
-            chat=chat, user_message=payload.message, model=model, claims=claims
+            chat=chat,
+            user_message=payload.message,
+            model=model,
+            claims=claims,
+            state=state,
         ):
-            try:
-                event = _json.loads(chunk[6:-2])
-            except Exception:  # pragma: no cover  - unreachable from sse_* helpers
-                event = None
-            if event:
-                if event.get("type") == "user_persisted" and produced_user_msg_id is None:
-                    produced_user_msg_id = event["msg_id"]
-                elif event.get("type") == "done":
-                    produced_done = {
-                        "msg_id": event["msg_id"],
-                        "seq": event["seq"],
-                        "model": event["model"],
-                        "input_tokens": event["input_tokens"],
-                        "output_tokens": event["output_tokens"],
-                        "stop_reason": event["stop_reason"],
-                    }
             yield chunk
-        if idempotency_key and produced_user_msg_id and produced_done:
+        if idempotency_key and state.get("assistant_msg_id"):
             storage.store_idempotency_result(
                 user_id=claims["sub"],
                 key=idempotency_key,
                 payload={
-                    "user_msg_id": produced_user_msg_id,
-                    "text": "",  # populated in Task 6
-                    "done": produced_done,
+                    "user_msg_id": state["user_msg_id"],
+                    "text": state["assistant_text"],
+                    "done": {
+                        "msg_id": state["assistant_msg_id"],
+                        "seq": 1,
+                        "model": resolve_model_id(model),
+                        "input_tokens": state["input_tokens"],
+                        "output_tokens": state["output_tokens"],
+                        "stop_reason": state["stop_reason"],
+                    },
                 },
             )
 

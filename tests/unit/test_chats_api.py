@@ -329,7 +329,6 @@ def test_post_message_returns_404_for_unowned_chat(
     assert response.status_code == 404
 
 
-@pytest.mark.xfail(reason="text capture lands in Task 6")
 def test_post_message_replays_on_duplicate_idempotency_key(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -349,6 +348,8 @@ def test_post_message_replays_on_duplicate_idempotency_key(
         "user_msg_id": "user-existing",
         "text": "previous reply",
         "done": {
+            "msg_id": "asst-existing",
+            "seq": 1,
             "model": "canned-stream-v1",
             "input_tokens": 0,
             "output_tokens": 0,
@@ -373,9 +374,10 @@ def test_post_message_replays_on_duplicate_idempotency_key(
     )
     assert response.status_code == 200
     assert "previous reply" in response.text
+    assert "user-existing" in response.text
+    assert "asst-existing" in response.text
 
 
-@pytest.mark.xfail(reason="text capture lands in Task 6")
 def test_post_message_stores_result_on_fresh_idempotency_key(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -430,7 +432,14 @@ def test_post_message_stores_result_on_fresh_idempotency_key(
     # After the stream completes, store_idempotency_result should have been called.
     assert stored["user_id"] == "u-1"
     assert stored["key"] == "k-fresh"
-    assert stored["payload"]["text"]  # accumulated assistant text persisted (Task 6)
+    # Accumulated assistant text from the Strands stream is persisted verbatim.
+    assert stored["payload"]["text"] == "Hi back"
+    assert stored["payload"]["user_msg_id"] == "m1"
+    assert stored["payload"]["done"]["msg_id"] == "m1"
+    assert stored["payload"]["done"]["seq"] == 1
+    assert stored["payload"]["done"]["input_tokens"] == 1
+    assert stored["payload"]["done"]["output_tokens"] == 2
+    assert stored["payload"]["done"]["stop_reason"] == "end_turn"
 
 
 def test_post_message_rejects_empty_message(
