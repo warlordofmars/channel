@@ -43,3 +43,31 @@ describe("updater.init platform gate", () => {
     expect(autoUpdater.setFeedURL).not.toHaveBeenCalled();
   });
 });
+
+describe("updater.init feed URL mapping", () => {
+  beforeEach(() => setPlatform("darwin"));
+
+  it("uses the prod URL for the latest channel", async () => {
+    const { autoUpdater } = await import("electron-updater");
+    init({ channel: "latest", webContents: { send: vi.fn() } });
+    expect(autoUpdater.setFeedURL).toHaveBeenCalledWith({
+      provider: "generic",
+      url: "https://channel.warlordofmars.net/updates/latest",
+    });
+  });
+
+  it("uses the dev URL for the dev channel", async () => {
+    const { autoUpdater } = await import("electron-updater");
+    init({ channel: "dev", webContents: { send: vi.fn() } });
+    expect(autoUpdater.setFeedURL).toHaveBeenCalledWith({
+      provider: "generic",
+      url: "https://channel-dev.warlordofmars.net/updates/dev",
+    });
+  });
+
+  it("throws on unknown channels", () => {
+    expect(() =>
+      init({ channel: "beta", webContents: { send: vi.fn() } }),
+    ).toThrow(/unknown channel: beta/);
+  });
+});
