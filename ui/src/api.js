@@ -168,3 +168,20 @@ export async function streamMessage(
   if (!response.ok) throw new Error(`streamMessage ${response.status}`);
   return response;
 }
+
+export async function listModels() {
+  const response = await fetch(`${BASE}/api/models`, { headers: authHeader() });
+  if (!response.ok) throw new Error(`listModels ${response.status}`);
+  return response.json();
+}
+
+export async function regenerate(chatId, { model, effort, signal } = {}) {
+  const response = await fetch(`${BASE}/api/chats/${chatId}/regenerate`, {
+    method: "POST",
+    headers: { ...authHeader(), "Content-Type": "application/json" },
+    body: JSON.stringify({ model, effort }),
+    signal,
+  });
+  if (!response.ok) throw new Error(`regenerate ${response.status}`);
+  return response;
+}

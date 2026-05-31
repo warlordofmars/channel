@@ -5,7 +5,9 @@ import {
   createChat,
   getChat,
   listChats,
+  listModels,
   patchChat,
+  regenerate,
   streamMessage,
 } from "./api.js";
 
@@ -596,6 +598,59 @@ describe("chats wrappers", () => {
       await expect(streamMessage("c1", { message: "hi" })).rejects.toThrow(
         /streamMessage 500/,
       );
+    });
+  });
+
+  // ---- listModels ---------------------------------------------------------
+
+  describe("listModels", () => {
+    it("GETs /api/models and returns parsed body", async () => {
+      mockOk({ models: [{ id: "claude-sonnet-4-6" }] });
+      const result = await listModels();
+      expect(result.models[0].id).toBe("claude-sonnet-4-6");
+      expect(fetchMock.mock.calls[0][0]).toBe("/api/models");
+      expect(fetchMock.mock.calls[0][1].headers.Authorization).toBe(
+        "Bearer tok-abc",
+      );
+    });
+
+    it("throws on non-ok", async () => {
+      mockFail(500);
+      await expect(listModels()).rejects.toThrow(/listModels 500/);
+    });
+  });
+
+  // ---- regenerate ---------------------------------------------------------
+
+  describe("regenerate", () => {
+    it("POSTs to /regenerate and returns the raw Response", async () => {
+      const fakeResponse = { ok: true, status: 200, body: "stream" };
+      fetchMock.mockResolvedValue(fakeResponse);
+      const result = await regenerate("c1", { model: "claude-opus-4-7" });
+      expect(result).toBe(fakeResponse);
+      expect(fetchMock.mock.calls[0][0]).toBe("/api/chats/c1/regenerate");
+      expect(fetchMock.mock.calls[0][1].method).toBe("POST");
+      expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
+        model: "claude-opus-4-7",
+      });
+    });
+
+    it("forwards abort signal", async () => {
+      fetchMock.mockResolvedValue({ ok: true, status: 200 });
+      const controller = new AbortController();
+      await regenerate("c1", { signal: controller.signal });
+      expect(fetchMock.mock.calls[0][1].signal).toBe(controller.signal);
+    });
+
+    it("defaults to an empty body when no args are passed", async () => {
+      fetchMock.mockResolvedValue({ ok: true, status: 200 });
+      await regenerate("c1");
+      expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({});
+    });
+
+    it("throws on non-ok", async () => {
+      mockFail(500);
+      await expect(regenerate("c1", {})).rejects.toThrow(/regenerate 500/);
     });
   });
 });
