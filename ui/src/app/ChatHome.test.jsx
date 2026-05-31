@@ -99,12 +99,12 @@ describe("ChatHome", () => {
     fireEvent.click(screen.getByTitle("Send"));
 
     await waitFor(() => expect(mockCreateChat).toHaveBeenCalledTimes(1));
-    expect(mockCreateChat).toHaveBeenCalledWith({ modelDefault: "claude-opus-4-8" });
+    expect(mockCreateChat).toHaveBeenCalledWith({ modelDefault: "claude-opus-4-7" });
     await waitFor(() => expect(getLastPath()).toBe("/app/c/new-1"));
     expect(getLastState()).toEqual({
       firstMessage: {
         message: "hi there",
-        model: expect.objectContaining({ id: "claude-opus-4-8" }),
+        model: expect.objectContaining({ id: "claude-opus-4-7" }),
         effort: "High",
         attachments: [],
       },
@@ -137,8 +137,8 @@ describe("ChatHome", () => {
     storage["channel-model"] = "nonexistent-model-id";
     __resetChannelPrefsForTest();
     renderChatHome();
-    // ModelPicker shows the model.short of the fallback (Opus 4.8):
-    expect(screen.getByText(/opus 4.8/i)).toBeTruthy();
+    // ModelPicker shows the model.short of the fallback (Opus 4.7):
+    expect(screen.getByText(/opus 4.7/i)).toBeTruthy();
   });
 
   it("falls back to 'You' when JWT email local-part is empty", () => {
@@ -150,7 +150,7 @@ describe("ChatHome", () => {
   it("setModelObj writes the model id back to prefs when a model is selected", () => {
     renderChatHome();
     // Open the ModelPicker popover via the model-pick button in the Composer
-    fireEvent.click(screen.getByRole("button", { name: /sonnet 4\.6|opus 4\.8|haiku 4\.5/i }));
+    fireEvent.click(screen.getByRole("button", { name: /sonnet 4\.6|opus 4\.7|haiku 4\.5/i }));
     // Click the Haiku option to trigger setModelObj
     fireEvent.click(screen.getByText("Claude Haiku 4.5"));
     // The storage key should be updated

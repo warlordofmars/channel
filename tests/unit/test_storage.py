@@ -17,6 +17,7 @@ from boto3.dynamodb.conditions import And, BeginsWith, ConditionBase, Equals
 from channel.models import MessageRole
 from channel.storage import (
     create_chat,
+    delete_last_assistant_message,
     get_chat_by_id,
     list_chats_for_user,
     list_messages,
@@ -120,6 +121,10 @@ class FakeTable:
             items = items[:limit]
         result["Items"] = items
         return result
+
+    def delete_item(self, Key: dict[str, str]) -> dict[str, Any]:
+        self.items.pop((Key["PK"], Key["SK"]), None)
+        return {}
 
     def update_item(self, Key: dict[str, str], **kwargs: Any) -> dict[str, Any]:
         item = self.items.setdefault((Key["PK"], Key["SK"]), {**Key})
@@ -385,6 +390,27 @@ def test_idempotency_reserve_re_raises_other_client_errors(
 
     with pytest.raises(ClientError):
         st.reserve_idempotency_key(user_id="u-1", key="k3")
+
+
+def test_delete_last_assistant_message_drops_only_the_assistant_row(
+    table: FakeTable,
+) -> None:
+    chat = create_chat(user_id="u", title=None, model_default="m")
+    put_message(chat_id=chat.chat_id, role=MessageRole.USER, text="hi", model=None)
+    put_message(chat_id=chat.chat_id, role=MessageRole.ASSISTANT, text="hello", model="m")
+    deleted = delete_last_assistant_message(chat.chat_id)
+    assert deleted is not None and deleted.text == "hello"
+
+    msgs, _ = list_messages(chat.chat_id, limit=10, cursor=None)
+    assert [m.role for m in msgs] == [MessageRole.USER]
+
+
+def test_delete_last_assistant_message_returns_none_when_no_assistant_rows(
+    table: FakeTable,
+) -> None:
+    chat = create_chat(user_id="u-no-asst", title=None, model_default="m")
+    put_message(chat_id=chat.chat_id, role=MessageRole.USER, text="hi", model=None)
+    assert delete_last_assistant_message(chat.chat_id) is None
 
 
 def test_patch_chat_with_no_fields_is_noop(table: FakeTable) -> None:

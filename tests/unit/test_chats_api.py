@@ -86,7 +86,7 @@ def test_post_chat_uses_default_model_when_unspecified(
 
     monkeypatch.setattr("channel.api.chats.storage.create_chat", fake_create_chat)
     client.post("/api/chats", json={})
-    assert captured["model_default"] == "canned-stream-v1"
+    assert captured["model_default"] == "claude-sonnet-4-6"
 
 
 def test_list_returns_chats_for_authenticated_user(
@@ -250,7 +250,7 @@ def test_patch_returns_404_for_unowned_chat(
     assert response.status_code == 404
 
 
-def test_post_message_returns_sse_with_canned_stream(
+def test_post_message_returns_sse_via_strands(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     chat = Chat(
@@ -259,9 +259,8 @@ def test_post_message_returns_sse_with_canned_stream(
         title="t",
         created_at="t",
         last_message_at="t",
-        model_default="canned-stream-v1",
+        model_default="claude-sonnet-4-6",
     )
-
     monkeypatch.setattr("channel.api.chats.storage.get_chat_by_id", lambda _: chat)
 
     persisted: list[Message] = []
@@ -273,6 +272,8 @@ def test_post_message_returns_sse_with_canned_stream(
             role=kwargs["role"],
             text=kwargs["text"],
             model=kwargs.get("model"),
+            input_tokens=kwargs.get("input_tokens"),
+            output_tokens=kwargs.get("output_tokens"),
             created_at="t",
         )
         persisted.append(msg)
@@ -281,19 +282,43 @@ def test_post_message_returns_sse_with_canned_stream(
     monkeypatch.setattr("channel.api.chats.storage.put_message", fake_put)
     monkeypatch.setattr("channel.api.chats.storage.update_chat_index", lambda **_: None)
 
-    response = client.post("/api/chats/c1/messages", json={"message": "hello"})
+    # Fake Strands Agent that yields a deterministic event sequence.
+    async def fake_stream(self, prompt):
+        yield {"event": {"contentBlockDelta": {"delta": {"text": "Hello"}}}}
+        yield {"event": {"contentBlockDelta": {"delta": {"text": " world"}}}}
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+        yield {
+            "event": {
+                "metadata": {
+                    "usage": {"inputTokens": 12, "outputTokens": 5},
+                }
+            }
+        }
+
+    class FakeAgent:
+        stream_async = fake_stream
+
+    monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
+
+    response = client.post(
+        "/api/chats/c1/messages",
+        json={"message": "hi", "model": "claude-sonnet-4-6", "effort": "medium"},
+    )
     assert response.status_code == 200
-    assert response.headers["content-type"].startswith("text/event-stream")
     body = response.text
 
-    # SSE shape: at least one user_persisted, at least one delta, one done.
     assert "user_persisted" in body
     assert '"type": "delta"' in body
+    assert "Hello" in body and "world" in body
     assert '"type": "done"' in body
+    assert '"stop_reason": "end_turn"' in body
+    assert '"input_tokens": 12' in body
+    assert '"output_tokens": 5' in body
 
-    # Two messages persisted: the user turn, then the assistant turn.
     assert [m.role for m in persisted] == [MessageRole.USER, MessageRole.ASSISTANT]
-    assert persisted[1].text  # non-empty canned reply
+    assert persisted[1].text == "Hello world"
+    assert persisted[1].input_tokens == 12
+    assert persisted[1].output_tokens == 5
 
 
 def test_post_message_returns_404_for_unowned_chat(
@@ -323,6 +348,8 @@ def test_post_message_replays_on_duplicate_idempotency_key(
         "user_msg_id": "user-existing",
         "text": "previous reply",
         "done": {
+            "msg_id": "asst-existing",
+            "seq": 1,
             "model": "canned-stream-v1",
             "input_tokens": 0,
             "output_tokens": 0,
@@ -347,6 +374,8 @@ def test_post_message_replays_on_duplicate_idempotency_key(
     )
     assert response.status_code == 200
     assert "previous reply" in response.text
+    assert "user-existing" in response.text
+    assert "asst-existing" in response.text
 
 
 def test_post_message_stores_result_on_fresh_idempotency_key(
@@ -376,6 +405,17 @@ def test_post_message_stores_result_on_fresh_idempotency_key(
     # Fresh key — reserve returns None.
     monkeypatch.setattr("channel.api.chats.storage.reserve_idempotency_key", lambda **_: None)
 
+    # Mock Strands so the stream completes without real Bedrock.
+    async def fake_stream(self, prompt):
+        yield {"event": {"contentBlockDelta": {"delta": {"text": "Hi back"}}}}
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+        yield {"event": {"metadata": {"usage": {"inputTokens": 1, "outputTokens": 2}}}}
+
+    class FakeAgent:
+        stream_async = fake_stream
+
+    monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
+
     stored: dict[str, Any] = {}
     monkeypatch.setattr(
         "channel.api.chats.storage.store_idempotency_result",
@@ -384,7 +424,7 @@ def test_post_message_stores_result_on_fresh_idempotency_key(
 
     response = client.post(
         "/api/chats/c1/messages",
-        json={"message": "hi"},
+        json={"message": "hi", "model": "claude-sonnet-4-6"},
         headers={"Idempotency-Key": "k-fresh"},
     )
     assert response.status_code == 200
@@ -392,7 +432,14 @@ def test_post_message_stores_result_on_fresh_idempotency_key(
     # After the stream completes, store_idempotency_result should have been called.
     assert stored["user_id"] == "u-1"
     assert stored["key"] == "k-fresh"
-    assert stored["payload"]["text"]  # canned reply text persisted
+    # Accumulated assistant text from the Strands stream is persisted verbatim.
+    assert stored["payload"]["text"] == "Hi back"
+    assert stored["payload"]["user_msg_id"] == "m1"
+    assert stored["payload"]["done"]["msg_id"] == "m1"
+    assert stored["payload"]["done"]["seq"] == 1
+    assert stored["payload"]["done"]["input_tokens"] == 1
+    assert stored["payload"]["done"]["output_tokens"] == 2
+    assert stored["payload"]["done"]["stop_reason"] == "end_turn"
 
 
 def test_post_message_rejects_empty_message(
@@ -411,3 +458,111 @@ def test_post_message_rejects_empty_message(
     )
     response = client.post("/api/chats/c1/messages", json={"message": ""})
     assert response.status_code == 422  # Pydantic min_length=1
+
+
+def test_regenerate_drops_last_assistant_and_restreams(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    chat = Chat(
+        chat_id="c1",
+        user_id="u-1",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="claude-sonnet-4-6",
+    )
+    monkeypatch.setattr("channel.api.chats.storage.get_chat_by_id", lambda _: chat)
+
+    deleted_calls = []
+    monkeypatch.setattr(
+        "channel.api.chats.storage.delete_last_assistant_message",
+        lambda chat_id: deleted_calls.append(chat_id),
+    )
+    monkeypatch.setattr(
+        "channel.api.chats.storage.list_messages",
+        lambda *_a, **_kw: (
+            [
+                Message(
+                    chat_id="c1",
+                    msg_id="u-1",
+                    role=MessageRole.USER,
+                    text="redo",
+                    created_at="t",
+                )
+            ],
+            None,
+        ),
+    )
+
+    async def fake_stream(self, prompt):
+        assert prompt == "redo"
+        yield {"event": {"contentBlockDelta": {"delta": {"text": "again"}}}}
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+
+    class FakeAgent:
+        stream_async = fake_stream
+
+    monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
+
+    put_calls: list[dict[str, Any]] = []
+
+    def fake_put(**kw: Any) -> Message:
+        put_calls.append(kw)
+        return Message(
+            chat_id=kw["chat_id"],
+            msg_id="m-new",
+            role=kw["role"],
+            text=kw["text"],
+            created_at="t",
+        )
+
+    monkeypatch.setattr("channel.api.chats.storage.put_message", fake_put)
+
+    update_index_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "channel.api.chats.storage.update_chat_index",
+        lambda **kw: update_index_calls.append(kw),
+    )
+
+    response = client.post("/api/chats/c1/regenerate", json={})
+    assert response.status_code == 200
+    assert "again" in response.text
+    assert deleted_calls == ["c1"]
+
+    # Regenerate must NOT persist a new user message — only the assistant turn.
+    assert [c["role"] for c in put_calls] == [MessageRole.ASSISTANT], (
+        "regenerate must not persist a new user message"
+    )
+    # And must NOT emit a user_persisted SSE event (no temp turn to match).
+    assert "user_persisted" not in response.text
+    # Chat-index delta_count is 0 (deleted assistant + new assistant cancel out).
+    assert update_index_calls[0]["delta_count"] == 0
+
+
+def test_regenerate_returns_400_when_no_user_messages(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "channel.api.chats.storage.get_chat_by_id",
+        lambda _: Chat(
+            chat_id="c1",
+            user_id="u-1",
+            title="t",
+            created_at="t",
+            last_message_at="t",
+            model_default="m",
+        ),
+    )
+    monkeypatch.setattr("channel.api.chats.storage.delete_last_assistant_message", lambda _: None)
+    monkeypatch.setattr("channel.api.chats.storage.list_messages", lambda *_a, **_kw: ([], None))
+
+    response = client.post("/api/chats/c1/regenerate", json={})
+    assert response.status_code == 400
+
+
+def test_regenerate_returns_404_for_unowned_chat(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("channel.api.chats.storage.get_chat_by_id", lambda _: None)
+    response = client.post("/api/chats/x/regenerate", json={})
+    assert response.status_code == 404

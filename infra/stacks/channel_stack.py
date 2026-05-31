@@ -4,7 +4,7 @@ Channel CDK Stack — defines all AWS infrastructure.
 
 Resources:
   - DynamoDB table (single-table design) with GSIs and TTL
-  - Lambda function for the API (FastAPI + Mangum)
+  - Lambda function for the API (FastAPI + uvicorn behind AWSLWA)
   - Function URL for the Lambda (auth=NONE, TLS enforced)
   - IAM role scoped to DynamoDB table and SSM access
   - SSM Parameters for secrets
@@ -295,8 +295,6 @@ class ChannelStack(cdk.Stack):
             "APP_VERSION": app_version,
             # Used by EMF metrics as the "Environment" dimension.
             "STARTER_ENV": env_name,
-            # Default Bedrock model for agent endpoints.
-            "BEDROCK_MODEL_ID": "anthropic.claude-sonnet-4-6",
         }
 
         # Tag every resource with the deployed version for operational visibility.
@@ -340,23 +338,17 @@ class ChannelStack(cdk.Stack):
             iam.PolicyStatement(
                 actions=["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
                 resources=[
+                    # Foundation models (delegated to by inference profiles)
                     f"arn:aws:bedrock:{self.region}::foundation-model/anthropic.claude-sonnet-4-6",
                     f"arn:aws:bedrock:{self.region}::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0",
+                    f"arn:aws:bedrock:{self.region}::foundation-model/anthropic.claude-opus-4-7",
+                    # US cross-region inference profiles (us-east-1 primary)
+                    f"arn:aws:bedrock:{self.region}:{self.account}:inference-profile/us.anthropic.claude-sonnet-4-6",
+                    f"arn:aws:bedrock:{self.region}:{self.account}:inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0",
+                    f"arn:aws:bedrock:{self.region}:{self.account}:inference-profile/us.anthropic.claude-opus-4-7",
                 ],
             )
         )
-        # bedrock:InvokeInlineAgent is required for invoke_inline_agent calls.
-        # Inline agents are ephemeral (no pre-provisioned agent resource), so
-        # the resource ARN pattern covers all inline agent invocations in the account.
-        api_role.add_to_policy(
-            iam.PolicyStatement(
-                actions=["bedrock:InvokeInlineAgent"],
-                resources=[
-                    f"arn:aws:bedrock:{self.region}:{self.account}:agent/*",
-                ],
-            )
-        )
-
         api_fn = lambda_.Function(
             self,
             "ApiFunction",
@@ -381,7 +373,10 @@ class ChannelStack(cdk.Stack):
             },
             layers=[awslwa_layer],
             memory_size=512,
-            timeout=cdk.Duration.seconds(30),
+            # 5 min for streaming chats — Bedrock responses on long prompts can
+            # exceed 30s. AWSLWA streams to the Function URL as bytes arrive, so
+            # the long handler runtime doesn't add user-perceived latency.
+            timeout=cdk.Duration.minutes(5),
             description=f"Channel management API (FastAPI + AWSLWA) [{env_name}]",
             tracing=lambda_.Tracing.ACTIVE,
         )

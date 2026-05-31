@@ -174,8 +174,8 @@ describe("Customize", () => {
     storage["channel-model"] = "no-such-model";
     __resetChannelPrefsForTest();
     renderCustomize();
-    // MODELS[0] (Opus 4.8) should be the highlighted button + supply the hint.
-    expect(screen.getByRole("button", { name: "Opus 4.8" }).className).toContain("on");
+    // MODELS[0] (Opus 4.7) should be the highlighted button + supply the hint.
+    expect(screen.getByRole("button", { name: "Opus 4.7" }).className).toContain("on");
     const opus = MODELS[0];
     expect(screen.getByText(opus.desc)).toBeTruthy();
   });

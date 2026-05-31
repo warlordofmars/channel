@@ -78,3 +78,10 @@ class SendMessageRequest(BaseModel):
     model: str | None = None
     effort: str | None = None
     attachments: list[dict[str, Any]] | None = None
+
+
+class RegenerateRequest(BaseModel):
+    """Request body for POST /api/chats/{id}/regenerate."""
+
+    model: str | None = None
+    effort: str | None = None

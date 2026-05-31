@@ -62,6 +62,69 @@ export function useChatStream(chatId) {
     };
   }, [chatId]);
 
+  // Hook-local SSE reader loop. Shared by send() and regenerate().
+  //
+  // tempUserId is optional: regenerate doesn't add a temp user row (the
+  // backend re-streams only the assistant turn and never emits
+  // user_persisted). When tempUserId is null, a user_persisted event
+  // (should it arrive anyway) is a no-op because no row matches.
+  //
+  // try/catch wraps the loop because AbortController.abort() (from
+  // chatId change or unmount) causes reader.read() to reject. The
+  // abort is user-initiated so we bail out silently — state remains
+  // in whatever partial form it reached.
+  async function readSse(response, tempAsstId, tempUserId) {
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    const sse = makeSseDecoder();
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        const events = sse.feed(decoder.decode(value, { stream: true }));
+        for (const event of events) {
+          if (event.type === "user_persisted") {
+            setTurns((prev) =>
+              prev.map((t) =>
+                t.msg_id === tempUserId
+                  ? { ...t, msg_id: event.msg_id, pending: false }
+                  : t,
+              ),
+            );
+          } else if (event.type === "delta") {
+            setTurns((prev) =>
+              prev.map((t) =>
+                t.msg_id === tempAsstId
+                  ? { ...t, text: t.text + event.text }
+                  : t,
+              ),
+            );
+          } else if (event.type === "done") {
+            setTurns((prev) =>
+              prev.map((t) =>
+                t.msg_id === tempAsstId
+                  ? {
+                      ...t,
+                      msg_id: event.msg_id,
+                      streaming: false,
+                      model: event.model,
+                      input_tokens: event.input_tokens,
+                      output_tokens: event.output_tokens,
+                    }
+                  : t,
+              ),
+            );
+            setStatus("idle");
+          }
+        }
+      }
+    } catch {
+      // Reader aborted or errored — bail out silently. Abort is
+      // user-initiated (chatId change / unmount / explicit abort()),
+      // so no error surface needed.
+    }
+  }
+
   const send = useCallback(
     async ({ message, model, effort, attachments }) => {
       if (!chatId) return;
@@ -94,64 +157,49 @@ export function useChatStream(chatId) {
         return;
       }
 
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      const sse = makeSseDecoder();
+      await readSse(response, tempAsstId, tempUserId);
+    },
+    [chatId],
+  );
 
-      // Reader loop: each chunk feeds the stateful SSE decoder which
-      // hands back complete events. The decoder buffers partial events
-      // across chunk boundaries so we never JSON.parse a half-line.
-      //
-      // try/catch wraps the loop because AbortController.abort() (from
-      // chatId change or unmount) causes reader.read() to reject. The
-      // abort is user-initiated so we bail out silently — state remains
-      // in whatever partial form it reached.
+  const regenerate = useCallback(
+    async ({ model, effort } = {}) => {
+      if (!chatId) return;
+      setError(null);
+
+      // Drop the last assistant turn locally (if any); add an empty
+      // streaming row in its place. The backend re-streams only the
+      // assistant turn — the user turn stays put.
+      const tempAsstId = `tmp-a-${crypto.randomUUID()}`;
+      setTurns((prev) => {
+        const next =
+          prev[prev.length - 1]?.role === "assistant"
+            ? prev.slice(0, -1)
+            : [...prev];
+        return [
+          ...next,
+          { msg_id: tempAsstId, role: "assistant", text: "", streaming: true },
+        ];
+      });
+      setStatus("streaming");
+
+      const controller = new AbortController();
+      abortRef.current = controller;
+
+      let response;
       try {
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          const events = sse.feed(decoder.decode(value, { stream: true }));
-          for (const event of events) {
-            if (event.type === "user_persisted") {
-              setTurns((prev) =>
-                prev.map((t) =>
-                  t.msg_id === tempUserId
-                    ? { ...t, msg_id: event.msg_id, pending: false }
-                    : t,
-                ),
-              );
-            } else if (event.type === "delta") {
-              setTurns((prev) =>
-                prev.map((t) =>
-                  t.msg_id === tempAsstId
-                    ? { ...t, text: t.text + event.text }
-                    : t,
-                ),
-              );
-            } else if (event.type === "done") {
-              setTurns((prev) =>
-                prev.map((t) =>
-                  t.msg_id === tempAsstId
-                    ? {
-                        ...t,
-                        msg_id: event.msg_id,
-                        streaming: false,
-                        model: event.model,
-                        input_tokens: event.input_tokens,
-                        output_tokens: event.output_tokens,
-                      }
-                    : t,
-                ),
-              );
-              setStatus("idle");
-            }
-          }
-        }
-      } catch {
-        // Reader aborted or errored — bail out silently. Abort is
-        // user-initiated (chatId change / unmount / explicit abort()),
-        // so no error surface needed.
+        response = await api.regenerate(chatId, {
+          model,
+          effort,
+          signal: controller.signal,
+        });
+      } catch (err) {
+        setError(err);
+        setStatus("error");
+        return;
       }
+
+      await readSse(response, tempAsstId, null);
     },
     [chatId],
   );
@@ -160,5 +208,5 @@ export function useChatStream(chatId) {
     abortRef.current?.abort();
   }, []);
 
-  return { turns, send, abort, status, error };
+  return { turns, send, regenerate, abort, status, error };
 }

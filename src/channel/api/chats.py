@@ -9,30 +9,31 @@ so chat existence isn't leaked.
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Response
 from fastapi.responses import StreamingResponse
 
 from channel import storage
+from channel.agents.chat_agent import build_agent, resolve_model_id
+from channel.agents.strands_sse import (
+    sse_delta,
+    sse_done,
+    sse_user_persisted,
+    translate_event,
+)
 from channel.api._auth import require_mgmt_user
-from channel.models import Chat, ChatCreate, ChatPatch, MessageRole, SendMessageRequest
+from channel.models import (
+    Chat,
+    ChatCreate,
+    ChatPatch,
+    MessageRole,
+    RegenerateRequest,
+    SendMessageRequest,
+)
 
-_DEFAULT_MODEL = "canned-stream-v1"
+_DEFAULT_MODEL = "claude-sonnet-4-6"
 
-_CANNED_REPLY = """Good question — here's how I'd think about it.
-
-The core trade-off is between **read latency** and **write amplification**. A columnar store wins big on analytical scans because it only touches the columns you query, but you pay for that on ingest.
-
-A few concrete recommendations:
-
-1. **Batch your writes.** Buffer events for 5–10 seconds and flush in bulk. Columnar formats hate row-at-a-time inserts.
-2. **Partition by time, then by tenant.** Most of your queries are time-bounded, so this prunes the search space dramatically before any column is read.
-3. **Keep a hot row-store tail.** Serve the last few minutes from the existing row store and merge at query time — users never notice the seam.
-
-Want me to sketch the ingestion buffer as a small artifact you can drop into the pipeline?"""
-_CANNED_MODEL = "canned-stream-v1"
 
 router = APIRouter(prefix="/chats", tags=["chats"])
 
@@ -112,60 +113,94 @@ async def patch_chat(
     return Response(status_code=204)
 
 
-def _sse(payload: dict[str, Any]) -> bytes:
-    return f"data: {json.dumps(payload)}\n\n".encode()
-
-
-async def _stream_canned_reply(
+async def _stream_bedrock_reply(
     *,
     chat: Chat,
     user_message: str,
+    model: str,
     claims: dict[str, Any],
+    state: dict[str, Any] | None = None,
+    persist_user: bool = True,
+    index_delta_count: int = 2,
 ) -> Any:
-    """Persist the user turn, emit SSE, persist the assistant turn, update index."""
+    """Persist the user turn, stream Strands events, persist the assistant turn.
 
-    user_msg = storage.put_message(
-        chat_id=chat.chat_id,
-        role=MessageRole.USER,
-        text=user_message,
-        model=None,
-    )
-    yield _sse({"type": "user_persisted", "msg_id": user_msg.msg_id, "seq": 0})
+    ``state`` is an opt-in dict the caller passes in to capture the
+    accumulated assistant text, the user/assistant msg ids, and the final
+    done-event fields.  ``post_message`` uses it to build the idempotency
+    replay payload after the stream completes.  Callers that don't need
+    capture (e.g. the ``regenerate`` handler) can omit it.
 
-    # Stream the canned reply in word-chunks so the UI sees a real
-    # incremental render even pre-Bedrock.
-    words = _CANNED_REPLY.split(" ")
-    for i, word in enumerate(words):
-        chunk = (" " if i else "") + word
-        yield _sse({"type": "delta", "text": chunk})
+    ``persist_user`` controls whether the user message is written to
+    DynamoDB and announced via ``user_persisted``.  Regenerate sets this
+    to ``False`` because the user turn already exists.  ``index_delta_count``
+    is the net change to ``message_count`` on the chat-index row — 2 for a
+    fresh send (user + assistant), 0 for regenerate (deleted assistant +
+    new assistant cancel out).
+    """
+
+    state = state if state is not None else {}
+    resolved_model = resolve_model_id(model)
+    state["resolved_model"] = resolved_model
+
+    if persist_user:
+        user_msg = storage.put_message(
+            chat_id=chat.chat_id,
+            role=MessageRole.USER,
+            text=user_message,
+            model=None,
+        )
+        state["user_msg_id"] = user_msg.msg_id
+        yield sse_user_persisted(msg_id=user_msg.msg_id, seq=0)
+
+    agent = build_agent(model_id=model)
+    accumulated: list[str] = []
+    stop_reason = "end_turn"
+    input_tokens = 0
+    output_tokens = 0
+
+    async for event in agent.stream_async(user_message):
+        kind, payload = translate_event(event)
+        if kind == "delta":
+            accumulated.append(payload)
+            yield sse_delta(payload)
+        elif kind == "stop":
+            stop_reason = payload["stop_reason"]
+        elif kind == "usage":
+            input_tokens = payload["input_tokens"]
+            output_tokens = payload["output_tokens"]
+
+    assistant_text = "".join(accumulated)
+    state["assistant_text"] = assistant_text
+    state["input_tokens"] = input_tokens
+    state["output_tokens"] = output_tokens
+    state["stop_reason"] = stop_reason
 
     assistant_msg = storage.put_message(
         chat_id=chat.chat_id,
         role=MessageRole.ASSISTANT,
-        text=_CANNED_REPLY,
-        model=_CANNED_MODEL,
-        input_tokens=0,
-        output_tokens=0,
+        text=assistant_text,
+        model=resolved_model,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
     )
+    state["assistant_msg_id"] = assistant_msg.msg_id
 
     storage.update_chat_index(
         user_id=claims["sub"],
         chat=chat,
         last_user_preview=user_message,
-        delta_count=2,
+        delta_count=index_delta_count,
         last_message_at=assistant_msg.created_at,
     )
 
-    yield _sse(
-        {
-            "type": "done",
-            "msg_id": assistant_msg.msg_id,
-            "seq": 1,
-            "model": _CANNED_MODEL,
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "stop_reason": "end_turn",
-        }
+    yield sse_done(
+        msg_id=assistant_msg.msg_id,
+        seq=1,
+        model=resolved_model,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        stop_reason=stop_reason,
     )
 
 
@@ -176,9 +211,10 @@ async def post_message(
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     claims: dict[str, Any] = Depends(require_mgmt_user),
 ) -> StreamingResponse:
-    """Send a user message and stream the (canned, for now) assistant reply."""
+    """Send a user message and stream the Bedrock assistant reply via Strands."""
 
     chat = await _load_owned_chat(chat_id, claims["sub"])
+    model = payload.model or _DEFAULT_MODEL
 
     replay: dict[str, Any] | None = None
     if idempotency_key:
@@ -190,37 +226,71 @@ async def post_message(
         replay_payload = replay
 
         async def _replay() -> Any:
-            yield _sse(
-                {
-                    "type": "user_persisted",
-                    "msg_id": replay_payload["user_msg_id"],
-                    "seq": 0,
-                }
-            )
-            yield _sse({"type": "delta", "text": replay_payload["text"]})
-            yield _sse({"type": "done", **replay_payload["done"]})
+            yield sse_user_persisted(msg_id=replay_payload["user_msg_id"], seq=0)
+            yield sse_delta(replay_payload["text"])
+            yield sse_done(**replay_payload["done"])
 
         return StreamingResponse(_replay(), media_type="text/event-stream")
 
     async def _produce() -> Any:
-        async for chunk in _stream_canned_reply(
-            chat=chat, user_message=payload.message, claims=claims
+        state: dict[str, Any] = {}
+        async for chunk in _stream_bedrock_reply(
+            chat=chat,
+            user_message=payload.message,
+            model=model,
+            claims=claims,
+            state=state,
         ):
             yield chunk
-        if idempotency_key:
+        if idempotency_key and state.get("assistant_msg_id"):
             storage.store_idempotency_result(
                 user_id=claims["sub"],
                 key=idempotency_key,
                 payload={
-                    "user_msg_id": "n/a",
-                    "text": _CANNED_REPLY,
+                    "user_msg_id": state["user_msg_id"],
+                    "text": state["assistant_text"],
                     "done": {
-                        "model": _CANNED_MODEL,
-                        "input_tokens": 0,
-                        "output_tokens": 0,
-                        "stop_reason": "end_turn",
+                        "msg_id": state["assistant_msg_id"],
+                        "seq": 1,
+                        "model": state["resolved_model"],
+                        "input_tokens": state["input_tokens"],
+                        "output_tokens": state["output_tokens"],
+                        "stop_reason": state["stop_reason"],
                     },
                 },
             )
 
     return StreamingResponse(_produce(), media_type="text/event-stream")
+
+
+@router.post("/{chat_id}/regenerate")
+async def regenerate(
+    payload: RegenerateRequest,
+    chat_id: str = Path(...),
+    claims: dict[str, Any] = Depends(require_mgmt_user),
+) -> StreamingResponse:
+    """Drop the last assistant message and re-stream from the last user message."""
+
+    chat = await _load_owned_chat(chat_id, claims["sub"])
+    model = payload.model or chat.model_default or _DEFAULT_MODEL
+
+    storage.delete_last_assistant_message(chat_id)
+
+    msgs, _ = storage.list_messages(chat_id, limit=50, cursor=None)
+    last_user = next((m for m in reversed(msgs) if m.role == MessageRole.USER), None)
+    if last_user is None:
+        raise HTTPException(
+            status_code=400, detail="Cannot regenerate — chat has no user messages."
+        )
+
+    return StreamingResponse(
+        _stream_bedrock_reply(
+            chat=chat,
+            user_message=last_user.text,
+            model=model,
+            claims=claims,
+            persist_user=False,
+            index_delta_count=0,
+        ),
+        media_type="text/event-stream",
+    )

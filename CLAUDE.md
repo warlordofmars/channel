@@ -30,10 +30,13 @@ channel/
 │       │   └── mgmt_auth.py   # Management API authentication
 │       ├── agents/
 │       │   ├── __init__.py
-│       │   ├── bedrock.py     # Converse + converse_stream (raw Bedrock)
-│       │   └── inline_agent.py # invoke + invoke_stream (Bedrock inline agent)
+│       │   ├── chat_agent.py   # Strands Agent factory (build_agent / resolve_model_id)
+│       │   └── strands_sse.py  # Strands event → SSE byte translator
 │       └── api/
 │           ├── main.py        # FastAPI app + routes
+│           ├── _auth.py       # Shared mgmt-JWT dependency for /api/* routes
+│           ├── chats.py       # Chat CRUD + SSE streaming + regenerate
+│           ├── models.py      # GET /api/models — server allowlist
 │           └── csp.py         # CSP violation reporting endpoint
 ├── ui/
 │   ├── index.html             # Vite entry HTML
@@ -320,11 +323,14 @@ re-derive these during design review — cite them.
   take a `workspace_id` / `namespace` param on every call. Scope comes
   from the token claim; agents register a new DCR client per context and
   swap tokens to switch.
-- **Agent session IDs are user-namespaced** — the `inline_agent.py` wrapper
-  computes the Bedrock `sessionId` as `f"{jwt_sub}:{caller_session_id}"`.
-  Callers supply their own opaque `session_id`; the wrapper adds the user
-  prefix so sessions never bleed across users. The namespaced form is
-  internal — only the caller's `session_id` is echoed back in responses.
+- **Chat scope is enforced via the chat-index ownership check** — every
+  read/write of a chat goes through `_load_owned_chat(chat_id, jwt_sub)`
+  in `src/channel/api/chats.py` which compares the chat row's `user_id`
+  to the JWT `sub` claim. Mismatches return 404 (not 403) so chat
+  existence isn't leaked. This replaces the pre-Strands
+  `f"{jwt_sub}:{session_id}"` Bedrock sessionId namespacing — Strands'
+  `BedrockModel` doesn't expose Bedrock's session machinery, so the
+  cross-user guard happens at the API layer instead.
 
 ## UI conventions
 
