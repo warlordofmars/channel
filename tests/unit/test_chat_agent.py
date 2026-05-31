@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
 import pytest
 
 from channel.agents.chat_agent import (
@@ -11,6 +13,12 @@ from channel.agents.chat_agent import (
     build_agent,
     resolve_model_id,
 )
+
+
+@pytest.fixture(autouse=True)
+def _set_starter_env(monkeypatch):
+    """build_agent needs STARTER_ENV to derive the AgentCore Memory name."""
+    monkeypatch.setenv("STARTER_ENV", "test")
 
 
 def test_resolve_model_id_returns_full_bedrock_id_for_known_id():
@@ -50,17 +58,21 @@ def test_build_agent_constructs_strands_agent_with_bedrock_model(monkeypatch):
 
     monkeypatch.setattr("channel.agents.chat_agent.BedrockModel", FakeBedrockModel)
     monkeypatch.setattr("channel.agents.chat_agent.Agent", FakeAgent)
+    monkeypatch.setattr(
+        "channel.agents.chat_agent.get_or_create_memory", lambda env: "mem-test"
+    )
+    monkeypatch.setattr(
+        "channel.agents.chat_agent.AgentCoreMemoryHook", lambda **kw: object()
+    )
 
-    agent = build_agent(model_id="claude-sonnet-4-6")
+    agent = build_agent(
+        model_id="claude-sonnet-4-6", user_id="u-1", chat_id="c-1",
+    )
 
     assert isinstance(agent, FakeAgent)
     assert captured["bedrock_kwargs"]["model_id"] == "us.anthropic.claude-sonnet-4-6"
     assert captured["bedrock_kwargs"]["max_tokens"] == DEFAULT_MAX_TOKENS
     assert captured["system_prompt"] == DEFAULT_SYSTEM_PROMPT
-    # memory adapter is None in 7b — wired in 7c.  Strands' Agent does not
-    # accept a ``memory`` kwarg in 1.41.0, so we simply omit it; no memory
-    # is attached by default.
-    assert "memory" not in captured["agent_kwargs"]
 
 
 def test_build_agent_uses_custom_system_prompt_when_provided(monkeypatch):
@@ -71,6 +83,54 @@ def test_build_agent_uses_custom_system_prompt_when_provided(monkeypatch):
         "channel.agents.chat_agent.Agent",
         lambda model, system_prompt=None, **kw: captured.update({"system_prompt": system_prompt}),
     )
+    monkeypatch.setattr(
+        "channel.agents.chat_agent.get_or_create_memory", lambda env: "mem-test"
+    )
+    monkeypatch.setattr(
+        "channel.agents.chat_agent.AgentCoreMemoryHook", lambda **kw: object()
+    )
 
-    build_agent(model_id="claude-sonnet-4-6", system_prompt="Be brief.")
+    build_agent(
+        model_id="claude-sonnet-4-6",
+        user_id="u-1",
+        chat_id="c-1",
+        system_prompt="Be brief.",
+    )
     assert captured["system_prompt"] == "Be brief."
+
+
+def test_build_agent_attaches_agentcore_memory_hook(monkeypatch):
+    """Hook must be constructed with caller's user_id+chat_id and passed
+    in via ``hooks=[hook]``."""
+
+    captured: dict[str, object] = {}
+    sentinel_hook = MagicMock(name="memory_hook")
+
+    def fake_hook_factory(**kwargs):
+        captured["hook_kwargs"] = kwargs
+        return sentinel_hook
+
+    class FakeAgent:
+        def __init__(self, **kwargs):
+            captured["agent_kwargs"] = kwargs
+
+    monkeypatch.setattr("channel.agents.chat_agent.BedrockModel", lambda **_: object())
+    monkeypatch.setattr("channel.agents.chat_agent.Agent", FakeAgent)
+    monkeypatch.setattr(
+        "channel.agents.chat_agent.AgentCoreMemoryHook", fake_hook_factory,
+    )
+    monkeypatch.setattr(
+        "channel.agents.chat_agent.get_or_create_memory",
+        lambda env: f"channel-{env}-MEMID",
+    )
+
+    build_agent(
+        model_id="claude-sonnet-4-6", user_id="user-abc", chat_id="chat-xyz",
+    )
+
+    assert captured["hook_kwargs"] == {
+        "memory_id": "channel-test-MEMID",
+        "actor_id": "user-abc",
+        "session_id": "chat-xyz",
+    }
+    assert captured["agent_kwargs"]["hooks"] == [sentinel_hook]

@@ -2,17 +2,21 @@
 """Strands ``Agent`` factory for the chat router.
 
 The factory constructs a fresh ``strands.Agent`` per turn with a
-``BedrockModel`` and an optional system prompt.  Memory adapter is
-``None`` in 7b — 7c wires the AgentCore Memory adapter once the spike
-finalises the recall semantics.  Strands' ``Agent.__init__`` in 1.41.0
-does not accept a ``memory`` kwarg, so we simply omit it; the default
-behaviour is no memory attached.
+``BedrockModel`` and an optional system prompt.  Phase 7c attaches an
+``AgentCoreMemoryHook`` to every Agent so each round-trip is persisted
+to Bedrock AgentCore Memory — see
+``docs/superpowers/specs/2026-05-31-phase-7c-agentcore-memory-writes-design.md``.
+Recall is still disabled; that's 7d.
 """
 
 from __future__ import annotations
 
+import os
+
 from strands import Agent
 from strands.models import BedrockModel
+
+from channel.agents.memory import AgentCoreMemoryHook, get_or_create_memory
 
 # Caller-supplied short ids (``claude-sonnet-4-6``) → Bedrock cross-region
 # inference-profile IDs.  Strands' BedrockModel calls ``converse_stream``,
@@ -49,16 +53,30 @@ def resolve_model_id(short_id: str) -> str:
 def build_agent(
     *,
     model_id: str,
+    user_id: str,
+    chat_id: str,
     system_prompt: str | None = None,
     max_tokens: int = DEFAULT_MAX_TOKENS,
 ) -> Agent:
-    """Construct a fresh Strands ``Agent`` for one chat turn."""
+    """Construct a fresh Strands ``Agent`` for one chat turn.
+
+    ``user_id`` becomes the AgentCore ``actorId`` and ``chat_id`` the
+    AgentCore ``sessionId``.  The Memory resource itself is discovered
+    (or created) once per Lambda cold-start, keyed off the
+    ``STARTER_ENV`` env var.
+    """
 
     bedrock = BedrockModel(
         model_id=resolve_model_id(model_id),
         max_tokens=max_tokens,
     )
+    memory_hook = AgentCoreMemoryHook(
+        memory_id=get_or_create_memory(os.environ["STARTER_ENV"]),
+        actor_id=user_id,
+        session_id=chat_id,
+    )
     return Agent(
         model=bedrock,
         system_prompt=system_prompt or DEFAULT_SYSTEM_PROMPT,
+        hooks=[memory_hook],
     )
