@@ -51,3 +51,35 @@ describe("preload script", () => {
     expect(v).toBe("1.2.3");
   });
 });
+
+describe("preload — update bridge", () => {
+  it("exposes onUpdateStatus, registering an ipcRenderer.on listener", async () => {
+    await import("../preload/index.js");
+    const { contextBridge, ipcRenderer } = await import("electron");
+    // The preload module ran on import; capture the exposed surface.
+    const exposed = contextBridge.exposeInMainWorld.mock.calls.find(
+      ([name]) => name === "channelDesktop",
+    )[1];
+
+    const cb = vi.fn();
+    exposed.onUpdateStatus(cb);
+    expect(ipcRenderer.on).toHaveBeenCalledWith("desktop:update-status", expect.any(Function));
+
+    // Invoke the registered listener and assert the callback receives the payload.
+    const [, registeredListener] = ipcRenderer.on.mock.calls.find(
+      ([ch]) => ch === "desktop:update-status",
+    );
+    registeredListener({}, { state: "downloaded", version: "0.2.1" });
+    expect(cb).toHaveBeenCalledWith({ state: "downloaded", version: "0.2.1" });
+  });
+
+  it("exposes relaunchToUpdate, invoking the ipcRenderer", async () => {
+    await import("../preload/index.js");
+    const { contextBridge, ipcRenderer } = await import("electron");
+    const exposed = contextBridge.exposeInMainWorld.mock.calls.find(
+      ([name]) => name === "channelDesktop",
+    )[1];
+    await exposed.relaunchToUpdate();
+    expect(ipcRenderer.invoke).toHaveBeenCalledWith("desktop:relaunch-to-update");
+  });
+});

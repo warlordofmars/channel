@@ -28,7 +28,7 @@ export function mockElectron(overrides = {}) {
       });
     }),
     ipcMain: { handle: vi.fn(), removeHandler: vi.fn() },
-    ipcRenderer: { invoke: vi.fn() },
+    ipcRenderer: { invoke: vi.fn(), on: vi.fn() },
     contextBridge: { exposeInMainWorld: vi.fn() },
     shell: { openExternal: vi.fn(() => Promise.resolve()) },
     protocol: {

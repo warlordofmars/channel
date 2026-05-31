@@ -6,4 +6,8 @@ contextBridge.exposeInMainWorld("channelDesktop", {
   login: () => ipcRenderer.invoke("desktop:login"),
   logout: () => ipcRenderer.invoke("desktop:logout"),
   getVersion: () => ipcRenderer.invoke("desktop:version"),
+  onUpdateStatus: (cb) => {
+    ipcRenderer.on("desktop:update-status", (_event, payload) => cb(payload));
+  },
+  relaunchToUpdate: () => ipcRenderer.invoke("desktop:relaunch-to-update"),
 });
