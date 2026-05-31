@@ -13,12 +13,14 @@ function resolveModel(modelId) {
   return MODELS.find((m) => m.id === modelId) ?? MODELS[0];
 }
 
-// Bedrock returns model ids like `anthropic.claude-sonnet-4-6`; strip the
-// vendor prefix before looking up the friendly display name in MODELS.
-// Unknown ids fall back to the raw value (acceptable visual debug hint).
+// Bedrock returns model ids like `us.anthropic.claude-sonnet-4-6`
+// (cross-region inference profile) or `anthropic.claude-sonnet-4-6`
+// (base foundation-model). Strip whichever prefix is present before
+// looking up the friendly display name in MODELS. Unknown ids fall back
+// to the raw value (acceptable visual debug hint).
 function modelLabel(raw) {
   if (!raw) return "";
-  const shortId = raw.replace(/^anthropic\./, "");
+  const shortId = raw.replace(/^(us|global)\.anthropic\.|^anthropic\./, "");
   const display = MODELS.find((m) => m.id === shortId);
   return display ? display.name : raw;
 }

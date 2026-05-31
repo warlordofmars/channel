@@ -14,13 +14,18 @@ from __future__ import annotations
 from strands import Agent
 from strands.models import BedrockModel
 
-# Caller-supplied short ids (``claude-sonnet-4-6``) → full Bedrock model
-# ARNs.  The CDK stack at ``infra/stacks/channel_stack.py:341-345`` must
-# grant ``bedrock:InvokeModelWithResponseStream`` on every entry below.
+# Caller-supplied short ids (``claude-sonnet-4-6``) → Bedrock cross-region
+# inference-profile IDs.  Strands' BedrockModel calls ``converse_stream``,
+# which requires inference profiles (not base model IDs) for on-demand
+# throughput in us-east-1.  Verified via
+# ``aws bedrock list-inference-profiles --region us-east-1``.
+# The CDK stack at ``infra/stacks/channel_stack.py`` grants
+# ``bedrock:InvokeModelWithResponseStream`` on both the inference-profile
+# resources (us.* and global.*) and the underlying foundation models.
 _MODEL_ID_MAP = {
-    "claude-sonnet-4-6": "anthropic.claude-sonnet-4-6",
-    "claude-haiku-4-5": "anthropic.claude-haiku-4-5-20251001-v1:0",
-    "claude-opus-4-7": "anthropic.claude-opus-4-7",
+    "claude-sonnet-4-6": "us.anthropic.claude-sonnet-4-6",
+    "claude-haiku-4-5": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "claude-opus-4-7": "us.anthropic.claude-opus-4-7",
 }
 
 DEFAULT_MAX_TOKENS = 4096

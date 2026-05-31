@@ -327,14 +327,14 @@ describe("Conversation", () => {
           role: "assistant",
           text: "ok",
           msg_id: "a1",
-          model: "anthropic.claude-sonnet-4-6",
+          model: "us.anthropic.claude-sonnet-4-6",
           streaming: false,
         },
       ],
     });
     renderAt("/app/c/c1");
     expect(screen.getByText("Claude Sonnet 4.6")).toBeInTheDocument();
-    expect(screen.queryByText(/anthropic\./)).toBeNull();
+    expect(screen.queryByText(/^us\.anthropic\.|^anthropic\./)).toBeNull();
   });
 
   it("regenerate button calls hook.regenerate on the last assistant turn", () => {

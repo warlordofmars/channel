@@ -14,11 +14,11 @@ from channel.agents.chat_agent import (
 
 
 def test_resolve_model_id_returns_full_bedrock_id_for_known_id():
-    assert resolve_model_id("claude-sonnet-4-6") == "anthropic.claude-sonnet-4-6"
+    assert resolve_model_id("claude-sonnet-4-6") == "us.anthropic.claude-sonnet-4-6"
 
 
 def test_resolve_model_id_returns_full_bedrock_id_for_haiku():
-    assert resolve_model_id("claude-haiku-4-5") == "anthropic.claude-haiku-4-5-20251001-v1:0"
+    assert resolve_model_id("claude-haiku-4-5") == "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 
 
 def test_resolve_model_id_raises_on_unknown_model():
@@ -54,7 +54,7 @@ def test_build_agent_constructs_strands_agent_with_bedrock_model(monkeypatch):
     agent = build_agent(model_id="claude-sonnet-4-6")
 
     assert isinstance(agent, FakeAgent)
-    assert captured["bedrock_kwargs"]["model_id"] == "anthropic.claude-sonnet-4-6"
+    assert captured["bedrock_kwargs"]["model_id"] == "us.anthropic.claude-sonnet-4-6"
     assert captured["bedrock_kwargs"]["max_tokens"] == DEFAULT_MAX_TOKENS
     assert captured["system_prompt"] == DEFAULT_SYSTEM_PROMPT
     # memory adapter is None in 7b — wired in 7c.  Strands' Agent does not
