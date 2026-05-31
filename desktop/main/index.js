@@ -5,6 +5,7 @@ import { registerAppScheme, registerAppHandler } from "./protocol.js";
 import { createMainWindow } from "./window.js";
 import { registerIpc } from "./ipc.js";
 import { login } from "./auth.js";
+import { init as initUpdater, relaunchToUpdate } from "./updater.js";
 
 // esbuild CJS bundle: __dirname at runtime is <app>/dist-main/main/.
 // The preload sits at <app>/dist-main/preload/index.js (sibling directory).
@@ -33,8 +34,19 @@ app.whenReady().then(() => {
       login: () => login({ authBaseUrl: AUTH_BASE }),
       logout: () => {},                          // renderer clears localStorage itself
       getVersion: () => app.getVersion(),
+      relaunchToUpdate,
     },
   });
+
+  // Channel detection: `0.2.0-dev.142` → dev; `0.2.0` → latest.
+  // electron-builder bakes the version into package.json at build time.
+  // app.isPackaged is false for `electron .` (inv desktop-dev), true for built apps.
+  // Without this gate, dev would check the prod feed and try to install 0.2.0
+  // over an `electron .` session — disruptive and meaningless.
+  if (app.isPackaged) {
+    const channel = app.getVersion().includes("-dev") ? "dev" : "latest";
+    initUpdater({ channel, webContents: win.webContents });
+  }
 
   if (IS_SMOKE) {
     win.webContents.on("did-finish-load", () => {
