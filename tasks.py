@@ -449,6 +449,16 @@ def dev(ctx, seed=False):
         # Always enable auth bypass in local dev — the bypass only activates when
         # ?test_email= is present, so normal browser flows are unaffected.
         "STARTER_BYPASS_GOOGLE_AUTH": "1",
+        # Phase 7c: mount /api/_debug/* so the Playwright e2e can verify
+        # AgentCore writes. Prod stacks do NOT set this — see
+        # tests/unit/test_channel_stack.py for the guard.
+        "STARTER_ENABLE_DEBUG_ENDPOINTS": "1",
+        # Phase 7c: AgentCore Memory writes need an env tag for the
+        # ``channel-{env}`` naming convention. Personal dev points at
+        # the developer's own AWS account, so default to "jc"; override
+        # via STARTER_AGENTCORE_MEMORY_NAME if pointing at a shared
+        # pre-existing Memory.
+        "STARTER_ENV": os.environ.get("STARTER_ENV", "jc"),
     }
     ui_env = {
         **os.environ,
