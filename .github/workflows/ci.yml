@@ -515,7 +515,11 @@ jobs:
           cd desktop
           npm run build:main
           npm run build:renderer
-          npx electron-builder ${{ matrix.target }}
+          # --publish=never tells electron-builder to skip publish-config
+          # validation. The matrix builds unsigned artefacts for smoke
+          # testing only; the actual signed+published flow runs in the
+          # `publish-desktop-mac` job, which sets UPDATES_FEED_URL.
+          npx electron-builder ${{ matrix.target }} --publish=never
 
       - name: Smoke test (Linux uses xvfb)
         shell: bash
