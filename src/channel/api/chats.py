@@ -21,13 +21,17 @@ from channel.models import Chat, ChatCreate, ChatPatch, MessageRole, SendMessage
 
 _DEFAULT_MODEL = "canned-stream-v1"
 
-_CANNED_REPLY = (
-    "Here's how I'd think about it. "
-    "**First**, the ingestion buffer drains in roughly constant time. "
-    "**Second**, the consumer-side fan-out can be parallelised cheaply. "
-    "**Third**, retries should be idempotent or you'll double-count. "
-    "Want me to sketch the buffer interface?"
-)
+_CANNED_REPLY = """Good question — here's how I'd think about it.
+
+The core trade-off is between **read latency** and **write amplification**. A columnar store wins big on analytical scans because it only touches the columns you query, but you pay for that on ingest.
+
+A few concrete recommendations:
+
+1. **Batch your writes.** Buffer events for 5–10 seconds and flush in bulk. Columnar formats hate row-at-a-time inserts.
+2. **Partition by time, then by tenant.** Most of your queries are time-bounded, so this prunes the search space dramatically before any column is read.
+3. **Keep a hot row-store tail.** Serve the last few minutes from the existing row store and merge at query time — users never notice the seam.
+
+Want me to sketch the ingestion buffer as a small artifact you can drop into the pipeline?"""
 _CANNED_MODEL = "canned-stream-v1"
 
 router = APIRouter(prefix="/chats", tags=["chats"])
