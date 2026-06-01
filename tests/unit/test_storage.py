@@ -101,6 +101,9 @@ class FakeTable:
         if exclusive_start is not None:
             # Drop everything up to AND including the item whose
             # (PK, SK) matches the cursor — mirrors DynamoDB pagination.
+            # If the cursor item has been deleted (e.g. during a
+            # paginated-delete loop), fall back to SK-based position so
+            # pages after the cursor are still reachable.
             cursor_pk = exclusive_start.get("PK")
             cursor_sk = exclusive_start.get("SK")
             for idx, item in enumerate(items):
@@ -108,9 +111,12 @@ class FakeTable:
                     items = items[idx + 1 :]
                     break
             else:
-                # Cursor doesn't match any item — DynamoDB would return
-                # nothing; mirror that.
-                items = []
+                # Cursor item not found (e.g. already deleted) — skip
+                # all items whose SK is <= cursor_sk to preserve ordering.
+                if cursor_sk is not None:
+                    items = [i for i in items if i.get("SK", "") > cursor_sk]
+                else:
+                    items = []
         result: dict[str, Any] = {}
         if limit is not None and len(items) > limit:
             returned = items[:limit]
@@ -125,6 +131,9 @@ class FakeTable:
     def delete_item(self, Key: dict[str, str]) -> dict[str, Any]:
         self.items.pop((Key["PK"], Key["SK"]), None)
         return {}
+
+    def batch_writer(self) -> "_FakeBatchWriter":
+        return _FakeBatchWriter(self)
 
     def update_item(self, Key: dict[str, str], **kwargs: Any) -> dict[str, Any]:
         item = self.items.setdefault((Key["PK"], Key["SK"]), {**Key})
@@ -155,6 +164,22 @@ class FakeTable:
                 item.get(resolve(attr.strip()), 0) + values[placeholder.strip()]
             )
         return {"Attributes": item}
+
+
+class _FakeBatchWriter:
+    """Context manager that proxies delete_item calls back to a FakeTable."""
+
+    def __init__(self, fake_table: FakeTable) -> None:
+        self._table = fake_table
+
+    def __enter__(self) -> "_FakeBatchWriter":
+        return self
+
+    def __exit__(self, *_: Any) -> None:
+        pass
+
+    def delete_item(self, Key: dict[str, str]) -> None:
+        self._table.delete_item(Key)
 
 
 @pytest.fixture
@@ -434,3 +459,50 @@ def test_patch_chat_with_no_fields_is_noop(table: FakeTable) -> None:
     before = dict(table.items[(pk, sk)])
     patch_chat(user_id="u-1", chat=chat, title=None, archived=None)
     assert table.items[(pk, sk)] == before
+
+
+def test_delete_chat_removes_message_rows_and_chat_index_row(table: FakeTable) -> None:
+    """delete_chat removes EVERY message row plus the chat-index row.
+
+    Uses a chat with 26 messages to cross the 25-row DDB batch boundary
+    — guards against off-by-one in the batched-delete loop.
+    """
+    from channel import storage
+
+    chat = create_chat(user_id="u1", title="t", model_default="claude-sonnet-4-6")
+    # Plant 26 fake message rows.
+    for i in range(26):
+        table.put_item(Item={
+            "PK": f"CHAT#{chat.chat_id}",
+            "SK": f"MSG#2026-06-01T00:00:00.{i:06d}#m{i}",
+            "msg_id": f"m{i}",
+            "text": f"hello {i}",
+            "role": "user",
+        })
+
+    storage.delete_chat(user_id="u1", chat=chat)
+
+    # All message rows gone.
+    remaining_msgs = [
+        item for item in table.items.values()
+        if item["PK"] == f"CHAT#{chat.chat_id}" and item["SK"].startswith("MSG#")
+    ]
+    assert len(remaining_msgs) == 0, (
+        f"expected 0 message rows after delete; got {len(remaining_msgs)}"
+    )
+
+    # Chat-index row gone.
+    idx = table.get_item(Key={
+        "PK": "USER#u1",
+        "SK": storage._chat_index_sk(chat.created_at, chat.chat_id),
+    })
+    assert "Item" not in idx, "chat-index row still present after delete"
+
+
+def test_delete_chat_is_idempotent(table: FakeTable) -> None:
+    """Calling delete_chat twice doesn't raise — DDB delete is naturally idempotent."""
+    from channel import storage
+
+    chat = create_chat(user_id="u1", title="t", model_default="claude-sonnet-4-6")
+    storage.delete_chat(user_id="u1", chat=chat)
+    storage.delete_chat(user_id="u1", chat=chat)  # MUST NOT raise

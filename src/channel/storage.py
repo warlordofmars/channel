@@ -235,6 +235,51 @@ def patch_chat(
     )
 
 
+def delete_chat(*, user_id: str, chat: Chat) -> None:
+    """Permanently delete a chat: all its message rows + the chat-index row.
+
+    Message rows live at ``PK=CHAT#{chat_id}, SK begins_with MSG#`` and
+    are paginated + batch-deleted in chunks of 25 (DDB batch-write
+    limit). The chat-index row lives at
+    ``PK=USER#{user_id}, SK=CHAT#{created_at}#{chat_id}`` and is a
+    single delete.
+
+    DDB ``DeleteItem`` is naturally idempotent — calling this twice for
+    the same chat is safe (the second call finds nothing to delete and
+    no-ops). The API layer should still call this only once per user
+    action; idempotency is a defence-in-depth guarantee, not a feature
+    to lean on.
+    """
+    table = _get_table()
+    # 1. Paginate + batch-delete all message rows.
+    last_evaluated_key: dict[str, Any] | None = None
+    while True:
+        query_kwargs: dict[str, Any] = {
+            "KeyConditionExpression": (
+                Key("PK").eq(f"CHAT#{chat.chat_id}") & Key("SK").begins_with("MSG#")
+            ),
+            "ProjectionExpression": "PK, SK",  # don't fetch payloads we'll just throw away
+            "Limit": 25,  # bound memory per page; drives pagination in the while-loop
+        }
+        if last_evaluated_key:
+            query_kwargs["ExclusiveStartKey"] = last_evaluated_key
+        page = table.query(**query_kwargs)
+        items = page.get("Items", [])
+        if items:
+            with table.batch_writer() as bw:
+                for it in items:
+                    bw.delete_item(Key={"PK": it["PK"], "SK": it["SK"]})
+        last_evaluated_key = page.get("LastEvaluatedKey")
+        if not last_evaluated_key:
+            break
+
+    # 2. Delete the chat-index row.
+    table.delete_item(Key={
+        "PK": f"USER#{user_id}",
+        "SK": _chat_index_sk(chat.created_at, chat.chat_id),
+    })
+
+
 def reserve_idempotency_key(*, user_id: str, key: str) -> dict[str, Any] | None:
     """Reserve a key via ConditionalPut.  Returns stored payload if already used.
 
