@@ -49,18 +49,22 @@ export default function Icon({ name, size = 18, stroke = 1.6, style = {} }) {
     case "refresh":      return <svg {...p}><path d="M20 7a8 8 0 1 0 1.5 6"/><path d="M20 3v4.5h-4.5"/></svg>;
     case "thumb-up":     return <svg {...p}><path d="M7 11v8H4v-8z"/><path d="M7 11l4-7a2 2 0 0 1 2 2v3h5a2 2 0 0 1 2 2.3l-1 5A2 2 0 0 1 17 19H7"/></svg>;
     case "thumb-down":   return <svg {...p}><path d="M17 13V5h3v8z"/><path d="M17 13l-4 7a2 2 0 0 1-2-2v-3H6a2 2 0 0 1-2-2.3l1-5A2 2 0 0 1 7 5h10"/></svg>;
+    case "trash":        return <svg {...p}><path d="M4 7h16M9 7V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2M6 7l1 13a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-13M10 11v7M14 11v7"/></svg>;
     case "close":        return <svg {...p}><path d="M6 6l12 12M18 6L6 18"/></svg>;
     case "check":        return <svg {...p}><path d="M5 12.5l4.5 4.5L19 6.5"/></svg>;
     case "file":         return <svg {...p}><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/></svg>;
     case "doc":          return <svg {...p}><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4M9 13h6M9 16.5h4"/></svg>;
+    case "folder-x":     return <svg {...p}><path d="M3 7.5A1.5 1.5 0 0 1 4.5 6h4l2 2.2H19.5A1.5 1.5 0 0 1 21 9.7V17a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 13l6 4M15 13l-6 4"/></svg>;
     case "globe":        return <svg {...p}><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.7 2.5 15.3 0 18M12 3c-2.5 2.7-2.5 15.3 0 18"/></svg>;
     case "sparkle":      return <svg {...p}><path d="M12 3l1.8 6.2L20 11l-6.2 1.8L12 19l-1.8-6.2L4 11l6.2-1.8z"/></svg>;
     case "menu":         return <svg {...p}><path d="M4 7h16M4 12h16M4 17h16"/></svg>;
+    case "more-vertical":return <svg {...p}><circle cx="12" cy="5" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="12" cy="19" r="1.4"/></svg>;
     case "pin":          return <svg {...p}><path d="M9 4h6l-1 5 3 3v2H7v-2l3-3z"/><path d="M12 14v6"/></svg>;
     case "dots":         return <svg {...p}><circle cx="5" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="19" cy="12" r="1.4"/></svg>;
     case "star":         return <svg {...p}><path d="M12 3.5l2.6 5.7 6.2.6-4.7 4.1 1.4 6.1L12 16.9 6.5 20l1.4-6.1L3.2 9.8l6.2-.6z"/></svg>;
     case "database":     return <svg {...p}><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg>;
     case "play":         return <svg {...p}><path d="M7 5l12 7-12 7z"/></svg>;
+    case "pencil":       return <svg {...p}><path d="M4 20h4L19 9a2 2 0 0 0-3-3L5 16z"/><path d="M14 7l3 3"/></svg>;
     case "expand":       return <svg {...p}><path d="M9 4H4v5M15 4h5v5M9 20H4v-5M15 20h5v-5"/></svg>;
     default:             return null;
   }

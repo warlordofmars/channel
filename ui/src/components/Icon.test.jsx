@@ -76,6 +76,10 @@ describe("Icon", () => {
     "database",
     "play",
     "expand",
+    "folder-x",
+    "more-vertical",
+    "pencil",
+    "trash",
   ])("renders an SVG for the '%s' name", (name) => {
     const { container } = render(<Icon name={name} />);
     expect(container.querySelector("svg")).toBeTruthy();
