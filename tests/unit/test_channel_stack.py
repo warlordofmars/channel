@@ -108,6 +108,7 @@ def test_lambda_role_grants_agentcore_write_and_lookup_actions(dev_template):
         "bedrock-agentcore:CreateMemory",
         "bedrock-agentcore:GetMemory",
         "bedrock-agentcore:ListMemories",
+        "bedrock-agentcore:RetrieveMemoryRecords",  # Phase 7d recall
     }
     granted: set[str] = set()
     for pol in policies.values():

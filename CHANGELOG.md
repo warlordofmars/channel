@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Phase 7d — agent now recalls relevant context from the user's
+  PRIOR chats via Bedrock AgentCore Memory, and auto-titles new
+  chats in 3-6 words after the first reply. Recall fires per turn
+  with a 5-turn cache; injection is a Markdown addendum on the
+  system prompt. Auto-title uses a Haiku one-shot Strands Agent
+  emitted inline as a new `title_suggested` SSE event. Both
+  features fail-soft and ship behind `STARTER_RECALL_ENABLED` and
+  `STARTER_AUTO_TITLE_ENABLED` kill-switches. NOTE: AgentCore's
+  `SemanticMemoryStrategy` is asynchronous — newly-written events
+  take minutes to appear as queryable recall records.
 - Phase 7c — agent now persists every chat turn to Bedrock AgentCore
   Memory via a Strands `AfterInvocationEvent` hook. Writes are
   fire-and-forget (never block the SSE response), failures swallowed

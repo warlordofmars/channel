@@ -33,6 +33,18 @@ describe("parseSseChunk", () => {
     const events = parseSseChunk('event: delta\ndata: {"type":"delta","text":"y"}\n\n');
     expect(events).toEqual([{ type: "delta", text: "y" }]);
   });
+
+  it("passes through title_suggested events with chat_id + title", () => {
+    // Phase 7d: parser is type-agnostic. Regression guard so a future
+    // refactor that restricts allowed event types doesn't break the
+    // auto-title flow.
+    const events = parseSseChunk(
+      'data: {"type":"title_suggested","chat_id":"c1","title":"New title"}\n\n',
+    );
+    expect(events).toEqual([
+      { type: "title_suggested", chat_id: "c1", title: "New title" },
+    ]);
+  });
 });
 
 describe("makeSseDecoder", () => {

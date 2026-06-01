@@ -129,6 +129,7 @@ def test_get_or_create_memory_does_not_match_unrelated_prefix():
         "memories": [{"id": "channel_jcsmith-AAAA1111"}],
     }
     fake_control.create_memory.return_value = {"memory": {"id": "channel_jc-NEW9NEW9"}}
+    fake_control.get_memory.return_value = {"memory": {"status": "ACTIVE"}}
 
     with patch("channel.agents.memory.boto3.client", return_value=fake_control):
         assert get_or_create_memory("jc") == "channel_jc-NEW9NEW9"
@@ -142,6 +143,10 @@ def test_get_or_create_memory_creates_when_absent():
     fake_control.create_memory.return_value = {
         "memory": {"id": "channel_dev-NEW1NEW1"},
     }
+    # Phase 7d: bootstrap polls get_memory until status=ACTIVE.
+    fake_control.get_memory.return_value = {
+        "memory": {"status": "ACTIVE"},
+    }
 
     with patch("channel.agents.memory.boto3.client", return_value=fake_control):
         assert get_or_create_memory("dev") == "channel_dev-NEW1NEW1"
@@ -149,6 +154,74 @@ def test_get_or_create_memory_creates_when_absent():
     fake_control.create_memory.assert_called_once()
     kwargs = fake_control.create_memory.call_args.kwargs
     assert kwargs["name"] == "channel_dev"
+    # Phase 7d: SemanticMemoryStrategy must be configured so
+    # RetrieveMemoryRecords actually returns data. Without a strategy,
+    # the recall side of the Memory loop is a no-op.
+    strategies = kwargs["memoryStrategies"]
+    assert len(strategies) == 1
+    assert "semanticMemoryStrategy" in strategies[0]
+    assert strategies[0]["semanticMemoryStrategy"]["namespaces"] == [
+        "/strategies/{memoryStrategyId}/actors/{actorId}",
+    ]
+
+
+def test_get_or_create_memory_polls_until_active(monkeypatch):
+    """Phase 7d: newly-created memories enter CREATING; poll until ACTIVE
+    before returning so the first chat doesn't lose events to validation
+    errors."""
+    fake_control = MagicMock()
+    fake_control.list_memories.return_value = {"memories": []}
+    fake_control.create_memory.return_value = {
+        "memory": {"id": "channel_dev-NEW1NEW1"},
+    }
+    # First two get_memory calls return CREATING, third returns ACTIVE.
+    fake_control.get_memory.side_effect = [
+        {"memory": {"status": "CREATING"}},
+        {"memory": {"status": "CREATING"}},
+        {"memory": {"status": "ACTIVE"}},
+    ]
+    # Skip the sleep so the test is fast.
+    monkeypatch.setattr("channel.agents.memory.time.sleep", lambda _s: None)
+
+    with patch("channel.agents.memory.boto3.client", return_value=fake_control):
+        assert get_or_create_memory("dev") == "channel_dev-NEW1NEW1"
+
+    assert fake_control.get_memory.call_count == 3
+
+
+def test_get_or_create_memory_raises_when_polling_times_out(monkeypatch):
+    fake_control = MagicMock()
+    fake_control.list_memories.return_value = {"memories": []}
+    fake_control.create_memory.return_value = {
+        "memory": {"id": "channel_dev-STUCK"},
+    }
+    fake_control.get_memory.return_value = {"memory": {"status": "CREATING"}}
+    # Force the timeout to fire on the next monotonic call.
+    times = iter([0.0, 1e9])  # second call exceeds deadline
+    monkeypatch.setattr("channel.agents.memory.time.monotonic", lambda: next(times))
+    monkeypatch.setattr("channel.agents.memory.time.sleep", lambda _s: None)
+
+    with (
+        patch("channel.agents.memory.boto3.client", return_value=fake_control),
+        pytest.raises(TimeoutError, match="did not reach ACTIVE"),
+    ):
+        get_or_create_memory("dev")
+
+
+def test_get_or_create_memory_raises_when_terminal_status(monkeypatch):
+    fake_control = MagicMock()
+    fake_control.list_memories.return_value = {"memories": []}
+    fake_control.create_memory.return_value = {
+        "memory": {"id": "channel_dev-BAD"},
+    }
+    fake_control.get_memory.return_value = {"memory": {"status": "FAILED"}}
+    monkeypatch.setattr("channel.agents.memory.time.sleep", lambda _s: None)
+
+    with (
+        patch("channel.agents.memory.boto3.client", return_value=fake_control),
+        pytest.raises(RuntimeError, match="terminal status 'FAILED'"),
+    ):
+        get_or_create_memory("dev")
 
 
 def test_get_or_create_memory_respects_override_env_var(monkeypatch):

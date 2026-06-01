@@ -18,6 +18,7 @@ import asyncio
 import logging
 import os
 import re
+import time
 from datetime import datetime, timezone
 from typing import Any, cast
 
@@ -95,14 +96,60 @@ def get_or_create_memory(env: str) -> str:
             _memory_id_cache[env] = mem_id
             return mem_id
 
+    # Phase 7d: configure a SemanticMemoryStrategy so AgentCore derives
+    # searchable memory records from raw events. Without a strategy,
+    # ``RetrieveMemoryRecords`` always returns empty regardless of how
+    # many events have been written. The strategy is async — newly
+    # written events take minutes to appear as records. The namespace
+    # ``/strategies/{memoryStrategyId}/actors/{actorId}`` (the
+    # AgentCore-default for SEMANTIC) is what recall.py queries.
     created = control.create_memory(
         name=name,
-        memoryStrategies=[],
+        memoryStrategies=[
+            {
+                "semanticMemoryStrategy": {
+                    "name": "channel_semantic_recall",
+                    "namespaces": [
+                        "/strategies/{memoryStrategyId}/actors/{actorId}",
+                    ],
+                },
+            },
+        ],
         eventExpiryDuration=90,
     )
     memory_id = created["memory"]["id"]
+
+    # Phase 7d: newly-created memories are in ``CREATING`` status for
+    # ~30s. CreateEvent and RetrieveMemoryRecords both reject calls
+    # against a non-ACTIVE memory with a ValidationException. Block
+    # ``get_or_create_memory`` until the memory is ready so the first
+    # chat after a cold start doesn't lose its events / produce empty
+    # recall. Subsequent requests use the cached id without polling.
+    _wait_for_memory_active(control, memory_id)
     _memory_id_cache[env] = memory_id
     return memory_id
+
+
+def _wait_for_memory_active(
+    control: Any,
+    memory_id: str,
+    *,
+    timeout_seconds: int = 360,
+    poll_seconds: int = 5,
+) -> None:
+    """Poll ``GetMemory`` until status is ``ACTIVE`` or timeout."""
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        resp = control.get_memory(memoryId=memory_id)
+        status = resp.get("memory", {}).get("status")
+        if status == "ACTIVE":
+            return
+        if status in ("FAILED", "DELETING", "DELETED"):
+            raise RuntimeError(f"AgentCore Memory {memory_id} reached terminal status {status!r}")
+        time.sleep(poll_seconds)
+    raise TimeoutError(
+        f"AgentCore Memory {memory_id} did not reach ACTIVE within {timeout_seconds}s"
+    )
 
 
 class AgentCoreMemoryHook:

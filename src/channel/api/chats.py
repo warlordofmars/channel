@@ -9,20 +9,24 @@ so chat existence isn't leaked.
 
 from __future__ import annotations
 
+import logging
+import os
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Response
 from fastapi.responses import StreamingResponse
 
 from channel import storage
-from channel.agents.chat_agent import build_agent, resolve_model_id
+from channel.agents.chat_agent import build_agent, build_titler_agent, resolve_model_id
 from channel.agents.strands_sse import (
     sse_delta,
     sse_done,
+    sse_title_suggested,
     sse_user_persisted,
     translate_event,
 )
 from channel.api._auth import require_mgmt_user
+from channel.metrics import record_auto_title_outcome
 from channel.models import (
     Chat,
     ChatCreate,
@@ -32,6 +36,8 @@ from channel.models import (
     RegenerateRequest,
     SendMessageRequest,
 )
+
+logger = logging.getLogger(__name__)
 
 _DEFAULT_MODEL = "claude-sonnet-4-6"
 
@@ -159,6 +165,10 @@ async def _stream_bedrock_reply(
     state = state if state is not None else {}
     resolved_model = resolve_model_id(model)
     state["resolved_model"] = resolved_model
+    # Capture "this was the first round-trip" BEFORE we persist anything.
+    # Auto-title block below uses it to fire exactly once per chat
+    # (Phase 7d idempotency).
+    was_first_round_trip = chat.message_count == 0
 
     # Load the chat's stored history BEFORE persisting the new user
     # message so the loaded list is the true prior context. For
@@ -235,6 +245,42 @@ async def _stream_bedrock_reply(
         output_tokens=output_tokens,
         stop_reason=stop_reason,
     )
+
+    # Phase 7d auto-title: after the FIRST round-trip lands, fire a
+    # one-shot Haiku Agent to summarise the exchange in 3-6 words.
+    # Inline-emitted in the same SSE stream after ``done`` and BEFORE
+    # close — the SPA's readSse loop iterates until reader is done.
+    # Fail-soft: titler errors log + EMF + swallow; the user's stream
+    # has already completed by this point.
+    if was_first_round_trip and os.environ.get("STARTER_AUTO_TITLE_ENABLED", "1") == "1":
+        try:
+            titler = build_titler_agent()
+            titler_prompt = f"User: {user_message}\nAssistant: {assistant_text[:500]}"
+            title_chunks: list[str] = []
+            async for event in titler.stream_async(titler_prompt):
+                kind, payload = translate_event(event)
+                if kind == "delta":
+                    title_chunks.append(payload)
+            title = "".join(title_chunks).strip().strip('"').strip(".")
+            if title:
+                storage.patch_chat(
+                    user_id=claims["sub"],
+                    chat=chat,
+                    title=title,
+                    archived=None,
+                )
+                yield sse_title_suggested(chat_id=chat.chat_id, title=title)
+                await record_auto_title_outcome(success=True)
+            else:
+                await record_auto_title_outcome(success=False)
+        except Exception as exc:
+            logger.warning(
+                "auto_title_failed chat_id=%s",
+                chat.chat_id,
+                extra={"error_type": type(exc).__name__, "error_message": str(exc)},
+                exc_info=True,
+            )
+            await record_auto_title_outcome(success=False)
 
 
 @router.post("/{chat_id}/messages")

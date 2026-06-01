@@ -384,6 +384,7 @@ class ChannelStack(cdk.Stack):
                     "bedrock-agentcore:DeleteEvent",
                     "bedrock-agentcore:CreateMemory",
                     "bedrock-agentcore:GetMemory",
+                    "bedrock-agentcore:RetrieveMemoryRecords",  # Phase 7d recall
                 ],
                 resources=[agentcore_memory_arn],
             )

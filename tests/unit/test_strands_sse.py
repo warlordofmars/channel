@@ -100,3 +100,15 @@ def test_sse_user_persisted_includes_msg_id_and_seq():
     raw = sse_user_persisted(msg_id="u-1", seq=0)
     payload = json.loads(raw[6:-2])
     assert payload == {"type": "user_persisted", "msg_id": "u-1", "seq": 0}
+
+
+def test_sse_title_suggested_emits_chat_id_and_title():
+    from channel.agents.strands_sse import sse_title_suggested
+
+    raw = sse_title_suggested(chat_id="c-1", title="Pytest fixture debug")
+    payload = json.loads(raw[6:-2])
+    assert payload == {
+        "type": "title_suggested",
+        "chat_id": "c-1",
+        "title": "Pytest fixture debug",
+    }
