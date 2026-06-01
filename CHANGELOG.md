@@ -69,6 +69,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Auto-titler now salvages partial output when the Haiku titler trips
+  `MaxTokensReachedException`. Previously the whole title was
+  discarded and the chat stayed on "New chat" in the sidebar. The
+  salvage path strips colon-prefixed preamble (e.g. "Here's a title:
+  ...") and caps the result at 6 words. Closes #90.
 - `useChatStream` no longer aborts the in-flight stream during React
   StrictMode dev double-effect cleanup. The `useEffect(() => () =>
   abort(), [chatId])` pattern fired during the initial mount's cleanup

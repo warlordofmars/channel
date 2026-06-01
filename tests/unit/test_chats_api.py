@@ -1179,3 +1179,186 @@ def test_delete_chat_wipe_paginates_with_next_token(
     # Second list_events call must include nextToken.
     second_call_kwargs = fake_ac.list_events.call_args_list[1].kwargs
     assert second_call_kwargs["nextToken"] == "tok-abc"
+
+
+# ---- _postprocess_title helper ----------------------------------------------
+
+
+def test_postprocess_title_passes_clean_input_through():
+    from channel.api.chats import _postprocess_title
+
+    assert _postprocess_title("Debug pytest fixture") == "Debug pytest fixture"
+
+
+def test_postprocess_title_strips_colon_prefixed_preamble():
+    from channel.api.chats import _postprocess_title
+
+    assert (
+        _postprocess_title("Here's a 3-6 word title: Debug pytest fixture")
+        == "Debug pytest fixture"
+    )
+
+
+def test_postprocess_title_returns_empty_on_empty_input():
+    from channel.api.chats import _postprocess_title
+
+    assert _postprocess_title("") == ""
+
+
+def test_postprocess_title_caps_at_6_words():
+    from channel.api.chats import _postprocess_title
+
+    assert (
+        _postprocess_title("One two three four five six seven eight")
+        == "One two three four five six"
+    )
+
+
+def test_postprocess_title_strips_wrapping_quotes():
+    from channel.api.chats import _postprocess_title
+
+    assert _postprocess_title('"Debug pytest fixture"') == "Debug pytest fixture"
+
+
+def test_postprocess_title_returns_empty_on_preamble_only_truncation():
+    """When the model wrote preamble but ran out of tokens before
+    emitting the actual title, the colon-split returns an empty tail.
+    The helper MUST surface that as empty (caller treats it as a
+    failure outcome) — emitting the preamble itself as the title
+    would be worse than 'New chat'."""
+    from channel.api.chats import _postprocess_title
+
+    assert _postprocess_title("Here's a 3-6 word title:") == ""
+
+
+# ---- Titler salvage on MaxTokensReachedException ----------------------------
+
+
+def test_titler_salvages_partial_output_on_max_tokens(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Strands emits deltas BEFORE raising MaxTokensReachedException
+    on the cap, so title_chunks already holds usable partial text.
+    The salvage path strips the preamble via colon-split and persists
+    the recovered title."""
+    from strands.types.exceptions import MaxTokensReachedException
+
+    _stub_first_round_trip_chat(monkeypatch)
+
+    patched_titles: list[str] = []
+    monkeypatch.setattr(
+        "channel.api.chats.storage.patch_chat",
+        lambda **kwargs: patched_titles.append(kwargs["title"]),
+    )
+
+    async def fake_main_stream(self, prompt):
+        yield {"event": {"contentBlockDelta": {"delta": {"text": "Hi"}}}}
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+
+    class FakeAgent:
+        stream_async = fake_main_stream
+
+    monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
+
+    async def fake_titler_stream(self, prompt):
+        yield {"event": {"contentBlockDelta": {"delta": {"text": "Here's a title: "}}}}
+        yield {"event": {"contentBlockDelta": {"delta": {"text": "Debug pytest fixture"}}}}
+        raise MaxTokensReachedException("token limit reached")
+
+    class FakeTitler:
+        stream_async = fake_titler_stream
+
+    monkeypatch.setattr("channel.api.chats.build_titler_agent", lambda: FakeTitler())
+
+    response = client.post(
+        "/api/chats/c1/messages",
+        json={"message": "hi", "model": "claude-sonnet-4-6", "effort": "medium"},
+    )
+    assert response.status_code == 200
+    body = response.text
+    assert '"type": "title_suggested"' in body
+    assert '"title": "Debug pytest fixture"' in body
+    assert patched_titles == ["Debug pytest fixture"]
+
+
+def test_titler_records_failure_when_only_preamble_emitted(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If MaxTokensReachedException fires before any post-colon text
+    arrives, _postprocess_title returns empty and we MUST NOT emit
+    SSE — surfacing the preamble as the title would be worse than
+    leaving 'New chat'."""
+    from strands.types.exceptions import MaxTokensReachedException
+
+    _stub_first_round_trip_chat(monkeypatch)
+
+    patched: list[Any] = []
+    monkeypatch.setattr(
+        "channel.api.chats.storage.patch_chat",
+        lambda **kwargs: patched.append(kwargs),
+    )
+
+    async def fake_main_stream(self, prompt):
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+
+    class FakeAgent:
+        stream_async = fake_main_stream
+
+    monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
+
+    async def fake_titler_stream(self, prompt):
+        yield {"event": {"contentBlockDelta": {"delta": {"text": "Here's a 3-6 word title:"}}}}
+        raise MaxTokensReachedException("token limit reached")
+
+    class FakeTitler:
+        stream_async = fake_titler_stream
+
+    monkeypatch.setattr("channel.api.chats.build_titler_agent", lambda: FakeTitler())
+
+    response = client.post(
+        "/api/chats/c1/messages",
+        json={"message": "hi", "model": "claude-sonnet-4-6", "effort": "medium"},
+    )
+    assert response.status_code == 200
+    assert '"type": "title_suggested"' not in response.text
+    assert patched == []
+
+
+def test_titler_outer_except_catches_unrelated_errors(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Non-MaxTokens errors (network, agent build failure, etc.) still
+    hit the outer except Exception and record failure — fail-soft
+    contract preserved for arbitrary exceptions."""
+    _stub_first_round_trip_chat(monkeypatch)
+
+    patched: list[Any] = []
+    monkeypatch.setattr(
+        "channel.api.chats.storage.patch_chat",
+        lambda **kwargs: patched.append(kwargs),
+    )
+
+    async def fake_main_stream(self, prompt):
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+
+    class FakeAgent:
+        stream_async = fake_main_stream
+
+    monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
+
+    async def fake_titler_stream(self, prompt):
+        raise RuntimeError("bedrock down")
+        yield  # unreachable; declares this as an async generator
+
+    class FakeTitler:
+        stream_async = fake_titler_stream
+
+    monkeypatch.setattr("channel.api.chats.build_titler_agent", lambda: FakeTitler())
+
+    response = client.post(
+        "/api/chats/c1/messages",
+        json={"message": "hi", "model": "claude-sonnet-4-6", "effort": "medium"},
+    )
+    assert response.status_code == 200
+    assert '"type": "title_suggested"' not in response.text
+    assert patched == []

@@ -17,6 +17,7 @@ from typing import Any
 import boto3
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Response
 from fastapi.responses import StreamingResponse
+from strands.types.exceptions import MaxTokensReachedException
 
 from channel import storage
 from channel.agents.chat_agent import build_agent, build_titler_agent, resolve_model_id
@@ -92,6 +93,30 @@ async def list_chats(
         "items": [c.model_dump() for c in chats],
         "next_cursor": next_cursor,
     }
+
+
+def _postprocess_title(raw: str) -> str:
+    """Normalize raw titler output into a usable sidebar title.
+
+    Haiku occasionally emits preamble (e.g. ``"Here's a 3-6 word title:
+    Debug pytest fixture"``). We strip leading explanations by taking
+    the part after the LAST colon if a colon is present, then split
+    into words and cap at 6 (matches the titler's 3-6 word system
+    prompt). Strips wrapping quote characters and trailing sentence
+    punctuation.
+
+    Returns empty string if no usable text remains — caller treats
+    that as a failure outcome (better to leave "New chat" than to
+    surface preamble as a title).
+    """
+    if not raw:
+        return ""
+    candidate = raw.rsplit(":", 1)[-1] if ":" in raw else raw
+    candidate = candidate.strip().strip('"').strip("'").strip()
+    words = candidate.split()
+    if not words:
+        return ""
+    return " ".join(words[:6]).rstrip(".,;:!?")
 
 
 def _agentcore_client() -> Any:
@@ -329,15 +354,23 @@ async def _stream_bedrock_reply(
     # Fail-soft: titler errors log + EMF + swallow; the user's stream
     # has already completed by this point.
     if was_first_round_trip and os.environ.get("STARTER_AUTO_TITLE_ENABLED", "1") == "1":
+        truncated = False
         try:
             titler = build_titler_agent()
             titler_prompt = f"User: {user_message}\nAssistant: {assistant_text[:500]}"
             title_chunks: list[str] = []
-            async for event in titler.stream_async(titler_prompt):
-                kind, payload = translate_event(event)
-                if kind == "delta":
-                    title_chunks.append(payload)
-            title = "".join(title_chunks).strip().strip('"').strip(".")
+            try:
+                async for event in titler.stream_async(titler_prompt):
+                    kind, payload = translate_event(event)
+                    if kind == "delta":
+                        title_chunks.append(payload)
+            except MaxTokensReachedException:
+                # Strands emits deltas BEFORE raising on token-cap, so
+                # title_chunks already holds usable partial text.
+                # _postprocess_title strips preamble and caps at 6
+                # words; empty result → caller records failure.
+                truncated = True
+            title = _postprocess_title("".join(title_chunks))
             if title:
                 storage.patch_chat(
                     user_id=claims["sub"],
@@ -351,8 +384,9 @@ async def _stream_bedrock_reply(
                 await record_auto_title_outcome(success=False)
         except Exception as exc:
             logger.warning(
-                "auto_title_failed chat_id=%s",
+                "auto_title_failed chat_id=%s truncated=%s",
                 chat.chat_id,
+                truncated,
                 extra={"error_type": type(exc).__name__, "error_message": str(exc)},
                 exc_info=True,
             )
