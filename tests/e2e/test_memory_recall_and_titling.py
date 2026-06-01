@@ -85,7 +85,8 @@ async def test_cross_session_recall_surfaces_planted_facts() -> None:
     assert any("nightfall" in r.lower() for r in b_replies), (
         f"chat B should mention 'Nightfall' (recall worked); got: {b_replies!r}"
     )
-    assert any("sage" in r.lower() for r in b_replies), (
+    # Word-boundary match so "message"/"passage" don't spuriously match.
+    assert any(re.search(r"\bsage\b", r, re.IGNORECASE) for r in b_replies), (
         f"chat B should mention 'sage' (recall worked); got: {b_replies!r}"
     )
 
