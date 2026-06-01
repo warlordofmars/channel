@@ -32,7 +32,7 @@ channel/
 │       │   ├── __init__.py
 │       │   ├── chat_agent.py   # Strands Agent factory + build_titler_agent (7c/7d)
 │       │   ├── memory.py       # AgentCoreMemoryHook + get_or_create_memory (Phase 7c)
-│       │   ├── recall.py       # AgentCoreRecallHook + cache (Phase 7d)
+│       │   ├── recall.py       # AgentCoreRecallHook + cache (Phase 7d → 8a)
 │       │   └── strands_sse.py  # Strands event → SSE byte translator
 │       └── api/
 │           ├── main.py        # FastAPI app + routes
