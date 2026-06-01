@@ -94,7 +94,8 @@ def _format_recall_addendum(records: list[dict[str, Any]]) -> str:
         # refactored to emit multiple records per session, the later
         # createdAt would be silently dropped here.
         group = groups.setdefault(
-            sid, {"createdAt": rec.get("createdAt", ""), "bullets": []},
+            sid,
+            {"createdAt": rec.get("createdAt", ""), "bullets": []},
         )
         for msg in rec.get("payload", []):
             conv = msg.get("conversational") or {}
@@ -112,9 +113,7 @@ def _format_recall_addendum(records: list[dict[str, Any]]) -> str:
         if not group["bullets"]:
             continue
         date = group["createdAt"][:10] if group["createdAt"] else "earlier"
-        blocks.append(
-            f"**Earlier conversation ({date})**\n" + "\n".join(group["bullets"])
-        )
+        blocks.append(f"**Earlier conversation ({date})**\n" + "\n".join(group["bullets"]))
 
     if not blocks:
         return ""
@@ -290,11 +289,13 @@ class AgentCoreRecallHook:
             for ev in reversed(events_resp.get("events", [])):
                 combined_payload.extend(ev.get("payload", []))
             if combined_payload:
-                aggregated.append({
-                    "sessionId": session["sessionId"],
-                    "createdAt": session.get("createdAt", ""),
-                    "payload": combined_payload,
-                })
+                aggregated.append(
+                    {
+                        "sessionId": session["sessionId"],
+                        "createdAt": session.get("createdAt", ""),
+                        "payload": combined_payload,
+                    }
+                )
 
         # ``age=1`` counts the cold-fetch turn as the 1st served turn —
         # next 4 turns are cache hits (ages 2..5), 6th turn triggers refresh.

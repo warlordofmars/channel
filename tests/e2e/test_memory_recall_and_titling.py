@@ -56,7 +56,9 @@ async def test_cross_session_recall_surfaces_planted_facts() -> None:
         try:
             # Chat A — plant two facts.
             chat_a_id, _ = await _drive_chat(
-                browser, ui_url, jwt,
+                browser,
+                ui_url,
+                jwt,
                 messages=[
                     "I'm building a chess engine called Nightfall.",
                     "My favourite colour is sage green.",
@@ -65,13 +67,13 @@ async def test_cross_session_recall_surfaces_planted_facts() -> None:
             # Brief eventual-consistency window for CreateEvent.
             await asyncio.sleep(3)
             events = _list_events(api_url, jwt, chat_a_id, limit=10)
-            assert len(events) == 2, (
-                f"expected 2 events for chat A, got {len(events)}"
-            )
+            assert len(events) == 2, f"expected 2 events for chat A, got {len(events)}"
 
             # Chat B — recall must surface Nightfall + sage.
             _chat_b_id, b_replies = await _drive_chat(
-                browser, ui_url, jwt,
+                browser,
+                ui_url,
+                jwt,
                 messages=[
                     "What was the project I'm working on?",
                     "And the colour I like?",

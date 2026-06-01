@@ -176,7 +176,12 @@ async def test_hook_lists_sessions_and_events_excluding_current_chat():
                     "sessionId": "prior-1",
                     "eventTimestamp": "2026-05-31T19:00:30Z",
                     "payload": [
-                        {"conversational": {"role": "USER", "content": {"text": "hello from prior-1"}}},
+                        {
+                            "conversational": {
+                                "role": "USER",
+                                "content": {"text": "hello from prior-1"},
+                            }
+                        },
                         {"conversational": {"role": "ASSISTANT", "content": {"text": "hi"}}},
                     ],
                 },
@@ -188,7 +193,12 @@ async def test_hook_lists_sessions_and_events_excluding_current_chat():
                     "sessionId": "prior-2",
                     "eventTimestamp": "2026-05-31T18:00:30Z",
                     "payload": [
-                        {"conversational": {"role": "USER", "content": {"text": "hello from prior-2"}}},
+                        {
+                            "conversational": {
+                                "role": "USER",
+                                "content": {"text": "hello from prior-2"},
+                            }
+                        },
                         {"conversational": {"role": "ASSISTANT", "content": {"text": "hi"}}},
                     ],
                 },
@@ -196,7 +206,9 @@ async def test_hook_lists_sessions_and_events_excluding_current_chat():
         },
     ]
     hook = AgentCoreRecallHook(
-        memory_id="m-1", actor_id="user_abc", client=fake_client,
+        memory_id="m-1",
+        actor_id="user_abc",
+        client=fake_client,
     )
     event = _fake_before_event(user_text="anything")
 
@@ -205,7 +217,8 @@ async def test_hook_lists_sessions_and_events_excluding_current_chat():
 
     # ListSessions called once, scoped to actor.
     fake_client.list_sessions.assert_called_once_with(
-        memoryId="m-1", actorId="user_abc",
+        memoryId="m-1",
+        actorId="user_abc",
     )
     # ListEvents called once per prior session, NOT for the current chat.
     assert fake_client.list_events.call_count == 2
@@ -225,13 +238,14 @@ async def test_hook_caps_sessions_at_max():
     fake_client = MagicMock()
     fake_client.list_sessions.return_value = {
         "sessionSummaries": [
-            {"sessionId": f"s{i}", "createdAt": f"2026-05-{30 - i:02d}T00:00:00Z"}
-            for i in range(8)
+            {"sessionId": f"s{i}", "createdAt": f"2026-05-{30 - i:02d}T00:00:00Z"} for i in range(8)
         ],
     }
     fake_client.list_events.return_value = {"events": []}
     hook = AgentCoreRecallHook(
-        memory_id="m", actor_id="a", client=fake_client,
+        memory_id="m",
+        actor_id="a",
+        client=fake_client,
     )
     event = _fake_before_event(user_text="anything")
 
@@ -250,7 +264,9 @@ async def test_hook_caps_events_per_session():
     }
     fake_client.list_events.return_value = {"events": []}
     hook = AgentCoreRecallHook(
-        memory_id="m", actor_id="a", client=fake_client,
+        memory_id="m",
+        actor_id="a",
+        client=fake_client,
     )
     event = _fake_before_event(user_text="anything")
 
@@ -267,10 +283,13 @@ async def test_hook_emits_no_addendum_when_actor_has_no_prior_sessions():
     fake_client = MagicMock()
     fake_client.list_sessions.return_value = {"sessionSummaries": []}
     hook = AgentCoreRecallHook(
-        memory_id="m", actor_id="a", client=fake_client,
+        memory_id="m",
+        actor_id="a",
+        client=fake_client,
     )
     event = _fake_before_event(
-        user_text="hello", system_text="You are Channel.",
+        user_text="hello",
+        system_text="You are Channel.",
     )
 
     with patch("channel.agents.recall.record_recall_outcome", new=AsyncMock()):
@@ -292,10 +311,13 @@ async def test_hook_emits_no_addendum_when_only_session_is_current_chat():
         ],
     }
     hook = AgentCoreRecallHook(
-        memory_id="m", actor_id="a", client=fake_client,
+        memory_id="m",
+        actor_id="a",
+        client=fake_client,
     )
     event = _fake_before_event(
-        user_text="hello", system_text="You are Channel.",
+        user_text="hello",
+        system_text="You are Channel.",
     )
 
     with patch("channel.agents.recall.record_recall_outcome", new=AsyncMock()):
