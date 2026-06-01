@@ -17,11 +17,11 @@ from typing import Any
 import boto3
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Response
 from fastapi.responses import StreamingResponse
+from strands.types.exceptions import MaxTokensReachedException
 
 from channel import storage
 from channel.agents.chat_agent import build_agent, build_titler_agent, resolve_model_id
 from channel.agents.memory import _sanitize_actor_id, get_or_create_memory
-from strands.types.exceptions import MaxTokensReachedException
 from channel.agents.strands_sse import (
     sse_delta,
     sse_done,
