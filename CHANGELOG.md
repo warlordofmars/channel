@@ -36,6 +36,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Phase 8a — memory recall now uses synchronous `ListSessions` +
+  `ListEvents` instead of `RetrieveMemoryRecords`. AgentCore's
+  `SemanticMemoryStrategy` had a multi-hour ingestion lag in real
+  use, leaving recall empty long after events were written. The
+  new path retrieves raw prior-chat events directly (cap: 5
+  sessions × 2 events each) and works immediately. New Memory
+  resources are no longer created with a strategy.
 - Lambda timeout raised from 30s to 5 min for streaming chats.
 - Bedrock IAM extended to allowlist Opus 4.6 and to grant invocation on
   the US cross-region inference profiles (required for on-demand
