@@ -32,8 +32,9 @@ from channel.metrics import record_recall_outcome
 
 logger = logging.getLogger(__name__)
 
-_RECALL_HEADING = "## What I remember about previous conversations"
+_RECALL_HEADING = "## What we've talked about before"
 _RECALL_CACHE_REFRESH_TURNS: int = 5
+_RECALL_ROLE_MAP: dict[str, str] = {"USER": "You", "ASSISTANT": "Me"}
 
 # Phase 8a: ListSessions + ListEvents recall constants.
 # Replace the SemanticMemoryStrategy/RetrieveMemoryRecords approach
@@ -46,8 +47,9 @@ _RECALL_EVENT_TEXT_TRUNCATE: int = 120
 @dataclass
 class CacheEntry:
     """Per-(actor, chat) recall cache row. ``age`` increments on cache
-    hits; ``records`` is the flattened list of conversational text records
-    from the most recent ``ListSessions`` + ``ListEvents`` fetch."""
+    hits; ``records`` is one entry per prior session with shape
+    ``{sessionId, createdAt, payload}`` from the most recent
+    ``ListSessions`` + ``ListEvents`` fetch."""
 
     records: list[dict[str, Any]]
     age: int
@@ -59,21 +61,60 @@ _recall_cache: dict[tuple[str, str], CacheEntry] = {}
 
 
 def _format_recall_addendum(records: list[dict[str, Any]]) -> str:
-    """Render ``MemoryRecordSummary`` records as a Markdown addendum.
+    """Render aggregated ListEvents output as a Markdown addendum.
 
-    Returns the empty string when no records have usable text content.
-    Defensive: records missing ``content.text`` or with empty text are
-    silently skipped so a malformed AgentCore response can't corrupt
-    the system prompt.
+    Records are grouped by ``sessionId``; each group gets a header
+    derived from ``createdAt`` (date only — time-of-day is noise).
+    Within each group, AgentCore ``payload[].conversational``
+    messages become turn bullets::
+
+        ## What we've talked about before
+
+        **Earlier conversation (2026-05-31)**
+        - You: i love sage green
+        - Me: sage is great
+
+    Returns the empty string if no records have usable text.
+    Defensive: payload entries missing ``conversational.content.text``
+    or with empty text are silently skipped so a malformed AgentCore
+    response can't corrupt the system prompt.
     """
-    bullets: list[str] = []
-    for rec in records:
-        text = rec.get("content", {}).get("text") if isinstance(rec, dict) else None
-        if text:
-            bullets.append(f"- {text}")
-    if not bullets:
+    if not records:
         return ""
-    return _RECALL_HEADING + "\n\n" + "\n".join(bullets)
+
+    # Group by sessionId, preserving the order in ``records`` (which is
+    # already most-recent first from ListSessions).
+    groups: dict[str, dict[str, Any]] = {}
+    for rec in records:
+        sid = rec.get("sessionId", "")
+        if not sid:
+            continue
+        group = groups.setdefault(
+            sid, {"createdAt": rec.get("createdAt", ""), "bullets": []},
+        )
+        for msg in rec.get("payload", []):
+            conv = msg.get("conversational") or {}
+            role_raw = conv.get("role", "")
+            text = (conv.get("content") or {}).get("text", "")
+            if not text:
+                continue
+            role_label = _RECALL_ROLE_MAP.get(role_raw, role_raw or "?")
+            if len(text) > _RECALL_EVENT_TEXT_TRUNCATE:
+                text = text[:_RECALL_EVENT_TEXT_TRUNCATE] + "..."
+            group["bullets"].append(f"- {role_label}: {text}")
+
+    blocks: list[str] = []
+    for group in groups.values():
+        if not group["bullets"]:
+            continue
+        date = group["createdAt"][:10] if group["createdAt"] else "earlier"
+        blocks.append(
+            f"**Earlier conversation ({date})**\n" + "\n".join(group["bullets"])
+        )
+
+    if not blocks:
+        return ""
+    return _RECALL_HEADING + "\n\n" + "\n\n".join(blocks)
 
 
 def _extract_user_message(event: BeforeInvocationEvent) -> str:
@@ -198,17 +239,16 @@ class AgentCoreRecallHook:
         Phase 8a: synchronous recall via ListSessions + ListEvents per
         session. Excludes the current chat (PR #73 already feeds that
         history into Strands via ``Agent(messages=...)``). Caps at
-        ``_RECALL_MAX_SESSIONS`` × ``_RECALL_EVENTS_PER_SESSION`` to
-        bound prompt size.
+        ``_RECALL_MAX_SESSIONS`` prior sessions to bound prompt size.
 
         ``user_message`` is no longer used for retrieval (we don't do
         semantic search anymore) — kept on the signature for cache
         parity and to match the BeforeInvocationEvent contract.
 
-        Returns records shaped ``{"content": {"text": ...}}`` so the
-        existing ``_format_recall_addendum`` can render them without
-        change. Task 3 will update both sides to a richer
-        ``{sessionId, createdAt, payload}`` shape.
+        Returns one record per prior session with shape
+        ``{sessionId, createdAt, payload}``, where ``payload`` is the
+        concatenation of all that session's events' payloads in arrival
+        order. ``_format_recall_addendum`` renders these into Markdown.
         """
         del user_message  # no longer used for retrieval
         key = (self._actor_id, chat_id)
@@ -224,15 +264,13 @@ class AgentCoreRecallHook:
             actorId=self._actor_id,
         )
         sessions = sessions_resp.get("sessionSummaries", [])
-        prior_sessions = [
-            s for s in sessions if s.get("sessionId") != chat_id
-        ][:_RECALL_MAX_SESSIONS]
+        prior_sessions = [s for s in sessions if s.get("sessionId") != chat_id]
+        # Explicit newest-first ordering; don't rely on AgentCore's default.
+        prior_sessions.sort(key=lambda s: s.get("createdAt", ""), reverse=True)
+        prior_sessions = prior_sessions[:_RECALL_MAX_SESSIONS]
 
         # Step 2: fetch the last K events from each prior session and
-        # flatten each conversational payload entry into the
-        # ``{"content": {"text": ...}}`` shape that ``_format_recall_addendum``
-        # expects. Task 3 will widen the shape to ``{sessionId, createdAt,
-        # payload}`` and update the formatter in the same commit.
+        # flatten all events' payloads into one combined list per session.
         aggregated: list[dict[str, Any]] = []
         for session in prior_sessions:
             events_resp = await asyncio.to_thread(
@@ -242,12 +280,15 @@ class AgentCoreRecallHook:
                 sessionId=session["sessionId"],
                 maxResults=_RECALL_EVENTS_PER_SESSION,
             )
+            combined_payload: list[dict[str, Any]] = []
             for ev in events_resp.get("events", []):
-                for payload_entry in ev.get("payload", []):
-                    conv = payload_entry.get("conversational", {})
-                    text = conv.get("content", {}).get("text", "")
-                    if text:
-                        aggregated.append({"content": {"text": text[:_RECALL_EVENT_TEXT_TRUNCATE]}})
+                combined_payload.extend(ev.get("payload", []))
+            if combined_payload:
+                aggregated.append({
+                    "sessionId": session["sessionId"],
+                    "createdAt": session.get("createdAt", ""),
+                    "payload": combined_payload,
+                })
 
         # ``age=1`` counts the cold-fetch turn as the 1st served turn —
         # next 4 turns are cache hits (ages 2..5), 6th turn triggers refresh.

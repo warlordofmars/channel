@@ -45,35 +45,94 @@ def test_format_recall_addendum_returns_empty_string_for_no_records():
     assert _format_recall_addendum([]) == ""
 
 
-def test_format_recall_addendum_renders_records_as_markdown_bullets():
+def test_format_recall_addendum_groups_records_by_session_with_date_header():
     records = [
-        {"content": {"text": "User builds chess engines"}, "score": 0.92},
-        {"content": {"text": "Favourite colour: sage green"}, "score": 0.85},
+        {
+            "sessionId": "s1",
+            "createdAt": "2026-05-31T19:00:00Z",
+            "payload": [
+                {"conversational": {"role": "USER", "content": {"text": "i love sage green"}}},
+                {"conversational": {"role": "ASSISTANT", "content": {"text": "sage is great"}}},
+            ],
+        },
+        {
+            "sessionId": "s2",
+            "createdAt": "2026-05-31T18:00:00Z",
+            "payload": [
+                {"conversational": {"role": "USER", "content": {"text": "building Nightfall"}}},
+                {"conversational": {"role": "ASSISTANT", "content": {"text": "cool engine name"}}},
+            ],
+        },
     ]
-
     result = _format_recall_addendum(records)
 
-    # Heading + each record on its own bullet.
-    assert "## What I remember about previous conversations" in result
-    assert "- User builds chess engines" in result
-    assert "- Favourite colour: sage green" in result
+    assert "## What we've talked about before" in result
+    # Date header per session.
+    assert "Earlier conversation (2026-05-31)" in result
+    # Two session blocks.
+    assert result.count("Earlier conversation") == 2
+    # Role mapping.
+    assert "- You: i love sage green" in result
+    assert "- Me: sage is great" in result
+    assert "- You: building Nightfall" in result
+    assert "- Me: cool engine name" in result
 
 
-def test_format_recall_addendum_skips_records_missing_text():
-    """Defensive: AgentCore responses without ``content.text`` are dropped
-    so a malformed payload can't corrupt the prompt."""
+def test_format_recall_addendum_truncates_long_text():
+    long_text = "A" * 500
     records = [
-        {"content": {"text": "valid record"}, "score": 0.9},
-        {"content": {}, "score": 0.85},  # no text key
-        {"score": 0.8},  # no content key
-        {"content": {"text": ""}, "score": 0.75},  # empty text
+        {
+            "sessionId": "s1",
+            "createdAt": "2026-05-31T00:00:00Z",
+            "payload": [
+                {"conversational": {"role": "USER", "content": {"text": long_text}}},
+            ],
+        },
     ]
-
     result = _format_recall_addendum(records)
+    # Each event text capped at _RECALL_EVENT_TEXT_TRUNCATE chars
+    # (plus a trailing ellipsis indicator).
+    assert "A" * 500 not in result
+    assert "..." in result
 
-    assert "- valid record" in result
-    # Heading appears once, no empty bullets.
-    assert result.count("- ") == 1
+
+def test_format_recall_addendum_skips_records_with_no_payload_text():
+    records = [
+        {
+            "sessionId": "s1",
+            "createdAt": "2026-05-31T00:00:00Z",
+            "payload": [
+                {"conversational": {"role": "USER", "content": {}}},  # no text
+                {"conversational": {"role": "ASSISTANT", "content": {"text": ""}}},
+            ],
+        },
+    ]
+    # All payload entries unusable → no bullets → session block dropped.
+    result = _format_recall_addendum(records)
+    assert result == ""
+
+
+def test_format_recall_addendum_skips_records_missing_session_id():
+    """Defensive: records with no ``sessionId`` key are silently dropped."""
+    records = [
+        # No sessionId — should be skipped entirely.
+        {
+            "createdAt": "2026-05-31T00:00:00Z",
+            "payload": [
+                {"conversational": {"role": "USER", "content": {"text": "should not appear"}}},
+            ],
+        },
+        {
+            "sessionId": "s1",
+            "createdAt": "2026-05-31T01:00:00Z",
+            "payload": [
+                {"conversational": {"role": "USER", "content": {"text": "valid"}}},
+            ],
+        },
+    ]
+    result = _format_recall_addendum(records)
+    assert "should not appear" not in result
+    assert "- You: valid" in result
 
 
 # ---------------------------------------------------------------------------
