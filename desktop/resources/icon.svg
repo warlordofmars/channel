@@ -1,0 +1,45 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <!--
+    macOS / Win / Linux app icon for Channel. Same brand mark as
+    ui/public/logo.svg + ui/src/components/ChannelMark.jsx (terracotta
+    rounded square + two cream bars) with extra polish for icon use:
+    subtle top-down gradient on the background, a faint top-edge
+    highlight, soft drop shadow under each bar, and Apple's standard
+    icon corner radius (~22.4% = 230/1024) so it sits visually in the
+    same family as Safari / Calendar / Notes in the dock.
+
+    Regenerate the .png + .icns from this file via:
+      sharp -i icon.svg --resize 1024 1024 --density 600 -o icon.png
+      sips -z N N icon.png --out icon_NxN.png   (for each N in {16,32,128,256,512} × {1, 2})
+      iconutil -c icns icon.iconset -o icon.icns
+  -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%"   stop-color="#d68b62"/>
+      <stop offset="55%"  stop-color="#c97a4e"/>
+      <stop offset="100%" stop-color="#b66a3e"/>
+    </linearGradient>
+    <linearGradient id="highlight" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%"   stop-color="#ffffff" stop-opacity="0.14"/>
+      <stop offset="45%"  stop-color="#ffffff" stop-opacity="0.04"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="barShadow" x="-20%" y="-20%" width="140%" height="160%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="6"/>
+      <feOffset dx="0" dy="4"/>
+      <feComponentTransfer><feFuncA type="linear" slope="0.22"/></feComponentTransfer>
+      <feMerge>
+        <feMergeNode/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <rect x="0" y="0" width="1024" height="1024" rx="230" fill="url(#bg)"/>
+  <rect x="0" y="0" width="1024" height="1024" rx="230" fill="url(#highlight)"/>
+
+  <g filter="url(#barShadow)">
+    <rect x="282" y="256" width="132" height="512" rx="56" fill="#fdf9ee"/>
+    <rect x="610" y="256" width="132" height="512" rx="56" fill="#fdf9ee"/>
+  </g>
+</svg>
