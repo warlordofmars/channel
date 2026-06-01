@@ -1179,3 +1179,53 @@ def test_delete_chat_wipe_paginates_with_next_token(
     # Second list_events call must include nextToken.
     second_call_kwargs = fake_ac.list_events.call_args_list[1].kwargs
     assert second_call_kwargs["nextToken"] == "tok-abc"
+
+
+# ---- _postprocess_title helper ----------------------------------------------
+
+
+def test_postprocess_title_passes_clean_input_through():
+    from channel.api.chats import _postprocess_title
+
+    assert _postprocess_title("Debug pytest fixture") == "Debug pytest fixture"
+
+
+def test_postprocess_title_strips_colon_prefixed_preamble():
+    from channel.api.chats import _postprocess_title
+
+    assert (
+        _postprocess_title("Here's a 3-6 word title: Debug pytest fixture")
+        == "Debug pytest fixture"
+    )
+
+
+def test_postprocess_title_returns_empty_on_empty_input():
+    from channel.api.chats import _postprocess_title
+
+    assert _postprocess_title("") == ""
+
+
+def test_postprocess_title_caps_at_6_words():
+    from channel.api.chats import _postprocess_title
+
+    assert (
+        _postprocess_title("One two three four five six seven eight")
+        == "One two three four five six"
+    )
+
+
+def test_postprocess_title_strips_wrapping_quotes():
+    from channel.api.chats import _postprocess_title
+
+    assert _postprocess_title('"Debug pytest fixture"') == "Debug pytest fixture"
+
+
+def test_postprocess_title_returns_empty_on_preamble_only_truncation():
+    """When the model wrote preamble but ran out of tokens before
+    emitting the actual title, the colon-split returns an empty tail.
+    The helper MUST surface that as empty (caller treats it as a
+    failure outcome) — emitting the preamble itself as the title
+    would be worse than 'New chat'."""
+    from channel.api.chats import _postprocess_title
+
+    assert _postprocess_title("Here's a 3-6 word title:") == ""

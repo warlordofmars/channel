@@ -94,6 +94,30 @@ async def list_chats(
     }
 
 
+def _postprocess_title(raw: str) -> str:
+    """Normalize raw titler output into a usable sidebar title.
+
+    Haiku occasionally emits preamble (e.g. ``"Here's a 3-6 word title:
+    Debug pytest fixture"``). We strip leading explanations by taking
+    the part after the LAST colon if a colon is present, then split
+    into words and cap at 6 (matches the titler's 3-6 word system
+    prompt). Strips wrapping quote characters and trailing sentence
+    punctuation.
+
+    Returns empty string if no usable text remains — caller treats
+    that as a failure outcome (better to leave "New chat" than to
+    surface preamble as a title).
+    """
+    if not raw:
+        return ""
+    candidate = raw.rsplit(":", 1)[-1] if ":" in raw else raw
+    candidate = candidate.strip().strip('"').strip("'").strip()
+    words = candidate.split()
+    if not words:
+        return ""
+    return " ".join(words[:6]).rstrip(".,;:!?")
+
+
 def _agentcore_client() -> Any:
     """Lazy boto3 client construction — patched in unit tests."""
     return boto3.client("bedrock-agentcore")
