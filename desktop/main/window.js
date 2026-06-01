@@ -1,13 +1,22 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
 import { BrowserWindow } from "electron";
 
-const DEFAULT_DIMENSIONS = { width: 1280, height: 800, minWidth: 720, minHeight: 480 };
+// Portrait-ish default that fits the chat-app layout: wide enough for the
+// 264px sidebar + readable conversation column + composer, tall enough to
+// show many messages without scrolling on first load.
+const DEFAULT_DIMENSIONS = { width: 880, height: 1080, minWidth: 720, minHeight: 600 };
 
 // macOS-only: hide the title bar chrome but keep the traffic lights, so
 // the sidebar background extends to the top edge and the window feels
 // native (matches the visual style of Claude Desktop / Linear / Notion).
 // On Windows/Linux titleBarStyle: "hidden" would also hide min/max/close
 // without a replacement, so we leave those platforms on the default chrome.
+//
+// Traffic-light position stays at the default top-left. The sidebar's
+// header row is lifted up (CSS, in app.css) so its icons share a row
+// with the traffic lights, with platform-aware left padding pushing
+// them past the lights. Coordinated change — see the
+// `.is-electron-mac .sb-top` rule in ui/src/styles/app.css.
 function macosFrameOpts(platform) {
   if (platform !== "darwin") return {};
   return {

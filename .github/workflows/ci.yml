@@ -496,19 +496,29 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Resolve API base URL per branch
+      - name: Resolve per-branch desktop build settings
         id: api-base
         shell: bash
         run: |
-          # main → prod, anything else (development, PRs) → dev. The SPA
-          # build picks this up via VITE_API_BASE; the desktop main process
-          # gets it baked in by scripts/build-main.js's esbuild --define.
-          # Without this, packaged dev builds connect to prod URLs that
-          # don't exist for the early-life project.
+          # main → prod identity, anything else (development, PRs) → dev
+          # identity. We separate the two by both name AND macOS bundle
+          # ID so a tester can install both side-by-side without one
+          # replacing the other.
+          BASE_VERSION=$(node -p "require('./desktop/package.json').version")
           if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
             echo "url=https://channel.warlordofmars.net" >> "$GITHUB_OUTPUT"
+            echo "product_name=Channel" >> "$GITHUB_OUTPUT"
+            echo "app_id=net.warlordofmars.channel.desktop" >> "$GITHUB_OUTPUT"
+            echo "version=$BASE_VERSION" >> "$GITHUB_OUTPUT"
           else
             echo "url=https://channel-dev.warlordofmars.net" >> "$GITHUB_OUTPUT"
+            echo "product_name=Channel - Dev" >> "$GITHUB_OUTPUT"
+            echo "app_id=net.warlordofmars.channel.desktop.dev" >> "$GITHUB_OUTPUT"
+            # Dev version is monotonic via GH run number plus the short
+            # SHA so two CI runs on the same branch tip still differ.
+            # Format matches npm/semver pre-release: $BASE-dev.$N-$SHA
+            SHA=$(git rev-parse --short=7 HEAD)
+            echo "version=${BASE_VERSION}-dev.${{ github.run_number }}-${SHA}" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Install ui deps + build SPA
@@ -542,30 +552,44 @@ jobs:
           CHANNEL_API_BASE: ${{ steps.api-base.outputs.url }}
         run: |
           cd desktop
+          # Bake the resolved version into package.json before electron-builder
+          # reads it. Defaults stay at 0.0.0 in git; CI populates a real value
+          # (semver tag on main, $BASE-dev.$RUN-$SHA on other branches).
+          npm version --no-git-tag-version "${{ steps.api-base.outputs.version }}"
           npm run build:main
           npm run build:renderer
-          # --config.mac.hardenedRuntime=false overrides the YAML default
-          # (which is true to satisfy notarisation in the publish-desktop-mac
-          # job). The matrix builds are unsigned — electron-builder falls
-          # back to ad-hoc signing the outer .app, leaving the Electron
-          # Framework's original signature in place. On macOS 15 (Sequoia),
-          # hardenedRuntime: true triggers strict Team ID consistency
-          # validation across the bundle, which an ad-hoc outer + Electron-
-          # signed inner can't satisfy → SIGABRT at launch. Turning the
-          # flag off matches sub-project A's behaviour: testers can install
-          # the unsigned dev .dmg and it opens.
+          # --config.mac.hardenedRuntime=false: see sub-project B PR #81 — the
+          # matrix builds are unsigned and macOS 15 (Sequoia) refuses to load
+          # an ad-hoc outer + Electron-signed inner with strict Team ID checks
+          # when hardenedRuntime is on. Override to false for the matrix only.
+          #
+          # --config.productName + --config.appId give the dev variant a
+          # distinct dock name ("Channel - Dev") and bundle ID so a tester
+          # can have both prod and dev installed at the same time.
           npx electron-builder ${{ matrix.target }} --publish=never \
             --config.mac.hardenedRuntime=false \
-            --config.mac.gatekeeperAssess=false
+            --config.mac.gatekeeperAssess=false \
+            --config.productName="${{ steps.api-base.outputs.product_name }}" \
+            --config.appId="${{ steps.api-base.outputs.app_id }}"
 
       - name: Smoke test (Linux uses xvfb)
         shell: bash
         run: |
+          # The matrix.binary paths assume productName="Channel". When the
+          # build runs on dev/PR branches, productName becomes "Channel - Dev"
+          # and the .app folder + Windows .exe name change. Linux stays at
+          # `channel` via linux.executableName in electron-builder.yml.
+          PRODUCT="${{ steps.api-base.outputs.product_name }}"
+          case "${{ matrix.os }}" in
+            macos-14)        BIN="desktop/release/mac-universal/$PRODUCT.app/Contents/MacOS/$PRODUCT" ;;
+            windows-latest)  BIN="desktop/release/win-unpacked/$PRODUCT.exe" ;;
+            ubuntu-latest)   BIN="desktop/release/linux-unpacked/channel" ;;
+          esac
           if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
             sudo apt-get update && sudo apt-get install -y xvfb
-            xvfb-run -a env CHANNEL_DESKTOP_BIN="$PWD/${{ matrix.binary }}" node desktop/test/smoke.js
+            xvfb-run -a env CHANNEL_DESKTOP_BIN="$PWD/$BIN" node desktop/test/smoke.js
           else
-            CHANNEL_DESKTOP_BIN="$PWD/${{ matrix.binary }}" node desktop/test/smoke.js
+            CHANNEL_DESKTOP_BIN="$PWD/$BIN" node desktop/test/smoke.js
           fi
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -723,10 +747,14 @@ jobs:
             echo "channel=latest" >> "$GITHUB_OUTPUT"
             echo "cdk_env=prod"   >> "$GITHUB_OUTPUT"
             echo "domain=channel.warlordofmars.net" >> "$GITHUB_OUTPUT"
+            echo "product_name=Channel" >> "$GITHUB_OUTPUT"
+            echo "app_id=net.warlordofmars.channel.desktop" >> "$GITHUB_OUTPUT"
           else
             echo "channel=dev"    >> "$GITHUB_OUTPUT"
             echo "cdk_env=dev"    >> "$GITHUB_OUTPUT"
             echo "domain=channel-dev.warlordofmars.net" >> "$GITHUB_OUTPUT"
+            echo "product_name=Channel - Dev" >> "$GITHUB_OUTPUT"
+            echo "app_id=net.warlordofmars.channel.desktop.dev" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Read CDK outputs
@@ -794,7 +822,13 @@ jobs:
         run: |
           npm run build:main
           npm run build:renderer
-          npx electron-builder --mac --publish=never
+          # productName + appId per branch so the dev signed build installs
+          # under "Channel - Dev" alongside the prod "Channel" without
+          # collision. artifactName overrides in electron-builder.yml keep
+          # the .dmg filename as the stable "Channel-mac.dmg" regardless.
+          npx electron-builder --mac --publish=never \
+            --config.productName="${{ steps.env.outputs.product_name }}" \
+            --config.appId="${{ steps.env.outputs.app_id }}"
 
       - name: Sync versioned auto-update bundles to S3 (tagged for lifecycle)
         run: |
