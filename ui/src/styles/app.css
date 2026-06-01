@@ -86,11 +86,17 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  /* Top padding gives the macOS traffic lights (positioned x:14 y:14 by
-     the Electron main process) room above the sidebar actions on the
-     desktop build; harmless extra space on the web build. */
-  padding: 28px 14px 6px;
+  padding: 8px 14px 6px;
   -webkit-app-region: drag;
+}
+/* macOS Electron only: push the sidebar header right of the traffic
+   lights (positioned at x:14 y:14 by the Electron main process). 76px
+   clears the three-dot cluster (~70px wide) with a 6px gap before the
+   sidebar toggle button. The icons end up in the same row as the
+   traffic lights, vertically centred. Web SPA and Win/Linux Electron
+   keep the default 14px left padding. */
+html.is-electron-mac .sb-top {
+  padding: 8px 14px 6px 76px;
 }
 /* Children of the drag region inherit the drag behavior — explicitly
    opt buttons + interactive controls out so they remain clickable. */
