@@ -105,3 +105,37 @@ def test_record_auto_title_outcome_signature_locks_out_dimensions():
     sig = inspect.signature(record_auto_title_outcome)
     assert list(sig.parameters.keys()) == ["success"]
     assert sig.parameters["success"].annotation == "bool"
+
+
+@pytest.mark.asyncio
+async def test_record_chat_delete_memory_wipe_outcome_success_emits_success_counter():
+    from channel.metrics import record_chat_delete_memory_wipe_outcome
+
+    with patch("channel.metrics.emit_metric", new=AsyncMock()) as mock_emit:
+        await record_chat_delete_memory_wipe_outcome(success=True)
+    mock_emit.assert_awaited_once_with("ChatDeleteMemoryWipeSuccesses")
+
+
+@pytest.mark.asyncio
+async def test_record_chat_delete_memory_wipe_outcome_failure_emits_failure_counter():
+    from channel.metrics import record_chat_delete_memory_wipe_outcome
+
+    with patch("channel.metrics.emit_metric", new=AsyncMock()) as mock_emit:
+        await record_chat_delete_memory_wipe_outcome(success=False)
+    mock_emit.assert_awaited_once_with("ChatDeleteMemoryWipeFailures")
+
+
+def test_record_chat_delete_memory_wipe_outcome_signature_locks_out_dimensions():
+    """The function MUST NOT accept actor_id / chat_id / user_id args.
+    Per-actor/-chat dimensions blow up CloudWatch metric cardinality.
+    """
+    import inspect
+    from channel.metrics import record_chat_delete_memory_wipe_outcome
+    sig = inspect.signature(record_chat_delete_memory_wipe_outcome)
+    param_names = set(sig.parameters)
+    forbidden = {"actor_id", "chat_id", "user_id"}
+    leaked = param_names & forbidden
+    assert not leaked, (
+        f"record_chat_delete_memory_wipe_outcome must NOT accept {leaked} "
+        "— per-actor/chat dimensions cause CloudWatch cardinality blowup"
+    )
