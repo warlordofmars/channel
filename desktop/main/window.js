@@ -1,10 +1,12 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
 import { BrowserWindow } from "electron";
 
-// Portrait-ish default that fits the chat-app layout: wide enough for the
-// 264px sidebar + readable conversation column + composer, tall enough to
-// show many messages without scrolling on first load.
-const DEFAULT_DIMENSIONS = { width: 880, height: 1080, minWidth: 720, minHeight: 600 };
+// Portrait-ish default sized to fit a 13" MacBook (1440x900 effective)
+// without overflowing the dock. 880 wide accommodates the 264px sidebar
+// plus a readable conversation column; 800 tall leaves ~70px for the
+// menu bar + dock on a small screen. Users can resize taller for
+// long-running chats.
+const DEFAULT_DIMENSIONS = { width: 880, height: 800, minWidth: 720, minHeight: 600 };
 
 // macOS-only: hide the title bar chrome but keep the traffic lights, so
 // the sidebar background extends to the top edge and the window feels
