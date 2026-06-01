@@ -65,7 +65,8 @@ channel/
 │   │   │   ├── AuthGate.jsx       # Redirects /app/* visits to /app/login when no JWT
 │   │   │   ├── ChannelMark.jsx    # Brand mark SVG (rounded square + two bars)
 │   │   │   ├── ErrorBoundary.jsx  # Token-styled error fallback
-│   │   │   └── Icon.jsx           # 24×24 stroke icon set
+│   │   │   ├── Icon.jsx           # 24×24 stroke icon set
+│   │   │   └── Modal.jsx          # Shared modal primitive (Esc + backdrop dismissal)
 │   │   ├── marketing/             # Marketing site routes (Phase 6b)
 │   │   │   ├── Nav.jsx, Footer.jsx, SiteLayout.jsx, ThemeToggle.jsx, ImageSlot.jsx
 │   │   │   └── pages/             # Home, Product, Models, Pricing, Download, About, Blog, Careers, Privacy, NotFound
@@ -75,7 +76,10 @@ channel/
 │   │       ├── Shell.jsx, Sidebar.jsx, AccountPopover.jsx    # Layout chrome
 │   │       ├── Composer.jsx, ModelPicker.jsx, AttachMenu.jsx # Composer + its popovers
 │   │       ├── ChatHome.jsx                                  # Empty-state greeting
+│   │       ├── ChatRowMenu.jsx                               # Per-row sidebar popover (rename/delete/placeholders)
 │   │       ├── Conversation.jsx                              # Streamed-turns view + inline artifact card
+│   │       ├── DeleteChatModal.jsx                           # Delete confirm dialog
+│   │       ├── RenameChatModal.jsx                           # Rename chat dialog
 │   │       ├── renderMarkdown.jsx                            # Tiny markdown helper (paragraphs/bold/OL/cursor)
 │   │       └── views/                                        # /app/projects, /app/projects/:id, /app/artifacts, /app/customize
 │   │           ├── Projects.jsx                              # Grid of project cards + 'New project' tile
@@ -190,6 +194,12 @@ auto-titling of fresh chats via a Haiku one-shot Agent (Phase 7d).
   dimensions (cardinality blowup risk — codified by the
   `_signature_locks_out_dimensions` test on
   `record_memory_write_outcome`).
+- **Chat deletion wipes session events** — `DELETE /api/chats/{chat_id}`
+  removes the chat from DynamoDB AND best-effort deletes the
+  AgentCore Memory events for the chat's session (`ListEvents` +
+  `DeleteEvent`). Failure is logged + counted
+  (`ChatDeleteMemoryWipeFailures`) but does not fail the user-visible
+  delete — DDB is the source of truth for chat existence.
 
 Dev-only `GET /api/_debug/memory/events?chat_id=...&limit=...` and
 `DELETE /api/_debug/memory/events?chat_id=...&event_id=...`
@@ -450,6 +460,9 @@ re-derive these during design review — cite them.
   the same `<div className="backdrop" />` + `<div className="pop" />` pattern.
   The backdrop captures outside-clicks to close the popover; the caller
   controls `open` state.
+- **Modal dialogs** — all destructive confirms and edit-in-place dialogs
+  use `Modal.jsx` (`ui/src/components/Modal.jsx`) for backdrop + Esc
+  dismissal. Don't reinvent the modal shell.
 - **User identity from JWT** — chat-app components that need the user's
   email or display name read the mgmt JWT from `localStorage[TOKEN_KEY]`
   via `parseToken` from `lib/auth.js`. Display name = email's local-part
