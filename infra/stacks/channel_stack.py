@@ -380,11 +380,12 @@ class ChannelStack(cdk.Stack):
                     # prefix per the Service Authorization Reference.
                     "bedrock-agentcore:CreateEvent",
                     "bedrock-agentcore:ListEvents",
+                    "bedrock-agentcore:ListSessions",  # Phase 8a recall
                     "bedrock-agentcore:GetEvent",
                     "bedrock-agentcore:DeleteEvent",
                     "bedrock-agentcore:CreateMemory",
                     "bedrock-agentcore:GetMemory",
-                    "bedrock-agentcore:RetrieveMemoryRecords",  # Phase 7d recall
+                    "bedrock-agentcore:RetrieveMemoryRecords",  # Phase 7d recall (retained for future use)
                 ],
                 resources=[agentcore_memory_arn],
             )
