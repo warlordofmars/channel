@@ -30,9 +30,16 @@ from channel.metrics import record_recall_outcome
 logger = logging.getLogger(__name__)
 
 _RECALL_HEADING = "## What I remember about previous conversations"
-_RECALL_SCORE_THRESHOLD: float = 0.7
-_RECALL_TOP_K: int = 5
+_RECALL_SCORE_THRESHOLD: float = 0.7  # Phase 8a: legacy, will be removed in Task 2
+_RECALL_TOP_K: int = 5  # Phase 8a: legacy, will be removed in Task 2
 _RECALL_CACHE_REFRESH_TURNS: int = 5
+
+# Phase 8a: ListSessions + ListEvents recall constants.
+# Replace the SemanticMemoryStrategy/RetrieveMemoryRecords approach
+# which had hours-long ingestion lag (unusable in practice).
+_RECALL_MAX_SESSIONS: int = 5
+_RECALL_EVENTS_PER_SESSION: int = 2
+_RECALL_EVENT_TEXT_TRUNCATE: int = 120
 
 
 @dataclass

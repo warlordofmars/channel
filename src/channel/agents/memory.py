@@ -96,25 +96,14 @@ def get_or_create_memory(env: str) -> str:
             _memory_id_cache[env] = mem_id
             return mem_id
 
-    # Phase 7d: configure a SemanticMemoryStrategy so AgentCore derives
-    # searchable memory records from raw events. Without a strategy,
-    # ``RetrieveMemoryRecords`` always returns empty regardless of how
-    # many events have been written. The strategy is async — newly
-    # written events take minutes to appear as records. The namespace
-    # ``/strategies/{memoryStrategyId}/actors/{actorId}`` (the
-    # AgentCore-default for SEMANTIC) is what recall.py queries.
+    # Phase 8a: SemanticMemoryStrategy retired — its ingestion lag (hours
+    # in real use) made RetrieveMemoryRecords unusable. Recall now reads
+    # raw events via ListSessions + ListEvents (see agents/recall.py).
+    # Strategy-less memories provision faster (no strategy resources to
+    # spin up) and cost less.
     created = control.create_memory(
         name=name,
-        memoryStrategies=[
-            {
-                "semanticMemoryStrategy": {
-                    "name": "channel_semantic_recall",
-                    "namespaces": [
-                        "/strategies/{memoryStrategyId}/actors/{actorId}",
-                    ],
-                },
-            },
-        ],
+        memoryStrategies=[],
         eventExpiryDuration=90,
     )
     memory_id = created["memory"]["id"]
