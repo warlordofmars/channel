@@ -489,6 +489,30 @@ describe("Sidebar — per-row menu", () => {
     fireEvent.click(screen.getByRole("button", { name: /cancel/i }));
     expect(screen.queryByText(/delete chat\?/i)).toBeNull();
   });
+
+  it("marks the active row with the 'active' class", () => {
+    render(
+      <MemoryRouter initialEntries={["/app/c/c1"]}>
+        <Routes>
+          <Route
+            path="/app/c/:chatId"
+            element={
+              <Sidebar
+                chats={[
+                  { chat_id: "c1", title: "alpha", last_message_at: new Date().toISOString() },
+                  { chat_id: "c2", title: "beta", last_message_at: new Date().toISOString() },
+                ]}
+              />
+            }
+          />
+        </Routes>
+      </MemoryRouter>,
+    );
+    const alpha = screen.getByRole("button", { name: /^alpha$/i });
+    const beta = screen.getByRole("button", { name: /^beta$/i });
+    expect(alpha.className).toMatch(/\bactive\b/);
+    expect(beta.className).not.toMatch(/\bactive\b/);
+  });
 });
 
 describe("groupNameFor", () => {

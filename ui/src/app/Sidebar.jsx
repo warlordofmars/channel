@@ -177,7 +177,7 @@ export default function Sidebar({
               <div key={c.chat_id} className="recent-wrap">
                 <button
                   type="button"
-                  className="recent"
+                  className={"recent" + (c.chat_id === activeChatId ? " active" : "")}
                   onClick={() => navigate(`/app/c/${c.chat_id}`)}
                 >
                   {c.title}

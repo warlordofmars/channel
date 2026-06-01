@@ -44,6 +44,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The active chat row in the sidebar Recents list now has a subtle
+  selection highlight (matches Claude Desktop's selected-row
+  treatment). Reuses the existing `--sel` and `.recent.active` CSS
+  rule that had been styled but not wired — the active chat was
+  visually indistinguishable from inactive rows before.
 - macOS app icon regenerated as a full-bleed brand mark (orange
   squircle with two white pause bars). The previous icon rendered
   the brand mark inside a separate white squircle, producing a
