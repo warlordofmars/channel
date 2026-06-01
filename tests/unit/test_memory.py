@@ -154,15 +154,13 @@ def test_get_or_create_memory_creates_when_absent():
     fake_control.create_memory.assert_called_once()
     kwargs = fake_control.create_memory.call_args.kwargs
     assert kwargs["name"] == "channel_dev"
-    # Phase 7d: SemanticMemoryStrategy must be configured so
-    # RetrieveMemoryRecords actually returns data. Without a strategy,
-    # the recall side of the Memory loop is a no-op.
-    strategies = kwargs["memoryStrategies"]
-    assert len(strategies) == 1
-    assert "semanticMemoryStrategy" in strategies[0]
-    assert strategies[0]["semanticMemoryStrategy"]["namespaces"] == [
-        "/strategies/{memoryStrategyId}/actors/{actorId}",
-    ]
+    # Phase 8a: SemanticMemoryStrategy backed out — recall reads raw
+    # events via ListSessions + ListEvents instead. Regression guard:
+    # ensure the strategy is NOT reintroduced accidentally.
+    assert kwargs["memoryStrategies"] == [], (
+        "Phase 8a backed out SemanticMemoryStrategy; recall reads raw "
+        "events via ListSessions + ListEvents instead."
+    )
 
 
 def test_get_or_create_memory_polls_until_active(monkeypatch):

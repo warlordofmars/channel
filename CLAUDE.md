@@ -32,7 +32,7 @@ channel/
 │       │   ├── __init__.py
 │       │   ├── chat_agent.py   # Strands Agent factory + build_titler_agent (7c/7d)
 │       │   ├── memory.py       # AgentCoreMemoryHook + get_or_create_memory (Phase 7c)
-│       │   ├── recall.py       # AgentCoreRecallHook + cache (Phase 7d)
+│       │   ├── recall.py       # AgentCoreRecallHook + cache (Phase 7d → 8a)
 │       │   └── strands_sse.py  # Strands event → SSE byte translator
 │       └── api/
 │           ├── main.py        # FastAPI app + routes
@@ -160,10 +160,11 @@ require a valid Bearer mgmt JWT. JWT validation enforces `iss`,
 
 Phase 7c onward, every chat turn is persisted to a Bedrock AgentCore
 Memory resource via a Strands `AfterInvocationEvent` hook
-(`src/channel/agents/memory.py`). Phase 7d adds the read side: a
+(`src/channel/agents/memory.py`). Phase 8a adds the read side: a
 `BeforeInvocationEvent` recall hook (`src/channel/agents/recall.py`)
-injects relevant cross-session context into the system prompt, plus
-auto-titling of fresh chats via a Haiku one-shot Agent.
+injects prior-chat context into the system prompt via synchronous
+`ListSessions` + `ListEvents` reads (no strategy required), plus
+auto-titling of fresh chats via a Haiku one-shot Agent (Phase 7d).
 
 - **One Memory resource per environment** — named `channel_{env}`
   (underscores, not hyphens — AgentCore's name validator rejects
@@ -183,7 +184,7 @@ auto-titling of fresh chats via a Haiku one-shot Agent.
   Chat ids are UUIDs so no sanitization needed.
 - **Failure mode**: log + EMF counter (`MemoryWriteFailures`) +
   swallow. Memory writes must not break chats. Loss-on-Lambda-freeze
-  is acceptable (recall in 7d treats missing recall as "no memory").
+  is acceptable (the recall hook treats missing sessions as "no memory").
 - **`MemoryWriteSuccesses` / `MemoryWriteFailures`** are CloudWatch
   counters under namespace `Channel`, with NO per-actor or per-session
   dimensions (cardinality blowup risk — codified by the
@@ -197,32 +198,29 @@ verification. Mounted only when `STARTER_ENABLE_DEBUG_ENDPOINTS=1`;
 prod never sets the flag (CDK assertion test in
 `tests/unit/test_channel_stack.py` guards this).
 
-### Recall (Phase 7d)
+### Recall (Phase 8a; pivoted from 7d)
 
-- **`AgentCoreRecallHook`** (`src/channel/agents/recall.py`) subscribes
-  to `BeforeInvocationEvent`. Per turn, calls `RetrieveMemoryRecords`
-  with `namespace="/actors/{actor_id}"` (cross-session same user),
-  filters records to `score >= 0.7`, caps at top 5, and appends a
-  Markdown addendum (`## What I remember about previous conversations\n\n- ...`)
-  to the system prompt.
+- **`AgentCoreRecallHook`** (`src/channel/agents/recall.py`)
+  subscribes to `BeforeInvocationEvent`. Per turn, queries the
+  actor's prior chats via `ListSessions` + per-session
+  `ListEvents`, formats the aggregate as a Markdown addendum
+  grouped by session with a date header, mutates
+  `event.messages[0]`.
+- **Caps** — `_RECALL_MAX_SESSIONS = 5` most-recent prior
+  sessions; `_RECALL_EVENTS_PER_SESSION = 2` most-recent events
+  per session; `_RECALL_EVENT_TEXT_TRUNCATE = 120` chars per
+  quoted turn. Worst-case prompt overhead ~2.4 KB.
+- **Current chat excluded** — PR #73 already feeds the current
+  chat's DDB history into Strands; the recall hook drops that
+  `sessionId` from the ListSessions result to avoid double-feeding.
 - **5-turn cache** — keyed by `(actor_id, chat_id)`, module-level.
-  Cold-start invalidates. Reduces RPC volume to ~one
-  `RetrieveMemoryRecords` per 5 turns.
-- **Memory must be configured with a strategy** — `get_or_create_memory`
-  attaches a `SemanticMemoryStrategy` at creation time so AgentCore
-  derives queryable records from raw events. Without a strategy,
-  recall always returns empty.
-- **`SemanticMemoryStrategy` is async** — newly-written events take
-  minutes (not seconds) to appear as queryable recall records. The
-  recall path won't surface a fact you just mentioned in another chat
-  five seconds ago; it matures on AgentCore's ingestion schedule.
-- **Memory ACTIVE wait** — `CreateMemory` returns immediately with
-  status `CREATING`; subsequent `CreateEvent` / `RetrieveMemoryRecords`
-  calls reject until the memory becomes `ACTIVE` (2-3 min). The
-  bootstrap polls `GetMemory` until ACTIVE (360s timeout) so the
-  first chat doesn't lose events.
-- **Kill-switch** — `STARTER_RECALL_ENABLED=0` short-circuits the
-  hook. Default `"1"`.
+  Cold-start invalidates.
+- **Kill-switch** — `STARTER_RECALL_ENABLED=0` short-circuits.
+- **History**: Phase 7d implemented this via `RetrieveMemoryRecords`
+  + `SemanticMemoryStrategy`. The strategy's async ingestion lag
+  (hours in real use) made recall empty for too long, so 8a pivoted
+  to raw-event reads. The strategy is no longer attached to new
+  memories.
 
 ### Auto-titling (Phase 7d)
 

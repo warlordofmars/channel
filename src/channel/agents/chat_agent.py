@@ -48,7 +48,7 @@ DEFAULT_SYSTEM_PROMPT = (
 )
 
 _DEFAULT_TITLER_MODEL = "claude-haiku-4-5"
-_TITLER_MAX_TOKENS = 20
+_TITLER_MAX_TOKENS = 60
 
 _TITLER_SYSTEM_PROMPT = (
     "Summarise the following exchange in 3-6 words, sentence case, no "

@@ -1,9 +1,13 @@
 # Copyright (c) 2026 John Carter. All rights reserved.
-"""End-to-end verification of Phase 7d recall + auto-titling.
+"""End-to-end verification of Phase 7d auto-titling + Phase 8a recall.
 
 Drives chats through the UI and asserts (1) cross-session recall
-surfaces in chat B based on writes from chat A, and (2) auto-title
-fires within 5s of the first assistant reply.
+surfaces specific keywords in chat B based on facts planted in chat A,
+and (2) auto-title fires within 5s of the first assistant reply.
+
+Phase 8a recall is synchronous (ListSessions + ListEvents), so facts
+written 3 s ago are immediately queryable — the SemanticMemoryStrategy
+ingestion lag from 7d is gone.
 
 Requirements (same as 7c):
 
@@ -31,35 +35,26 @@ pytestmark = pytest.mark.asyncio
 
 
 @pytest.mark.asyncio
-async def test_recall_hook_runs_without_error() -> None:
-    """Verify the recall API path: plant events in chat A, open chat B,
-    confirm chat B's stream completes without ``agentcore.recall_failed``
-    warnings.
+async def test_cross_session_recall_surfaces_planted_facts() -> None:
+    """Plant facts in chat A; assert chat B's agent recalls them.
 
-    NOTE: This is intentionally NOT a "did the agent surface Nightfall?"
-    assertion. AgentCore's SemanticMemoryStrategy is asynchronous — there's
-    a multi-minute lag between ``CreateEvent`` and the strategy emitting a
-    queryable record. A near-immediate cross-chat assertion would race
-    that ingestion window every time. The semantic-recall UX matures on
-    its own timescale once strategies have ingested. What this test DOES
-    verify: the ``RetrieveMemoryRecords`` call shape is correct
-    (``namespace`` not ``actorId``), the hook is wired into the agent
-    loop, and the stream completes cleanly even when recall returns
-    empty results."""
+    Phase 8a: recall is synchronous (ListSessions + ListEvents), so
+    facts written 3s ago are immediately queryable. No multi-minute
+    wait required (the SemanticMemoryStrategy ingestion lag from 7d
+    is gone)."""
     ui_url = os.environ.get("STARTER_UI_URL")
     api_url = os.environ.get("STARTER_API_URL", "http://localhost:8001")
     if not ui_url:
         pytest.skip("STARTER_UI_URL not set — run via `inv e2e-local`")
 
-    tag = f"e2e-7d-recall-{int(time.time())}-{uuid.uuid4().hex[:6]}"
+    tag = f"e2e-8a-recall-{int(time.time())}-{uuid.uuid4().hex[:6]}"
     email = f"{tag}@example.com"
     jwt = _mint_jwt_via_bypass(api_url, email)
 
     async with async_playwright() as p:
         browser = await p.chromium.launch()
         try:
-            # Chat A — plant two facts (writes; will eventually become
-            # recall records on the strategy's schedule).
+            # Chat A — plant two facts.
             chat_a_id, _ = await _drive_chat(
                 browser,
                 ui_url,
@@ -69,25 +64,33 @@ async def test_recall_hook_runs_without_error() -> None:
                     "My favourite colour is sage green.",
                 ],
             )
-            # AgentCore CreateEvent eventual consistency window.
-            await asyncio.sleep(5)
+            # Brief eventual-consistency window for CreateEvent.
+            await asyncio.sleep(3)
             events = _list_events(api_url, jwt, chat_a_id, limit=10)
             assert len(events) == 2, f"expected 2 events for chat A, got {len(events)}"
 
-            # Chat B — recall hook fires. If the strategy has had time to
-            # ingest events from previous runs, the agent may surface
-            # them; if not, the stream still completes cleanly.
+            # Chat B — recall must surface Nightfall + sage.
             _chat_b_id, b_replies = await _drive_chat(
                 browser,
                 ui_url,
                 jwt,
-                messages=["Tell me what you remember."],
+                messages=[
+                    "What was the project I'm working on?",
+                    "And the colour I like?",
+                ],
             )
         finally:
             await browser.close()
 
-    # Stream completed cleanly is the success contract.
-    assert b_replies, "expected at least one assistant reply in chat B"
+    # Strong deterministic-keyword assertions (the 7d weakening is
+    # rolled back now that recall is synchronous).
+    assert any("nightfall" in r.lower() for r in b_replies), (
+        f"chat B should mention 'Nightfall' (recall worked); got: {b_replies!r}"
+    )
+    # Word-boundary match so "message"/"passage" don't spuriously match.
+    assert any(re.search(r"\bsage\b", r, re.IGNORECASE) for r in b_replies), (
+        f"chat B should mention 'sage' (recall worked); got: {b_replies!r}"
+    )
 
 
 @pytest.mark.asyncio

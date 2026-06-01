@@ -11,9 +11,11 @@ from strands.hooks.events import BeforeInvocationEvent
 
 from channel.agents import recall as recall_module
 from channel.agents.recall import (
-    _RECALL_TOP_K,
+    _RECALL_EVENT_TEXT_TRUNCATE,
+    _RECALL_EVENTS_PER_SESSION,
     AgentCoreRecallHook,
     _format_recall_addendum,
+    _iso_date,
 )
 
 
@@ -45,35 +47,172 @@ def test_format_recall_addendum_returns_empty_string_for_no_records():
     assert _format_recall_addendum([]) == ""
 
 
-def test_format_recall_addendum_renders_records_as_markdown_bullets():
+def test_format_recall_addendum_groups_records_by_session_with_date_header():
+    # Records here use the normalized YYYY-MM-DD form that _get_or_fetch_records
+    # emits via _iso_date; _format_recall_addendum receives pre-normalized data.
     records = [
-        {"content": {"text": "User builds chess engines"}, "score": 0.92},
-        {"content": {"text": "Favourite colour: sage green"}, "score": 0.85},
+        {
+            "sessionId": "s1",
+            "createdAt": "2026-05-31",
+            "payload": [
+                {"conversational": {"role": "USER", "content": {"text": "i love sage green"}}},
+                {"conversational": {"role": "ASSISTANT", "content": {"text": "sage is great"}}},
+            ],
+        },
+        {
+            "sessionId": "s2",
+            "createdAt": "2026-05-31",
+            "payload": [
+                {"conversational": {"role": "USER", "content": {"text": "building Nightfall"}}},
+                {"conversational": {"role": "ASSISTANT", "content": {"text": "cool engine name"}}},
+            ],
+        },
     ]
-
     result = _format_recall_addendum(records)
 
-    # Heading + each record on its own bullet.
-    assert "## What I remember about previous conversations" in result
-    assert "- User builds chess engines" in result
-    assert "- Favourite colour: sage green" in result
+    assert "## What we've talked about before" in result
+    # Date header per session.
+    assert "Earlier conversation (2026-05-31)" in result
+    # Two session blocks.
+    assert result.count("Earlier conversation") == 2
+    # Role mapping.
+    assert "- You: i love sage green" in result
+    assert "- Me: sage is great" in result
+    assert "- You: building Nightfall" in result
+    assert "- Me: cool engine name" in result
 
 
-def test_format_recall_addendum_skips_records_missing_text():
-    """Defensive: AgentCore responses without ``content.text`` are dropped
-    so a malformed payload can't corrupt the prompt."""
+def test_format_recall_addendum_truncates_long_text():
+    long_text = "A" * 500
     records = [
-        {"content": {"text": "valid record"}, "score": 0.9},
-        {"content": {}, "score": 0.85},  # no text key
-        {"score": 0.8},  # no content key
-        {"content": {"text": ""}, "score": 0.75},  # empty text
+        {
+            "sessionId": "s1",
+            "createdAt": "2026-05-31",
+            "payload": [
+                {"conversational": {"role": "USER", "content": {"text": long_text}}},
+            ],
+        },
     ]
-
     result = _format_recall_addendum(records)
+    # Positive shape: exactly _RECALL_EVENT_TEXT_TRUNCATE chars of A
+    # followed by an ellipsis indicator.
+    assert "A" * _RECALL_EVENT_TEXT_TRUNCATE + "..." in result
+    assert "A" * (_RECALL_EVENT_TEXT_TRUNCATE + 1) not in result
 
-    assert "- valid record" in result
-    # Heading appears once, no empty bullets.
-    assert result.count("- ") == 1
+
+def test_format_recall_addendum_skips_records_with_no_payload_text():
+    records = [
+        {
+            "sessionId": "s1",
+            "createdAt": "2026-05-31",
+            "payload": [
+                {"conversational": {"role": "USER", "content": {}}},  # no text
+                {"conversational": {"role": "ASSISTANT", "content": {"text": ""}}},
+            ],
+        },
+    ]
+    # All payload entries unusable → no bullets → session block dropped.
+    result = _format_recall_addendum(records)
+    assert result == ""
+
+
+def test_format_recall_addendum_skips_records_missing_session_id():
+    """Defensive: records with no ``sessionId`` key are silently dropped."""
+    records = [
+        # No sessionId — should be skipped entirely.
+        {
+            "createdAt": "2026-05-31",
+            "payload": [
+                {"conversational": {"role": "USER", "content": {"text": "should not appear"}}},
+            ],
+        },
+        {
+            "sessionId": "s1",
+            "createdAt": "2026-05-31",
+            "payload": [
+                {"conversational": {"role": "USER", "content": {"text": "valid"}}},
+            ],
+        },
+    ]
+    result = _format_recall_addendum(records)
+    assert "should not appear" not in result
+    assert "- You: valid" in result
+
+
+def test_format_recall_addendum_handles_iso_string_createdAt():
+    """createdAt as ISO string (the normalized boundary shape)."""
+    records = [
+        {
+            "sessionId": "s1",
+            "createdAt": "2026-05-31",  # already a YYYY-MM-DD from _iso_date
+            "payload": [
+                {"conversational": {"role": "USER", "content": {"text": "hello"}}},
+            ],
+        },
+    ]
+    result = _format_recall_addendum(records)
+    assert "Earlier conversation (2026-05-31)" in result
+
+
+def test_iso_date_normalizes_datetime():
+    """_iso_date handles datetime, datetime-naive, string, and None inputs."""
+    from datetime import datetime, timezone
+
+    # datetime → YYYY-MM-DD
+    aware = datetime(2026, 5, 31, 22, 58, 39, tzinfo=timezone.utc)
+    assert _iso_date(aware) == "2026-05-31"
+
+    # Naive datetime → YYYY-MM-DD
+    naive = datetime(2026, 5, 31, 22, 58, 39)
+    assert _iso_date(naive) == "2026-05-31"
+
+    # ISO-string passthrough (truncated to 10 chars)
+    assert _iso_date("2026-05-31T22:58:39Z") == "2026-05-31"
+
+    # None → empty string
+    assert _iso_date(None) == ""
+
+
+@pytest.mark.asyncio
+async def test_get_or_fetch_records_normalizes_datetime_createdAt():
+    """ListSessions returns datetime objects; _get_or_fetch_records must
+    normalize them to ISO strings in the aggregated records."""
+    from datetime import datetime, timezone
+
+    fake_client = MagicMock()
+    fake_client.list_sessions.return_value = {
+        "sessionSummaries": [
+            {
+                "sessionId": "prior-1",
+                "createdAt": datetime(2026, 5, 31, 19, 0, 0, tzinfo=timezone.utc),
+            },
+        ],
+    }
+    fake_client.list_events.return_value = {
+        "events": [
+            {
+                "sessionId": "prior-1",
+                "eventTimestamp": datetime(2026, 5, 31, 19, 0, 30, tzinfo=timezone.utc),
+                "payload": [
+                    {"conversational": {"role": "USER", "content": {"text": "hi"}}},
+                ],
+            },
+        ],
+    }
+    hook = AgentCoreRecallHook(
+        memory_id="m-1",
+        actor_id="a",
+        client=fake_client,
+    )
+    event = _fake_before_event(user_text="anything")
+
+    with patch("channel.agents.recall.record_recall_outcome", new=AsyncMock()):
+        await hook._on_before_invocation_async(event, chat_id="current")
+
+    sys_text = event.messages[0]["content"][0]["text"]
+    # Date header rendered correctly from datetime, not "TypeError" or empty.
+    assert "Earlier conversation (2026-05-31)" in sys_text
+    assert "- You: hi" in sys_text
 
 
 # ---------------------------------------------------------------------------
@@ -98,50 +237,156 @@ def test_hook_registers_before_invocation_callback_only():
 
 
 @pytest.mark.asyncio
-async def test_hook_injects_records_into_system_prompt_on_first_turn():
+async def test_hook_lists_sessions_and_events_excluding_current_chat():
+    """Recall iterates this actor's sessions, drops the current chat,
+    fetches the last 2 events per session, returns the aggregate."""
     fake_client = MagicMock()
-    fake_client.retrieve_memory_records.return_value = {
-        "memoryRecordSummaries": [
-            {"content": {"text": "User builds chess engines"}, "score": 0.92},
-            {"content": {"text": "Likes sage green"}, "score": 0.81},
+    fake_client.list_sessions.return_value = {
+        "sessionSummaries": [
+            {"sessionId": "current-chat", "createdAt": "2026-05-31T20:00:00Z"},
+            {"sessionId": "prior-1", "createdAt": "2026-05-31T19:00:00Z"},
+            {"sessionId": "prior-2", "createdAt": "2026-05-31T18:00:00Z"},
         ],
     }
+    fake_client.list_events.side_effect = [
+        {
+            "events": [
+                {
+                    "sessionId": "prior-1",
+                    "eventTimestamp": "2026-05-31T19:00:30Z",
+                    "payload": [
+                        {
+                            "conversational": {
+                                "role": "USER",
+                                "content": {"text": "hello from prior-1"},
+                            }
+                        },
+                        {"conversational": {"role": "ASSISTANT", "content": {"text": "hi"}}},
+                    ],
+                },
+            ],
+        },
+        {
+            "events": [
+                {
+                    "sessionId": "prior-2",
+                    "eventTimestamp": "2026-05-31T18:00:30Z",
+                    "payload": [
+                        {
+                            "conversational": {
+                                "role": "USER",
+                                "content": {"text": "hello from prior-2"},
+                            }
+                        },
+                        {"conversational": {"role": "ASSISTANT", "content": {"text": "hi"}}},
+                    ],
+                },
+            ],
+        },
+    ]
     hook = AgentCoreRecallHook(
         memory_id="m-1",
-        actor_id="alice_example_com",
+        actor_id="user_abc",
         client=fake_client,
     )
-    event = _fake_before_event(user_text="what colour do i like?")
+    event = _fake_before_event(user_text="anything")
 
-    with patch("channel.agents.recall.record_recall_outcome", new=AsyncMock()) as mock_record:
-        await hook._on_before_invocation_async(event, chat_id="chat-1")
+    with patch("channel.agents.recall.record_recall_outcome", new=AsyncMock()):
+        await hook._on_before_invocation_async(event, chat_id="current-chat")
 
+    # ListSessions called once, scoped to actor.
+    fake_client.list_sessions.assert_called_once_with(
+        memoryId="m-1",
+        actorId="user_abc",
+    )
+    # ListEvents called once per prior session, NOT for the current chat.
+    assert fake_client.list_events.call_count == 2
+    session_ids_queried = {
+        call.kwargs["sessionId"] for call in fake_client.list_events.call_args_list
+    }
+    assert session_ids_queried == {"prior-1", "prior-2"}
+    # System prompt grew with content from both prior sessions.
     sys_text = event.messages[0]["content"][0]["text"]
-    assert "## What I remember about previous conversations" in sys_text
-    assert "chess engines" in sys_text
-    assert "sage green" in sys_text
-
-    fake_client.retrieve_memory_records.assert_called_once()
-    kwargs = fake_client.retrieve_memory_records.call_args.kwargs
-    assert kwargs["memoryId"] == "m-1"
-    # AgentCore takes ``namespace`` (a path prefix encoding the actor),
-    # NOT ``actorId``. ``/actors/<actorId>`` is the prefix that matches
-    # all strategies' records for this actor.
-    assert kwargs["namespace"] == "/actors/alice_example_com"
-    assert "actorId" not in kwargs
-    assert kwargs["searchCriteria"]["searchQuery"] == "what colour do i like?"
-    assert kwargs["searchCriteria"]["topK"] == _RECALL_TOP_K
-    mock_record.assert_awaited_once_with(success=True)
+    assert "hello from prior-1" in sys_text
+    assert "hello from prior-2" in sys_text
 
 
 @pytest.mark.asyncio
-async def test_hook_filters_records_below_score_threshold():
+async def test_hook_caps_sessions_at_max():
+    """8 sessions returned → only the 5 most-recent get ListEvents'd."""
     fake_client = MagicMock()
-    fake_client.retrieve_memory_records.return_value = {
-        "memoryRecordSummaries": [
-            {"content": {"text": "Highly relevant"}, "score": 0.95},
-            {"content": {"text": "Borderline"}, "score": 0.65},  # below threshold
-            {"content": {"text": "Also high"}, "score": 0.82},
+    fake_client.list_sessions.return_value = {
+        "sessionSummaries": [
+            {"sessionId": f"s{i}", "createdAt": f"2026-05-{30 - i:02d}T00:00:00Z"} for i in range(8)
+        ],
+    }
+    fake_client.list_events.return_value = {"events": []}
+    hook = AgentCoreRecallHook(
+        memory_id="m",
+        actor_id="a",
+        client=fake_client,
+    )
+    event = _fake_before_event(user_text="anything")
+
+    with patch("channel.agents.recall.record_recall_outcome", new=AsyncMock()):
+        await hook._on_before_invocation_async(event, chat_id="not-in-list")
+
+    assert fake_client.list_events.call_count == 5  # _RECALL_MAX_SESSIONS
+
+
+@pytest.mark.asyncio
+async def test_hook_caps_events_per_session():
+    """ListEvents is called with maxResults=_RECALL_EVENTS_PER_SESSION."""
+    fake_client = MagicMock()
+    fake_client.list_sessions.return_value = {
+        "sessionSummaries": [{"sessionId": "s1", "createdAt": "2026-05-31T00:00:00Z"}],
+    }
+    fake_client.list_events.return_value = {"events": []}
+    hook = AgentCoreRecallHook(
+        memory_id="m",
+        actor_id="a",
+        client=fake_client,
+    )
+    event = _fake_before_event(user_text="anything")
+
+    with patch("channel.agents.recall.record_recall_outcome", new=AsyncMock()):
+        await hook._on_before_invocation_async(event, chat_id="not-in-list")
+
+    call = fake_client.list_events.call_args
+    assert call.kwargs["maxResults"] == _RECALL_EVENTS_PER_SESSION
+
+
+@pytest.mark.asyncio
+async def test_hook_emits_no_addendum_when_actor_has_no_prior_sessions():
+    """0 prior sessions → no addendum, no ListEvents calls."""
+    fake_client = MagicMock()
+    fake_client.list_sessions.return_value = {"sessionSummaries": []}
+    hook = AgentCoreRecallHook(
+        memory_id="m",
+        actor_id="a",
+        client=fake_client,
+    )
+    event = _fake_before_event(
+        user_text="hello",
+        system_text="You are Channel.",
+    )
+
+    with patch("channel.agents.recall.record_recall_outcome", new=AsyncMock()):
+        await hook._on_before_invocation_async(event, chat_id="any")
+
+    fake_client.list_events.assert_not_called()
+    # System prompt unchanged.
+    assert event.messages[0]["content"][0]["text"] == "You are Channel."
+
+
+@pytest.mark.asyncio
+async def test_hook_emits_no_addendum_when_only_session_is_current_chat():
+    """1 session = the current chat → exclusion leaves 0 candidates,
+    no addendum, no ListEvents calls."""
+    fake_client = MagicMock()
+    fake_client.list_sessions.return_value = {
+        "sessionSummaries": [
+            {"sessionId": "current", "createdAt": "2026-05-31T00:00:00Z"},
         ],
     }
     hook = AgentCoreRecallHook(
@@ -149,24 +394,22 @@ async def test_hook_filters_records_below_score_threshold():
         actor_id="a",
         client=fake_client,
     )
-    event = _fake_before_event(user_text="...")
-    with patch("channel.agents.recall.record_recall_outcome", new=AsyncMock()):
-        await hook._on_before_invocation_async(event, chat_id="chat-1")
+    event = _fake_before_event(
+        user_text="hello",
+        system_text="You are Channel.",
+    )
 
-    sys_text = event.messages[0]["content"][0]["text"]
-    assert "Highly relevant" in sys_text
-    assert "Also high" in sys_text
-    assert "Borderline" not in sys_text
+    with patch("channel.agents.recall.record_recall_outcome", new=AsyncMock()):
+        await hook._on_before_invocation_async(event, chat_id="current")
+
+    fake_client.list_events.assert_not_called()
+    assert event.messages[0]["content"][0]["text"] == "You are Channel."
 
 
 @pytest.mark.asyncio
 async def test_hook_reuses_cached_records_for_next_5_turns():
     fake_client = MagicMock()
-    fake_client.retrieve_memory_records.return_value = {
-        "memoryRecordSummaries": [
-            {"content": {"text": "Cached record"}, "score": 0.9},
-        ],
-    }
+    fake_client.list_sessions.return_value = {"sessionSummaries": []}
     hook = AgentCoreRecallHook(
         memory_id="m",
         actor_id="a",
@@ -178,15 +421,13 @@ async def test_hook_reuses_cached_records_for_next_5_turns():
             await hook._on_before_invocation_async(event, chat_id="chat-1")
 
     # Only ONE RPC across 5 turns — turns 2-5 are cache hits.
-    fake_client.retrieve_memory_records.assert_called_once()
+    fake_client.list_sessions.assert_called_once()
 
 
 @pytest.mark.asyncio
 async def test_hook_refreshes_cache_after_5_turns():
     fake_client = MagicMock()
-    fake_client.retrieve_memory_records.return_value = {
-        "memoryRecordSummaries": [{"content": {"text": "x"}, "score": 0.9}],
-    }
+    fake_client.list_sessions.return_value = {"sessionSummaries": []}
     hook = AgentCoreRecallHook(
         memory_id="m",
         actor_id="a",
@@ -197,7 +438,7 @@ async def test_hook_refreshes_cache_after_5_turns():
             event = _fake_before_event(user_text="anything")
             await hook._on_before_invocation_async(event, chat_id="chat-1")
 
-    assert fake_client.retrieve_memory_records.call_count == 2
+    assert fake_client.list_sessions.call_count == 2
 
 
 @pytest.mark.asyncio
@@ -205,7 +446,7 @@ async def test_hook_per_chat_cache_keys():
     """Cache is keyed by ``(actor_id, chat_id)`` — chat A's cache must
     NOT serve chat B."""
     fake_client = MagicMock()
-    fake_client.retrieve_memory_records.return_value = {"memoryRecordSummaries": []}
+    fake_client.list_sessions.return_value = {"sessionSummaries": []}
     hook = AgentCoreRecallHook(
         memory_id="m",
         actor_id="a",
@@ -221,13 +462,13 @@ async def test_hook_per_chat_cache_keys():
             chat_id="B",
         )
     # Two distinct chats → two cold-cache RPCs.
-    assert fake_client.retrieve_memory_records.call_count == 2
+    assert fake_client.list_sessions.call_count == 2
 
 
 @pytest.mark.asyncio
-async def test_hook_swallows_retrieve_failures_and_emits_failure_metric():
+async def test_hook_swallows_list_failures_and_emits_failure_metric():
     fake_client = MagicMock()
-    fake_client.retrieve_memory_records.side_effect = RuntimeError("agentcore down")
+    fake_client.list_sessions.side_effect = RuntimeError("agentcore down")
     hook = AgentCoreRecallHook(
         memory_id="m",
         actor_id="a",
@@ -256,7 +497,7 @@ async def test_hook_short_circuits_when_kill_switch_off(monkeypatch):
     )
     event = _fake_before_event(user_text="...")
     await hook._on_before_invocation_async(event, chat_id="chat-1")
-    fake_client.retrieve_memory_records.assert_not_called()
+    fake_client.list_sessions.assert_not_called()
 
 
 def test_hook_before_invocation_fires_and_forgets():
