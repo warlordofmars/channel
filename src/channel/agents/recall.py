@@ -203,35 +203,31 @@ class AgentCoreRecallHook:
         # hook. AgentCore's actorId/namespace regex rejects ``@`` and ``.``.
         self._actor_id = _sanitize_actor_id(actor_id)
         self._client = client if client is not None else boto3.client("bedrock-agentcore")
-        # Strong refs to in-flight recall tasks (Sonar python:S7502, same
-        # pattern as the 7c write hook).
-        self._pending_recalls: set[asyncio.Task[None]] = set()
 
     def register_hooks(self, registry: Any, **_: Any) -> None:
+        # Register the ASYNC callback directly. Strands'
+        # ``HookRegistry.invoke_callbacks_async`` detects coroutine
+        # functions via ``inspect.iscoroutinefunction`` and ``await``s
+        # them, so we get synchronous-completion semantics in an async
+        # context. Phase 8a Layer-3 (#97): the prior fire-and-forget
+        # pattern raced against the model invocation — Strands would
+        # build the request payload (capturing ``agent.system_prompt``)
+        # before the recall task had a chance to mutate it. Awaiting
+        # the callback guarantees the addendum is in place before the
+        # model call begins.
         registry.add_callback(BeforeInvocationEvent, self._on_before_invocation)
 
-    def _on_before_invocation(self, event: BeforeInvocationEvent) -> None:
-        """Sync entry point — schedule the async recall, return immediately.
+    async def _on_before_invocation(self, event: BeforeInvocationEvent) -> None:
+        """Async recall path. Log + swallow on failure.
 
         ``chat_id`` is carried on ``event.agent.chat_id`` (set at
-        agent-build time in ``chat_agent.build_agent``). Strands' agent
-        doesn't expose chat_id natively; this is a Channel-specific
-        attribute.
+        agent-build time in ``chat_agent.build_agent``). Strands'
+        agent doesn't expose chat_id natively; this is a
+        Channel-specific attribute.
         """
-        chat_id = getattr(event.agent, "chat_id", None) or ""
-        task = asyncio.create_task(self._on_before_invocation_async(event, chat_id=chat_id))
-        self._pending_recalls.add(task)
-        task.add_done_callback(self._pending_recalls.discard)
-
-    async def _on_before_invocation_async(
-        self,
-        event: BeforeInvocationEvent,
-        *,
-        chat_id: str,
-    ) -> None:
-        """Async recall path. Log + swallow on failure."""
         if os.environ.get("STARTER_RECALL_ENABLED", "1") != "1":
             return
+        chat_id = getattr(event.agent, "chat_id", None) or ""
 
         try:
             records = await self._get_or_fetch_records(

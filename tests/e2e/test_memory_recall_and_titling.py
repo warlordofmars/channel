@@ -70,7 +70,7 @@ async def test_cross_session_recall_surfaces_planted_facts() -> None:
             assert len(events) == 2, f"expected 2 events for chat A, got {len(events)}"
 
             # Chat B — recall must surface Nightfall + sage.
-            _chat_b_id, b_replies = await _drive_chat(
+            chat_b_id, b_replies = await _drive_chat(
                 browser,
                 ui_url,
                 jwt,
@@ -79,6 +79,8 @@ async def test_cross_session_recall_surfaces_planted_facts() -> None:
                     "And the colour I like?",
                 ],
             )
+            await asyncio.sleep(3)
+            b_events = _list_events(api_url, jwt, chat_b_id, limit=10)
         finally:
             await browser.close()
 
@@ -91,6 +93,58 @@ async def test_cross_session_recall_surfaces_planted_facts() -> None:
     assert any(re.search(r"\bsage\b", r, re.IGNORECASE) for r in b_replies), (
         f"chat B should mention 'sage' (recall worked); got: {b_replies!r}"
     )
+
+    # Structural check: the recall addendum heading must NEVER appear
+    # inside a USER-role event payload. The bug from issue #95 was
+    # that the recall hook mutated event.messages[0] (the new user
+    # turn) instead of event.agent.system_prompt — when that
+    # happened, the polluted user message reached the memory write
+    # hook and the addendum heading was stored as part of the user's
+    # turn text in AgentCore. This is a model-independent signal: a
+    # robust model (Sonnet) still answers correctly when the addendum
+    # lands in the user message, so a behavioural assertion would
+    # spuriously pass under Sonnet but fail under Opus. The
+    # structural check fires regardless of model and pins the
+    # contract: only the assistant's own output and the user's
+    # literal input belong in the conversational payload.
+    for ev in b_events:
+        for entry in ev.get("payload", []) or []:
+            conv = entry.get("conversational") or {}
+            if conv.get("role") != "USER":
+                continue
+            content_text = (conv.get("content") or {}).get("text", "")
+            assert "What we've talked about before" not in content_text, (
+                "recall addendum heading found inside a USER-role event "
+                "payload — the hook is mutating event.messages[0] (the "
+                "new user turn) instead of event.agent.system_prompt. "
+                "See PR #96 / issue #95.\n"
+                f"Polluted USER content:\n{content_text!r}"
+            )
+
+    # "No memory" disclaimer absence — these phrases surface when the
+    # recall addendum lands in the user turn rather than the system
+    # prompt under sensitive models (Opus on dev). Kept alongside the
+    # structural check above because Opus might respond differently
+    # than the structural check catches.
+    disclaimers = (
+        "don't have any information",
+        "don't have access to",
+        "don't have any context",
+        "no previous conversations",
+        "no prior",
+        "no memory",
+        "don't retain",
+        "starts fresh",
+        "no information about you",
+    )
+    for reply in b_replies:
+        for d in disclaimers:
+            assert d not in reply.lower(), (
+                "chat B reply contained a no-memory disclaimer "
+                f"({d!r}); recall addendum may have landed in the user "
+                f"turn rather than agent.system_prompt. See PR #96. "
+                f"Reply: {reply!r}"
+            )
 
 
 @pytest.mark.asyncio
