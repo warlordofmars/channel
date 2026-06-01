@@ -492,10 +492,12 @@ describe("Sidebar — per-row menu", () => {
 
   it("marks the active row with the 'active' class", () => {
     render(
+      // App.jsx defines the route as ``/app/c/:id`` — the param is
+      // named ``id``, not ``chatId``. This test must match production.
       <MemoryRouter initialEntries={["/app/c/c1"]}>
         <Routes>
           <Route
-            path="/app/c/:chatId"
+            path="/app/c/:id"
             element={
               <Sidebar
                 chats={[
