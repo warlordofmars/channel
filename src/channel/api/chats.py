@@ -9,15 +9,18 @@ so chat existence isn't leaked.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from typing import Any
 
+import boto3
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Response
 from fastapi.responses import StreamingResponse
 
 from channel import storage
 from channel.agents.chat_agent import build_agent, build_titler_agent, resolve_model_id
+from channel.agents.memory import _sanitize_actor_id, get_or_create_memory
 from channel.agents.strands_sse import (
     sse_delta,
     sse_done,
@@ -26,7 +29,7 @@ from channel.agents.strands_sse import (
     translate_event,
 )
 from channel.api._auth import require_mgmt_user
-from channel.metrics import record_auto_title_outcome
+from channel.metrics import record_auto_title_outcome, record_chat_delete_memory_wipe_outcome
 from channel.models import (
     Chat,
     ChatCreate,
@@ -91,6 +94,54 @@ async def list_chats(
     }
 
 
+def _agentcore_client() -> Any:
+    """Lazy boto3 client construction — patched in unit tests."""
+    return boto3.client("bedrock-agentcore")
+
+
+def _memory_id_for_env() -> str:
+    """Resolve the current env's AgentCore memoryId. Cached by
+    ``get_or_create_memory``; cheap to call per request."""
+    env = os.environ.get("STARTER_ENV", "unknown")
+    return get_or_create_memory(env)
+
+
+async def _wipe_agentcore_session(actor_id: str, chat_id: str) -> None:
+    """Best-effort delete of all AgentCore events for one chat session.
+
+    Pages list_events and calls delete_event per event. Wrapped in
+    try/except at the endpoint level; this helper just does the work
+    and lets exceptions propagate so the caller can record the
+    failure metric. Same fail-soft contract as Phase 7c memory writes
+    and Phase 8a recall.
+    """
+    client = _agentcore_client()
+    memory_id = _memory_id_for_env()
+    sanitized_actor = _sanitize_actor_id(actor_id)
+    next_token: str | None = None
+    while True:
+        kwargs: dict[str, Any] = {
+            "memoryId": memory_id,
+            "actorId": sanitized_actor,
+            "sessionId": chat_id,
+            "maxResults": 100,
+        }
+        if next_token:
+            kwargs["nextToken"] = next_token
+        resp = await asyncio.to_thread(client.list_events, **kwargs)
+        for event in resp.get("events", []):
+            await asyncio.to_thread(
+                client.delete_event,
+                memoryId=memory_id,
+                actorId=sanitized_actor,
+                sessionId=chat_id,
+                eventId=event["eventId"],
+            )
+        next_token = resp.get("nextToken")
+        if not next_token:
+            break
+
+
 async def _load_owned_chat(chat_id: str, user_id: str) -> Chat:
     """Look up a chat by id and assert ownership.  404 on mismatch."""
 
@@ -133,6 +184,31 @@ async def patch_chat(
         title=payload.title,
         archived=payload.archived,
     )
+    return Response(status_code=204)
+
+
+@router.delete("/{chat_id}", status_code=204)
+async def delete_chat(
+    chat_id: str = Path(...),
+    claims: dict[str, Any] = Depends(require_mgmt_user),
+) -> Response:
+    """Permanently delete a chat: DDB message rows + chat-index row +
+    AgentCore session events. AgentCore failure is logged + counted
+    but does NOT fail the user's delete (DDB is the source of truth
+    for chat existence)."""
+    chat = await _load_owned_chat(chat_id, claims["sub"])
+    storage.delete_chat(user_id=claims["sub"], chat=chat)
+    try:
+        await _wipe_agentcore_session(actor_id=claims["sub"], chat_id=chat_id)
+        await record_chat_delete_memory_wipe_outcome(success=True)
+    except Exception as exc:
+        logger.warning(
+            "agentcore.chat_delete_wipe_failed chat_id=%s",
+            chat_id,
+            extra={"error_type": type(exc).__name__, "error_message": str(exc)},
+            exc_info=True,
+        )
+        await record_chat_delete_memory_wipe_outcome(success=False)
     return Response(status_code=204)
 
 

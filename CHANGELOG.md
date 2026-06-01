@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Chat rename + delete from the sidebar. Hovering a chat in the
+  Recents list reveals a `⋮` menu button; clicking it opens a popover
+  with Rename (wired), Delete (wired, permanent), and three disabled
+  placeholders (Pin, Change project, Remove from project). Delete
+  wipes the chat from both DynamoDB AND AgentCore Memory so the
+  agent stops recalling the deleted conversation in future chats.
+  Introduces a reusable `Modal.jsx` primitive and a `--danger` CSS
+  token (no destructive colour existed yet).
 - Phase 7d — agent now recalls relevant context from the user's
   PRIOR chats via Bedrock AgentCore Memory, and auto-titles new
   chats in 3-6 words after the first reply. Recall fires per turn

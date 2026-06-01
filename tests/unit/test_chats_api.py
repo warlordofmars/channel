@@ -967,3 +967,215 @@ def test_regenerate_returns_404_for_unowned_chat(
     monkeypatch.setattr("channel.api.chats.storage.get_chat_by_id", lambda _: None)
     response = client.post("/api/chats/x/regenerate", json={})
     assert response.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# DELETE /api/chats/{chat_id}
+# ---------------------------------------------------------------------------
+
+
+def test_delete_chat_returns_204_and_wipes_ddb(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Happy path: DELETE returns 204 with empty body; subsequent GET returns 404."""
+    chat = Chat(
+        chat_id="c-del-1",
+        user_id="u-1",
+        title="to delete",
+        created_at="t",
+        last_message_at="t",
+        model_default="claude-sonnet-4-6",
+    )
+    deleted: list[dict[str, Any]] = []
+
+    def fake_get(chat_id: str) -> Chat | None:
+        # Return None after deletion to simulate the chat being gone.
+        return None if deleted else chat
+
+    monkeypatch.setattr("channel.api.chats.storage.get_chat_by_id", fake_get)
+    monkeypatch.setattr(
+        "channel.api.chats.storage.delete_chat",
+        lambda **kwargs: deleted.append(kwargs),
+    )
+    # Stub out AgentCore helpers so no boto3 calls happen.
+    monkeypatch.setattr("channel.api.chats._agentcore_client", lambda: None)
+    monkeypatch.setattr("channel.api.chats._memory_id_for_env", lambda: "mem-fake")
+
+    async def fake_wipe(actor_id: str, chat_id: str) -> None:
+        pass
+
+    monkeypatch.setattr("channel.api.chats._wipe_agentcore_session", fake_wipe)
+
+    resp = client.delete("/api/chats/c-del-1")
+    assert resp.status_code == 204
+    assert resp.content == b""
+    assert deleted[0]["user_id"] == "u-1"
+    assert deleted[0]["chat"].chat_id == "c-del-1"
+
+    # Subsequent GET should 404 (chat_id unknown after deletion).
+    get_resp = client.get("/api/chats/c-del-1")
+    assert get_resp.status_code == 404
+
+
+def test_delete_chat_404s_on_cross_user(monkeypatch: pytest.MonkeyPatch) -> None:
+    """DELETE from a different user's JWT returns 404; owner's chat is untouched."""
+    from channel.api._auth import require_mgmt_user
+    from channel.api.main import app
+
+    chat = Chat(
+        chat_id="c-del-2",
+        user_id="u-owner",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="m",
+    )
+    monkeypatch.setattr("channel.api.chats.storage.get_chat_by_id", lambda _: chat)
+
+    # Client authenticated as a different user (intruder).
+    def _stub_intruder() -> dict[str, Any]:
+        return {"sub": "u-intruder", "role": "user"}
+
+    app.dependency_overrides[require_mgmt_user] = _stub_intruder
+    try:
+        intruder_client = TestClient(app)
+        resp = intruder_client.delete("/api/chats/c-del-2")
+        assert resp.status_code == 404
+
+        # Owner can still GET the chat.
+        def _stub_owner() -> dict[str, Any]:
+            return {"sub": "u-owner", "role": "user"}
+
+        app.dependency_overrides[require_mgmt_user] = _stub_owner
+        owner_client = TestClient(app)
+        monkeypatch.setattr(
+            "channel.api.chats.storage.list_messages", lambda *_a, **_kw: ([], None)
+        )
+        ok = owner_client.get("/api/chats/c-del-2")
+        assert ok.status_code == 200
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_delete_chat_calls_agentcore_delete_event_per_event(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AgentCore wipe calls delete_event for each event returned by list_events."""
+    from unittest.mock import MagicMock
+
+    chat = Chat(
+        chat_id="c-del-3",
+        user_id="u-1",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="m",
+    )
+    monkeypatch.setattr("channel.api.chats.storage.get_chat_by_id", lambda _: chat)
+    monkeypatch.setattr("channel.api.chats.storage.delete_chat", lambda **_: None)
+
+    fake_ac = MagicMock()
+    fake_ac.list_events.return_value = {
+        "events": [
+            {"eventId": "ev-1"},
+            {"eventId": "ev-2"},
+        ],
+    }
+    monkeypatch.setattr("channel.api.chats._agentcore_client", lambda: fake_ac)
+    monkeypatch.setattr("channel.api.chats._memory_id_for_env", lambda: "channel_test-FAKEMEMID")
+
+    resp = client.delete("/api/chats/c-del-3")
+    assert resp.status_code == 204
+
+    assert fake_ac.list_events.called
+    assert fake_ac.delete_event.call_count == 2
+    deleted_event_ids = {call.kwargs["eventId"] for call in fake_ac.delete_event.call_args_list}
+    assert deleted_event_ids == {"ev-1", "ev-2"}
+
+
+def test_delete_chat_swallows_agentcore_failure(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AgentCore failure must not prevent the 204; metric is recorded as failure."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    chat = Chat(
+        chat_id="c-del-4",
+        user_id="u-1",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="m",
+    )
+    monkeypatch.setattr("channel.api.chats.storage.get_chat_by_id", lambda _: chat)
+    monkeypatch.setattr("channel.api.chats.storage.delete_chat", lambda **_: None)
+
+    fake_ac = MagicMock()
+    fake_ac.list_events.side_effect = RuntimeError("agentcore down")
+    monkeypatch.setattr("channel.api.chats._agentcore_client", lambda: fake_ac)
+    monkeypatch.setattr("channel.api.chats._memory_id_for_env", lambda: "channel_test-FAKEMEMID")
+
+    record_failure = AsyncMock()
+    monkeypatch.setattr(
+        "channel.api.chats.record_chat_delete_memory_wipe_outcome",
+        record_failure,
+    )
+
+    resp = client.delete("/api/chats/c-del-4")
+    assert resp.status_code == 204
+    record_failure.assert_awaited_once_with(success=False)
+
+
+def test_agentcore_client_and_memory_id_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Directly exercise _agentcore_client and _memory_id_for_env to cover
+    the real-boto3 / real-agentcore code paths (lines patched in endpoint tests)."""
+    from unittest.mock import MagicMock, patch
+
+    import channel.api.chats as chats_mod
+
+    fake_boto_client = MagicMock()
+    with patch("channel.api.chats.boto3.client", return_value=fake_boto_client) as mock_boto:
+        result = chats_mod._agentcore_client()
+    mock_boto.assert_called_once_with("bedrock-agentcore")
+    assert result is fake_boto_client
+
+    monkeypatch.setenv("STARTER_ENV", "test-env")
+    monkeypatch.setattr("channel.api.chats.get_or_create_memory", lambda env: f"mem-{env}")
+    mem_id = chats_mod._memory_id_for_env()
+    assert mem_id == "mem-test-env"
+
+
+def test_delete_chat_wipe_paginates_with_next_token(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """_wipe_agentcore_session must page through list_events when nextToken
+    is present, covering the ``kwargs['nextToken'] = next_token`` branch."""
+    from unittest.mock import MagicMock
+
+    chat = Chat(
+        chat_id="c-del-5",
+        user_id="u-1",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="m",
+    )
+    monkeypatch.setattr("channel.api.chats.storage.get_chat_by_id", lambda _: chat)
+    monkeypatch.setattr("channel.api.chats.storage.delete_chat", lambda **_: None)
+
+    # First call returns page 1 with nextToken; second call returns page 2.
+    page1 = {"events": [{"eventId": "ev-p1"}], "nextToken": "tok-abc"}
+    page2 = {"events": [{"eventId": "ev-p2"}]}
+    fake_ac = MagicMock()
+    fake_ac.list_events.side_effect = [page1, page2]
+    monkeypatch.setattr("channel.api.chats._agentcore_client", lambda: fake_ac)
+    monkeypatch.setattr("channel.api.chats._memory_id_for_env", lambda: "mem-fake")
+
+    resp = client.delete("/api/chats/c-del-5")
+    assert resp.status_code == 204
+    # Two pages → two list_events calls, two delete_event calls.
+    assert fake_ac.list_events.call_count == 2
+    assert fake_ac.delete_event.call_count == 2
+    # Second list_events call must include nextToken.
+    second_call_kwargs = fake_ac.list_events.call_args_list[1].kwargs
+    assert second_call_kwargs["nextToken"] == "tok-abc"

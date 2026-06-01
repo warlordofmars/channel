@@ -6,6 +6,7 @@ vi.mock("../api.js", () => ({
   listChats: vi.fn(),
   createChat: vi.fn(),
   patchChat: vi.fn(),
+  deleteChat: vi.fn(),
 }));
 
 import * as api from "../api.js";
@@ -111,6 +112,25 @@ describe("useChatList", () => {
 
     await act(async () => result.current.archiveChat("a"));
     expect(result.current.chats.find((c) => c.chat_id === "a")).toBeUndefined();
+  });
+
+  it("optimistically removes chat via deleteChat", async () => {
+    vi.spyOn(api, "deleteChat").mockResolvedValue(undefined);
+    vi.spyOn(api, "listChats").mockResolvedValue({
+      items: [
+        { chat_id: "a", title: "alpha", last_message_at: "2026-06-01T00:00:00Z" },
+        { chat_id: "b", title: "beta", last_message_at: "2026-06-01T00:00:00Z" },
+      ],
+    });
+    const { result } = renderHook(() => useChatList());
+    await waitFor(() => expect(result.current.chats.length).toBe(2));
+
+    await act(async () => {
+      await result.current.deleteChat("a");
+    });
+
+    expect(result.current.chats.map((c) => c.chat_id)).toEqual(["b"]);
+    expect(api.deleteChat).toHaveBeenCalledWith("a");
   });
 
   it("sets error status on initial fetch failure", async () => {

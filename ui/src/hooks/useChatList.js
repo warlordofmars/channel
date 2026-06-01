@@ -64,6 +64,11 @@ export function useChatList() {
     await api.patchChat(chatId, { archived: true });
   }, []);
 
+  const deleteChat = useCallback(async (chatId) => {
+    setChats((prev) => prev.filter((c) => c.chat_id !== chatId));
+    await api.deleteChat(chatId);
+  }, []);
+
   return {
     chats,
     status,
@@ -72,5 +77,6 @@ export function useChatList() {
     renameChat,
     renameChatLocal,
     archiveChat,
+    deleteChat,
   };
 }

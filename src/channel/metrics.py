@@ -80,3 +80,13 @@ async def record_auto_title_outcome(success: bool) -> None:
     """
     metric = "AutoTitleSuccesses" if success else "AutoTitleFailures"
     await emit_metric(metric)
+
+
+async def record_chat_delete_memory_wipe_outcome(success: bool) -> None:
+    """Emit a CloudWatch counter for one AgentCore Memory wipe attempt on chat delete.
+
+    Counter-only — same cardinality-risk rationale as
+    :func:`record_memory_write_outcome`. No per-actor or per-chat dimensions.
+    """
+    metric = "ChatDeleteMemoryWipeSuccesses" if success else "ChatDeleteMemoryWipeFailures"
+    await emit_metric(metric)

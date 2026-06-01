@@ -17,7 +17,26 @@ import { useChatList } from "./useChatList.js";
 const ChatsContext = createContext(null);
 
 export function ChatsProvider({ children }) {
-  const value = useChatList();
+  const {
+    chats,
+    status,
+    refresh,
+    createChat,
+    renameChat,
+    renameChatLocal,
+    archiveChat,
+    deleteChat,
+  } = useChatList();
+  const value = {
+    chats,
+    status,
+    refresh,
+    createChat,
+    renameChat,
+    renameChatLocal,
+    archiveChat,
+    deleteChat,
+  };
   return <ChatsContext.Provider value={value}>{children}</ChatsContext.Provider>;
 }
 
