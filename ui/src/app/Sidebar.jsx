@@ -1,9 +1,12 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
 import React, { useEffect, useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useParams } from "react-router-dom";
 import { parseToken, TOKEN_KEY } from "../lib/auth.js";
 import Icon from "../components/Icon.jsx";
 import AccountPopover from "./AccountPopover.jsx";
+import ChatRowMenu from "./ChatRowMenu.jsx";
+import RenameChatModal from "./RenameChatModal.jsx";
+import DeleteChatModal from "./DeleteChatModal.jsx";
 
 /**
  * Bucket a chat into a recents group based on `last_message_at`.
@@ -54,6 +57,11 @@ export default function Sidebar({
   const [search, setSearch] = useState("");
   const [acctOpen, setAcctOpen] = useState(false);
   const [pendingUpdateVersion, setPendingUpdateVersion] = useState(null);
+  const [menuFor, setMenuFor] = useState(null);    // { chatId, chatTitle, anchorRect } | null
+  const [renameFor, setRenameFor] = useState(null); // { chatId, currentTitle } | null
+  const [deleteFor, setDeleteFor] = useState(null); // { chatId, chatTitle } | null
+  const params = useParams();
+  const activeChatId = params.chatId ?? null;
 
   useEffect(() => {
     const desktop = window.channelDesktop;
@@ -166,14 +174,29 @@ export default function Sidebar({
           <div key={g.name}>
             <div className="sb-section">{g.name}</div>
             {g.items.map((c) => (
-              <button
-                type="button"
-                key={c.chat_id}
-                className="recent"
-                onClick={() => navigate(`/app/c/${c.chat_id}`)}
-              >
-                {c.title}
-              </button>
+              <div key={c.chat_id} className="recent-wrap">
+                <button
+                  type="button"
+                  className="recent"
+                  onClick={() => navigate(`/app/c/${c.chat_id}`)}
+                >
+                  {c.title}
+                </button>
+                <button
+                  type="button"
+                  className="recent-menu-btn"
+                  aria-label={`More options for ${c.title}`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    const rect = e.currentTarget
+                      .closest(".recent-wrap")
+                      .getBoundingClientRect();
+                    setMenuFor({ chatId: c.chat_id, chatTitle: c.title, anchorRect: rect });
+                  }}
+                >
+                  <Icon name="more-vertical" size={16} />
+                </button>
+              </div>
             ))}
           </div>
         ))}
@@ -211,6 +234,37 @@ export default function Sidebar({
           </button>
         </div>
       </div>
+
+      {menuFor && (
+        <ChatRowMenu
+          open
+          anchorRect={menuFor.anchorRect}
+          onClose={() => setMenuFor(null)}
+          onRename={() => {
+            setRenameFor({ chatId: menuFor.chatId, currentTitle: menuFor.chatTitle });
+          }}
+          onDelete={() => {
+            setDeleteFor({ chatId: menuFor.chatId, chatTitle: menuFor.chatTitle });
+          }}
+        />
+      )}
+      {renameFor && (
+        <RenameChatModal
+          open
+          chatId={renameFor.chatId}
+          currentTitle={renameFor.currentTitle}
+          onClose={() => setRenameFor(null)}
+        />
+      )}
+      {deleteFor && (
+        <DeleteChatModal
+          open
+          chatId={deleteFor.chatId}
+          chatTitle={deleteFor.chatTitle}
+          isActive={activeChatId === deleteFor.chatId}
+          onClose={() => setDeleteFor(null)}
+        />
+      )}
     </div>
   );
 }

@@ -6,6 +6,15 @@ import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import Sidebar, { groupNameFor } from "./Sidebar.jsx";
 import { TOKEN_KEY } from "../lib/auth.js";
 
+vi.mock("../hooks/ChatsContext.jsx", () => ({
+  useChats: () => ({
+    renameChat: vi.fn(),
+    archiveChat: vi.fn(),
+    deleteChat: vi.fn(),
+    renameChatLocal: vi.fn(),
+  }),
+}));
+
 function makeToken({ email = "ada@example.com", display_name } = {}) {
   const exp = Math.floor(Date.now() / 1000) + 3600;
   const claims = { exp, sub: "u1", role: "user", email };
@@ -392,6 +401,93 @@ describe("Sidebar — update pill", () => {
     act(() => registeredCb({ state: "available", version: "0.2.1" }));
     act(() => registeredCb({ state: "error", message: "boom" }));
     expect(screen.queryByRole("button", { name: /relaunch to update/i })).toBeNull();
+  });
+});
+
+describe("Sidebar — per-row menu", () => {
+  let storage;
+
+  beforeEach(() => {
+    storage = { [TOKEN_KEY]: makeToken() };
+    vi.stubGlobal("localStorage", {
+      getItem: (k) => storage[k] ?? null,
+      setItem: (k, v) => { storage[k] = String(v); },
+      removeItem: (k) => { delete storage[k]; },
+    });
+    vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() }));
+    vi.stubGlobal("location", { ...globalThis.location, assign: vi.fn() });
+    vi.spyOn(Date, "now").mockReturnValue(NOW);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  function renderSidebarWithChat(chat) {
+    return render(
+      <MemoryRouter>
+        <Sidebar chats={[chat]} />
+      </MemoryRouter>,
+    );
+  }
+
+  it("renders a more-vertical button per chat row", () => {
+    renderSidebarWithChat({
+      chat_id: "c1", title: "alpha", last_message_at: new Date().toISOString(),
+    });
+    expect(screen.getByLabelText(/more options for alpha/i)).toBeTruthy();
+  });
+
+  it("clicking the menu button opens ChatRowMenu", () => {
+    renderSidebarWithChat({
+      chat_id: "c1", title: "alpha", last_message_at: new Date().toISOString(),
+    });
+    fireEvent.click(screen.getByLabelText(/more options for alpha/i));
+    expect(screen.getByRole("menu")).toBeTruthy();
+    expect(screen.getByRole("menuitem", { name: /rename/i })).toBeTruthy();
+  });
+
+  it("clicking Rename opens RenameChatModal", () => {
+    renderSidebarWithChat({
+      chat_id: "c1", title: "alpha", last_message_at: new Date().toISOString(),
+    });
+    fireEvent.click(screen.getByLabelText(/more options for alpha/i));
+    fireEvent.click(screen.getByRole("menuitem", { name: /rename/i }));
+    expect(screen.getByText(/rename chat/i)).toBeTruthy();
+    expect(screen.getByLabelText(/title/i).value).toBe("alpha");
+  });
+
+  it("clicking Delete opens DeleteChatModal", () => {
+    renderSidebarWithChat({
+      chat_id: "c1", title: "alpha", last_message_at: new Date().toISOString(),
+    });
+    fireEvent.click(screen.getByLabelText(/more options for alpha/i));
+    fireEvent.click(screen.getByRole("menuitem", { name: /delete/i }));
+    expect(screen.getByText(/delete chat\?/i)).toBeTruthy();
+  });
+
+  it("RenameChatModal onClose clears renameFor (modal closes)", () => {
+    renderSidebarWithChat({
+      chat_id: "c1", title: "alpha", last_message_at: new Date().toISOString(),
+    });
+    fireEvent.click(screen.getByLabelText(/more options for alpha/i));
+    fireEvent.click(screen.getByRole("menuitem", { name: /rename/i }));
+    expect(screen.getByText(/rename chat/i)).toBeTruthy();
+    // Click Cancel to invoke onClose
+    fireEvent.click(screen.getByRole("button", { name: /cancel/i }));
+    expect(screen.queryByText(/rename chat/i)).toBeNull();
+  });
+
+  it("DeleteChatModal onClose clears deleteFor (modal closes)", () => {
+    renderSidebarWithChat({
+      chat_id: "c1", title: "alpha", last_message_at: new Date().toISOString(),
+    });
+    fireEvent.click(screen.getByLabelText(/more options for alpha/i));
+    fireEvent.click(screen.getByRole("menuitem", { name: /delete/i }));
+    expect(screen.getByText(/delete chat\?/i)).toBeTruthy();
+    // Click Cancel to invoke onClose
+    fireEvent.click(screen.getByRole("button", { name: /cancel/i }));
+    expect(screen.queryByText(/delete chat\?/i)).toBeNull();
   });
 });
 
