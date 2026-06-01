@@ -1,9 +1,12 @@
 # Copyright (c) 2026 John Carter. All rights reserved.
 """Bedrock AgentCore Memory recall via Strands hooks.
 
-Phase 7d implementation. Subscribes to ``BeforeInvocationEvent`` and
-injects relevant prior-conversation context (scoped to the caller's
-``actorId``) into the system prompt as a Markdown addendum.
+Phase 8a implementation. Subscribes to ``BeforeInvocationEvent`` and
+injects prior-conversation context (scoped to the caller's ``actorId``)
+into the system prompt as a Markdown addendum. Uses ``ListSessions`` +
+``ListEvents`` for synchronous recall — the Phase 7d
+``SemanticMemoryStrategy``/``RetrieveMemoryRecords`` approach had
+hours-long ingestion lag that made it unusable in practice.
 
 Design rationale: ``docs/superpowers/specs/2026-05-31-phase-7d-memory-recall-auto-titling-design.md``.
 
@@ -30,8 +33,6 @@ from channel.metrics import record_recall_outcome
 logger = logging.getLogger(__name__)
 
 _RECALL_HEADING = "## What I remember about previous conversations"
-_RECALL_SCORE_THRESHOLD: float = 0.7  # Phase 8a: legacy, will be removed in Task 2
-_RECALL_TOP_K: int = 5  # Phase 8a: legacy, will be removed in Task 2
 _RECALL_CACHE_REFRESH_TURNS: int = 5
 
 # Phase 8a: ListSessions + ListEvents recall constants.
@@ -45,8 +46,8 @@ _RECALL_EVENT_TEXT_TRUNCATE: int = 120
 @dataclass
 class CacheEntry:
     """Per-(actor, chat) recall cache row. ``age`` increments on cache
-    hits; ``records`` is the score-filtered ``MemoryRecordSummary`` list
-    from the most recent ``RetrieveMemoryRecords`` response."""
+    hits; ``records`` is the flattened list of conversational text records
+    from the most recent ``ListSessions`` + ``ListEvents`` fetch."""
 
     records: list[dict[str, Any]]
     age: int
@@ -112,10 +113,11 @@ class AgentCoreRecallHook:
     """Strands ``HookProvider`` that injects AgentCore Memory recall
     into the system prompt before each turn.
 
-    Subscribes to ``BeforeInvocationEvent``; runs ``RetrieveMemoryRecords``
-    scoped to the caller's ``actorId``; filters by score; injects the
-    survivors as a Markdown system-prompt addendum. Failures are logged
-    + EMF-counted + swallowed — recall must not break chats.
+    Subscribes to ``BeforeInvocationEvent``; runs ``ListSessions`` +
+    per-session ``ListEvents`` scoped to the caller's ``actorId``;
+    injects the aggregated conversational history as a Markdown
+    system-prompt addendum. Failures are logged + EMF-counted + swallowed
+    — recall must not break chats.
 
     Conforms to the ``HookProvider`` protocol (``strands.hooks.registry``)
     structurally; no explicit base class — Strands uses ``@runtime_checkable``.
@@ -193,42 +195,61 @@ class AgentCoreRecallHook:
     ) -> list[dict[str, Any]]:
         """Return cached records when fresh; refetch when stale or missing.
 
-        ``age`` counts how many turns the current cache has served,
-        including the cold-fetch turn. Refresh when ``age >= 5`` so
-        the cache lifetime is exactly 5 turns (cold-fetch + 4 hits,
-        then re-fetch on the 6th turn).
+        Phase 8a: synchronous recall via ListSessions + ListEvents per
+        session. Excludes the current chat (PR #73 already feeds that
+        history into Strands via ``Agent(messages=...)``). Caps at
+        ``_RECALL_MAX_SESSIONS`` × ``_RECALL_EVENTS_PER_SESSION`` to
+        bound prompt size.
+
+        ``user_message`` is no longer used for retrieval (we don't do
+        semantic search anymore) — kept on the signature for cache
+        parity and to match the BeforeInvocationEvent contract.
+
+        Returns records shaped ``{"content": {"text": ...}}`` so the
+        existing ``_format_recall_addendum`` can render them without
+        change. Task 3 will update both sides to a richer
+        ``{sessionId, createdAt, payload}`` shape.
         """
+        del user_message  # no longer used for retrieval
         key = (self._actor_id, chat_id)
         cache_entry = _recall_cache.get(key)
         if cache_entry is not None and cache_entry.age < _RECALL_CACHE_REFRESH_TURNS:
             cache_entry.age += 1
             return cache_entry.records
 
-        # AgentCore's RetrieveMemoryRecords takes ``namespace`` (a
-        # prefix), NOT ``actorId``. The actor is encoded INTO the
-        # namespace per the strategy's namespace template configured at
-        # CreateMemory time. The default SemanticMemoryStrategy uses
-        # ``/strategies/{memoryStrategyId}/actors/{actorId}`` — we use
-        # ``/actors/{actorId}`` as a prefix which matches all strategies
-        # for this actor (lets us evolve strategy configuration without
-        # changing this query).
-        #
-        # Records are async — there's a multi-minute lag between
-        # CreateEvent and the strategy emitting a queryable record. Early
-        # turns in a new chat will see empty recall; subsequent turns
-        # surface what's been ingested.
-        resp = await asyncio.to_thread(
-            self._client.retrieve_memory_records,
+        # Step 1: list this actor's sessions, exclude the current chat.
+        sessions_resp = await asyncio.to_thread(
+            self._client.list_sessions,
             memoryId=self._memory_id,
-            namespace=f"/actors/{self._actor_id}",
-            searchCriteria={"searchQuery": user_message, "topK": _RECALL_TOP_K},
+            actorId=self._actor_id,
         )
-        records = [
-            rec
-            for rec in resp.get("memoryRecordSummaries", [])
-            if isinstance(rec, dict) and rec.get("score", 0) >= _RECALL_SCORE_THRESHOLD
-        ]
+        sessions = sessions_resp.get("sessionSummaries", [])
+        prior_sessions = [
+            s for s in sessions if s.get("sessionId") != chat_id
+        ][:_RECALL_MAX_SESSIONS]
+
+        # Step 2: fetch the last K events from each prior session and
+        # flatten each conversational payload entry into the
+        # ``{"content": {"text": ...}}`` shape that ``_format_recall_addendum``
+        # expects. Task 3 will widen the shape to ``{sessionId, createdAt,
+        # payload}`` and update the formatter in the same commit.
+        aggregated: list[dict[str, Any]] = []
+        for session in prior_sessions:
+            events_resp = await asyncio.to_thread(
+                self._client.list_events,
+                memoryId=self._memory_id,
+                actorId=self._actor_id,
+                sessionId=session["sessionId"],
+                maxResults=_RECALL_EVENTS_PER_SESSION,
+            )
+            for ev in events_resp.get("events", []):
+                for payload_entry in ev.get("payload", []):
+                    conv = payload_entry.get("conversational", {})
+                    text = conv.get("content", {}).get("text", "")
+                    if text:
+                        aggregated.append({"content": {"text": text[:_RECALL_EVENT_TEXT_TRUNCATE]}})
+
         # ``age=1`` counts the cold-fetch turn as the 1st served turn —
         # next 4 turns are cache hits (ages 2..5), 6th turn triggers refresh.
-        _recall_cache[key] = CacheEntry(records=records, age=1)
-        return records
+        _recall_cache[key] = CacheEntry(records=aggregated, age=1)
+        return aggregated
