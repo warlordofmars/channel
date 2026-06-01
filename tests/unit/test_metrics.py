@@ -130,7 +130,9 @@ def test_record_chat_delete_memory_wipe_outcome_signature_locks_out_dimensions()
     Per-actor/-chat dimensions blow up CloudWatch metric cardinality.
     """
     import inspect
+
     from channel.metrics import record_chat_delete_memory_wipe_outcome
+
     sig = inspect.signature(record_chat_delete_memory_wipe_outcome)
     param_names = set(sig.parameters)
     forbidden = {"actor_id", "chat_id", "user_id"}

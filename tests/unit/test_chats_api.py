@@ -1048,7 +1048,9 @@ def test_delete_chat_404s_on_cross_user(monkeypatch: pytest.MonkeyPatch) -> None
 
         app.dependency_overrides[require_mgmt_user] = _stub_owner
         owner_client = TestClient(app)
-        monkeypatch.setattr("channel.api.chats.storage.list_messages", lambda *_a, **_kw: ([], None))
+        monkeypatch.setattr(
+            "channel.api.chats.storage.list_messages", lambda *_a, **_kw: ([], None)
+        )
         ok = owner_client.get("/api/chats/c-del-2")
         assert ok.status_code == 200
     finally:

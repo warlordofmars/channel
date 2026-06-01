@@ -132,7 +132,7 @@ class FakeTable:
         self.items.pop((Key["PK"], Key["SK"]), None)
         return {}
 
-    def batch_writer(self) -> "_FakeBatchWriter":
+    def batch_writer(self) -> _FakeBatchWriter:
         return _FakeBatchWriter(self)
 
     def update_item(self, Key: dict[str, str], **kwargs: Any) -> dict[str, Any]:
@@ -172,7 +172,7 @@ class _FakeBatchWriter:
     def __init__(self, fake_table: FakeTable) -> None:
         self._table = fake_table
 
-    def __enter__(self) -> "_FakeBatchWriter":
+    def __enter__(self) -> _FakeBatchWriter:
         return self
 
     def __exit__(self, *_: Any) -> None:
@@ -472,19 +472,22 @@ def test_delete_chat_removes_message_rows_and_chat_index_row(table: FakeTable) -
     chat = create_chat(user_id="u1", title="t", model_default="claude-sonnet-4-6")
     # Plant 26 fake message rows.
     for i in range(26):
-        table.put_item(Item={
-            "PK": f"CHAT#{chat.chat_id}",
-            "SK": f"MSG#2026-06-01T00:00:00.{i:06d}#m{i}",
-            "msg_id": f"m{i}",
-            "text": f"hello {i}",
-            "role": "user",
-        })
+        table.put_item(
+            Item={
+                "PK": f"CHAT#{chat.chat_id}",
+                "SK": f"MSG#2026-06-01T00:00:00.{i:06d}#m{i}",
+                "msg_id": f"m{i}",
+                "text": f"hello {i}",
+                "role": "user",
+            }
+        )
 
     storage.delete_chat(user_id="u1", chat=chat)
 
     # All message rows gone.
     remaining_msgs = [
-        item for item in table.items.values()
+        item
+        for item in table.items.values()
         if item["PK"] == f"CHAT#{chat.chat_id}" and item["SK"].startswith("MSG#")
     ]
     assert len(remaining_msgs) == 0, (
@@ -492,10 +495,12 @@ def test_delete_chat_removes_message_rows_and_chat_index_row(table: FakeTable) -
     )
 
     # Chat-index row gone.
-    idx = table.get_item(Key={
-        "PK": "USER#u1",
-        "SK": storage._chat_index_sk(chat.created_at, chat.chat_id),
-    })
+    idx = table.get_item(
+        Key={
+            "PK": "USER#u1",
+            "SK": storage._chat_index_sk(chat.created_at, chat.chat_id),
+        }
+    )
     assert "Item" not in idx, "chat-index row still present after delete"
 
 

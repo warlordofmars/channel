@@ -274,10 +274,12 @@ def delete_chat(*, user_id: str, chat: Chat) -> None:
             break
 
     # 2. Delete the chat-index row.
-    table.delete_item(Key={
-        "PK": f"USER#{user_id}",
-        "SK": _chat_index_sk(chat.created_at, chat.chat_id),
-    })
+    table.delete_item(
+        Key={
+            "PK": f"USER#{user_id}",
+            "SK": _chat_index_sk(chat.created_at, chat.chat_id),
+        }
+    )
 
 
 def reserve_idempotency_key(*, user_id: str, key: str) -> dict[str, Any] | None:
