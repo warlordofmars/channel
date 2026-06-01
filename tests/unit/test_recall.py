@@ -200,7 +200,9 @@ async def test_get_or_fetch_records_normalizes_datetime_createdAt():
         ],
     }
     hook = AgentCoreRecallHook(
-        memory_id="m-1", actor_id="a", client=fake_client,
+        memory_id="m-1",
+        actor_id="a",
+        client=fake_client,
     )
     event = _fake_before_event(user_text="anything")
 
