@@ -543,6 +543,24 @@ describe("chats wrappers", () => {
     });
   });
 
+  // ---- deleteChat ---------------------------------------------------------
+
+  describe("deleteChat", () => {
+    it("DELETEs /api/chats/{id} and resolves on 204", async () => {
+      const { deleteChat } = await import("./api.js");
+      mockOk({});
+      await deleteChat("c1");
+      expect(fetchMock.mock.calls[0][0]).toBe("/api/chats/c1");
+      expect(fetchMock.mock.calls[0][1].method).toBe("DELETE");
+    });
+
+    it("throws on non-ok", async () => {
+      const { deleteChat } = await import("./api.js");
+      mockFail(403);
+      await expect(deleteChat("c1")).rejects.toThrow(/deleteChat 403/);
+    });
+  });
+
   // ---- streamMessage ------------------------------------------------------
 
   describe("streamMessage", () => {
