@@ -89,6 +89,10 @@ def _format_recall_addendum(records: list[dict[str, Any]]) -> str:
         sid = rec.get("sessionId", "")
         if not sid:
             continue
+        # Invariant: _get_or_fetch_records emits exactly one record per
+        # sessionId, so setdefault never collides. If upstream is ever
+        # refactored to emit multiple records per session, the later
+        # createdAt would be silently dropped here.
         group = groups.setdefault(
             sid, {"createdAt": rec.get("createdAt", ""), "bullets": []},
         )
@@ -281,7 +285,9 @@ class AgentCoreRecallHook:
                 maxResults=_RECALL_EVENTS_PER_SESSION,
             )
             combined_payload: list[dict[str, Any]] = []
-            for ev in events_resp.get("events", []):
+            # ListEvents returns newest-first; reverse so combined_payload reads
+            # chronologically within each session (oldest event first).
+            for ev in reversed(events_resp.get("events", [])):
                 combined_payload.extend(ev.get("payload", []))
             if combined_payload:
                 aggregated.append({

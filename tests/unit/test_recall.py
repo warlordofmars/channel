@@ -11,6 +11,7 @@ from strands.hooks.events import BeforeInvocationEvent
 
 from channel.agents import recall as recall_module
 from channel.agents.recall import (
+    _RECALL_EVENT_TEXT_TRUNCATE,
     _RECALL_EVENTS_PER_SESSION,
     AgentCoreRecallHook,
     _format_recall_addendum,
@@ -90,10 +91,10 @@ def test_format_recall_addendum_truncates_long_text():
         },
     ]
     result = _format_recall_addendum(records)
-    # Each event text capped at _RECALL_EVENT_TEXT_TRUNCATE chars
-    # (plus a trailing ellipsis indicator).
-    assert "A" * 500 not in result
-    assert "..." in result
+    # Positive shape: exactly _RECALL_EVENT_TEXT_TRUNCATE chars of A
+    # followed by an ellipsis indicator.
+    assert "A" * _RECALL_EVENT_TEXT_TRUNCATE + "..." in result
+    assert "A" * (_RECALL_EVENT_TEXT_TRUNCATE + 1) not in result
 
 
 def test_format_recall_addendum_skips_records_with_no_payload_text():
