@@ -15,6 +15,7 @@ from channel.agents.recall import (
     _RECALL_EVENTS_PER_SESSION,
     AgentCoreRecallHook,
     _format_recall_addendum,
+    _iso_date,
 )
 
 
@@ -47,10 +48,12 @@ def test_format_recall_addendum_returns_empty_string_for_no_records():
 
 
 def test_format_recall_addendum_groups_records_by_session_with_date_header():
+    # Records here use the normalized YYYY-MM-DD form that _get_or_fetch_records
+    # emits via _iso_date; _format_recall_addendum receives pre-normalized data.
     records = [
         {
             "sessionId": "s1",
-            "createdAt": "2026-05-31T19:00:00Z",
+            "createdAt": "2026-05-31",
             "payload": [
                 {"conversational": {"role": "USER", "content": {"text": "i love sage green"}}},
                 {"conversational": {"role": "ASSISTANT", "content": {"text": "sage is great"}}},
@@ -58,7 +61,7 @@ def test_format_recall_addendum_groups_records_by_session_with_date_header():
         },
         {
             "sessionId": "s2",
-            "createdAt": "2026-05-31T18:00:00Z",
+            "createdAt": "2026-05-31",
             "payload": [
                 {"conversational": {"role": "USER", "content": {"text": "building Nightfall"}}},
                 {"conversational": {"role": "ASSISTANT", "content": {"text": "cool engine name"}}},
@@ -84,7 +87,7 @@ def test_format_recall_addendum_truncates_long_text():
     records = [
         {
             "sessionId": "s1",
-            "createdAt": "2026-05-31T00:00:00Z",
+            "createdAt": "2026-05-31",
             "payload": [
                 {"conversational": {"role": "USER", "content": {"text": long_text}}},
             ],
@@ -101,7 +104,7 @@ def test_format_recall_addendum_skips_records_with_no_payload_text():
     records = [
         {
             "sessionId": "s1",
-            "createdAt": "2026-05-31T00:00:00Z",
+            "createdAt": "2026-05-31",
             "payload": [
                 {"conversational": {"role": "USER", "content": {}}},  # no text
                 {"conversational": {"role": "ASSISTANT", "content": {"text": ""}}},
@@ -118,14 +121,14 @@ def test_format_recall_addendum_skips_records_missing_session_id():
     records = [
         # No sessionId — should be skipped entirely.
         {
-            "createdAt": "2026-05-31T00:00:00Z",
+            "createdAt": "2026-05-31",
             "payload": [
                 {"conversational": {"role": "USER", "content": {"text": "should not appear"}}},
             ],
         },
         {
             "sessionId": "s1",
-            "createdAt": "2026-05-31T01:00:00Z",
+            "createdAt": "2026-05-31",
             "payload": [
                 {"conversational": {"role": "USER", "content": {"text": "valid"}}},
             ],
@@ -134,6 +137,80 @@ def test_format_recall_addendum_skips_records_missing_session_id():
     result = _format_recall_addendum(records)
     assert "should not appear" not in result
     assert "- You: valid" in result
+
+
+def test_format_recall_addendum_handles_iso_string_createdAt():
+    """createdAt as ISO string (the normalized boundary shape)."""
+    records = [
+        {
+            "sessionId": "s1",
+            "createdAt": "2026-05-31",  # already a YYYY-MM-DD from _iso_date
+            "payload": [
+                {"conversational": {"role": "USER", "content": {"text": "hello"}}},
+            ],
+        },
+    ]
+    result = _format_recall_addendum(records)
+    assert "Earlier conversation (2026-05-31)" in result
+
+
+def test_iso_date_normalizes_datetime():
+    """_iso_date handles datetime, datetime-naive, string, and None inputs."""
+    from datetime import datetime, timezone
+
+    # datetime → YYYY-MM-DD
+    aware = datetime(2026, 5, 31, 22, 58, 39, tzinfo=timezone.utc)
+    assert _iso_date(aware) == "2026-05-31"
+
+    # Naive datetime → YYYY-MM-DD
+    naive = datetime(2026, 5, 31, 22, 58, 39)
+    assert _iso_date(naive) == "2026-05-31"
+
+    # ISO-string passthrough (truncated to 10 chars)
+    assert _iso_date("2026-05-31T22:58:39Z") == "2026-05-31"
+
+    # None → empty string
+    assert _iso_date(None) == ""
+
+
+@pytest.mark.asyncio
+async def test_get_or_fetch_records_normalizes_datetime_createdAt():
+    """ListSessions returns datetime objects; _get_or_fetch_records must
+    normalize them to ISO strings in the aggregated records."""
+    from datetime import datetime, timezone
+
+    fake_client = MagicMock()
+    fake_client.list_sessions.return_value = {
+        "sessionSummaries": [
+            {
+                "sessionId": "prior-1",
+                "createdAt": datetime(2026, 5, 31, 19, 0, 0, tzinfo=timezone.utc),
+            },
+        ],
+    }
+    fake_client.list_events.return_value = {
+        "events": [
+            {
+                "sessionId": "prior-1",
+                "eventTimestamp": datetime(2026, 5, 31, 19, 0, 30, tzinfo=timezone.utc),
+                "payload": [
+                    {"conversational": {"role": "USER", "content": {"text": "hi"}}},
+                ],
+            },
+        ],
+    }
+    hook = AgentCoreRecallHook(
+        memory_id="m-1", actor_id="a", client=fake_client,
+    )
+    event = _fake_before_event(user_text="anything")
+
+    with patch("channel.agents.recall.record_recall_outcome", new=AsyncMock()):
+        await hook._on_before_invocation_async(event, chat_id="current")
+
+    sys_text = event.messages[0]["content"][0]["text"]
+    # Date header rendered correctly from datetime, not "TypeError" or empty.
+    assert "Earlier conversation (2026-05-31)" in sys_text
+    assert "- You: hi" in sys_text
 
 
 # ---------------------------------------------------------------------------

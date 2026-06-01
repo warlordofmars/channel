@@ -22,6 +22,8 @@ import asyncio
 import logging
 import os
 from dataclasses import dataclass
+from datetime import datetime as _dt
+from datetime import timezone as _tz
 from typing import Any
 
 import boto3
@@ -42,6 +44,24 @@ _RECALL_ROLE_MAP: dict[str, str] = {"USER": "You", "ASSISTANT": "Me"}
 _RECALL_MAX_SESSIONS: int = 5
 _RECALL_EVENTS_PER_SESSION: int = 2
 _RECALL_EVENT_TEXT_TRUNCATE: int = 120
+
+# Sentinel used as the sort-key default when a session has no ``createdAt``.
+# Using ``datetime.min`` (tz-aware) ensures datetime objects compare correctly.
+_EPOCH = _dt(1970, 1, 1, tzinfo=_tz.utc)
+
+
+def _iso_date(value: Any) -> str:
+    """Return ``YYYY-MM-DD`` for a datetime or string; empty string for None.
+
+    boto3 deserializes AgentCore ``createdAt`` fields as ``datetime.datetime``
+    objects.  This helper normalizes them to a plain date string at the API
+    boundary so the rest of the module never needs to handle datetimes.
+    """
+    if value is None:
+        return ""
+    if hasattr(value, "strftime"):  # datetime.datetime or datetime.date
+        return value.strftime("%Y-%m-%d")
+    return str(value)[:10]
 
 
 @dataclass
@@ -112,7 +132,7 @@ def _format_recall_addendum(records: list[dict[str, Any]]) -> str:
     for group in groups.values():
         if not group["bullets"]:
             continue
-        date = group["createdAt"][:10] if group["createdAt"] else "earlier"
+        date = group["createdAt"] or "earlier"
         blocks.append(f"**Earlier conversation ({date})**\n" + "\n".join(group["bullets"]))
 
     if not blocks:
@@ -269,7 +289,7 @@ class AgentCoreRecallHook:
         sessions = sessions_resp.get("sessionSummaries", [])
         prior_sessions = [s for s in sessions if s.get("sessionId") != chat_id]
         # Explicit newest-first ordering; don't rely on AgentCore's default.
-        prior_sessions.sort(key=lambda s: s.get("createdAt", ""), reverse=True)
+        prior_sessions.sort(key=lambda s: s.get("createdAt") or _EPOCH, reverse=True)
         prior_sessions = prior_sessions[:_RECALL_MAX_SESSIONS]
 
         # Step 2: fetch the last K events from each prior session and
@@ -292,7 +312,7 @@ class AgentCoreRecallHook:
                 aggregated.append(
                     {
                         "sessionId": session["sessionId"],
-                        "createdAt": session.get("createdAt", ""),
+                        "createdAt": _iso_date(session.get("createdAt")),
                         "payload": combined_payload,
                     }
                 )
