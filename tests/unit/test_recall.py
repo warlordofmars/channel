@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -214,7 +213,8 @@ async def test_get_or_fetch_records_normalizes_datetime_createdAt():
     event = _fake_before_event(user_text="anything")
 
     with patch("channel.agents.recall.record_recall_outcome", new=AsyncMock()):
-        await hook._on_before_invocation_async(event, chat_id="current")
+        event.agent.chat_id = "current"
+        await hook._on_before_invocation(event)
 
     sys_text = event.agent.system_prompt
     # Date header rendered correctly from datetime, not "TypeError" or empty.
@@ -299,7 +299,8 @@ async def test_hook_lists_sessions_and_events_excluding_current_chat():
     event = _fake_before_event(user_text="anything")
 
     with patch("channel.agents.recall.record_recall_outcome", new=AsyncMock()):
-        await hook._on_before_invocation_async(event, chat_id="current-chat")
+        event.agent.chat_id = "current-chat"
+        await hook._on_before_invocation(event)
 
     # ListSessions called once, scoped to actor.
     fake_client.list_sessions.assert_called_once_with(
@@ -337,7 +338,8 @@ async def test_hook_caps_sessions_at_max():
     event = _fake_before_event(user_text="anything")
 
     with patch("channel.agents.recall.record_recall_outcome", new=AsyncMock()):
-        await hook._on_before_invocation_async(event, chat_id="not-in-list")
+        event.agent.chat_id = "not-in-list"
+        await hook._on_before_invocation(event)
 
     assert fake_client.list_events.call_count == 5  # _RECALL_MAX_SESSIONS
 
@@ -358,7 +360,8 @@ async def test_hook_caps_events_per_session():
     event = _fake_before_event(user_text="anything")
 
     with patch("channel.agents.recall.record_recall_outcome", new=AsyncMock()):
-        await hook._on_before_invocation_async(event, chat_id="not-in-list")
+        event.agent.chat_id = "not-in-list"
+        await hook._on_before_invocation(event)
 
     call = fake_client.list_events.call_args
     assert call.kwargs["maxResults"] == _RECALL_EVENTS_PER_SESSION
@@ -380,7 +383,8 @@ async def test_hook_emits_no_addendum_when_actor_has_no_prior_sessions():
     )
 
     with patch("channel.agents.recall.record_recall_outcome", new=AsyncMock()):
-        await hook._on_before_invocation_async(event, chat_id="any")
+        event.agent.chat_id = "any"
+        await hook._on_before_invocation(event)
 
     fake_client.list_events.assert_not_called()
     # System prompt unchanged.
@@ -408,7 +412,8 @@ async def test_hook_emits_no_addendum_when_only_session_is_current_chat():
     )
 
     with patch("channel.agents.recall.record_recall_outcome", new=AsyncMock()):
-        await hook._on_before_invocation_async(event, chat_id="current")
+        event.agent.chat_id = "current"
+        await hook._on_before_invocation(event)
 
     fake_client.list_events.assert_not_called()
     assert event.agent.system_prompt == "You are Channel."
@@ -426,7 +431,8 @@ async def test_hook_reuses_cached_records_for_next_5_turns():
     with patch("channel.agents.recall.record_recall_outcome", new=AsyncMock()):
         for _ in range(5):
             event = _fake_before_event(user_text="anything")
-            await hook._on_before_invocation_async(event, chat_id="chat-1")
+            event.agent.chat_id = "chat-1"
+            await hook._on_before_invocation(event)
 
     # Only ONE RPC across 5 turns — turns 2-5 are cache hits.
     fake_client.list_sessions.assert_called_once()
@@ -444,7 +450,8 @@ async def test_hook_refreshes_cache_after_5_turns():
     with patch("channel.agents.recall.record_recall_outcome", new=AsyncMock()):
         for _ in range(6):  # 1 cold + 4 cached + 1 refresh
             event = _fake_before_event(user_text="anything")
-            await hook._on_before_invocation_async(event, chat_id="chat-1")
+            event.agent.chat_id = "chat-1"
+            await hook._on_before_invocation(event)
 
     assert fake_client.list_sessions.call_count == 2
 
@@ -461,14 +468,12 @@ async def test_hook_per_chat_cache_keys():
         client=fake_client,
     )
     with patch("channel.agents.recall.record_recall_outcome", new=AsyncMock()):
-        await hook._on_before_invocation_async(
-            _fake_before_event("q1"),
-            chat_id="A",
-        )
-        await hook._on_before_invocation_async(
-            _fake_before_event("q2"),
-            chat_id="B",
-        )
+        evt_a = _fake_before_event("q1")
+        evt_a.agent.chat_id = "A"
+        await hook._on_before_invocation(evt_a)
+        evt_b = _fake_before_event("q2")
+        evt_b.agent.chat_id = "B"
+        await hook._on_before_invocation(evt_b)
     # Two distinct chats → two cold-cache RPCs.
     assert fake_client.list_sessions.call_count == 2
 
@@ -487,7 +492,8 @@ async def test_hook_swallows_list_failures_and_emits_failure_metric():
 
     with patch("channel.agents.recall.record_recall_outcome", new=AsyncMock()) as mock_record:
         # MUST NOT raise.
-        await hook._on_before_invocation_async(event, chat_id="chat-1")
+        event.agent.chat_id = "chat-1"
+        await hook._on_before_invocation(event)
 
     # System prompt untouched on failure.
     assert event.agent.system_prompt == original_sys
@@ -504,30 +510,32 @@ async def test_hook_short_circuits_when_kill_switch_off(monkeypatch):
         client=fake_client,
     )
     event = _fake_before_event(user_text="...")
-    await hook._on_before_invocation_async(event, chat_id="chat-1")
+    event.agent.chat_id = "chat-1"
+    await hook._on_before_invocation(event)
     fake_client.list_sessions.assert_not_called()
 
 
-def test_hook_before_invocation_fires_and_forgets():
-    """Sync callback must fire-and-forget via asyncio.create_task and
-    hold a strong ref to the task (Sonar python:S7502 from 7c)."""
+def test_hook_registers_async_callback():
+    """Phase 8a Layer-3 fix (#97): the callback is now async so Strands'
+    ``invoke_callbacks_async`` awaits it. The prior sync-wrapper +
+    fire-and-forget pattern raced against the model invocation —
+    Strands built the request payload (capturing
+    ``agent.system_prompt``) before the async recall task had mutated
+    it, so the addendum landed too late to affect the model's reply.
+    """
+    import inspect
+
     hook = AgentCoreRecallHook(memory_id="m", actor_id="a", client=MagicMock())
-    event = _fake_before_event(user_text="anything")
+    registry = MagicMock()
+    hook.register_hooks(registry)
 
-    scheduled: list[Any] = []
-    fake_task = MagicMock(name="fake_task")
-
-    def _record(coro: Any) -> Any:
-        scheduled.append(coro)
-        coro.close()
-        return fake_task
-
-    with patch("channel.agents.recall.asyncio.create_task", side_effect=_record):
-        hook._on_before_invocation(event)
-
-    assert len(scheduled) == 1
-    assert fake_task in hook._pending_recalls
-    fake_task.add_done_callback.assert_called_once_with(hook._pending_recalls.discard)
+    args, _kwargs = registry.add_callback.call_args
+    callback = args[1]
+    assert inspect.iscoroutinefunction(callback), (
+        "Recall hook callback must be an async function so Strands "
+        "awaits it before invoking the model. Sync + fire-and-forget "
+        "races against the request build — see #97."
+    )
 
 
 def test_hook_default_client_is_bedrock_agentcore():
