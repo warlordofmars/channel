@@ -176,7 +176,7 @@ html.is-electron-mac .sb-top {
   transition: background .12s, color .12s;
 }
 .recent:hover { background: var(--hover); color: var(--ink); }
-.recent.active { background: var(--sel); color: var(--ink); }
+.recent.active { background: var(--raised); color: var(--ink); }
 
 /* ---------- sidebar footer ---------- */
 .sb-foot { padding: 8px; border-top: 1px solid var(--border-soft); display: flex; flex-direction: column; gap: 6px; }

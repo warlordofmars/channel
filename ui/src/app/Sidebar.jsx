@@ -60,8 +60,10 @@ export default function Sidebar({
   const [menuFor, setMenuFor] = useState(null);    // { chatId, chatTitle, anchorRect } | null
   const [renameFor, setRenameFor] = useState(null); // { chatId, currentTitle } | null
   const [deleteFor, setDeleteFor] = useState(null); // { chatId, chatTitle } | null
-  const params = useParams();
-  const activeChatId = params.chatId ?? null;
+  // The chat route is defined in App.jsx as `/app/c/:id` — the param
+  // name is `id`, not `chatId`. Destructure-rename for consistency
+  // with Conversation.jsx.
+  const { id: activeChatId = null } = useParams();
 
   useEffect(() => {
     const desktop = window.channelDesktop;
