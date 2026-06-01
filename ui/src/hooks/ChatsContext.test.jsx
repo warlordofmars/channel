@@ -49,6 +49,7 @@ describe("ChatsContext", () => {
       createChat: expect.any(Function),
       renameChat: expect.any(Function),
       archiveChat: expect.any(Function),
+      deleteChat: expect.any(Function),
       refresh: expect.any(Function),
       status: expect.any(String),
     });
