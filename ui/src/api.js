@@ -153,6 +153,14 @@ export async function patchChat(chatId, { title, archived } = {}) {
   if (!response.ok) throw new Error(`patchChat ${response.status}`);
 }
 
+export async function deleteChat(chatId) {
+  const response = await fetch(`${BASE}/api/chats/${chatId}`, {
+    method: "DELETE",
+    headers: authHeader(),
+  });
+  if (!response.ok) throw new Error(`deleteChat ${response.status}`);
+}
+
 export async function streamMessage(
   chatId,
   { message, model, effort, attachments, idempotencyKey, signal } = {},
