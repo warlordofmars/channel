@@ -318,3 +318,17 @@ def test_append_to_system_prompt_creates_text_block_when_absent():
     ]
     _append_to_system_prompt(fake_event, "addendum text")
     assert fake_event.messages[0]["content"] == [{"text": "addendum text"}]
+
+
+def test_append_to_system_prompt_is_noop_when_messages_empty():
+    """Defensive: Strands types ``event.messages`` as ``list[Message] | None``.
+    If None or empty, the helper short-circuits rather than indexing."""
+    from channel.agents.recall import _append_to_system_prompt
+
+    fake_event_none = MagicMock()
+    fake_event_none.messages = None
+    _append_to_system_prompt(fake_event_none, "anything")  # MUST NOT raise
+
+    fake_event_empty = MagicMock()
+    fake_event_empty.messages = []
+    _append_to_system_prompt(fake_event_empty, "anything")  # MUST NOT raise
