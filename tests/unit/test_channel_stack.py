@@ -105,10 +105,11 @@ def test_lambda_role_grants_agentcore_write_and_lookup_actions(dev_template):
     required = {
         "bedrock-agentcore:CreateEvent",
         "bedrock-agentcore:ListEvents",
+        "bedrock-agentcore:ListSessions",  # Phase 8a recall
         "bedrock-agentcore:CreateMemory",
         "bedrock-agentcore:GetMemory",
         "bedrock-agentcore:ListMemories",
-        "bedrock-agentcore:RetrieveMemoryRecords",  # Phase 7d recall
+        "bedrock-agentcore:RetrieveMemoryRecords",  # Phase 7d recall (retained)
     }
     granted: set[str] = set()
     for pol in policies.values():
