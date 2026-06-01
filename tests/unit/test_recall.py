@@ -28,14 +28,21 @@ def _reset_recall_cache():
 
 
 def _fake_before_event(user_text: str, system_text: str = "You are Channel.") -> MagicMock:
-    """Build a BeforeInvocationEvent stand-in with mutable messages."""
+    """Build a BeforeInvocationEvent stand-in.
+
+    Strands keeps the system prompt as a separate field on the Agent;
+    ``event.messages`` is the conversation only (no synthetic system
+    message). Pre-Phase 8a's Layer-3 fix mocked messages[0] as the
+    system message, which masked the production bug where the addendum
+    was appended to the user message instead of the system prompt.
+    """
     msgs = [
-        {"role": "system", "content": [{"text": system_text}]},
         {"role": "user", "content": [{"text": user_text}]},
     ]
     fake_agent = MagicMock()
     fake_agent.messages = msgs
     fake_agent.chat_id = "chat-1"
+    fake_agent.system_prompt = system_text
     fake_event = MagicMock()
     fake_event.agent = fake_agent
     fake_event.messages = msgs
@@ -209,7 +216,7 @@ async def test_get_or_fetch_records_normalizes_datetime_createdAt():
     with patch("channel.agents.recall.record_recall_outcome", new=AsyncMock()):
         await hook._on_before_invocation_async(event, chat_id="current")
 
-    sys_text = event.messages[0]["content"][0]["text"]
+    sys_text = event.agent.system_prompt
     # Date header rendered correctly from datetime, not "TypeError" or empty.
     assert "Earlier conversation (2026-05-31)" in sys_text
     assert "- You: hi" in sys_text
@@ -305,8 +312,9 @@ async def test_hook_lists_sessions_and_events_excluding_current_chat():
         call.kwargs["sessionId"] for call in fake_client.list_events.call_args_list
     }
     assert session_ids_queried == {"prior-1", "prior-2"}
-    # System prompt grew with content from both prior sessions.
-    sys_text = event.messages[0]["content"][0]["text"]
+    # System prompt (on the agent, not in event.messages) grew with
+    # content from both prior sessions.
+    sys_text = event.agent.system_prompt
     assert "hello from prior-1" in sys_text
     assert "hello from prior-2" in sys_text
 
@@ -376,7 +384,7 @@ async def test_hook_emits_no_addendum_when_actor_has_no_prior_sessions():
 
     fake_client.list_events.assert_not_called()
     # System prompt unchanged.
-    assert event.messages[0]["content"][0]["text"] == "You are Channel."
+    assert event.agent.system_prompt == "You are Channel."
 
 
 @pytest.mark.asyncio
@@ -403,7 +411,7 @@ async def test_hook_emits_no_addendum_when_only_session_is_current_chat():
         await hook._on_before_invocation_async(event, chat_id="current")
 
     fake_client.list_events.assert_not_called()
-    assert event.messages[0]["content"][0]["text"] == "You are Channel."
+    assert event.agent.system_prompt == "You are Channel."
 
 
 @pytest.mark.asyncio
@@ -475,14 +483,14 @@ async def test_hook_swallows_list_failures_and_emits_failure_metric():
         client=fake_client,
     )
     event = _fake_before_event(user_text="...")
-    original_sys = event.messages[0]["content"][0]["text"]
+    original_sys = event.agent.system_prompt
 
     with patch("channel.agents.recall.record_recall_outcome", new=AsyncMock()) as mock_record:
         # MUST NOT raise.
         await hook._on_before_invocation_async(event, chat_id="chat-1")
 
     # System prompt untouched on failure.
-    assert event.messages[0]["content"][0]["text"] == original_sys
+    assert event.agent.system_prompt == original_sys
     mock_record.assert_awaited_once_with(success=False)
 
 
@@ -547,29 +555,35 @@ def test_extract_user_message_returns_empty_when_no_user_turn():
     assert _extract_user_message(fake_event) == ""
 
 
-def test_append_to_system_prompt_creates_text_block_when_absent():
-    """Defensive: when the system message has no text content block,
-    create one rather than mutating an unrelated block."""
+def test_append_to_system_prompt_appends_to_existing_system_prompt():
+    """Mutates ``event.agent.system_prompt`` in place, appending the
+    addendum with a blank-line separator."""
     from channel.agents.recall import _append_to_system_prompt
 
+    fake_agent = MagicMock()
+    fake_agent.system_prompt = "You are Channel."
     fake_event = MagicMock()
-    fake_event.messages = [
-        {"role": "system", "content": []},  # no blocks
-        {"role": "user", "content": [{"text": "hi"}]},
-    ]
+    fake_event.agent = fake_agent
+
     _append_to_system_prompt(fake_event, "addendum text")
-    assert fake_event.messages[0]["content"] == [{"text": "addendum text"}]
+
+    assert fake_agent.system_prompt == "You are Channel.\n\naddendum text"
 
 
-def test_append_to_system_prompt_is_noop_when_messages_empty():
-    """Defensive: Strands types ``event.messages`` as ``list[Message] | None``.
-    If None or empty, the helper short-circuits rather than indexing."""
+def test_append_to_system_prompt_sets_addendum_when_agent_has_no_system_prompt():
+    """Defensive: if the agent's ``system_prompt`` is None / empty for
+    any reason, the addendum becomes the entire system prompt rather
+    than producing a leading-blank-line string."""
     from channel.agents.recall import _append_to_system_prompt
 
-    fake_event_none = MagicMock()
-    fake_event_none.messages = None
-    _append_to_system_prompt(fake_event_none, "anything")  # MUST NOT raise
+    fake_agent = MagicMock()
+    fake_agent.system_prompt = None
+    fake_event = MagicMock()
+    fake_event.agent = fake_agent
 
-    fake_event_empty = MagicMock()
-    fake_event_empty.messages = []
-    _append_to_system_prompt(fake_event_empty, "anything")  # MUST NOT raise
+    _append_to_system_prompt(fake_event, "addendum text")
+    assert fake_agent.system_prompt == "addendum text"
+
+    fake_agent.system_prompt = ""
+    _append_to_system_prompt(fake_event, "addendum text")
+    assert fake_agent.system_prompt == "addendum text"

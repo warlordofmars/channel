@@ -155,22 +155,23 @@ def _extract_user_message(event: BeforeInvocationEvent) -> str:
 
 
 def _append_to_system_prompt(event: BeforeInvocationEvent, addendum: str) -> None:
-    """Mutate the system message in place to append the recall block.
+    """Append the recall block to the agent's system prompt.
 
-    Strands' system prompt is always at ``event.messages[0]``; we append
-    the addendum to its first text block. Defensive: if the system
-    message has no text block (shouldn't happen with our prompt), we
-    create one.
+    Strands keeps ``system_prompt`` as a separate field on the
+    ``Agent`` instance (set at construction time, read by the event
+    loop when building each request). ``event.messages`` is the
+    *conversation* (prior turns + new user turn); mutating
+    ``messages[0]`` would land the addendum inside the user message —
+    which is exactly the Phase 8a Layer-3 bug we hit on dev (#95).
+
+    Each turn builds a fresh Agent via ``chat_agent.build_agent``,
+    so mutating ``agent.system_prompt`` here is safe — no leak across
+    turns. Defensive: if the agent has no system_prompt for any
+    reason, set it to the addendum directly.
     """
-    messages = event.messages or []
-    if not messages:
-        return
-    sys_msg = messages[0]
-    content = sys_msg.setdefault("content", [])
-    if content and "text" in content[0]:
-        content[0]["text"] = content[0]["text"] + "\n\n" + addendum
-    else:
-        content.append({"text": addendum})
+    agent = event.agent
+    current = getattr(agent, "system_prompt", None) or ""
+    agent.system_prompt = (current + "\n\n" + addendum) if current else addendum
 
 
 class AgentCoreRecallHook:
