@@ -44,6 +44,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- macOS app icon regenerated as a full-bleed brand mark (orange
+  squircle with two white pause bars). The previous icon rendered
+  the brand mark inside a separate white squircle, producing a
+  "rounded square in a rounded square" look that stood out next to
+  other apps in Finder. The new icon matches the macOS app-icon
+  convention used by Calendar, Books, App Store, etc.
 - Phase 8a — memory recall now uses synchronous `ListSessions` +
   `ListEvents` instead of `RetrieveMemoryRecords`. AgentCore's
   `SemanticMemoryStrategy` had a multi-hour ingestion lag in real
