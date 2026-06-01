@@ -192,7 +192,7 @@ def test_build_titler_agent_uses_haiku_with_no_hooks(monkeypatch):
     build_titler_agent()
 
     assert "haiku" in captured["model_kwargs"]["model_id"].lower()
-    assert captured["model_kwargs"]["max_tokens"] == 20
+    assert captured["model_kwargs"]["max_tokens"] == 60
     assert captured["agent_kwargs"].get("hooks", []) == []
 
 
