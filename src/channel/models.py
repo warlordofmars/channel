@@ -85,3 +85,25 @@ class RegenerateRequest(BaseModel):
 
     model: str | None = None
     effort: str | None = None
+
+
+class Prefs(BaseModel):
+    """User preferences — single JSON-blob row at ``PK=USER#{u}, SK=PREFS``.
+
+    All fields have defaults so a missing DDB row yields the canonical
+    defaults at hydration time. ``extra="forbid"`` rejects unknown keys
+    so a stale client can't silently write a typo.
+    """
+
+    theme: str = "dark"
+    accent: str = "42"
+    density: str = "cozy"
+    shape: str = "soft"
+    font: str = "figtree"
+    model: str = "claude-opus-4-6"
+    effort: str = "High"
+    send_on_enter: bool = True
+    show_reasoning: bool = False
+    suggest_followups: bool = True
+
+    model_config = {"extra": "forbid"}

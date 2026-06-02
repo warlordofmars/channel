@@ -1,6 +1,7 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
-import React, { useEffect, useRef, useState } from "react";
+import React, { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import Icon from "../components/Icon.jsx";
+import { useChannelPrefs } from "../hooks/useChannelPrefs.js";
 import AttachMenu from "./AttachMenu.jsx";
 import ModelPicker from "./ModelPicker.jsx";
 
@@ -14,10 +15,26 @@ import ModelPicker from "./ModelPicker.jsx";
  *   - placeholder — defaults to "How can I help you today?"
  *   - autofocus — focuses the textarea on mount when true
  */
-export default function Composer({ model, effort, setModel, setEffort, onSend, autofocus, placeholder }) {
+const Composer = forwardRef(function Composer(
+  { model, effort, setModel, setEffort, onSend, autofocus, placeholder },
+  ref,
+) {
   const [text, setText] = useState("");
   const [atts, setAtts] = useState([]);
   const taRef = useRef(null);
+  const { sendOnEnter } = useChannelPrefs();
+
+  // Imperative handle for parent components that need to seed the
+  // textarea from outside (e.g. follow-up chip clicks). Exposes only
+  // ``setText`` + ``focus`` — the surface stays intentionally tiny so
+  // tests can't accidentally rely on internals.
+  useImperativeHandle(ref, () => ({
+    setText: (value) => {
+      setText(value);
+      requestAnimationFrame(grow);
+    },
+    focus: () => taRef.current?.focus(),
+  }), []);
 
   function grow() {
     const ta = taRef.current;
@@ -39,7 +56,16 @@ export default function Composer({ model, effort, setModel, setEffort, onSend, a
   }
 
   function onKeyDown(e) {
-    if (e.key === "Enter" && !e.shiftKey) {
+    if (e.key !== "Enter") return;
+    const cmdOrCtrl = e.metaKey || e.ctrlKey;
+    if (sendOnEnter) {
+      // Enter submits; Shift+Enter inserts a newline.
+      if (e.shiftKey) return;
+      e.preventDefault();
+      submit();
+    } else if (cmdOrCtrl) {
+      // Cmd/Ctrl+Enter submits; plain Enter falls through to insert
+      // a newline in the textarea (default browser behavior).
       e.preventDefault();
       submit();
     }
@@ -89,4 +115,6 @@ export default function Composer({ model, effort, setModel, setEffort, onSend, a
       </div>
     </div>
   );
-}
+});
+
+export default Composer;

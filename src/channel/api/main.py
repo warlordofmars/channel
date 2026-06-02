@@ -19,6 +19,7 @@ from channel.api._auth import require_admin  # noqa: F401 — re-exported for ro
 from channel.api.chats import router as chats_router
 from channel.api.csp import router as csp_router
 from channel.api.models import router as models_router
+from channel.api.prefs import router as prefs_router
 from channel.auth.mgmt_auth import router as mgmt_auth_router
 from channel.logging_config import (
     configure_logging,
@@ -138,6 +139,10 @@ app.include_router(chats_router, prefix="/api")
 # Models allowlist — served at /api/models (separate router so the
 # /models path isn't nested under chats_router's "/chats" prefix)
 app.include_router(models_router, prefix="/api")
+
+# User preferences — GET/PUT /api/me/prefs (full paths declared on the
+# router so no prefix needed here)
+app.include_router(prefs_router)
 
 # Dev-only debug router (Phase 7c). Mounted ONLY when the env flag is
 # explicitly set; prod stacks must not set it. See channel_stack.py +

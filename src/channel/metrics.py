@@ -90,3 +90,13 @@ async def record_chat_delete_memory_wipe_outcome(success: bool) -> None:
     """
     metric = "ChatDeleteMemoryWipeSuccesses" if success else "ChatDeleteMemoryWipeFailures"
     await emit_metric(metric)
+
+
+async def record_followup_outcome(success: bool) -> None:
+    """Emit a CloudWatch counter for one follow-up suggestion generation.
+
+    Counter-only — same cardinality-risk rationale as
+    :func:`record_memory_write_outcome`. No per-actor or per-chat dimensions.
+    """
+    metric = "FollowupGenSuccesses" if success else "FollowupGenFailures"
+    await emit_metric(metric)

@@ -68,6 +68,7 @@ export default function Conversation() {
   const prefs = useChannelPrefs();
   const ref = useRef(null);
   const sentFirstRef = useRef(false);
+  const composerRef = useRef(null);
 
   // Auto-scroll to the bottom on any turns change (catches each stream tick).
   useEffect(() => {
@@ -96,6 +97,10 @@ export default function Conversation() {
   const followUp = (text, atts) =>
     // Backend expects model as a short id string, not the picker's display object.
     send({ message: text, model: modelObj.id, effort: prefs.effort, attachments: atts });
+  const onFollowUpClick = (suggestion) => {
+    composerRef.current?.setText(suggestion);
+    composerRef.current?.focus();
+  };
   const noop = () => {};
 
   return (
@@ -181,6 +186,20 @@ export default function Conversation() {
                     </button>
                   </div>
                 )}
+                {isLast && t.followUps && t.followUps.length > 0 && (
+                  <div className="followups">
+                    {t.followUps.map((s) => (
+                      <button
+                        key={s}
+                        type="button"
+                        className="followup-chip"
+                        onClick={() => onFollowUpClick(s)}
+                      >
+                        {s}
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
             );
           })}
@@ -188,6 +207,7 @@ export default function Conversation() {
       </div>
       <div className="bottom-composer">
         <Composer
+          ref={composerRef}
           model={modelObj}
           effort={prefs.effort}
           setModel={setModelObj}

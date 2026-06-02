@@ -112,3 +112,20 @@ def test_sse_title_suggested_emits_chat_id_and_title():
         "chat_id": "c-1",
         "title": "Pytest fixture debug",
     }
+
+
+def test_sse_follow_ups_suggested_emits_chat_id_message_id_and_suggestions():
+    from channel.agents.strands_sse import sse_follow_ups_suggested
+
+    raw = sse_follow_ups_suggested(
+        chat_id="c-1",
+        message_id="m-1",
+        suggestions=["First", "Second", "Third"],
+    )
+    payload = json.loads(raw[6:-2])
+    assert payload == {
+        "type": "follow_ups_suggested",
+        "chat_id": "c-1",
+        "message_id": "m-1",
+        "suggestions": ["First", "Second", "Third"],
+    }

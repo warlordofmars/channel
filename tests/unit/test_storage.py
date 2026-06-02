@@ -511,3 +511,43 @@ def test_delete_chat_is_idempotent(table: FakeTable) -> None:
     chat = create_chat(user_id="u1", title="t", model_default="claude-sonnet-4-6")
     storage.delete_chat(user_id="u1", chat=chat)
     storage.delete_chat(user_id="u1", chat=chat)  # MUST NOT raise
+
+
+def test_get_prefs_returns_defaults_when_no_row(table: FakeTable) -> None:
+    from channel import storage
+
+    prefs = storage.get_prefs("user-1")
+    assert prefs.theme == "dark"
+    assert prefs.send_on_enter is True
+    assert prefs.suggest_followups is True
+
+
+def test_put_prefs_persists_and_returns_merged(table: FakeTable) -> None:
+    from channel import storage
+
+    merged = storage.put_prefs("user-1", {"theme": "light", "send_on_enter": False})
+    assert merged.theme == "light"
+    assert merged.send_on_enter is False
+    # Other fields fall back to defaults.
+    assert merged.accent == "42"
+    # Round-trip via a fresh read.
+    assert storage.get_prefs("user-1").theme == "light"
+
+
+def test_put_prefs_unknown_key_raises(table: FakeTable) -> None:
+    import pydantic
+
+    from channel import storage
+
+    with pytest.raises(pydantic.ValidationError):
+        storage.put_prefs("user-1", {"made_up_key": "x"})
+
+
+def test_put_prefs_partial_update_preserves_other_keys(table: FakeTable) -> None:
+    from channel import storage
+
+    storage.put_prefs("user-1", {"theme": "light"})
+    storage.put_prefs("user-1", {"accent": "150"})
+    prefs = storage.get_prefs("user-1")
+    assert prefs.theme == "light"
+    assert prefs.accent == "150"

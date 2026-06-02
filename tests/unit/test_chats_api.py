@@ -15,7 +15,30 @@ from fastapi.testclient import TestClient
 
 from channel.api._auth import require_mgmt_user
 from channel.api.main import app
-from channel.models import Chat, Message, MessageRole
+from channel.models import Chat, Message, MessageRole, Prefs
+
+
+@pytest.fixture(autouse=True)
+def _stub_get_prefs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default ``storage.get_prefs`` to canonical defaults + neutralise
+    the follow-ups Haiku call.
+
+    ``_stream_bedrock_reply`` reads prefs once at stream start and (when
+    ``suggest_followups`` is on) invokes a Haiku Agent after the
+    assistant turn lands (Phase 113). Without these stubs the
+    production code would hit boto3 / Bedrock; tests that care about
+    follow-up behaviour override these inline.
+    """
+    monkeypatch.setattr("channel.api.chats.storage.get_prefs", lambda _user_id: Prefs())
+
+    async def _empty_stream(self, prompt: str):  # noqa: ANN001, ANN201
+        if False:  # pragma: no cover
+            yield None
+
+    class _NoopFollowupsAgent:
+        stream_async = _empty_stream
+
+    monkeypatch.setattr("channel.api.chats.build_followups_agent", lambda: _NoopFollowupsAgent())
 
 
 @pytest.fixture
@@ -567,6 +590,316 @@ def test_post_message_titler_empty_response_swallows_without_patch(
     assert response.status_code == 200
     assert '"type": "title_suggested"' not in response.text
     assert patched == []
+
+
+# ---- Follow-up suggestions (Phase 113) -------------------------------------
+
+
+def _stub_existing_chat(monkeypatch: pytest.MonkeyPatch) -> Chat:
+    """A chat with prior turns — exercises the follow-up block without
+    also exercising the (first-round-trip-only) auto-titler block."""
+    chat = Chat(
+        chat_id="c1",
+        user_id="u-1",
+        title="Existing chat",
+        created_at="t",
+        last_message_at="t",
+        model_default="claude-sonnet-4-6",
+        message_count=4,
+    )
+    monkeypatch.setattr("channel.api.chats.storage.get_chat_by_id", lambda _: chat)
+    monkeypatch.setattr(
+        "channel.api.chats.storage.put_message",
+        lambda **kwargs: Message(
+            chat_id=kwargs["chat_id"],
+            msg_id="m-asst",
+            role=kwargs["role"],
+            text=kwargs["text"],
+            model=kwargs.get("model"),
+            created_at="t",
+        ),
+    )
+    monkeypatch.setattr("channel.api.chats.storage.update_chat_index", lambda **_: None)
+    monkeypatch.setattr(
+        "channel.api.chats.storage.list_messages",
+        lambda *_a, **_kw: ([], None),
+    )
+    return chat
+
+
+def test_post_message_emits_follow_ups_suggested_when_pref_on(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """suggest_followups=True → emits a follow_ups_suggested SSE event
+    after done, carrying the parsed suggestion list."""
+    _stub_existing_chat(monkeypatch)
+    monkeypatch.setattr(
+        "channel.api.chats.storage.get_prefs",
+        lambda _u: Prefs(suggest_followups=True),
+    )
+
+    async def fake_main(self, prompt):
+        yield {"event": {"contentBlockDelta": {"delta": {"text": "Reply"}}}}
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+
+    class FakeAgent:
+        stream_async = fake_main
+
+    monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
+
+    async def fake_followups(self, prompt):
+        yield {"event": {"contentBlockDelta": {"delta": {"text": "What about X?\n"}}}}
+        yield {"event": {"contentBlockDelta": {"delta": {"text": "How does Y work?\n"}}}}
+        yield {"event": {"contentBlockDelta": {"delta": {"text": "Compare Z and W."}}}}
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+
+    class FakeFollowups:
+        stream_async = fake_followups
+
+    monkeypatch.setattr("channel.api.chats.build_followups_agent", lambda: FakeFollowups())
+
+    response = client.post(
+        "/api/chats/c1/messages",
+        json={"message": "hi", "model": "claude-sonnet-4-6", "effort": "medium"},
+    )
+    assert response.status_code == 200
+    body = response.text
+    assert '"type": "follow_ups_suggested"' in body
+    # Three cleaned suggestions.
+    assert '"What about X?"' in body
+    assert '"How does Y work?"' in body
+    assert '"Compare Z and W"' in body
+    # Order: done → follow_ups_suggested.
+    assert body.find('"type": "follow_ups_suggested"') > body.find('"type": "done"')
+
+
+def test_post_message_skips_follow_ups_when_pref_off(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """suggest_followups=False → no SSE event, no agent built."""
+    _stub_existing_chat(monkeypatch)
+    monkeypatch.setattr(
+        "channel.api.chats.storage.get_prefs",
+        lambda _u: Prefs(suggest_followups=False),
+    )
+
+    async def fake_main(self, prompt):
+        yield {"event": {"contentBlockDelta": {"delta": {"text": "Reply"}}}}
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+
+    class FakeAgent:
+        stream_async = fake_main
+
+    monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
+
+    built: list[bool] = []
+    monkeypatch.setattr(
+        "channel.api.chats.build_followups_agent",
+        lambda: built.append(True) or object(),
+    )
+
+    response = client.post(
+        "/api/chats/c1/messages",
+        json={"message": "hi", "model": "claude-sonnet-4-6", "effort": "medium"},
+    )
+    assert response.status_code == 200
+    assert '"type": "follow_ups_suggested"' not in response.text
+    assert built == []
+
+
+def test_post_message_follow_ups_respects_kill_switch_env(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """STARTER_FOLLOWUPS_ENABLED=0 → skip even when pref is on."""
+    monkeypatch.setenv("STARTER_FOLLOWUPS_ENABLED", "0")
+    _stub_existing_chat(monkeypatch)
+    monkeypatch.setattr(
+        "channel.api.chats.storage.get_prefs",
+        lambda _u: Prefs(suggest_followups=True),
+    )
+
+    async def fake_main(self, prompt):
+        yield {"event": {"contentBlockDelta": {"delta": {"text": "Reply"}}}}
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+
+    class FakeAgent:
+        stream_async = fake_main
+
+    monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
+    built: list[bool] = []
+    monkeypatch.setattr(
+        "channel.api.chats.build_followups_agent",
+        lambda: built.append(True) or object(),
+    )
+
+    response = client.post(
+        "/api/chats/c1/messages",
+        json={"message": "hi", "model": "claude-sonnet-4-6", "effort": "medium"},
+    )
+    assert response.status_code == 200
+    assert '"type": "follow_ups_suggested"' not in response.text
+    assert built == []
+
+
+def test_post_message_follow_ups_failure_is_swallowed(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Follow-ups Agent raises → stream still completes, no event emitted."""
+    _stub_existing_chat(monkeypatch)
+    monkeypatch.setattr(
+        "channel.api.chats.storage.get_prefs",
+        lambda _u: Prefs(suggest_followups=True),
+    )
+
+    async def fake_main(self, prompt):
+        yield {"event": {"contentBlockDelta": {"delta": {"text": "Reply"}}}}
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+
+    class FakeAgent:
+        stream_async = fake_main
+
+    class FakeFollowups:
+        async def stream_async(self, prompt):
+            if False:  # pragma: no cover
+                yield None
+            raise RuntimeError("haiku unavailable")
+
+    monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
+    monkeypatch.setattr("channel.api.chats.build_followups_agent", lambda: FakeFollowups())
+
+    response = client.post(
+        "/api/chats/c1/messages",
+        json={"message": "hi", "model": "claude-sonnet-4-6", "effort": "medium"},
+    )
+    assert response.status_code == 200
+    body = response.text
+    assert '"type": "done"' in body
+    assert '"type": "follow_ups_suggested"' not in body
+
+
+def test_post_message_follow_ups_empty_result_records_failure(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Haiku returns whitespace-only → no event emitted (no garbage chips)."""
+    _stub_existing_chat(monkeypatch)
+    monkeypatch.setattr(
+        "channel.api.chats.storage.get_prefs",
+        lambda _u: Prefs(suggest_followups=True),
+    )
+
+    async def fake_main(self, prompt):
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+
+    class FakeAgent:
+        stream_async = fake_main
+
+    async def empty_followups(self, prompt):
+        yield {"event": {"contentBlockDelta": {"delta": {"text": "   \n   \n"}}}}
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+
+    class FakeFollowups:
+        stream_async = empty_followups
+
+    monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
+    monkeypatch.setattr("channel.api.chats.build_followups_agent", lambda: FakeFollowups())
+
+    response = client.post(
+        "/api/chats/c1/messages",
+        json={"message": "hi", "model": "claude-sonnet-4-6", "effort": "medium"},
+    )
+    assert response.status_code == 200
+    assert '"type": "follow_ups_suggested"' not in response.text
+
+
+def test_post_message_follow_ups_caps_at_three_suggestions(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_existing_chat(monkeypatch)
+    monkeypatch.setattr(
+        "channel.api.chats.storage.get_prefs",
+        lambda _u: Prefs(suggest_followups=True),
+    )
+
+    async def fake_main(self, prompt):
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+
+    class FakeAgent:
+        stream_async = fake_main
+
+    async def fake_followups(self, prompt):
+        # Five lines — the parser must drop everything past three.
+        text = "One\nTwo\nThree\nFour\nFive"
+        yield {"event": {"contentBlockDelta": {"delta": {"text": text}}}}
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+
+    class FakeFollowups:
+        stream_async = fake_followups
+
+    monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
+    monkeypatch.setattr("channel.api.chats.build_followups_agent", lambda: FakeFollowups())
+
+    response = client.post(
+        "/api/chats/c1/messages",
+        json={"message": "hi", "model": "claude-sonnet-4-6", "effort": "medium"},
+    )
+    assert response.status_code == 200
+    body = response.text
+    assert '"One"' in body
+    assert '"Two"' in body
+    assert '"Three"' in body
+    assert '"Four"' not in body
+    assert '"Five"' not in body
+
+
+def test_parse_followups_strips_numbering_and_bullets():
+    from channel.api.chats import _parse_followups
+
+    assert _parse_followups("1. Build a feature\n- Refactor X\n• Test Z\n* Deploy") == [
+        "Build a feature",
+        "Refactor X",
+        "Test Z",
+    ]
+
+
+def test_parse_followups_returns_empty_for_blank_input():
+    from channel.api.chats import _parse_followups
+
+    assert _parse_followups("") == []
+    assert _parse_followups("   \n\n   ") == []
+
+
+def test_post_message_follow_ups_salvages_partial_output_on_max_tokens(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """MaxTokensReachedException → use whatever lines were emitted so far."""
+    from strands.types.exceptions import MaxTokensReachedException
+
+    _stub_existing_chat(monkeypatch)
+    monkeypatch.setattr(
+        "channel.api.chats.storage.get_prefs",
+        lambda _u: Prefs(suggest_followups=True),
+    )
+
+    async def fake_main(self, prompt):
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+
+    class FakeAgent:
+        stream_async = fake_main
+
+    class FakeFollowups:
+        async def stream_async(self, prompt):
+            yield {"event": {"contentBlockDelta": {"delta": {"text": "Salvage me"}}}}
+            raise MaxTokensReachedException("hit cap")
+
+    monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
+    monkeypatch.setattr("channel.api.chats.build_followups_agent", lambda: FakeFollowups())
+
+    response = client.post(
+        "/api/chats/c1/messages",
+        json={"message": "hi", "model": "claude-sonnet-4-6", "effort": "medium"},
+    )
+    assert response.status_code == 200
+    assert '"Salvage me"' in response.text
 
 
 def test_post_message_seeds_agent_with_prior_chat_history(

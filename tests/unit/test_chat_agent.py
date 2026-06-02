@@ -211,3 +211,46 @@ def test_build_titler_agent_respects_starter_titler_model_override(monkeypatch):
 
     build_titler_agent()
     assert captured["model_kwargs"]["model_id"] == "us.anthropic.claude-sonnet-4-6"
+
+
+def test_build_followups_agent_uses_haiku_with_no_hooks(monkeypatch):
+    from channel.agents.chat_agent import build_followups_agent
+
+    captured: dict[str, object] = {}
+
+    class FakeBedrockModel:
+        def __init__(self, **kwargs):
+            captured["model_kwargs"] = kwargs
+
+    class FakeAgent:
+        def __init__(self, **kwargs):
+            captured["agent_kwargs"] = kwargs
+
+    monkeypatch.setattr("channel.agents.chat_agent.BedrockModel", FakeBedrockModel)
+    monkeypatch.setattr("channel.agents.chat_agent.Agent", FakeAgent)
+
+    build_followups_agent()
+
+    assert "haiku" in captured["model_kwargs"]["model_id"].lower()
+    assert captured["model_kwargs"]["max_tokens"] == 120
+    assert captured["agent_kwargs"].get("hooks", []) == []
+    # The system prompt should mention follow-ups so a wiring mistake
+    # (e.g. accidentally using the titler prompt) fails loudly.
+    assert "follow-up" in captured["agent_kwargs"]["system_prompt"].lower()
+
+
+def test_build_followups_agent_respects_starter_followups_model_override(monkeypatch):
+    from channel.agents.chat_agent import build_followups_agent
+
+    monkeypatch.setenv("STARTER_FOLLOWUPS_MODEL", "claude-sonnet-4-6")
+    captured: dict[str, object] = {}
+
+    class FakeBedrockModel:
+        def __init__(self, **kwargs):
+            captured["model_kwargs"] = kwargs
+
+    monkeypatch.setattr("channel.agents.chat_agent.BedrockModel", FakeBedrockModel)
+    monkeypatch.setattr("channel.agents.chat_agent.Agent", lambda **_: object())
+
+    build_followups_agent()
+    assert captured["model_kwargs"]["model_id"] == "us.anthropic.claude-sonnet-4-6"

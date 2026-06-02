@@ -381,6 +381,87 @@ describe("useChatStream", () => {
     expect(result.current.status).toBe("idle");
   });
 
+  it("attaches follow-up suggestions to the matching assistant turn", async () => {
+    api.getChat.mockResolvedValue({
+      chat: { chat_id: "c1" },
+      messages: [],
+      next_cursor: null,
+    });
+    api.streamMessage.mockResolvedValue({
+      ok: true,
+      body: makeMockResponseBody([
+        { type: "user_persisted", msg_id: "u-1", seq: 0 },
+        { type: "delta", text: "Reply" },
+        {
+          type: "done",
+          msg_id: "a-1",
+          seq: 1,
+          model: "x",
+          input_tokens: 0,
+          output_tokens: 0,
+          stop_reason: "end_turn",
+        },
+        {
+          type: "follow_ups_suggested",
+          chat_id: "c1",
+          message_id: "a-1",
+          suggestions: ["One", "Two", "Three"],
+        },
+      ]),
+    });
+
+    const { result } = renderHook(() => useChatStream("c1"));
+    await waitFor(() => expect(result.current.status).toBe("idle"));
+
+    await act(async () => {
+      await result.current.send({ message: "hi", model: "m", effort: "med" });
+    });
+
+    const assistant = result.current.turns.find((t) => t.msg_id === "a-1");
+    expect(assistant).toBeDefined();
+    expect(assistant.followUps).toEqual(["One", "Two", "Three"]);
+  });
+
+  it("ignores follow_ups_suggested when no turn matches the message_id", async () => {
+    api.getChat.mockResolvedValue({
+      chat: { chat_id: "c1" },
+      messages: [],
+      next_cursor: null,
+    });
+    api.streamMessage.mockResolvedValue({
+      ok: true,
+      body: makeMockResponseBody([
+        {
+          type: "done",
+          msg_id: "a-1",
+          seq: 1,
+          model: "x",
+          input_tokens: 0,
+          output_tokens: 0,
+          stop_reason: "end_turn",
+        },
+        {
+          type: "follow_ups_suggested",
+          chat_id: "c1",
+          message_id: "no-such-turn",
+          suggestions: ["Nope"],
+        },
+      ]),
+    });
+
+    const { result } = renderHook(() => useChatStream("c1"));
+    await waitFor(() => expect(result.current.status).toBe("idle"));
+
+    await act(async () => {
+      await result.current.send({ message: "hi", model: "m", effort: "med" });
+    });
+
+    // No turn should have followUps populated.
+    for (const t of result.current.turns) {
+      expect(t.followUps).toBeUndefined();
+    }
+  });
+
   it("aborts the in-flight stream when chatId changes", async () => {
     // First chat: history loads, then stream starts but doesn't complete.
     api.getChat.mockResolvedValueOnce({
