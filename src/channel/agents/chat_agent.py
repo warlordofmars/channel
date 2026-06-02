@@ -48,9 +48,9 @@ DEFAULT_MAX_TOKENS = 4096
 # continues that pattern.  Look-up is case-insensitive so the API can
 # accept either the UI's capitalized values or lower-case strings from
 # scripted clients without a normalisation layer in the route.
-_EFFORT_MAX_TOKENS = {
+_EFFORT_MAX_TOKENS: dict[str, int] = {
     "low": 1024,
-    "medium": 4096,
+    "medium": DEFAULT_MAX_TOKENS,  # 4096 — keep this aligned by reference
     "high": 16384,
     "max": 32768,
 }

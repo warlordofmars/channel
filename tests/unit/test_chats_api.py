@@ -398,7 +398,13 @@ def _stub_storage_for_one_turn(
         created_at="t",
         last_message_at="t",
         model_default="claude-sonnet-4-6",
-        message_count=2,  # not first round trip → titler/follow-ups skipped
+        # Non-zero message_count keeps the auto-titler block from
+        # firing in these tests (it gates on the first round-trip).
+        # Follow-ups are gated by ``prefs.suggest_followups`` + env, not
+        # by message_count — we don't disable them explicitly here
+        # because the FakeAgent's stream is short enough that the
+        # follow-ups call would simply be best-effort and harmless.
+        message_count=2,
     )
     monkeypatch.setattr("channel.api.chats.storage.get_chat_by_id", lambda _: chat)
     monkeypatch.setattr(
