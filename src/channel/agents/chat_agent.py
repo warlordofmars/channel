@@ -41,6 +41,33 @@ _MODEL_ID_MAP = {
 
 DEFAULT_MAX_TOKENS = 4096
 
+# Map the SPA's segmented "Response effort" control to ``max_tokens`` on
+# the Strands ``BedrockModel`` (per issue #154). The UI ships four
+# tiers (Low / Medium / High / Max — see ``ui/src/app/data.js``); the
+# issue spec locked the first three to a doubling pattern, Max
+# continues that pattern.  Look-up is case-insensitive so the API can
+# accept either the UI's capitalized values or lower-case strings from
+# scripted clients without a normalisation layer in the route.
+_EFFORT_MAX_TOKENS = {
+    "low": 1024,
+    "medium": 4096,
+    "high": 16384,
+    "max": 32768,
+}
+
+
+def max_tokens_for_effort(effort: str | None) -> int:
+    """Resolve the ``max_tokens`` budget for a caller-supplied effort tier.
+
+    Unknown / missing values fall back to ``DEFAULT_MAX_TOKENS`` so a
+    stale SPA build or an effort string we haven't seen yet still
+    produces a working response.
+    """
+    if effort is None:
+        return DEFAULT_MAX_TOKENS
+    return _EFFORT_MAX_TOKENS.get(effort.lower(), DEFAULT_MAX_TOKENS)
+
+
 DEFAULT_SYSTEM_PROMPT = (
     "You are Channel, a helpful AI assistant.  Be concise, accurate, "
     "and tailored to the user's apparent expertise.  Use markdown for "
@@ -84,6 +111,7 @@ def build_agent(
     prior_messages: list[dict[str, Any]] | None = None,
     system_prompt: str | None = None,
     max_tokens: int = DEFAULT_MAX_TOKENS,
+    effort: str | None = None,
 ) -> Agent:
     """Construct a fresh Strands ``Agent`` for one chat turn.
 
@@ -97,8 +125,15 @@ def build_agent(
     ``Messages``: ``[{"role": "user"|"assistant", "content": [{"text": "..."}]}, ...]``
     in chronological order.  The new user message must NOT be included
     — the caller passes it via ``agent.stream_async(user_message)``.
+
+    ``effort`` is the SPA's "Response effort" tier (low / medium / high
+    / max). When supplied it overrides ``max_tokens`` via
+    :func:`max_tokens_for_effort`. Unknown values silently fall back to
+    the default budget — never error on a stale client.
     """
 
+    if effort is not None:
+        max_tokens = max_tokens_for_effort(effort)
     bedrock = BedrockModel(
         model_id=resolve_model_id(model_id),
         max_tokens=max_tokens,
