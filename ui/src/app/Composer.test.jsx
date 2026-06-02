@@ -1,5 +1,5 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../api.js", () => ({
@@ -42,8 +42,43 @@ function defaultProps(overrides = {}) {
   };
 }
 
+// Factory for a fake SpeechRecognition class that records its
+// instances so tests can drive the recognition lifecycle (onresult,
+// onend, onerror, start, stop). Mirrors the Web Speech API surface
+// the Composer touches.
+function makeSpeechRecognitionStub() {
+  const instances = [];
+  function FakeSpeechRecognition() {
+    const inst = {
+      continuous: undefined,
+      interimResults: undefined,
+      onresult: null,
+      onend: null,
+      onerror: null,
+      start: vi.fn(),
+      stop: vi.fn(),
+    };
+    instances.push(inst);
+    return inst;
+  }
+  return { ctor: FakeSpeechRecognition, instances };
+}
+
+// Helper that fires a synthetic `result` event on the most recently
+// created recognition instance. Matches the SpeechRecognitionResultList
+// shape the Composer iterates over. Wrapped in act() because firing
+// the handler triggers a setText state update.
+function fireResult(instance, transcript) {
+  act(function dispatchResult() {
+    instance.onresult({
+      results: [[{ transcript }]],
+    });
+  });
+}
+
 describe("Composer", () => {
   let storage;
+  let speech;
 
   beforeEach(() => {
     storage = {};
@@ -57,6 +92,11 @@ describe("Composer", () => {
       addEventListener: vi.fn(),
       removeEventListener: vi.fn(),
     }));
+    speech = makeSpeechRecognitionStub();
+    // Default: feature is available so the existing mic-button tests
+    // keep finding the control. Individual tests below clear the stub
+    // to exercise the missing-API path.
+    window.SpeechRecognition = speech.ctor;
     __resetChannelPrefsForTest();
     __resetServerSyncForTest();
     __resetModelsCacheForTest();
@@ -64,6 +104,8 @@ describe("Composer", () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+    delete window.SpeechRecognition;
+    delete window.webkitSpeechRecognition;
     __resetModelsCacheForTest();
   });
 
@@ -207,5 +249,185 @@ describe("Composer", () => {
     const ta = screen.getByRole("textbox");
     fireEvent.keyDown(ta, { key: "Enter", shiftKey: false });
     expect(onSend).not.toHaveBeenCalled();
+  });
+
+  describe("dictation (Web Speech API)", () => {
+    it("hides the mic button when neither SpeechRecognition nor webkitSpeechRecognition is available", () => {
+      delete window.SpeechRecognition;
+      delete window.webkitSpeechRecognition;
+      render(<Composer {...defaultProps()} />);
+      expect(screen.queryByTitle("Dictate")).toBeNull();
+    });
+
+    it("falls back to webkitSpeechRecognition when SpeechRecognition is unavailable", () => {
+      delete window.SpeechRecognition;
+      window.webkitSpeechRecognition = speech.ctor;
+      render(<Composer {...defaultProps()} />);
+      expect(screen.getByTitle("Dictate")).toBeTruthy();
+    });
+
+    it("clicking the mic starts a recognition session with the documented config", () => {
+      render(<Composer {...defaultProps()} />);
+      fireEvent.click(screen.getByTitle("Dictate"));
+      expect(speech.instances).toHaveLength(1);
+      const inst = speech.instances[0];
+      expect(inst.continuous).toBe(false);
+      expect(inst.interimResults).toBe(true);
+      expect(inst.start).toHaveBeenCalledTimes(1);
+    });
+
+    it("re-clicking the mic stops the active session", () => {
+      render(<Composer {...defaultProps()} />);
+      fireEvent.click(screen.getByTitle("Dictate"));
+      fireEvent.click(screen.getByTitle("Stop dictation"));
+      expect(speech.instances[0].stop).toHaveBeenCalledTimes(1);
+    });
+
+    it("renders an aria-pressed=true + 'Stop dictation' affordance while active", () => {
+      render(<Composer {...defaultProps()} />);
+      fireEvent.click(screen.getByTitle("Dictate"));
+      const btn = screen.getByTitle("Stop dictation");
+      expect(btn.getAttribute("aria-pressed")).toBe("true");
+      expect(btn.className).toContain("on");
+    });
+
+    it("onresult event appends the transcript to the textarea value", () => {
+      render(<Composer {...defaultProps()} />);
+      fireEvent.click(screen.getByTitle("Dictate"));
+      fireResult(speech.instances[0], "hello world");
+      expect(screen.getByRole("textbox").value).toBe("hello world");
+    });
+
+    it("preserves the caret position the user had when they tapped mic", () => {
+      render(<Composer {...defaultProps()} />);
+      const ta = screen.getByRole("textbox");
+      // Type "AB" then move caret to index 1 (between A and B).
+      fireEvent.change(ta, { target: { value: "AB" } });
+      ta.setSelectionRange(1, 1);
+      fireEvent.click(screen.getByTitle("Dictate"));
+      fireResult(speech.instances[0], "X");
+      // Transcript splices in at caret: A + X + B.
+      expect(ta.value).toBe("AXB");
+    });
+
+    it("falls back to end-of-text when the textarea reports null selectionStart", () => {
+      render(<Composer {...defaultProps()} />);
+      const ta = screen.getByRole("textbox");
+      fireEvent.change(ta, { target: { value: "HEAD" } });
+      // Simulate browsers where selectionStart is null until focus —
+      // exercises the `?? ta.value.length` fallback.
+      Object.defineProperty(ta, "selectionStart", { value: null, configurable: true });
+      fireEvent.click(screen.getByTitle("Dictate"));
+      fireResult(speech.instances[0], "-TAIL");
+      // With caret defaulted to value.length (4), transcript appends at end.
+      expect(ta.value).toBe("HEAD-TAIL");
+    });
+
+    it("onend handler reverts the button label back to 'Dictate'", () => {
+      render(<Composer {...defaultProps()} />);
+      fireEvent.click(screen.getByTitle("Dictate"));
+      expect(screen.getByTitle("Stop dictation")).toBeTruthy();
+      act(() => speech.instances[0].onend());
+      expect(screen.getByTitle("Dictate")).toBeTruthy();
+    });
+
+    it("onerror handler reverts the button label back to 'Dictate'", () => {
+      render(<Composer {...defaultProps()} />);
+      fireEvent.click(screen.getByTitle("Dictate"));
+      act(() => speech.instances[0].onerror({ error: "no-speech" }));
+      expect(screen.getByTitle("Dictate")).toBeTruthy();
+    });
+
+    it("submitting stops any active recognition", () => {
+      const onSend = vi.fn();
+      render(<Composer {...defaultProps({ onSend })} />);
+      fireEvent.change(screen.getByRole("textbox"), { target: { value: "hi" } });
+      fireEvent.click(screen.getByTitle("Dictate"));
+      fireEvent.click(screen.getByTitle("Send"));
+      expect(speech.instances[0].stop).toHaveBeenCalled();
+      expect(onSend).toHaveBeenCalledWith("hi", []);
+    });
+
+    it("unmount stops the active recognition", () => {
+      const { unmount } = render(<Composer {...defaultProps()} />);
+      fireEvent.click(screen.getByTitle("Dictate"));
+      const inst = speech.instances[0];
+      unmount();
+      expect(inst.stop).toHaveBeenCalled();
+    });
+
+    it("recognition constructor throwing keeps the button in idle state", () => {
+      window.SpeechRecognition = function ThrowingCtor() {
+        throw new Error("permission denied");
+      };
+      render(<Composer {...defaultProps()} />);
+      expect(() => fireEvent.click(screen.getByTitle("Dictate"))).not.toThrow();
+      // Still "Dictate" — no active session.
+      expect(screen.getByTitle("Dictate")).toBeTruthy();
+    });
+
+    it("start() throwing collapses back to idle", () => {
+      const stub = makeSpeechRecognitionStub();
+      stub.ctor = function CtorThatBuildsThrowingInstance() {
+        const inst = {
+          continuous: undefined,
+          interimResults: undefined,
+          onresult: null,
+          onend: null,
+          onerror: null,
+          start: vi.fn(() => { throw new Error("already started"); }),
+          stop: vi.fn(),
+        };
+        stub.instances.push(inst);
+        return inst;
+      };
+      window.SpeechRecognition = stub.ctor;
+      render(<Composer {...defaultProps()} />);
+      fireEvent.click(screen.getByTitle("Dictate"));
+      expect(screen.getByTitle("Dictate")).toBeTruthy();
+      expect(stub.instances[0].start).toHaveBeenCalled();
+    });
+
+    it("stop() throwing during unmount is swallowed silently", () => {
+      const stub = makeSpeechRecognitionStub();
+      stub.ctor = function CtorThatBuildsThrowingStop() {
+        const inst = {
+          continuous: undefined,
+          interimResults: undefined,
+          onresult: null,
+          onend: null,
+          onerror: null,
+          start: vi.fn(),
+          stop: vi.fn(() => { throw new Error("not started"); }),
+        };
+        stub.instances.push(inst);
+        return inst;
+      };
+      window.SpeechRecognition = stub.ctor;
+      const { unmount } = render(<Composer {...defaultProps()} />);
+      fireEvent.click(screen.getByTitle("Dictate"));
+      expect(() => unmount()).not.toThrow();
+    });
+
+    it("stop() throwing during the toggle re-click is swallowed silently", () => {
+      const stub = makeSpeechRecognitionStub();
+      stub.ctor = function CtorThatBuildsThrowingStop() {
+        const inst = {
+          continuous: undefined,
+          interimResults: undefined,
+          onresult: null,
+          onend: null,
+          onerror: null,
+          start: vi.fn(),
+          stop: vi.fn(() => { throw new Error("not started"); }),
+        };
+        stub.instances.push(inst);
+        return inst;
+      };
+      window.SpeechRecognition = stub.ctor;
+      render(<Composer {...defaultProps()} />);
+      fireEvent.click(screen.getByTitle("Dictate"));
+      expect(() => fireEvent.click(screen.getByTitle("Stop dictation"))).not.toThrow();
+    });
   });
 });
