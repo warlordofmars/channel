@@ -37,11 +37,15 @@ describe("Download page", () => {
   });
 });
 
-describe("Download — release-tagged URLs", () => {
+describe("Download — releases/latest URLs", () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  // Default tag (no ``VITE_RELEASE_TAG`` set) — dev pre-release.
-  const releasesBase = "https://github.com/warlordofmars/channel/releases/download/dev";
+  // Per #119: links point at the unversioned ``releases/latest/download/``
+  // redirect so the URL never goes stale. GitHub resolves ``latest`` to
+  // the most recent non-prerelease release at click time. PR #80's prior
+  // ``releases/download/dev/`` form was a stop-gap before #116 wired up
+  // proper versioned releases on push to main.
+  const releasesBase = "https://github.com/warlordofmars/channel/releases/latest/download";
 
   function renderPage() {
     vi.stubGlobal("localStorage", { getItem: () => null, setItem: vi.fn(), removeItem: vi.fn() });
@@ -83,14 +87,15 @@ describe("Download — release-tagged URLs", () => {
     expect(screen.getByText(/macOS auto-updates in the background/i)).toBeTruthy();
   });
 
-  it("links never point at the broken releases/latest/ URL while no stable release exists", () => {
-    // Regression guard against the bug we just fixed: pointing at
-    // ``releases/latest/download/...`` returns 404 because the only
-    // published release is the ``dev`` pre-release (and ``latest``
-    // ignores pre-releases + drafts).
+  it("every download link uses the releases/latest redirect (forward-compatible URL)", () => {
     renderPage();
-    for (const link of screen.getAllByRole("link")) {
-      expect(link.getAttribute("href") ?? "").not.toContain("releases/latest/");
+    const downloadLinks = screen
+      .getAllByRole("link")
+      .map((a) => a.getAttribute("href") ?? "")
+      .filter((href) => href.includes("/releases/"));
+    expect(downloadLinks.length).toBeGreaterThan(0);
+    for (const href of downloadLinks) {
+      expect(href).toContain("/releases/latest/download/");
     }
   });
 });
