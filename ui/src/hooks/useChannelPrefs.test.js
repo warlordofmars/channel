@@ -178,14 +178,26 @@ describe("useChannelPrefs", () => {
     act(() => result.current.setSendOnEnter(false));
     expect(result.current.sendOnEnter).toBe(false);
     expect(storage[STORAGE_KEYS.sendOnEnter]).toBe("0");
+    // Flip back — covers the truthy branch of the v ? "1" : "0" coercion.
+    act(() => result.current.setSendOnEnter(true));
+    expect(result.current.sendOnEnter).toBe(true);
+    expect(storage[STORAGE_KEYS.sendOnEnter]).toBe("1");
 
     act(() => result.current.setShowReasoning(true));
     expect(result.current.showReasoning).toBe(true);
     expect(storage[STORAGE_KEYS.showReasoning]).toBe("1");
+    // Flip back — covers the falsy branch.
+    act(() => result.current.setShowReasoning(false));
+    expect(result.current.showReasoning).toBe(false);
+    expect(storage[STORAGE_KEYS.showReasoning]).toBe("0");
 
     act(() => result.current.setSuggestFollowups(false));
     expect(result.current.suggestFollowups).toBe(false);
     expect(storage[STORAGE_KEYS.suggestFollowups]).toBe("0");
+    // Flip back — covers the truthy branch.
+    act(() => result.current.setSuggestFollowups(true));
+    expect(result.current.suggestFollowups).toBe(true);
+    expect(storage[STORAGE_KEYS.suggestFollowups]).toBe("1");
   });
 
   // ---- Server hydrate ----------------------------------------------------
@@ -225,6 +237,43 @@ describe("useChannelPrefs", () => {
     });
     const { result } = renderHook(() => useChannelPrefs());
     await waitFor(() => expect(result.current.theme).toBe("light"));
+  });
+
+  it("hydrates boolean true values (covers the truthy boolean branch)", async () => {
+    storage["starter_mgmt_token"] = "tok";
+    __resetChannelPrefsForTest();
+    __resetServerSyncForTest();
+    vi.spyOn(api, "getPrefs").mockResolvedValue({
+      show_reasoning: true,
+      suggest_followups: true,
+    });
+    const { result } = renderHook(() => useChannelPrefs());
+    await waitFor(() => expect(result.current.showReasoning).toBe(true));
+    expect(result.current.suggestFollowups).toBe(true);
+    expect(storage[STORAGE_KEYS.showReasoning]).toBe("1");
+  });
+
+  it("hydrate is a no-op when the server returns an empty prefs object", async () => {
+    storage["starter_mgmt_token"] = "tok";
+    __resetChannelPrefsForTest();
+    __resetServerSyncForTest();
+    const getPrefsSpy = vi.spyOn(api, "getPrefs").mockResolvedValue({});
+    const { result } = renderHook(() => useChannelPrefs());
+    await waitFor(() => expect(getPrefsSpy).toHaveBeenCalled());
+    // Defaults remain — no snapshot patch was applied (covers the false branch
+    // of `if (Object.keys(patch).length)`).
+    expect(result.current.theme).toBe(DEFAULTS.theme);
+    expect(result.current.accent).toBe(DEFAULTS.accent);
+  });
+
+  it("hydrate handles a null prefs response (covers `serverPrefs || {}`)", async () => {
+    storage["starter_mgmt_token"] = "tok";
+    __resetChannelPrefsForTest();
+    __resetServerSyncForTest();
+    const getPrefsSpy = vi.spyOn(api, "getPrefs").mockResolvedValue(null);
+    const { result } = renderHook(() => useChannelPrefs());
+    await waitFor(() => expect(getPrefsSpy).toHaveBeenCalled());
+    expect(result.current.theme).toBe(DEFAULTS.theme);
   });
 
   it("swallows getPrefs errors during hydrate", async () => {
@@ -343,6 +392,26 @@ describe("useChannelPrefs", () => {
     const { result } = renderHook(() => useChannelPrefs());
     vi.useFakeTimers();
     act(() => result.current.setAccent("18"));
+    await act(async () => {
+      vi.advanceTimersByTime(500);
+    });
+    vi.useRealTimers();
+    expect(putPrefsSpy).not.toHaveBeenCalled();
+  });
+
+  it("__resetServerSyncForTest clears pending debounced PUT timers", async () => {
+    storage["starter_mgmt_token"] = "tok";
+    __resetChannelPrefsForTest();
+    __resetServerSyncForTest();
+    vi.spyOn(api, "getPrefs").mockResolvedValue({});
+    const putPrefsSpy = vi.spyOn(api, "putPrefs").mockResolvedValue();
+    const { result } = renderHook(() => useChannelPrefs());
+    await waitFor(() => expect(api.getPrefs).toHaveBeenCalled());
+
+    vi.useFakeTimers();
+    act(() => result.current.setAccent("18"));
+    // Reset BEFORE the 200ms debounce fires; the pending timer should be cleared.
+    __resetServerSyncForTest();
     await act(async () => {
       vi.advanceTimersByTime(500);
     });
