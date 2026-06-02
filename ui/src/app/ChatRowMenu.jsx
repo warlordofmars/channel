@@ -3,10 +3,15 @@ import React, { useEffect } from "react";
 import Icon from "../components/Icon.jsx";
 
 /**
- * Per-row popover anchored to a sidebar Recents chat. 5 items
- * matching the reference UX; Pin / Change project / Remove from
- * project are disabled placeholders (rendered for menu shape; future
- * features wire them).
+ * Per-row popover anchored to a sidebar Recents chat. Six items in the
+ * reference UX; Pin / Change project / Remove from project are disabled
+ * placeholders (rendered for menu shape; future features wire them).
+ *
+ * Archive sits between Rename and the Delete divider — non-destructive,
+ * no confirm modal (chats can be unarchived later). The handler is
+ * supplied by the parent (Sidebar / ChatHeader) and typically resolves
+ * to ``useChats().archiveChat`` plus a navigate-to-/app when the
+ * archived chat is the active route.
  *
  * Positioning: ``anchorRect`` is the bounding rect of the row that
  * spawned the menu. The popover anchors near the row's right edge and
@@ -16,7 +21,14 @@ import Icon from "../components/Icon.jsx";
  * Backdrop click + Esc both close. Same pattern as ModelPicker /
  * AttachMenu / AccountPopover per CLAUDE.md §UI conventions.
  */
-export default function ChatRowMenu({ open, anchorRect, onClose, onRename, onDelete }) {
+export default function ChatRowMenu({
+  open,
+  anchorRect,
+  onClose,
+  onRename,
+  onArchive,
+  onDelete,
+}) {
   useEffect(() => {
     if (!open) return undefined;
     function onKey(e) {
@@ -64,6 +76,14 @@ export default function ChatRowMenu({ open, anchorRect, onClose, onRename, onDel
           onClick={handleClick(onRename)}
         >
           <Icon name="pencil" size={16} /> <span>Rename</span>
+        </button>
+        <button
+          type="button"
+          role="menuitem"
+          className="chat-row-menu-item"
+          onClick={handleClick(onArchive)}
+        >
+          <Icon name="download" size={16} /> <span>Archive</span>
         </button>
         <button
           type="button"

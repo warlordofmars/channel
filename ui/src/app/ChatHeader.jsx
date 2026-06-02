@@ -1,23 +1,29 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
 import React, { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import Icon from "../components/Icon.jsx";
 import ChatRowMenu from "./ChatRowMenu.jsx";
 import RenameChatModal from "./RenameChatModal.jsx";
 import DeleteChatModal from "./DeleteChatModal.jsx";
+import { useChats } from "../hooks/ChatsContext.jsx";
 
 /**
  * Header strip at the top of the Conversation view. Shows the active
  * chat's title as a single big button — clicking anywhere on it opens
- * the same ChatRowMenu (Pin / Rename / Change project / Remove from
- * project / Delete) used by the sidebar row's ⋮ button.
+ * the same ChatRowMenu (Pin / Rename / Archive / Change project /
+ * Remove from project / Delete) used by the sidebar row's ⋮ button.
  *
  * Renders an empty strip (no title button) when ``chat`` is null so
  * the layout doesn't jump while the chat list loads.
  *
  * Local state — does NOT route through Sidebar. The header's menu
- * and the sidebar row's menu are independent.
+ * and the sidebar row's menu are independent. Archive optimistically
+ * removes the chat from useChatList's state and routes back to /app
+ * since the header always sits on the active chat's URL.
  */
 export default function ChatHeader({ chat }) {
+  const navigate = useNavigate();
+  const { archiveChat } = useChats();
   const [menuOpen, setMenuOpen] = useState(false);
   const [anchorRect, setAnchorRect] = useState(null);
   const [renameOpen, setRenameOpen] = useState(false);
@@ -68,6 +74,14 @@ export default function ChatHeader({ chat }) {
           anchorRect={anchorRect}
           onClose={() => setMenuOpen(false)}
           onRename={() => setRenameOpen(true)}
+          onArchive={() => {
+            // .catch() swallows network errors so an API failure
+            // doesn't surface as an unhandled promise rejection.
+            // Same pattern as Sidebar.handleArchive — optimistic UI
+            // already moved on; backend resync happens on next load.
+            archiveChat(chat.chat_id).catch(() => {});
+            navigate("/app");
+          }}
           onDelete={() => setDeleteOpen(true)}
         />
       )}
