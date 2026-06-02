@@ -797,3 +797,34 @@ html.is-electron-mac .sb-top {
 .btn-danger:hover {
   filter: brightness(1.08);
 }
+
+/* ----- Conversation chat header ----------------------------------- */
+.chat-hd {
+  display: flex;
+  align-items: center;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border-soft);
+  min-height: 44px;
+}
+.chat-hd-spacer { flex: 1; }
+.chat-hd-title {
+  background: transparent;
+  border: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--ink);
+  cursor: pointer;
+}
+.chat-hd-title:hover { background: var(--raised); }
+.chat-hd-share {
+  margin-left: auto;
+}
+.chat-hd-share[disabled] {
+  opacity: 0.4;
+  cursor: not-allowed;
+}

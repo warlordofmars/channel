@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Conversation view now shows a header strip with the chat title and
+  a menu trigger. Clicking the title opens the same Pin / Rename /
+  Change project / Remove from project / Delete menu that the
+  sidebar row's `⋮` button does. A placeholder share icon sits on
+  the right for future wiring.
 - Chat rename + delete from the sidebar. Hovering a chat in the
   Recents list reveals a `⋮` menu button; clicking it opens a popover
   with Rename (wired), Delete (wired, permanent), and three disabled

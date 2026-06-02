@@ -397,6 +397,27 @@ describe("Conversation", () => {
     expect(container.querySelector(".convo > .convo-inner")).toBeTruthy();
   });
 
+  it("renders the chat header with the active chat's title", () => {
+    useChatsModule.useChats.mockReturnValueOnce({
+      chats: [
+        { chat_id: "c1", title: "Alpha conversation" },
+        { chat_id: "c2", title: "Beta" },
+      ],
+      renameChatLocal: vi.fn(),
+      renameChat: vi.fn(),
+      archiveChat: vi.fn(),
+      deleteChat: vi.fn(),
+      createChat: vi.fn(),
+      refresh: vi.fn(),
+      status: "idle",
+    });
+    mockStream();
+    renderAt("/app/c/c1");
+    expect(
+      screen.getByRole("button", { name: /Alpha conversation/i }),
+    ).toBeTruthy();
+  });
+
   it("renders an error banner when status is 'error'", () => {
     mockStream({ status: "error", error: new Error("boom") });
     renderAt("/app/c/c1");
