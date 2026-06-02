@@ -1,6 +1,7 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
 import React, { useEffect, useRef, useState } from "react";
 import Icon from "../components/Icon.jsx";
+import { useChannelPrefs } from "../hooks/useChannelPrefs.js";
 import AttachMenu from "./AttachMenu.jsx";
 import ModelPicker from "./ModelPicker.jsx";
 
@@ -18,6 +19,7 @@ export default function Composer({ model, effort, setModel, setEffort, onSend, a
   const [text, setText] = useState("");
   const [atts, setAtts] = useState([]);
   const taRef = useRef(null);
+  const { sendOnEnter } = useChannelPrefs();
 
   function grow() {
     const ta = taRef.current;
@@ -39,7 +41,16 @@ export default function Composer({ model, effort, setModel, setEffort, onSend, a
   }
 
   function onKeyDown(e) {
-    if (e.key === "Enter" && !e.shiftKey) {
+    if (e.key !== "Enter") return;
+    const cmdOrCtrl = e.metaKey || e.ctrlKey;
+    if (sendOnEnter) {
+      // Enter submits; Shift+Enter inserts a newline.
+      if (e.shiftKey) return;
+      e.preventDefault();
+      submit();
+    } else if (cmdOrCtrl) {
+      // Cmd/Ctrl+Enter submits; plain Enter falls through to insert
+      // a newline in the textarea (default browser behavior).
       e.preventDefault();
       submit();
     }

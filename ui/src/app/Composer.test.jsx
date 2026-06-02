@@ -1,8 +1,13 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
 import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Composer from "./Composer.jsx";
 import { MODELS } from "./data.js";
+import {
+  STORAGE_KEYS,
+  __resetChannelPrefsForTest,
+  __resetServerSyncForTest,
+} from "../hooks/useChannelPrefs.js";
 
 const opus = MODELS[0];
 
@@ -20,6 +25,26 @@ function defaultProps(overrides = {}) {
 }
 
 describe("Composer", () => {
+  let storage;
+
+  beforeEach(() => {
+    storage = {};
+    vi.stubGlobal("localStorage", {
+      getItem: (k) => storage[k] ?? null,
+      setItem: (k, v) => { storage[k] = String(v); },
+      removeItem: (k) => { delete storage[k]; },
+    });
+    vi.stubGlobal("matchMedia", () => ({
+      matches: false,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    }));
+    __resetChannelPrefsForTest();
+    __resetServerSyncForTest();
+  });
+
+  afterEach(() => vi.unstubAllGlobals());
+
   it("renders a textarea with the supplied placeholder", () => {
     render(<Composer {...defaultProps({ placeholder: "How can I help?" })} />);
     expect(screen.getByPlaceholderText("How can I help?")).toBeTruthy();
@@ -51,7 +76,7 @@ describe("Composer", () => {
     expect(ta.value).toBe("");
   });
 
-  it("Enter (no shift) submits; Shift+Enter inserts a newline", () => {
+  it("Enter (no shift) submits; Shift+Enter inserts a newline (default sendOnEnter=true)", () => {
     const onSend = vi.fn();
     render(<Composer {...defaultProps({ onSend })} />);
     const ta = screen.getByRole("textbox");
@@ -62,6 +87,50 @@ describe("Composer", () => {
     fireEvent.change(ta, { target: { value: "x" } });
     fireEvent.keyDown(ta, { key: "Enter", shiftKey: true });
     expect(onSend).toHaveBeenCalledTimes(0);
+  });
+
+  it("non-Enter keys are ignored by the keydown handler", () => {
+    const onSend = vi.fn();
+    render(<Composer {...defaultProps({ onSend })} />);
+    const ta = screen.getByRole("textbox");
+    fireEvent.change(ta, { target: { value: "x" } });
+    fireEvent.keyDown(ta, { key: "a" });
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
+  describe("when sendOnEnter is false (newline-first mode)", () => {
+    beforeEach(() => {
+      storage[STORAGE_KEYS.sendOnEnter] = "0";
+      __resetChannelPrefsForTest();
+      __resetServerSyncForTest();
+    });
+
+    it("plain Enter does NOT submit (falls through to newline)", () => {
+      const onSend = vi.fn();
+      render(<Composer {...defaultProps({ onSend })} />);
+      const ta = screen.getByRole("textbox");
+      fireEvent.change(ta, { target: { value: "x" } });
+      fireEvent.keyDown(ta, { key: "Enter", shiftKey: false });
+      expect(onSend).not.toHaveBeenCalled();
+    });
+
+    it("Cmd+Enter (metaKey) submits", () => {
+      const onSend = vi.fn();
+      render(<Composer {...defaultProps({ onSend })} />);
+      const ta = screen.getByRole("textbox");
+      fireEvent.change(ta, { target: { value: "x" } });
+      fireEvent.keyDown(ta, { key: "Enter", metaKey: true });
+      expect(onSend).toHaveBeenCalledTimes(1);
+    });
+
+    it("Ctrl+Enter submits (non-Mac case)", () => {
+      const onSend = vi.fn();
+      render(<Composer {...defaultProps({ onSend })} />);
+      const ta = screen.getByRole("textbox");
+      fireEvent.change(ta, { target: { value: "x" } });
+      fireEvent.keyDown(ta, { key: "Enter", ctrlKey: true });
+      expect(onSend).toHaveBeenCalledTimes(1);
+    });
   });
 
   it("renders the ModelPicker trigger with current model short name", () => {
