@@ -28,6 +28,16 @@ describe("createMainWindow", () => {
     );
   });
 
+  it("opens at the landscape 1280x900 default with 720x600 minimums", async () => {
+    const { BrowserWindow } = await import("electron");
+    createMainWindow({ preloadPath: "/preload.js" });
+    const opts = BrowserWindow.mock.calls[0][0];
+    expect(opts.width).toBe(1280);
+    expect(opts.height).toBe(900);
+    expect(opts.minWidth).toBe(720);
+    expect(opts.minHeight).toBe(600);
+  });
+
   it("loads app://-/app in production (no VITE_DEV_SERVER_URL)", async () => {
     const win = createMainWindow({ preloadPath: "/preload.js" });
     expect(win.loadURL).toHaveBeenCalledWith("app://-/app");
