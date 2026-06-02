@@ -25,7 +25,7 @@ import boto3
 from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
 
-from channel.models import Chat, Message, MessageRole
+from channel.models import Chat, Message, MessageRole, Prefs
 
 _CHAT_INDEX_GSI = "ChatByIdIndex"
 _DEFAULT_TITLE = "New chat"
@@ -342,6 +342,38 @@ def delete_last_assistant_message(chat_id: str) -> Message | None:
             )
             return msg
     return None
+
+
+def get_prefs(user_id: str) -> Prefs:
+    """Return the user's prefs, or default Prefs if no row exists."""
+
+    result = _get_table().get_item(
+        Key={"PK": f"USER#{user_id}", "SK": "PREFS"}
+    )
+    item = result.get("Item")
+    if not item:
+        return Prefs()
+    return Prefs(**(item.get("prefs") or {}))
+
+
+def put_prefs(user_id: str, updates: dict[str, Any]) -> Prefs:
+    """Merge ``updates`` into the user's prefs row and return the merged Prefs.
+
+    Validates the merged result against ``Prefs`` (so unknown keys raise).
+    Initialises with defaults when no row exists.
+    """
+
+    current = get_prefs(user_id).model_dump()
+    current.update(updates)
+    merged = Prefs(**current)  # raises ValidationError on unknown / bad type
+    _get_table().put_item(
+        Item={
+            "PK": f"USER#{user_id}",
+            "SK": "PREFS",
+            "prefs": merged.model_dump(),
+        }
+    )
+    return merged
 
 
 def _chat_from_item(item: dict[str, Any]) -> Chat:

@@ -12,6 +12,7 @@ from channel.models import (
     ChatPatch,
     Message,
     MessageRole,
+    Prefs,
     SendMessageRequest,
 )
 
@@ -107,3 +108,22 @@ def test_send_message_request_rejects_empty_message():
 def test_send_message_request_rejects_oversized_message():
     with pytest.raises(ValidationError):
         SendMessageRequest(message="x" * 100_001)
+
+
+def test_prefs_defaults():
+    p = Prefs()
+    assert p.theme == "dark"
+    assert p.accent == "42"
+    assert p.density == "cozy"
+    assert p.shape == "soft"
+    assert p.font == "figtree"
+    assert p.model == "claude-opus-4-6"
+    assert p.effort == "High"
+    assert p.send_on_enter is True
+    assert p.suggest_followups is True
+    assert p.show_reasoning is False
+
+
+def test_prefs_rejects_unknown_keys():
+    with pytest.raises(ValidationError):
+        Prefs(unknown_key="x")
