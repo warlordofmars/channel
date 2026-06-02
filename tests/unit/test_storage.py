@@ -149,11 +149,11 @@ class FakeTable:
                     items = [i for i in items if i.get("SK", "") > cursor_sk]
                 else:
                     items = []
-        # DynamoDB applies FilterExpression AFTER Limit on the wire, but
-        # the storage helper over-fetches by 2x to compensate. Mirror
-        # that ordering here: limit first, then filter — so the unit
-        # test for the over-fetch trade-off can observe the same
-        # partial-page behaviour as production.
+        # DynamoDB applies FilterExpression AFTER Limit on the wire.
+        # Mirror that ordering here: limit first, then filter — so a
+        # page that contains archived rows surfaces as "fewer than
+        # ``limit`` items, still has a cursor" exactly like production.
+        # See ``list_chats_for_user``'s docstring for the trade-off.
         result: dict[str, Any] = {}
         if limit is not None and len(items) > limit:
             returned = items[:limit]
