@@ -3,8 +3,20 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, Routes, Route, useLocation } from "react-router-dom";
 import { TOKEN_KEY } from "../lib/auth.js";
-import { QUICK_ACTIONS } from "./data.js";
+import { QUICK_ACTIONS, __resetModelsCacheForTest } from "./data.js";
 import { __resetChannelPrefsForTest } from "../hooks/useChannelPrefs.js";
+
+vi.mock("../api.js", () => ({
+  listModels: vi.fn(),
+}));
+
+import * as api from "../api.js";
+
+const SERVER_ALLOWLIST = [
+  { id: "claude-opus-4-6", label: "Claude Opus 4.6", tier: "Flagship" },
+  { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6", tier: "Balanced" },
+  { id: "claude-haiku-4-5", label: "Claude Haiku 4.5", tier: "Fast" },
+];
 
 const mockCreateChat = vi.fn();
 const mockUseChats = vi.fn();
@@ -68,12 +80,18 @@ describe("ChatHome", () => {
     });
     vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() }));
     __resetChannelPrefsForTest();
+    __resetModelsCacheForTest();
+    api.listModels.mockReset();
+    api.listModels.mockResolvedValue({ models: SERVER_ALLOWLIST });
     mockCreateChat.mockReset();
     mockCreateChat.mockResolvedValue({ chat_id: "new-1" });
     mockUseChats.mockReset();
     mockUseChats.mockReturnValue({ createChat: mockCreateChat });
   });
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    __resetModelsCacheForTest();
+  });
 
   it("renders the 'Back at it, <name>' greeting derived from the JWT email", () => {
     renderChatHome();
@@ -135,12 +153,12 @@ describe("ChatHome", () => {
     expect(screen.getByRole("heading", { level: 1 }).textContent).toMatch(/back at it, john$/i);
   });
 
-  it("falls back to first MODELS entry when prefs.model is not in MODELS", () => {
+  it("falls back to the API allowlist's first entry when prefs.model is unknown", async () => {
     storage["channel-model"] = "nonexistent-model-id";
     __resetChannelPrefsForTest();
     renderChatHome();
-    // ModelPicker shows the model.short of the fallback (Opus 4.6):
-    expect(screen.getByText(/opus 4.6/i)).toBeTruthy();
+    // After the API resolves, the picker should show the first server entry.
+    await waitFor(() => expect(screen.getByText(/opus 4\.6/i)).toBeTruthy());
   });
 
   it("falls back to 'You' when JWT email local-part is empty", () => {
@@ -149,13 +167,49 @@ describe("ChatHome", () => {
     expect(screen.getByRole("heading", { level: 1 }).textContent).toMatch(/back at it, you/i);
   });
 
-  it("setModelObj writes the model id back to prefs when a model is selected", () => {
+  it("setModelObj writes the model id back to prefs when a model is selected", async () => {
     renderChatHome();
+    await waitFor(() => expect(api.listModels).toHaveBeenCalled());
     // Open the ModelPicker popover via the model-pick button in the Composer
-    fireEvent.click(screen.getByRole("button", { name: /sonnet 4\.6|opus 4\.6|haiku 4\.5/i }));
+    await waitFor(() => {
+      fireEvent.click(screen.getByRole("button", { name: /sonnet 4\.6|opus 4\.6|haiku 4\.5/i }));
+    });
     // Click the Haiku option to trigger setModelObj
+    await waitFor(() => expect(screen.getByText("Claude Haiku 4.5")).toBeTruthy());
     fireEvent.click(screen.getByText("Claude Haiku 4.5"));
     // The storage key should be updated
     expect(storage["channel-model"]).toBe("claude-haiku-4-5");
+  });
+
+  it("submits using prefs.model id even when the models API has not yet resolved", async () => {
+    // Clear the pre-warmed cache so the component mounts in the
+    // truly-empty state. Hold the API promise open — the send path
+    // must still work with the local fallback derived from prefs.model.
+    __resetModelsCacheForTest();
+    let resolvePromise;
+    api.listModels.mockReturnValue(new Promise((resolve) => { resolvePromise = resolve; }));
+    const { getLastState } = renderChatHomeWithLocationCatcher();
+    const ta = screen.getByRole("textbox");
+    fireEvent.change(ta, { target: { value: "hi" } });
+    fireEvent.click(screen.getByTitle("Send"));
+    await waitFor(() => expect(mockCreateChat).toHaveBeenCalled());
+    expect(getLastState().firstMessage.model).toBe("claude-opus-4-6");
+    resolvePromise({ models: SERVER_ALLOWLIST });
+  });
+
+  it("handles API failure by falling back to a synthetic model derived from prefs.model", async () => {
+    // Clear the pre-warmed cache and stage a rejection so the effect's
+    // catch handler executes during mount.
+    __resetModelsCacheForTest();
+    api.listModels.mockReset();
+    api.listModels.mockRejectedValue(new Error("network"));
+    renderChatHome();
+    // The composer still renders; the send path uses prefs.model directly.
+    await waitFor(() => expect(api.listModels).toHaveBeenCalled());
+    const ta = screen.getByRole("textbox");
+    fireEvent.change(ta, { target: { value: "hello" } });
+    fireEvent.click(screen.getByTitle("Send"));
+    await waitFor(() => expect(mockCreateChat).toHaveBeenCalled());
+    expect(mockCreateChat).toHaveBeenCalledWith({ modelDefault: "claude-opus-4-6" });
   });
 });

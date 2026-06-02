@@ -2,8 +2,25 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
+
+vi.mock("../../api.js", () => ({
+  listModels: vi.fn(),
+}));
+
+import * as api from "../../api.js";
 import ProjectDetail from "./ProjectDetail.jsx";
-import { PROJECTS, PROJECT_DOCS } from "../data.js";
+import {
+  PROJECTS,
+  PROJECT_DOCS,
+  __resetModelsCacheForTest,
+  loadModels,
+} from "../data.js";
+
+const SERVER_ALLOWLIST = [
+  { id: "claude-opus-4-6", label: "Claude Opus 4.6", tier: "Flagship" },
+  { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6", tier: "Balanced" },
+  { id: "claude-haiku-4-5", label: "Claude Haiku 4.5", tier: "Fast" },
+];
 
 // Mirrors PROJECT_CHATS_PLACEHOLDER in ProjectDetail.jsx — first row only.
 // Kept local so the component remains free to evolve its placeholder list
@@ -33,7 +50,7 @@ function renderAt(path) {
 
 describe("ProjectDetail", () => {
   let storage;
-  beforeEach(() => {
+  beforeEach(async () => {
     storage = {};
     vi.stubGlobal("localStorage", {
       getItem: (k) => storage[k] ?? null,
@@ -49,8 +66,17 @@ describe("ProjectDetail", () => {
       matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn(),
     }));
     __resetChannelPrefsForTest();
+    __resetModelsCacheForTest();
+    api.listModels.mockReset();
+    api.listModels.mockResolvedValue({ models: SERVER_ALLOWLIST });
+    // Pre-warm the module-level cache so synchronous renders see the
+    // models — production reads cachedModels() in the useState initializer.
+    await loadModels();
   });
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    __resetModelsCacheForTest();
+  });
 
   it("renders the project's name + description in the header when :id matches PROJECTS", () => {
     renderAt("/app/projects/p1");
@@ -136,12 +162,12 @@ describe("ProjectDetail", () => {
     expect(badge.style.background).toContain("oklch(0.92 0.05 42)");
   });
 
-  it("falls back to MODELS[0] when prefs.model points at an unknown id", () => {
+  it("falls back to the first API allowlist entry when prefs.model points at an unknown id", () => {
     // Seed an unknown model id in storage so prefs.model = "no-such-id".
     storage["channel-model"] = "no-such-id";
     __resetChannelPrefsForTest();
     renderAt("/app/projects/p1");
-    // Sending should still work — Composer renders the first MODELS entry's short name.
+    // Sending should still work — Composer renders the first allowlist entry's short name.
     expect(screen.getByRole("button", { name: /Opus 4.6/i })).toBeTruthy();
     const ta = screen.getByRole("textbox");
     fireEvent.change(ta, { target: { value: "with fallback model" } });

@@ -1,15 +1,33 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
 import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("../api.js", () => ({
+  listModels: vi.fn().mockResolvedValue({
+    models: [
+      { id: "claude-opus-4-6", label: "Claude Opus 4.6", tier: "Flagship" },
+    ],
+  }),
+}));
+
 import Composer from "./Composer.jsx";
-import { MODELS } from "./data.js";
+import { __resetModelsCacheForTest } from "./data.js";
 import {
   STORAGE_KEYS,
   __resetChannelPrefsForTest,
   __resetServerSyncForTest,
 } from "../hooks/useChannelPrefs.js";
 
-const opus = MODELS[0];
+// Synthetic display-meta shape that mirrors what mergeWithDisplayMeta
+// produces for the opus id. Used as the Composer prop in every test —
+// the Composer doesn't fetch models itself; it just renders the prop.
+const opus = {
+  id: "claude-opus-4-6",
+  name: "Claude Opus 4.6",
+  short: "Opus 4.6",
+  tier: "Flagship",
+  desc: "Most capable",
+};
 
 function defaultProps(overrides = {}) {
   return {
@@ -41,9 +59,13 @@ describe("Composer", () => {
     }));
     __resetChannelPrefsForTest();
     __resetServerSyncForTest();
+    __resetModelsCacheForTest();
   });
 
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    __resetModelsCacheForTest();
+  });
 
   it("renders a textarea with the supplied placeholder", () => {
     render(<Composer {...defaultProps({ placeholder: "How can I help?" })} />);

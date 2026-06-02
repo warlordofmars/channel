@@ -1,8 +1,8 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
-import React from "react";
+import React, { useEffect, useState } from "react";
 import Icon from "../../components/Icon.jsx";
 import { useChannelPrefs } from "../../hooks/useChannelPrefs.js";
-import { EFFORTS, MODELS } from "../data.js";
+import { EFFORTS, cachedModels, loadModels, mergeWithDisplayMeta } from "../data.js";
 
 // Five accent hues. Co-located here because nothing else in the app reads
 // them; the spec mock-data list doesn't include ACCENTS. Lifted verbatim
@@ -45,14 +45,28 @@ const BEHAVIOR_ROWS = [
  * immediately persists to localStorage via the hook's shared store, so
  * changes apply instantly across every mounted consumer.
  *
- * Three Behavior toggles are UI-only at Phase 6f per the spec — they flip
- * a local useState but don't propagate anywhere.
+ * The model row sources its allowlist from `GET /api/models` via
+ * `loadModels()` (issue #148 dropped the hardcoded fallback). Until
+ * the API resolves we render a single "Loading models…" placeholder.
  */
 export default function Customize() {
   const prefs = useChannelPrefs();
+  const [models, setModels] = useState(() => cachedModels());
+  const [modelsError, setModelsError] = useState(false);
+
+  useEffect(function fetchModelsOnMount() {
+    setModelsError(false);
+    loadModels()
+      .then(setModels)
+      .catch(function onModelsFetchError() { setModelsError(true); });
+  }, []);
+
   // The hook stores `model` as an id string; the seg-ctl needs the model
   // object for its `desc` hint and `short` label.
-  const activeModel = MODELS.find((m) => m.id === prefs.model) ?? MODELS[0];
+  const activeModel =
+    (models && models.find((m) => m.id === prefs.model)) ||
+    (models && models[0]) ||
+    mergeWithDisplayMeta({ id: prefs.model });
 
   return (
     <div className="view">
@@ -142,20 +156,26 @@ export default function Customize() {
               <div className="hint">{activeModel.desc}</div>
             </div>
             <div className="ctl">
-              <div className="seg-ctl">
-                {MODELS.map((m) => (
-                  <button
-                    type="button"
-                    key={m.id}
-                    className={m.id === activeModel.id ? "on" : ""}
-                    onClick={() => prefs.setModel(m.id)}
-                  >
-                    {/* v8 ignore start */}
-                    {m.short || m.name}
-                    {/* v8 ignore stop */}
-                  </button>
-                ))}
-              </div>
+              {models == null && !modelsError && (
+                <div className="hint" data-testid="models-loading">Loading models…</div>
+              )}
+              {modelsError && (
+                <div className="hint" data-testid="models-error">Couldn't load models.</div>
+              )}
+              {models != null && (
+                <div className="seg-ctl">
+                  {models.map((m) => (
+                    <button
+                      type="button"
+                      key={m.id}
+                      className={m.id === activeModel.id ? "on" : ""}
+                      onClick={() => prefs.setModel(m.id)}
+                    >
+                      {m.short}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
           <div className="set-row">

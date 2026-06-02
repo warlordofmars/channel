@@ -1,14 +1,31 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
+
+vi.mock("../../api.js", () => ({
+  listModels: vi.fn(),
+}));
+
+import * as api from "../../api.js";
 import Customize from "./Customize.jsx";
-import { MODELS, EFFORTS } from "../data.js";
+import {
+  EFFORTS,
+  MODEL_DISPLAY_META,
+  __resetModelsCacheForTest,
+  loadModels,
+} from "../data.js";
 import {
   STORAGE_KEYS,
   __resetChannelPrefsForTest,
   __resetServerSyncForTest,
 } from "../../hooks/useChannelPrefs.js";
+
+const SERVER_ALLOWLIST = [
+  { id: "claude-opus-4-6", label: "Claude Opus 4.6", tier: "Flagship" },
+  { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6", tier: "Balanced" },
+  { id: "claude-haiku-4-5", label: "Claude Haiku 4.5", tier: "Fast" },
+];
 
 function renderCustomize() {
   return render(
@@ -20,7 +37,7 @@ function renderCustomize() {
 
 describe("Customize", () => {
   let storage;
-  beforeEach(() => {
+  beforeEach(async () => {
     storage = {};
     vi.stubGlobal("localStorage", {
       getItem: (k) => storage[k] ?? null,
@@ -36,8 +53,16 @@ describe("Customize", () => {
     }
     __resetChannelPrefsForTest();
     __resetServerSyncForTest();
+    __resetModelsCacheForTest();
+    api.listModels.mockReset();
+    api.listModels.mockResolvedValue({ models: SERVER_ALLOWLIST });
+    // Pre-warm the cache so synchronous renders see the model list.
+    await loadModels();
   });
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    __resetModelsCacheForTest();
+  });
 
   it("renders the 'Customize' header + tagline", () => {
     renderCustomize();
@@ -73,10 +98,7 @@ describe("Customize", () => {
     const { container } = renderCustomize();
     const swatches = container.querySelectorAll(".swatch");
     expect(swatches.length).toBe(5);
-    // First swatch = hue 42 (Clay): background = oklch(0.60 0.13 42).
-    // jsdom normalises 0.60 → 0.6, so match the normalised form.
     expect(swatches[0].style.background).toMatch(/oklch\(0\.6 0\.13 42\)/);
-    // The title attribute carries the human label.
     expect(swatches[0].getAttribute("title")).toBe("Clay");
   });
 
@@ -86,23 +108,22 @@ describe("Customize", () => {
     expect(fern).toBeTruthy();
     fireEvent.click(fern);
     expect(storage["channel-accent"]).toBe("150");
-    // The clicked swatch now has the .on class.
     expect(fern.className).toContain("on");
   });
 
   it("Density seg-ctl persists the chosen value", () => {
     renderCustomize();
-    // Default is "cozy".
     expect(screen.getByRole("button", { name: "Cozy" }).className).toContain("on");
     fireEvent.click(screen.getByRole("button", { name: "Compact" }));
     expect(storage["channel-density"]).toBe("compact");
     expect(screen.getByRole("button", { name: "Compact" }).className).toContain("on");
   });
 
-  it("Default model seg-ctl renders one button per MODELS entry + persists the chosen id", () => {
+  it("Default model seg-ctl renders one button per API allowlist entry + persists the chosen id", () => {
     renderCustomize();
-    for (const m of MODELS) {
-      expect(screen.getByRole("button", { name: m.short })).toBeTruthy();
+    for (const sm of SERVER_ALLOWLIST) {
+      const expected = MODEL_DISPLAY_META[sm.id]?.short ?? sm.label;
+      expect(screen.getByRole("button", { name: expected })).toBeTruthy();
     }
     fireEvent.click(screen.getByRole("button", { name: "Haiku 4.5" }));
     expect(storage["channel-model"]).toBe("claude-haiku-4-5");
@@ -123,16 +144,14 @@ describe("Customize", () => {
     storage["channel-model"] = "claude-haiku-4-5";
     __resetChannelPrefsForTest();
     renderCustomize();
-    const haiku = MODELS.find((m) => m.id === "claude-haiku-4-5");
-    // Hint paragraph for the model row carries the active model's desc.
-    expect(screen.getByText(haiku.desc)).toBeTruthy();
+    const haikuDesc = MODEL_DISPLAY_META["claude-haiku-4-5"].desc;
+    expect(screen.getByText(haikuDesc)).toBeTruthy();
   });
 
   it("renders three Behavior toggles with the correct default states", () => {
     const { container } = renderCustomize();
     const toggles = container.querySelectorAll(".toggle");
     expect(toggles.length).toBe(3);
-    // Send on Enter (true), Show reasoning trace (false), Suggest follow-ups (true).
     expect(toggles[0].className).toContain("on");
     expect(toggles[1].className).not.toContain("on");
     expect(toggles[2].className).toContain("on");
@@ -142,17 +161,14 @@ describe("Customize", () => {
     const { container } = renderCustomize();
     const toggles = container.querySelectorAll(".toggle");
 
-    // Send on Enter: starts ON (true → "1"); click flips to OFF.
     fireEvent.click(toggles[0]);
     expect(toggles[0].className).not.toContain("on");
     expect(storage[STORAGE_KEYS.sendOnEnter]).toBe("0");
 
-    // Show reasoning trace: starts OFF; click flips to ON.
     fireEvent.click(toggles[1]);
     expect(toggles[1].className).toContain("on");
     expect(storage[STORAGE_KEYS.showReasoning]).toBe("1");
 
-    // Suggest follow-ups: starts ON; click flips to OFF.
     fireEvent.click(toggles[2]);
     expect(toggles[2].className).not.toContain("on");
     expect(storage[STORAGE_KEYS.suggestFollowups]).toBe("0");
@@ -197,13 +213,32 @@ describe("Customize", () => {
     expect(screen.getByText(/related prompts/)).toBeTruthy();
   });
 
-  it("falls back to MODELS[0] when prefs.model points at an unknown id", () => {
+  it("falls back to the first API entry when prefs.model points at an unknown id", () => {
     storage["channel-model"] = "no-such-model";
     __resetChannelPrefsForTest();
     renderCustomize();
-    // MODELS[0] (Opus 4.6) should be the highlighted button + supply the hint.
+    // The first API entry (Opus 4.6) should be highlighted + supply the hint.
     expect(screen.getByRole("button", { name: "Opus 4.6" }).className).toContain("on");
-    const opus = MODELS[0];
-    expect(screen.getByText(opus.desc)).toBeTruthy();
+    expect(screen.getByText(MODEL_DISPLAY_META["claude-opus-4-6"].desc)).toBeTruthy();
+  });
+
+  it("renders a 'Loading models…' placeholder before the API resolves", async () => {
+    __resetModelsCacheForTest();
+    let resolvePromise;
+    api.listModels.mockReturnValue(new Promise((resolve) => { resolvePromise = resolve; }));
+    renderCustomize();
+    expect(screen.getByTestId("models-loading")).toBeTruthy();
+    // Resolve to silence the unhandled-promise warning.
+    resolvePromise({ models: SERVER_ALLOWLIST });
+    // Wait for the post-resolve render so afterEach's reset doesn't fire
+    // while React is still processing the state update.
+    await waitFor(() => expect(screen.queryByTestId("models-loading")).toBeNull());
+  });
+
+  it("renders an error placeholder when the API call fails", async () => {
+    __resetModelsCacheForTest();
+    api.listModels.mockRejectedValueOnce(new Error("network"));
+    renderCustomize();
+    await waitFor(() => expect(screen.getByTestId("models-error")).toBeTruthy());
   });
 });

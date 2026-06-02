@@ -1,6 +1,6 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../api.js", () => ({
   listModels: vi.fn(),
@@ -8,20 +8,30 @@ vi.mock("../api.js", () => ({
 
 import * as api from "../api.js";
 import ModelPicker from "./ModelPicker.jsx";
-import { MODELS } from "./data.js";
+import { __resetModelsCacheForTest } from "./data.js";
 
-const opus = MODELS[0];
-const sonnet = MODELS[1];
+// Synthetic test allowlist — exercises every assertion path without
+// depending on the production model ids.
+const SERVER_ALLOWLIST = [
+  { id: "claude-opus-4-6", label: "Claude Opus 4.6", tier: "Flagship" },
+  { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6", tier: "Balanced" },
+  { id: "claude-haiku-4-5", label: "Claude Haiku 4.5", tier: "Fast" },
+];
 
-// The default mock: resolve with the full client allowlist so the
-// existing assertions on every MODELS entry continue to pass after
-// the API call settles. Individual tests override this for the
-// failure-path / partial-allowlist coverage.
+// Display-merged shapes that mergeWithDisplayMeta produces — these are
+// what consumers actually see in the picker. Mirrors the production
+// MODEL_DISPLAY_META keys.
+const opus = { id: "claude-opus-4-6", name: "Claude Opus 4.6", short: "Opus 4.6", tier: "Flagship", desc: "Most capable" };
+const sonnet = { id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6", short: "Sonnet 4.6", tier: "Balanced", desc: "Best blend" };
+
 beforeEach(() => {
   vi.clearAllMocks();
-  api.listModels.mockResolvedValue({
-    models: MODELS.map((m) => ({ id: m.id, label: m.name })),
-  });
+  __resetModelsCacheForTest();
+  api.listModels.mockResolvedValue({ models: SERVER_ALLOWLIST });
+});
+
+afterEach(() => {
+  __resetModelsCacheForTest();
 });
 
 describe("ModelPicker", () => {
@@ -32,29 +42,33 @@ describe("ModelPicker", () => {
     expect(btn.textContent).toContain("High");
   });
 
-  it("opens the popover on click and shows every MODELS entry", async () => {
+  it("opens the popover on click and shows every API-sourced model", async () => {
     render(<ModelPicker model={opus} effort="High" onModel={vi.fn()} onEffort={vi.fn()} />);
     await waitFor(() => expect(api.listModels).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button"));
-    for (const m of MODELS) {
-      expect(screen.getByText(m.name)).toBeTruthy();
-    }
+    await waitFor(() => expect(screen.getByText("Claude Opus 4.6")).toBeTruthy());
+    expect(screen.getByText("Claude Sonnet 4.6")).toBeTruthy();
+    expect(screen.getByText("Claude Haiku 4.5")).toBeTruthy();
   });
 
-  it("shows a check next to the selected model and not on others", () => {
+  it("shows a check next to the selected model and not on others", async () => {
     render(<ModelPicker model={opus} effort="High" onModel={vi.fn()} onEffort={vi.fn()} />);
+    await waitFor(() => expect(api.listModels).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button"));
-    const opusOpt = screen.getByText(opus.name).closest(".opt");
-    const sonnetOpt = screen.getByText(sonnet.name).closest(".opt");
+    await waitFor(() => expect(screen.getByText("Claude Opus 4.6")).toBeTruthy());
+    const opusOpt = screen.getByText("Claude Opus 4.6").closest(".opt");
+    const sonnetOpt = screen.getByText("Claude Sonnet 4.6").closest(".opt");
     expect(opusOpt.querySelector(".ck")).toBeTruthy();
     expect(sonnetOpt.querySelector(".ck")).toBeFalsy();
   });
 
-  it("clicking a different model invokes onModel with that model object", () => {
+  it("clicking a different model invokes onModel with that model object", async () => {
     const onModel = vi.fn();
     render(<ModelPicker model={opus} effort="High" onModel={onModel} onEffort={vi.fn()} />);
+    await waitFor(() => expect(api.listModels).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button"));
-    fireEvent.click(screen.getByText(sonnet.name));
+    await waitFor(() => expect(screen.getByText("Claude Sonnet 4.6")).toBeTruthy());
+    fireEvent.click(screen.getByText("Claude Sonnet 4.6"));
     expect(onModel).toHaveBeenCalledWith(expect.objectContaining({ id: sonnet.id }));
   });
 
@@ -89,53 +103,62 @@ describe("ModelPicker", () => {
     expect(screen.getByRole("button").textContent).toContain("Custom Model");
   });
 
-  it("falls back to static MODELS on API failure", async () => {
-    api.listModels.mockRejectedValue(new Error("network"));
+  it("shows a 'Loading models…' row before the API resolves", async () => {
+    // Hold the API promise open so the loading state stays visible.
+    let resolvePromise;
+    api.listModels.mockReturnValue(new Promise((resolve) => { resolvePromise = resolve; }));
+    render(<ModelPicker model={opus} effort="High" onModel={vi.fn()} onEffort={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button"));
+    expect(screen.getByTestId("models-loading")).toBeTruthy();
+    // Resolve to avoid an unhandled-rejection warning at teardown.
+    resolvePromise({ models: SERVER_ALLOWLIST });
+  });
+
+  it("shows an error row with a Retry affordance on API failure", async () => {
+    api.listModels.mockRejectedValueOnce(new Error("network"));
     render(<ModelPicker model={opus} effort="High" onModel={vi.fn()} onEffort={vi.fn()} />);
     await waitFor(() => expect(api.listModels).toHaveBeenCalled());
-    // The fallback path keeps the full client MODELS list visible.
     fireEvent.click(screen.getByRole("button"));
-    for (const m of MODELS) {
-      expect(screen.getByText(m.name)).toBeTruthy();
-    }
+    await waitFor(() => expect(screen.getByTestId("models-error")).toBeTruthy());
+
+    // Retry path — second call resolves with the full list.
+    api.listModels.mockResolvedValueOnce({ models: SERVER_ALLOWLIST });
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(screen.getByText("Claude Opus 4.6")).toBeTruthy());
   });
 
   it("renders only the server allowlist on success", async () => {
+    api.listModels.mockReset();
     api.listModels.mockResolvedValue({
-      models: [{ id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6" }],
+      models: [{ id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6", tier: "Balanced" }],
     });
     render(<ModelPicker model={opus} effort="High" onModel={vi.fn()} onEffort={vi.fn()} />);
     await waitFor(() => expect(api.listModels).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button"));
-    await waitFor(() => {
-      expect(screen.getByText(/Sonnet 4\.6/i)).toBeTruthy();
-    });
-    // Models NOT in the server allowlist must NOT render in the list.
+    await waitFor(() => expect(screen.getByText("Claude Sonnet 4.6")).toBeTruthy());
     expect(screen.queryByText("Claude Opus 4.6")).toBeNull();
     expect(screen.queryByText("Claude Haiku 4.5")).toBeNull();
   });
 
-  it("uses server label when client has no display metadata for the id", async () => {
+  it("uses server label when the id has no client display meta", async () => {
+    api.listModels.mockReset();
     api.listModels.mockResolvedValue({
-      models: [{ id: "claude-experimental-x", label: "Experimental X" }],
+      models: [{ id: "claude-experimental-x", label: "Experimental X", tier: "Custom" }],
     });
     render(<ModelPicker model={opus} effort="High" onModel={vi.fn()} onEffort={vi.fn()} />);
     await waitFor(() => expect(api.listModels).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button"));
-    await waitFor(() => {
-      expect(screen.getByText("Experimental X")).toBeTruthy();
-    });
+    await waitFor(() => expect(screen.getByText("Experimental X")).toBeTruthy());
   });
 
-  it("falls back to the id when the server returns no label and the client has no display metadata", async () => {
+  it("falls back to the id when the server returns no label and the id is unknown", async () => {
+    api.listModels.mockReset();
     api.listModels.mockResolvedValue({
       models: [{ id: "claude-mystery-z" }],
     });
     render(<ModelPicker model={opus} effort="High" onModel={vi.fn()} onEffort={vi.fn()} />);
     await waitFor(() => expect(api.listModels).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button"));
-    await waitFor(() => {
-      expect(screen.getByText("claude-mystery-z")).toBeTruthy();
-    });
+    await waitFor(() => expect(screen.getByText("claude-mystery-z")).toBeTruthy());
   });
 });

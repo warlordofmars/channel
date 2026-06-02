@@ -1,49 +1,49 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
 import React, { useEffect, useState } from "react";
 import Icon from "../components/Icon.jsx";
-import { listModels } from "../api.js";
-import { EFFORTS, MODELS } from "./data.js";
-
-/**
- * Merge the server allowlist with the client-side display metadata in
- * `MODELS`. The server is the source of truth for ids — entries it
- * doesn't return must not render. Any extra display fields the client
- * knows about (short / tier / desc) layer in on top.
- */
-function mergeModels(serverModels) {
-  return serverModels.map((sm) => {
-    const display = MODELS.find((m) => m.id === sm.id) || {};
-    return { ...display, ...sm, name: display.name || sm.label || sm.id };
-  });
-}
+import { EFFORTS, cachedModels, loadModels } from "./data.js";
 
 /**
  * Composer popover for picking the active model + reasoning effort.
  * Translated from design-sources/app/chat.jsx `ModelPicker` function.
  *
- * The list of models is sourced from ``GET /api/models`` (Phase 7b
- * Task 8) and merged with the client-side display metadata in
- * `MODELS`. On API failure we fall back to the static `MODELS` so the
- * picker is never blank.
+ * The list of models comes from `GET /api/models` via `loadModels()`
+ * (issue #148 dropped the hardcoded fallback). Until the API resolves
+ * we render a single "Loading models…" row rather than a stale list.
+ * If the API fails outright we render "Couldn't load models" and a
+ * retry affordance — the picker is intentionally empty so the user
+ * can't pick a stale id.
  */
 export default function ModelPicker({ model, effort, onModel, onEffort }) {
   const [open, setOpen] = useState(false);
-  const [models, setModels] = useState(MODELS);
+  const [models, setModels] = useState(() => cachedModels());
+  const [error, setError] = useState(false);
 
-  useEffect(() => {
-    listModels()
-      .then(({ models: server }) => setModels(mergeModels(server)))
-      .catch(() => {
-        // Fallback already set via useState initial value.
-      });
+  useEffect(function fetchModelsOnMount() {
+    fetchModels();
   }, []);
+
+  function fetchModels() {
+    setError(false);
+    loadModels()
+      .then((next) => setModels(next))
+      .catch(() => setError(true));
+  }
+
+  function togglePopover() {
+    setOpen((o) => !o);
+  }
+
+  function closePopover() {
+    setOpen(false);
+  }
 
   return (
     <div style={{ position: "relative" }}>
       <button
         type="button"
         className="model-pick"
-        onClick={() => setOpen((o) => !o)}
+        onClick={togglePopover}
       >
         {model.short || model.name}
         <span className="eff">{effort}</span>
@@ -51,11 +51,36 @@ export default function ModelPicker({ model, effort, onModel, onEffort }) {
       </button>
       {open && (
         <>
-          <div className="backdrop" onClick={() => setOpen(false)} />
+          <div className="backdrop" onClick={closePopover} />
           <div className="pop" style={{ bottom: "calc(100% + 8px)", left: 0 }}>
             <div className="pop-h">Model</div>
-            {models.map((m) => (
-              <div className="opt" key={m.id} onClick={() => { onModel(m); }}>
+            {models == null && !error && (
+              <div className="opt" data-testid="models-loading">
+                <div style={{ flex: 1 }}>
+                  <div className="ds">Loading models…</div>
+                </div>
+              </div>
+            )}
+            {error && (
+              <div className="opt" data-testid="models-error">
+                <div style={{ flex: 1 }}>
+                  <div className="ds">Couldn't load models.</div>
+                </div>
+                <button
+                  type="button"
+                  className="ck"
+                  onClick={fetchModels}
+                >
+                  Retry
+                </button>
+              </div>
+            )}
+            {models != null && models.map((m) => (
+              <div
+                className="opt"
+                key={m.id}
+                onClick={() => onModel(m)}
+              >
                 <div style={{ flex: 1 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                     <span className="nm">{m.name}</span>
