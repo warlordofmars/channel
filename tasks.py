@@ -16,7 +16,8 @@ Usage:
     uv run inv synth                        # synthesize CDK template (no Docker bundling)
     uv run inv outputs                      # print CloudFormation stack outputs
     uv run inv install-hooks               # install pre-push hook (run once after clone)
-    uv run inv pre-push                    # full local CI gate (lint+typecheck+unit+frontend)
+    uv run inv pre-push                    # full local CI gate (lint+typecheck+unit+combined-coverage+frontend+desktop)
+    uv run inv test-combined-coverage      # unit+integration combined 100% gate (matches CI; requires DynamoDB Local)
 """
 
 import os
@@ -260,6 +261,73 @@ def test_integration(ctx):
     ctx.run("uv run pytest tests/integration -v", env=env, pty=True)
 
 
+def _dynamodb_local_running() -> bool:
+    """Return True if DynamoDB Local is reachable on DYNAMO_PORT.
+
+    Used by ``test_combined_coverage`` to decide between running the
+    real combined gate (matches CI) and a clear "skipped" warning when
+    the local stack isn't up. Mirrors the CI invariant: both unit and
+    integration tests collectively reach 100% on src/channel.
+
+    DynamoDB Local responds to ``GET /`` with HTTP 400 (it expects a
+    DynamoDB API request, not a plain GET) — that 400 is the
+    "port is listening with a working HTTP server" signal we care
+    about, so an HTTPError counts as available. Connection failures
+    (URLError without code, OSError, timeout) count as unavailable.
+    """
+    try:
+        with urllib.request.urlopen(
+            f"http://localhost:{DYNAMO_PORT}", timeout=1
+        ) as resp:
+            resp.read()
+        return True
+    except urllib.error.HTTPError:
+        # Port is bound and serving HTTP — DynamoDB Local just doesn't
+        # like GET /. That's fine, the integration tests use the
+        # DynamoDB API which speaks proper DDB JSON.
+        return True
+    except (urllib.error.URLError, OSError):
+        return False
+
+
+@task
+def test_combined_coverage(ctx):
+    """Run unit + integration tests as one pytest invocation, gated at 100%.
+
+    Mirrors the CI ``Integration Tests`` job — the combined report is
+    what CI enforces, so the local pre-push gate must too. The unit-only
+    and frontend-only gates can mask gaps that integration tests fill
+    (or vice versa); see issue #32 for the structural rationale.
+
+    Skips with a clear warning when DynamoDB Local isn't reachable on
+    port 8000. To run the gate locally, start the stack with
+    ``inv dynamo-start`` (or ``inv dev``) before invoking pre-push.
+    """
+    if not _dynamodb_local_running():
+        print(
+            "WARNING: DynamoDB Local not running on port "
+            f"{DYNAMO_PORT} — skipping combined-coverage gate.\n"
+            "         CI will still enforce 100% combined coverage on "
+            "push. Run `inv dynamo-start` (or `inv dev`) to enable the "
+            "gate locally."
+        )
+        return
+    env = {
+        "DYNAMODB_ENDPOINT": f"http://localhost:{DYNAMO_PORT}",
+        "AWS_ACCESS_KEY_ID": "local",
+        "AWS_SECRET_ACCESS_KEY": "local",
+        "AWS_DEFAULT_REGION": "us-east-1",
+        "STARTER_JWT_SECRET": "test-secret",
+        "STARTER_TABLE_NAME": "starter-integration",
+    }
+    ctx.run(
+        "uv run pytest tests/unit tests/integration "
+        "--cov=src/channel --cov-report=term-missing --cov-fail-under=100",
+        env=env,
+        pty=True,
+    )
+
+
 @task
 def test_frontend(ctx):
     """Run frontend vitest tests"""
@@ -342,9 +410,17 @@ def test(ctx):
     """Run all tests (unit + integration + frontend)"""
 
 
-@task(lint_backend, typecheck, check_copyright, test_unit, test_frontend, desktop_test)
+@task(
+    lint_backend,
+    typecheck,
+    check_copyright,
+    test_unit,
+    test_combined_coverage,
+    test_frontend,
+    desktop_test,
+)
 def pre_push(ctx):
-    """Local CI gate: lint + typecheck + copyright check + unit tests + frontend tests + desktop tests (run before every push)"""
+    """Local CI gate: lint + typecheck + copyright check + unit tests + combined coverage gate + frontend tests + desktop tests (run before every push)"""
 
 
 @task
