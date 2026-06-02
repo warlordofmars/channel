@@ -8,11 +8,12 @@ import { TOKEN_KEY } from "../lib/auth.js";
 
 // Module-scoped mocks so individual tests can assert on the archive /
 // rename / delete callbacks. vi.fn() identity stays stable across
-// renders within a test; afterEach resets call history.
+// renders within a test; call history is cleared in beforeEach
+// (vi.restoreAllMocks does NOT reset history on plain vi.fn() instances).
 const mockChatsCtx = {
-  renameChat: vi.fn(),
-  archiveChat: vi.fn(),
-  deleteChat: vi.fn(),
+  renameChat: vi.fn().mockResolvedValue(undefined),
+  archiveChat: vi.fn().mockResolvedValue(undefined),
+  deleteChat: vi.fn().mockResolvedValue(undefined),
   renameChatLocal: vi.fn(),
 };
 vi.mock("../hooks/ChatsContext.jsx", () => ({

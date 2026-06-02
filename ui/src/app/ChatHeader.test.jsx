@@ -6,9 +6,9 @@ import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import ChatHeader from "./ChatHeader.jsx";
 
 const mockChatsCtx = {
-  renameChat: vi.fn(),
-  archiveChat: vi.fn(),
-  deleteChat: vi.fn(),
+  renameChat: vi.fn().mockResolvedValue(undefined),
+  archiveChat: vi.fn().mockResolvedValue(undefined),
+  deleteChat: vi.fn().mockResolvedValue(undefined),
   renameChatLocal: vi.fn(),
 };
 vi.mock("../hooks/ChatsContext.jsx", () => ({

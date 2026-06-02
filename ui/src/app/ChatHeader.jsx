@@ -75,7 +75,11 @@ export default function ChatHeader({ chat }) {
           onClose={() => setMenuOpen(false)}
           onRename={() => setRenameOpen(true)}
           onArchive={() => {
-            archiveChat(chat.chat_id);
+            // .catch() swallows network errors so an API failure
+            // doesn't surface as an unhandled promise rejection.
+            // Same pattern as Sidebar.handleArchive — optimistic UI
+            // already moved on; backend resync happens on next load.
+            archiveChat(chat.chat_id).catch(() => {});
             navigate("/app");
           }}
           onDelete={() => setDeleteOpen(true)}

@@ -73,7 +73,12 @@ export default function Sidebar({
     // Fire-and-forget — the optimistic local removal happens inside
     // useChatList.archiveChat. If the active chat was just archived,
     // bounce to /app so the now-hidden row's URL doesn't 404 the user.
-    archiveChat(chatId);
+    // The .catch() swallows network errors to avoid noisy unhandled
+    // promise rejections; the optimistic UI already removed the row,
+    // and a backend failure surfaces on the next page load when the
+    // archive flag fails to come back. A future error toast hook can
+    // replace the swallow.
+    archiveChat(chatId).catch(() => {});
     if (activeChatId === chatId) navigate("/app");
   }
 
