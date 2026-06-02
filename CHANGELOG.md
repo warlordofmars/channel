@@ -49,6 +49,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Desktop app default window size is now **1280 × 900** (landscape)
+  instead of 880 × 800 (nearly square). The previous default looked
+  cramped next to the sidebar; the new size gives the conversation
+  column real breathing room and matches the visual convention of
+  Claude Desktop / Linear / Notion. Min size is unchanged at
+  720 × 600 — users can still shrink for split-screen work.
 - The active chat row in the sidebar Recents list now has a subtle
   selection highlight (matches Claude Desktop's selected-row
   treatment). Reuses the existing `--sel` and `.recent.active` CSS
