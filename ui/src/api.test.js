@@ -4,9 +4,11 @@ import {
   api,
   createChat,
   getChat,
+  getPrefs,
   listChats,
   listModels,
   patchChat,
+  putPrefs,
   regenerate,
   streamMessage,
 } from "./api.js";
@@ -669,6 +671,46 @@ describe("chats wrappers", () => {
     it("throws on non-ok", async () => {
       mockFail(500);
       await expect(regenerate("c1", {})).rejects.toThrow(/regenerate 500/);
+    });
+  });
+
+  // ---- prefs --------------------------------------------------------------
+
+  describe("getPrefs", () => {
+    it("GETs /api/me/prefs and unwraps the envelope", async () => {
+      mockOk({ prefs: { theme: "light", accent: "150" } });
+      const result = await getPrefs();
+      expect(result).toEqual({ theme: "light", accent: "150" });
+      expect(fetchMock.mock.calls[0][0]).toBe("/api/me/prefs");
+      expect(fetchMock.mock.calls[0][1].headers.Authorization).toBe(
+        "Bearer tok-abc",
+      );
+    });
+
+    it("throws on non-ok", async () => {
+      mockFail(500);
+      await expect(getPrefs()).rejects.toThrow(/getPrefs failed: 500/);
+    });
+  });
+
+  describe("putPrefs", () => {
+    it("PUTs a partial body wrapped in a prefs envelope", async () => {
+      fetchMock.mockResolvedValue({ ok: true, status: 204 });
+      await putPrefs({ theme: "dark", send_on_enter: false });
+      const [url, opts] = fetchMock.mock.calls[0];
+      expect(url).toBe("/api/me/prefs");
+      expect(opts.method).toBe("PUT");
+      expect(opts.headers["Content-Type"]).toBe("application/json");
+      expect(JSON.parse(opts.body)).toEqual({
+        prefs: { theme: "dark", send_on_enter: false },
+      });
+    });
+
+    it("throws on non-ok", async () => {
+      mockFail(422);
+      await expect(putPrefs({ bogus: "x" })).rejects.toThrow(
+        /putPrefs failed: 422/,
+      );
     });
   });
 });

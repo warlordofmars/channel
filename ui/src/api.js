@@ -193,3 +193,21 @@ export async function regenerate(chatId, { model, effort, signal } = {}) {
   if (!response.ok) throw new Error(`regenerate ${response.status}`);
   return response;
 }
+
+// ---- User preferences ----------------------------------------------------
+
+export async function getPrefs() {
+  const res = await fetch(`${BASE}/api/me/prefs`, { headers: authHeader() });
+  if (!res.ok) throw new Error(`getPrefs failed: ${res.status}`);
+  const body = await res.json();
+  return body.prefs;
+}
+
+export async function putPrefs(partial) {
+  const res = await fetch(`${BASE}/api/me/prefs`, {
+    method: "PUT",
+    headers: { ...authHeader(), "Content-Type": "application/json" },
+    body: JSON.stringify({ prefs: partial }),
+  });
+  if (!res.ok) throw new Error(`putPrefs failed: ${res.status}`);
+}
