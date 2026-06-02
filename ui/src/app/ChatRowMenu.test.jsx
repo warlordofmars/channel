@@ -12,6 +12,7 @@ function renderMenu(overrides = {}) {
     anchorRect: FAKE_RECT,
     onClose: vi.fn(),
     onRename: vi.fn(),
+    onArchive: vi.fn(),
     onDelete: vi.fn(),
     ...overrides,
   };
@@ -23,7 +24,7 @@ describe("ChatRowMenu", () => {
   it("renders nothing when open=false", () => {
     const { container } = render(
       <ChatRowMenu open={false} anchorRect={FAKE_RECT}
-        onClose={() => {}} onRename={() => {}} onDelete={() => {}} />,
+        onClose={() => {}} onRename={() => {}} onArchive={() => {}} onDelete={() => {}} />,
     );
     expect(container.firstChild).toBeNull();
   });
@@ -31,17 +32,18 @@ describe("ChatRowMenu", () => {
   it("renders nothing when anchorRect is missing", () => {
     const { container } = render(
       <ChatRowMenu open={true} anchorRect={null}
-        onClose={() => {}} onRename={() => {}} onDelete={() => {}} />,
+        onClose={() => {}} onRename={() => {}} onArchive={() => {}} onDelete={() => {}} />,
     );
     expect(container.firstChild).toBeNull();
   });
 
-  it("renders all 5 menu items in spec order", () => {
+  it("renders all 6 menu items in spec order (Archive between Rename and Change project)", () => {
     renderMenu();
     const items = screen.getAllByRole("menuitem");
     expect(items.map((el) => el.textContent.trim())).toEqual([
       "Pin",
       "Rename",
+      "Archive",
       "Change project",
       "Remove from project",
       "Delete",
@@ -55,10 +57,18 @@ describe("ChatRowMenu", () => {
     expect(screen.getByRole("menuitem", { name: /remove from project/i }).getAttribute("aria-disabled")).toBe("true");
   });
 
-  it("Rename and Delete are NOT disabled", () => {
+  it("Rename, Archive, and Delete are NOT disabled", () => {
     renderMenu();
     expect(screen.getByRole("menuitem", { name: /^rename$/i }).getAttribute("aria-disabled")).not.toBe("true");
+    expect(screen.getByRole("menuitem", { name: /^archive$/i }).getAttribute("aria-disabled")).not.toBe("true");
     expect(screen.getByRole("menuitem", { name: /^delete$/i }).getAttribute("aria-disabled")).not.toBe("true");
+  });
+
+  it("clicking Archive calls onArchive + onClose", () => {
+    const { props } = renderMenu();
+    fireEvent.click(screen.getByRole("menuitem", { name: /^archive$/i }));
+    expect(props.onArchive).toHaveBeenCalled();
+    expect(props.onClose).toHaveBeenCalled();
   });
 
   it("Delete item is danger-styled", () => {
@@ -85,6 +95,7 @@ describe("ChatRowMenu", () => {
     const { props } = renderMenu();
     fireEvent.click(screen.getByRole("menuitem", { name: /^pin$/i }));
     expect(props.onRename).not.toHaveBeenCalled();
+    expect(props.onArchive).not.toHaveBeenCalled();
     expect(props.onDelete).not.toHaveBeenCalled();
     expect(props.onClose).not.toHaveBeenCalled();
   });

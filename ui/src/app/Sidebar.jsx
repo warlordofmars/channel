@@ -7,6 +7,7 @@ import AccountPopover from "./AccountPopover.jsx";
 import ChatRowMenu from "./ChatRowMenu.jsx";
 import RenameChatModal from "./RenameChatModal.jsx";
 import DeleteChatModal from "./DeleteChatModal.jsx";
+import { useChats } from "../hooks/ChatsContext.jsx";
 
 /**
  * Bucket a chat into a recents group based on `last_message_at`.
@@ -55,6 +56,7 @@ export default function Sidebar({
   onNewChat = () => {},
 }) {
   const navigate = useNavigate();
+  const { archiveChat } = useChats();
   const [searching, setSearching] = useState(false);
   const [search, setSearch] = useState("");
   const [acctOpen, setAcctOpen] = useState(false);
@@ -66,6 +68,14 @@ export default function Sidebar({
   // name is `id`, not `chatId`. Destructure-rename for consistency
   // with Conversation.jsx.
   const { id: activeChatId = null } = useParams();
+
+  function handleArchive(chatId) {
+    // Fire-and-forget — the optimistic local removal happens inside
+    // useChatList.archiveChat. If the active chat was just archived,
+    // bounce to /app so the now-hidden row's URL doesn't 404 the user.
+    archiveChat(chatId);
+    if (activeChatId === chatId) navigate("/app");
+  }
 
   useEffect(() => {
     const desktop = window.channelDesktop;
@@ -247,6 +257,9 @@ export default function Sidebar({
           onClose={() => setMenuFor(null)}
           onRename={() => {
             setRenameFor({ chatId: menuFor.chatId, currentTitle: menuFor.chatTitle });
+          }}
+          onArchive={() => {
+            handleArchive(menuFor.chatId);
           }}
           onDelete={() => {
             setDeleteFor({ chatId: menuFor.chatId, chatTitle: menuFor.chatTitle });

@@ -6,13 +6,17 @@ import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import Sidebar, { groupNameFor } from "./Sidebar.jsx";
 import { TOKEN_KEY } from "../lib/auth.js";
 
+// Module-scoped mocks so individual tests can assert on the archive /
+// rename / delete callbacks. vi.fn() identity stays stable across
+// renders within a test; afterEach resets call history.
+const mockChatsCtx = {
+  renameChat: vi.fn(),
+  archiveChat: vi.fn(),
+  deleteChat: vi.fn(),
+  renameChatLocal: vi.fn(),
+};
 vi.mock("../hooks/ChatsContext.jsx", () => ({
-  useChats: () => ({
-    renameChat: vi.fn(),
-    archiveChat: vi.fn(),
-    deleteChat: vi.fn(),
-    renameChatLocal: vi.fn(),
-  }),
+  useChats: () => mockChatsCtx,
 }));
 
 function makeToken({ email = "ada@example.com", display_name } = {}) {
@@ -431,6 +435,12 @@ describe("Sidebar — per-row menu", () => {
     vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() }));
     vi.stubGlobal("location", { ...globalThis.location, assign: vi.fn() });
     vi.spyOn(Date, "now").mockReturnValue(NOW);
+    // Module-scoped ChatsContext mocks survive vi.restoreAllMocks;
+    // clear their call history explicitly.
+    mockChatsCtx.renameChat.mockClear();
+    mockChatsCtx.archiveChat.mockClear();
+    mockChatsCtx.deleteChat.mockClear();
+    mockChatsCtx.renameChatLocal.mockClear();
   });
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -478,6 +488,86 @@ describe("Sidebar — per-row menu", () => {
     fireEvent.click(screen.getByLabelText(/more options for alpha/i));
     fireEvent.click(screen.getByRole("menuitem", { name: /delete/i }));
     expect(screen.getByText(/delete chat\?/i)).toBeTruthy();
+  });
+
+  it("clicking Archive calls archiveChat (no confirm modal)", () => {
+    renderSidebarWithChat({
+      chat_id: "c1", title: "alpha", last_message_at: new Date().toISOString(),
+    });
+    fireEvent.click(screen.getByLabelText(/more options for alpha/i));
+    fireEvent.click(screen.getByRole("menuitem", { name: /^archive$/i }));
+    expect(mockChatsCtx.archiveChat).toHaveBeenCalledWith("c1");
+    // No "Archive chat?" confirm dialog appears — archive is non-destructive.
+    expect(screen.queryByText(/archive chat\?/i)).toBeNull();
+  });
+
+  it("archiving the active chat navigates to /app", () => {
+    let pathname;
+    function PathnameSpy() {
+      pathname = useLocation().pathname;
+      return null;
+    }
+    // Route shape mirrors App.jsx: `/app/c/:id` — useParams() inside
+    // the Sidebar reads `id`, so the route MUST declare it.
+    render(
+      <MemoryRouter initialEntries={["/app/c/c1"]}>
+        <Routes>
+          <Route
+            path="/app/c/:id"
+            element={
+              <>
+                <Sidebar chats={[{ chat_id: "c1", title: "alpha", last_message_at: new Date().toISOString() }]} />
+                <PathnameSpy />
+              </>
+            }
+          />
+          <Route
+            path="/app"
+            element={
+              <>
+                <Sidebar chats={[{ chat_id: "c1", title: "alpha", last_message_at: new Date().toISOString() }]} />
+                <PathnameSpy />
+              </>
+            }
+          />
+        </Routes>
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByLabelText(/more options for alpha/i));
+    act(() => {
+      fireEvent.click(screen.getByRole("menuitem", { name: /^archive$/i }));
+    });
+    expect(mockChatsCtx.archiveChat).toHaveBeenCalledWith("c1");
+    expect(pathname).toBe("/app");
+  });
+
+  it("archiving a non-active chat does NOT navigate", () => {
+    let pathname;
+    function PathnameSpy() {
+      pathname = useLocation().pathname;
+      return null;
+    }
+    render(
+      <MemoryRouter initialEntries={["/app/c/other"]}>
+        <Routes>
+          <Route
+            path="/app/c/:id"
+            element={
+              <>
+                <Sidebar chats={[{ chat_id: "c1", title: "alpha", last_message_at: new Date().toISOString() }]} />
+                <PathnameSpy />
+              </>
+            }
+          />
+        </Routes>
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByLabelText(/more options for alpha/i));
+    act(() => {
+      fireEvent.click(screen.getByRole("menuitem", { name: /^archive$/i }));
+    });
+    expect(mockChatsCtx.archiveChat).toHaveBeenCalledWith("c1");
+    expect(pathname).toBe("/app/c/other");
   });
 
   it("RenameChatModal onClose clears renameFor (modal closes)", () => {
