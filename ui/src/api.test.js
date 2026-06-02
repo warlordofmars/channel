@@ -307,6 +307,12 @@ describe("chats wrappers", () => {
       mockFail(500);
       await expect(getPrefs()).rejects.toThrow(/getPrefs failed: 500/);
     });
+
+    it("passes cache: 'no-store' so Chromium bypasses heuristic caching", async () => {
+      mockOk({ prefs: { theme: "dark" } });
+      await getPrefs();
+      expect(fetchMock.mock.calls[0][1].cache).toBe("no-store");
+    });
   });
 
   describe("putPrefs", () => {

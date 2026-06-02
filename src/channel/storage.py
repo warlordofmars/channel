@@ -367,9 +367,18 @@ def delete_last_assistant_message(chat_id: str) -> Message | None:
 
 
 def get_prefs(user_id: str) -> Prefs:
-    """Return the user's prefs, or default Prefs if no row exists."""
+    """Return the user's prefs, or default Prefs if no row exists.
 
-    result = _get_table().get_item(Key={"PK": f"USER#{user_id}", "SK": "PREFS"})
+    Uses ``ConsistentRead=True`` so a GET issued immediately after a PUT
+    from the same actor (typical cross-device sync flow: phone PUTs,
+    laptop refreshes) returns the just-written value rather than a
+    stale eventual-consistency replica.
+    """
+
+    result = _get_table().get_item(
+        Key={"PK": f"USER#{user_id}", "SK": "PREFS"},
+        ConsistentRead=True,
+    )
     item = result.get("Item")
     if not item:
         return Prefs()

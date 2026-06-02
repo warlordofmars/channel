@@ -97,7 +97,9 @@ class FakeTable:
         self.items[(Item["PK"], Item["SK"])] = dict(Item)
         return {}
 
-    def get_item(self, Key: dict[str, str]) -> dict[str, Any]:
+    def get_item(self, Key: dict[str, str], **kwargs: Any) -> dict[str, Any]:
+        # Record kwargs (e.g. ``ConsistentRead``) so tests can assert on them.
+        self.last_get_item_kwargs = kwargs
         item = self.items.get((Key["PK"], Key["SK"]))
         return {"Item": item} if item else {}
 
@@ -602,6 +604,16 @@ def test_get_prefs_returns_defaults_when_no_row(table: FakeTable) -> None:
     assert prefs.theme == "dark"
     assert prefs.send_on_enter is True
     assert prefs.suggest_followups is True
+
+
+def test_get_prefs_uses_strong_consistency(table: FakeTable) -> None:
+    """Cross-device sync requires `ConsistentRead=True` — without it, a
+    GET issued right after a PUT can return a stale eventual-consistency
+    replica and the second device sees the old value."""
+    from channel import storage
+
+    storage.get_prefs("user-1")
+    assert table.last_get_item_kwargs.get("ConsistentRead") is True
 
 
 def test_put_prefs_persists_and_returns_merged(table: FakeTable) -> None:

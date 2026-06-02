@@ -12,7 +12,7 @@ from __future__ import annotations
 from typing import Any
 
 import pydantic
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel
 
 from .. import storage
@@ -32,8 +32,13 @@ class PrefsUpdateRequest(BaseModel):
 
 @router.get("/api/me/prefs", response_model=PrefsEnvelope)
 def get_my_prefs(
+    response: Response,
     claims: dict[str, Any] = Depends(require_mgmt_user),
 ) -> PrefsEnvelope:
+    # Without an explicit no-store, Chromium (browser + Electron renderer)
+    # heuristic-caches the response. Cross-device sync then sees stale
+    # values until the heuristic TTL elapses.
+    response.headers["Cache-Control"] = "no-store"
     return PrefsEnvelope(prefs=storage.get_prefs(claims["sub"]))
 
 
