@@ -592,4 +592,81 @@ describe("Conversation", () => {
     renderAt("/app/c/c1");
     expect(screen.queryByText("Regenerate")).toBeNull();
   });
+
+  it("renders follow-up chips below the last assistant turn", () => {
+    mockStream({
+      turns: [
+        { role: "user", text: "hi", msg_id: "u1" },
+        {
+          role: "assistant",
+          text: "ok",
+          msg_id: "a1",
+          streaming: false,
+          followUps: ["Follow A", "Follow B", "Follow C"],
+        },
+      ],
+    });
+    const { container } = renderAt("/app/c/c1");
+    const chips = container.querySelectorAll(".followup-chip");
+    expect(chips).toHaveLength(3);
+    expect(chips[0].textContent).toBe("Follow A");
+    expect(chips[1].textContent).toBe("Follow B");
+    expect(chips[2].textContent).toBe("Follow C");
+  });
+
+  it("does NOT render follow-up chips on earlier assistant turns", () => {
+    // Backend currently only attaches followUps to the latest assistant
+    // turn, but defend in depth: even if an older turn carries the
+    // attribute, the UI only renders chips on the last turn.
+    mockStream({
+      turns: [
+        {
+          role: "assistant",
+          text: "older",
+          msg_id: "a-old",
+          streaming: false,
+          followUps: ["Stale chip"],
+        },
+        { role: "user", text: "follow", msg_id: "u1" },
+        {
+          role: "assistant",
+          text: "newer",
+          msg_id: "a-new",
+          streaming: false,
+        },
+      ],
+    });
+    const { container } = renderAt("/app/c/c1");
+    expect(container.querySelectorAll(".followup-chip")).toHaveLength(0);
+  });
+
+  it("does NOT render a chip row when followUps is missing or empty", () => {
+    mockStream({
+      turns: [
+        { role: "user", text: "hi", msg_id: "u1" },
+        { role: "assistant", text: "ok", msg_id: "a1", streaming: false },
+      ],
+    });
+    const { container } = renderAt("/app/c/c1");
+    expect(container.querySelector(".followups")).toBeNull();
+  });
+
+  it("clicking a follow-up chip drops its text into the composer textarea", () => {
+    mockStream({
+      turns: [
+        { role: "user", text: "hi", msg_id: "u1" },
+        {
+          role: "assistant",
+          text: "ok",
+          msg_id: "a1",
+          streaming: false,
+          followUps: ["What about X?"],
+        },
+      ],
+    });
+    renderAt("/app/c/c1");
+    fireEvent.click(screen.getByText("What about X?"));
+    // The bottom-composer textarea is the only textbox in the tree.
+    expect(screen.getByRole("textbox").value).toBe("What about X?");
+  });
 });

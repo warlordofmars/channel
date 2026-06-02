@@ -145,6 +145,19 @@ export function useChatStream(chatId, { onTitleSuggested } = {}) {
             // on a fresh chat. Caller decides what to do with the title
             // (typically: update the sidebar via ChatsContext.renameChat).
             onTitleSuggested?.(event.title);
+          } else if (event.type === "follow_ups_suggested") {
+            // Phase 113: attach the suggestion list to the matching
+            // assistant turn so the Conversation view can render a
+            // chip row below it. The event arrives after `done`, so
+            // the temp id has already been swapped to event.message_id
+            // by that branch above.
+            setTurns((prev) =>
+              prev.map((t) =>
+                t.msg_id === event.message_id
+                  ? { ...t, followUps: event.suggestions }
+                  : t,
+              ),
+            );
           }
         }
       }

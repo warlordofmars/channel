@@ -1,5 +1,5 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
-import React, { useEffect, useRef, useState } from "react";
+import React, { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import Icon from "../components/Icon.jsx";
 import { useChannelPrefs } from "../hooks/useChannelPrefs.js";
 import AttachMenu from "./AttachMenu.jsx";
@@ -15,11 +15,26 @@ import ModelPicker from "./ModelPicker.jsx";
  *   - placeholder — defaults to "How can I help you today?"
  *   - autofocus — focuses the textarea on mount when true
  */
-export default function Composer({ model, effort, setModel, setEffort, onSend, autofocus, placeholder }) {
+const Composer = forwardRef(function Composer(
+  { model, effort, setModel, setEffort, onSend, autofocus, placeholder },
+  ref,
+) {
   const [text, setText] = useState("");
   const [atts, setAtts] = useState([]);
   const taRef = useRef(null);
   const { sendOnEnter } = useChannelPrefs();
+
+  // Imperative handle for parent components that need to seed the
+  // textarea from outside (e.g. follow-up chip clicks). Exposes only
+  // ``setText`` + ``focus`` — the surface stays intentionally tiny so
+  // tests can't accidentally rely on internals.
+  useImperativeHandle(ref, () => ({
+    setText: (value) => {
+      setText(value);
+      requestAnimationFrame(grow);
+    },
+    focus: () => taRef.current?.focus(),
+  }), []);
 
   function grow() {
     const ta = taRef.current;
@@ -100,4 +115,6 @@ export default function Composer({ model, effort, setModel, setEffort, onSend, a
       </div>
     </div>
   );
-}
+});
+
+export default Composer;
