@@ -2,6 +2,7 @@
 import React, { useEffect, useRef } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import ChannelMark from "../components/ChannelMark.jsx";
+import ChatHeader from "./ChatHeader.jsx";
 import Composer from "./Composer.jsx";
 import Icon from "../components/Icon.jsx";
 import { useChannelPrefs } from "../hooks/useChannelPrefs.js";
@@ -57,6 +58,7 @@ export default function Conversation() {
   const location = useLocation();
   const navigate = useNavigate();
   const chats = useChats();
+  const currentChat = chats.chats.find((c) => c.chat_id === chatId) ?? null;
   const { turns, send, regenerate, status } = useChatStream(chatId, {
     // Phase 7d: backend auto-titles fresh chats after the first reply
     // and emits a ``title_suggested`` SSE event. Update the sidebar
@@ -98,6 +100,7 @@ export default function Conversation() {
 
   return (
     <>
+      <ChatHeader chat={currentChat} />
       <div className="convo" ref={ref}>
         <div className="convo-inner">
           {status === "error" && (

@@ -62,4 +62,22 @@ describe("ChatHeader", () => {
     expect(share.disabled).toBe(true);
     expect(share.getAttribute("aria-disabled")).toBe("true");
   });
+
+  it("RenameChatModal onClose clears renameOpen (modal closes)", () => {
+    renderHeader({ chat: { chat_id: "c1", title: "alpha" } });
+    fireEvent.click(screen.getByRole("button", { name: /alpha/i }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /rename/i }));
+    expect(screen.getByText(/rename chat/i)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /cancel/i }));
+    expect(screen.queryByText(/rename chat/i)).toBeNull();
+  });
+
+  it("DeleteChatModal onClose clears deleteOpen (modal closes)", () => {
+    renderHeader({ chat: { chat_id: "c1", title: "alpha" } });
+    fireEvent.click(screen.getByRole("button", { name: /alpha/i }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /delete/i }));
+    expect(screen.getByText(/delete chat\?/i)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /cancel/i }));
+    expect(screen.queryByText(/delete chat\?/i)).toBeNull();
+  });
 });
