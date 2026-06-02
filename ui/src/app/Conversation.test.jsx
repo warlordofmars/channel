@@ -214,7 +214,7 @@ describe("Conversation", () => {
     expect(screen.getByTitle("Bad")).toBeTruthy();
   });
 
-  it("clicking the message-actions buttons does not throw (no-op at Phase 7a)", () => {
+  it("clicking the message-actions buttons does not throw", () => {
     mockStream({
       turns: [
         {
@@ -226,9 +226,141 @@ describe("Conversation", () => {
       ],
     });
     renderAt("/app/c/c1");
-    for (const title of ["Copy", "Retry", "Good", "Bad"]) {
+    // Retry / Good / Bad are still placeholders; Copy has its own
+    // clipboard tests below.
+    for (const title of ["Retry", "Good", "Bad"]) {
       expect(() => fireEvent.click(screen.getByTitle(title))).not.toThrow();
     }
+  });
+
+  describe("Copy button", () => {
+    function turnWithText(text) {
+      return [
+        { role: "user", text: "hi", msg_id: "u1" },
+        { role: "assistant", text, msg_id: "a1", streaming: false },
+      ];
+    }
+
+    it("writes the assistant turn text to navigator.clipboard.writeText", async () => {
+      const writeText = vi.fn(() => Promise.resolve());
+      vi.stubGlobal("navigator", { clipboard: { writeText } });
+      mockStream({ turns: turnWithText("The reply") });
+      renderAt("/app/c/c1");
+      fireEvent.click(screen.getByTitle("Copy"));
+      await vi.waitFor(() => expect(writeText).toHaveBeenCalledWith("The reply"));
+    });
+
+    it("swaps the title to 'Copied' for ~1.5s after success then reverts", async () => {
+      vi.useFakeTimers();
+      const writeText = vi.fn(() => Promise.resolve());
+      vi.stubGlobal("navigator", { clipboard: { writeText } });
+      mockStream({ turns: turnWithText("ok") });
+      renderAt("/app/c/c1");
+      fireEvent.click(screen.getByTitle("Copy"));
+      // Flush the awaited writeText promise so the .then(setCopied(true)) runs.
+      await vi.advanceTimersByTimeAsync(0);
+      expect(screen.getByTitle("Copied")).toBeTruthy();
+      await vi.advanceTimersByTimeAsync(1500);
+      expect(screen.getByTitle("Copy")).toBeTruthy();
+      vi.useRealTimers();
+    });
+
+    it("uses the document.execCommand fallback when navigator.clipboard is missing", async () => {
+      vi.stubGlobal("navigator", {});
+      const execCommand = vi.fn(() => true);
+      document.execCommand = execCommand;
+      mockStream({ turns: turnWithText("fallback text") });
+      renderAt("/app/c/c1");
+      fireEvent.click(screen.getByTitle("Copy"));
+      await vi.waitFor(() => expect(execCommand).toHaveBeenCalledWith("copy"));
+    });
+
+    it("swallows clipboard errors silently (no toast, no thrown error)", async () => {
+      const writeText = vi.fn(() => Promise.reject(new Error("denied")));
+      vi.stubGlobal("navigator", { clipboard: { writeText } });
+      // Both paths fail — execCommand returns false.
+      document.execCommand = vi.fn(() => false);
+      mockStream({ turns: turnWithText("nope") });
+      renderAt("/app/c/c1");
+      fireEvent.click(screen.getByTitle("Copy"));
+      await vi.waitFor(() => expect(writeText).toHaveBeenCalled());
+      // Title stays "Copy" — no false "Copied" feedback.
+      expect(screen.getByTitle("Copy")).toBeTruthy();
+    });
+
+    it("swallows synchronous errors thrown by the execCommand fallback", async () => {
+      vi.stubGlobal("navigator", {});
+      // execCommand throws — exercises the inner catch in copyTextToClipboard.
+      document.execCommand = vi.fn(() => { throw new Error("oops"); });
+      mockStream({ turns: turnWithText("boom") });
+      renderAt("/app/c/c1");
+      fireEvent.click(screen.getByTitle("Copy"));
+      // Microtask flush so the awaited copy resolves before the assertion.
+      await Promise.resolve();
+      // No "Copied" affordance — title stays "Copy".
+      expect(screen.getByTitle("Copy")).toBeTruthy();
+    });
+
+    it("each Copy button manages its own state independently", async () => {
+      vi.useFakeTimers();
+      const writeText = vi.fn(() => Promise.resolve());
+      vi.stubGlobal("navigator", { clipboard: { writeText } });
+      mockStream({
+        turns: [
+          { role: "user", text: "hi", msg_id: "u1" },
+          { role: "assistant", text: "first", msg_id: "a1", streaming: false },
+          { role: "user", text: "more", msg_id: "u2" },
+          { role: "assistant", text: "second", msg_id: "a2", streaming: false },
+        ],
+      });
+      renderAt("/app/c/c1");
+      const copyButtons = screen.getAllByTitle("Copy");
+      expect(copyButtons).toHaveLength(2);
+      fireEvent.click(copyButtons[0]);
+      await vi.advanceTimersByTimeAsync(0);
+      // First reverts to "Copy"? No — it should show "Copied" while the
+      // second still shows "Copy".
+      expect(screen.getAllByTitle("Copy")).toHaveLength(1);
+      expect(screen.getByTitle("Copied")).toBeTruthy();
+      vi.useRealTimers();
+    });
+
+    it("clearing a pending revert timer when Copy is clicked again before the previous one fired", async () => {
+      vi.useFakeTimers();
+      const writeText = vi.fn(() => Promise.resolve());
+      vi.stubGlobal("navigator", { clipboard: { writeText } });
+      mockStream({ turns: turnWithText("twice") });
+      renderAt("/app/c/c1");
+      const btn = screen.getByTitle("Copy");
+      fireEvent.click(btn);
+      await vi.advanceTimersByTimeAsync(0);
+      // Title is now "Copied" — a timer is pending.
+      expect(screen.getByTitle("Copied")).toBeTruthy();
+      // Second click while the previous timer still pending — exercises
+      // the `if (timerRef.current) clearTimeout(...)` branch.
+      fireEvent.click(screen.getByTitle("Copied"));
+      await vi.advanceTimersByTimeAsync(0);
+      // Still shows "Copied" after the second click + microtask flush.
+      expect(screen.getByTitle("Copied")).toBeTruthy();
+      await vi.advanceTimersByTimeAsync(1500);
+      expect(screen.getByTitle("Copy")).toBeTruthy();
+      vi.useRealTimers();
+    });
+
+    it("clears the revert timer on unmount (no stray setState after unmount)", async () => {
+      vi.useFakeTimers();
+      const writeText = vi.fn(() => Promise.resolve());
+      vi.stubGlobal("navigator", { clipboard: { writeText } });
+      mockStream({ turns: turnWithText("clean") });
+      const { unmount } = renderAt("/app/c/c1");
+      fireEvent.click(screen.getByTitle("Copy"));
+      await vi.advanceTimersByTimeAsync(0);
+      unmount();
+      // Advance past the 1.5s window — would fire the setCopied timeout
+      // if the cleanup didn't run.
+      expect(() => vi.advanceTimersByTime(2000)).not.toThrow();
+      vi.useRealTimers();
+    });
   });
 
   it("renders the inline artifact card on assistant turns that carry one", () => {

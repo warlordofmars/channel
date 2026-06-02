@@ -30,6 +30,80 @@ function modelLabelFromList(raw, models) {
   return display ? display.name : raw;
 }
 
+const COPIED_FEEDBACK_MS = 1500;
+
+/**
+ * Copy-to-clipboard helper. Returns a Promise that resolves on success.
+ * Uses `navigator.clipboard.writeText` when available (secure-context
+ * default); falls back to the `document.execCommand("copy")` legacy
+ * path so the button still works in non-secure jsdom and older
+ * environments. Errors are swallowed — clipboard failures should not
+ * surface a console error to the user.
+ */
+async function copyTextToClipboard(text) {
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // Fall through to the legacy path.
+  }
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.setAttribute("readonly", "");
+  ta.style.position = "absolute";
+  ta.style.left = "-9999px";
+  document.body.appendChild(ta);
+  try {
+    ta.select();
+    return document.execCommand("copy");
+  } catch {
+    return false;
+  } finally {
+    document.body.removeChild(ta);
+  }
+}
+
+/**
+ * Copy-icon button rendered on the message-actions row of every
+ * settled assistant turn. Owns its own `copied` state so the
+ * "Copied" affordance is per-row — clicking one row's Copy button
+ * doesn't tick the icon on every other row.
+ */
+function CopyButton({ text }) {
+  const [copied, setCopied] = useState(false);
+  const timerRef = useRef(null);
+
+  useEffect(function clearTimerOnUnmount() {
+    return function cleanup() {
+      if (timerRef.current) clearTimeout(timerRef.current);
+    };
+  }, []);
+
+  async function handleClick() {
+    const ok = await copyTextToClipboard(text);
+    if (!ok) return;
+    setCopied(true);
+    if (timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(function clearCopiedFlag() {
+      setCopied(false);
+    }, COPIED_FEEDBACK_MS);
+  }
+
+  return (
+    <button
+      type="button"
+      className="icon-btn"
+      title={copied ? "Copied" : "Copy"}
+      aria-label={copied ? "Copied" : "Copy"}
+      onClick={handleClick}
+    >
+      <Icon name={copied ? "check" : "copy"} size={16} />
+    </button>
+  );
+}
+
 /**
  * Streaming conversation pane backed by the real SSE-driven
  * `useChatStream` hook. The URL `:id` is the canonical chat id; the hook
@@ -179,9 +253,7 @@ export default function Conversation() {
                 )}
                 {!t.streaming && (
                   <div className="msg-actions">
-                    <button type="button" className="icon-btn" title="Copy" onClick={noop}>
-                      <Icon name="copy" size={16} />
-                    </button>
+                    <CopyButton text={t.text} />
                     <button
                       type="button"
                       className="icon-btn"
