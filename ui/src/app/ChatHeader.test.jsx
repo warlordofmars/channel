@@ -65,6 +65,16 @@ describe("ChatHeader", () => {
     expect(screen.getByText(/delete chat\?/i)).toBeTruthy();
   });
 
+  it("swallows archiveChat rejection (no unhandled-promise-rejection)", async () => {
+    mockChatsCtx.archiveChat.mockRejectedValueOnce(new Error("offline"));
+    renderHeader({ chat: { chat_id: "c1", title: "alpha" } });
+    fireEvent.click(screen.getByRole("button", { name: /alpha/i }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /^archive$/i }));
+    // Flush microtasks so the catch handler runs before the test ends.
+    await Promise.resolve();
+    expect(mockChatsCtx.archiveChat).toHaveBeenCalledWith("c1");
+  });
+
   it("click Archive calls archiveChat and navigates to /app (header is always on the active chat)", () => {
     let pathname;
     function PathnameSpy() {

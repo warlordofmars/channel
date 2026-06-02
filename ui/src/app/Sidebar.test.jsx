@@ -542,6 +542,22 @@ describe("Sidebar — per-row menu", () => {
     expect(pathname).toBe("/app");
   });
 
+  it("swallows archiveChat rejection (no unhandled-promise-rejection)", async () => {
+    // Drive the .catch(() => {}) branch — if archiveChat rejects, the
+    // handler must absorb it. We can't easily observe the absence of
+    // an UPR via Vitest, but covering the catch handler keeps the
+    // 100% functions gate honest.
+    mockChatsCtx.archiveChat.mockRejectedValueOnce(new Error("offline"));
+    renderSidebarWithChat({
+      chat_id: "c1", title: "alpha", last_message_at: new Date().toISOString(),
+    });
+    fireEvent.click(screen.getByLabelText(/more options for alpha/i));
+    fireEvent.click(screen.getByRole("menuitem", { name: /^archive$/i }));
+    // Flush microtasks so the catch handler runs before the test ends.
+    await act(async () => { await Promise.resolve(); });
+    expect(mockChatsCtx.archiveChat).toHaveBeenCalledWith("c1");
+  });
+
   it("archiving a non-active chat does NOT navigate", () => {
     let pathname;
     function PathnameSpy() {
