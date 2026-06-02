@@ -54,6 +54,16 @@ def test_get_my_prefs_returns_defaults(client: TestClient, store: dict[str, Pref
     assert body["prefs"]["show_reasoning"] is False
 
 
+def test_get_my_prefs_sets_no_store_cache_header(
+    client: TestClient, store: dict[str, Prefs]
+) -> None:
+    """Without ``Cache-Control: no-store`` Chromium heuristic-caches the
+    response and cross-device sync sees stale prefs until the TTL elapses."""
+    r = client.get("/api/me/prefs", headers={"Authorization": "Bearer x"})
+    assert r.status_code == 200
+    assert r.headers.get("cache-control") == "no-store"
+
+
 def test_put_my_prefs_partial_update(client: TestClient, store: dict[str, Prefs]) -> None:
     r = client.put(
         "/api/me/prefs",

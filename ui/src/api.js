@@ -106,7 +106,13 @@ export async function regenerate(chatId, { model, effort, signal } = {}) {
 // ---- User preferences ----------------------------------------------------
 
 export async function getPrefs() {
-  const res = await fetch(`${BASE}/api/me/prefs`, { headers: authHeader() });
+  // `cache: "no-store"` is belt-and-suspenders alongside the server's
+  // Cache-Control: no-store header — guarantees Chromium (browser +
+  // Electron renderer) bypasses any heuristic cache when re-hydrating.
+  const res = await fetch(`${BASE}/api/me/prefs`, {
+    headers: authHeader(),
+    cache: "no-store",
+  });
   if (!res.ok) throw new Error(`getPrefs failed: ${res.status}`);
   const body = await res.json();
   return body.prefs;
