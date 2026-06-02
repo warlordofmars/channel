@@ -1,5 +1,5 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
-import React, { useState } from "react";
+import React from "react";
 import Icon from "../../components/Icon.jsx";
 import { useChannelPrefs } from "../../hooks/useChannelPrefs.js";
 import { EFFORTS, MODELS } from "../data.js";
@@ -15,10 +15,27 @@ const ACCENTS = [
   { h: 300, label: "Plum" },
 ];
 
+// Each row: [label, hint, hook getter key, hook setter key]. The hook
+// exposes booleans + boolean setters so we just thread the keys through.
 const BEHAVIOR_ROWS = [
-  ["Send on Enter", "Press Enter to send, Shift+Enter for a new line.", true],
-  ["Show reasoning trace", "Display the model's thinking before each reply.", false],
-  ["Suggest follow-ups", "Offer related prompts after responses.", true],
+  [
+    "Send on Enter",
+    "Press Enter to send, Shift+Enter for a new line.",
+    "sendOnEnter",
+    "setSendOnEnter",
+  ],
+  [
+    "Show reasoning trace",
+    "Display the model's thinking before each reply.",
+    "showReasoning",
+    "setShowReasoning",
+  ],
+  [
+    "Suggest follow-ups",
+    "Offer related prompts after responses.",
+    "suggestFollowups",
+    "setSuggestFollowups",
+  ],
 ];
 
 /**
@@ -165,8 +182,14 @@ export default function Customize() {
 
         <div className="set-group">
           <h3>Behavior</h3>
-          {BEHAVIOR_ROWS.map(([lbl, hint, def]) => (
-            <BehaviorRow key={lbl} lbl={lbl} hint={hint} def={def} />
+          {BEHAVIOR_ROWS.map(([lbl, hint, getKey, setKey]) => (
+            <BehaviorRow
+              key={lbl}
+              lbl={lbl}
+              hint={hint}
+              on={prefs[getKey]}
+              onToggle={() => prefs[setKey](!prefs[getKey])}
+            />
           ))}
         </div>
       </div>
@@ -174,8 +197,7 @@ export default function Customize() {
   );
 }
 
-function BehaviorRow({ lbl, hint, def }) {
-  const [on, setOn] = useState(def);
+function BehaviorRow({ lbl, hint, on, onToggle }) {
   return (
     <div className="set-row">
       <div>
@@ -186,7 +208,7 @@ function BehaviorRow({ lbl, hint, def }) {
         <button
           type="button"
           className={"toggle" + (on ? " on" : "")}
-          onClick={() => setOn((o) => !o)}
+          onClick={onToggle}
         >
           <span className="knob" />
         </button>

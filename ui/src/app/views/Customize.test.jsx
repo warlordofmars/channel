@@ -4,7 +4,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 import Customize from "./Customize.jsx";
 import { MODELS, EFFORTS } from "../data.js";
-import { __resetChannelPrefsForTest } from "../../hooks/useChannelPrefs.js";
+import {
+  STORAGE_KEYS,
+  __resetChannelPrefsForTest,
+  __resetServerSyncForTest,
+} from "../../hooks/useChannelPrefs.js";
 
 function renderCustomize() {
   return render(
@@ -31,6 +35,7 @@ describe("Customize", () => {
       if (a.name.startsWith("data-")) document.documentElement.removeAttribute(a.name);
     }
     __resetChannelPrefsForTest();
+    __resetServerSyncForTest();
   });
   afterEach(() => vi.unstubAllGlobals());
 
@@ -133,15 +138,37 @@ describe("Customize", () => {
     expect(toggles[2].className).toContain("on");
   });
 
-  it("clicking a Behavior toggle flips its .on class (UI-only — no localStorage write)", () => {
+  it("clicking each Behavior toggle persists the new value via the prefs hook", () => {
     const { container } = renderCustomize();
     const toggles = container.querySelectorAll(".toggle");
-    fireEvent.click(toggles[1]); // Show reasoning trace — starts off
-    expect(toggles[1].className).toContain("on");
-    // No localStorage key written — these are UI-only at Phase 6f.
-    expect(Object.keys(storage).filter((k) => k.startsWith("channel-behavior"))).toEqual([]);
+
+    // Send on Enter: starts ON (true → "1"); click flips to OFF.
+    fireEvent.click(toggles[0]);
+    expect(toggles[0].className).not.toContain("on");
+    expect(storage[STORAGE_KEYS.sendOnEnter]).toBe("0");
+
+    // Show reasoning trace: starts OFF; click flips to ON.
     fireEvent.click(toggles[1]);
-    expect(toggles[1].className).not.toContain("on");
+    expect(toggles[1].className).toContain("on");
+    expect(storage[STORAGE_KEYS.showReasoning]).toBe("1");
+
+    // Suggest follow-ups: starts ON; click flips to OFF.
+    fireEvent.click(toggles[2]);
+    expect(toggles[2].className).not.toContain("on");
+    expect(storage[STORAGE_KEYS.suggestFollowups]).toBe("0");
+  });
+
+  it("Behavior toggle initial state reflects persisted prefs (round-trip)", () => {
+    storage[STORAGE_KEYS.sendOnEnter] = "0";
+    storage[STORAGE_KEYS.showReasoning] = "1";
+    storage[STORAGE_KEYS.suggestFollowups] = "0";
+    __resetChannelPrefsForTest();
+    __resetServerSyncForTest();
+    const { container } = renderCustomize();
+    const toggles = container.querySelectorAll(".toggle");
+    expect(toggles[0].className).not.toContain("on");
+    expect(toggles[1].className).toContain("on");
+    expect(toggles[2].className).not.toContain("on");
   });
 
   it("clicking the Light button (when theme is dark) switches to light", () => {
