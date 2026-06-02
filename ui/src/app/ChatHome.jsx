@@ -1,5 +1,5 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
-import React from "react";
+import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { parseToken, TOKEN_KEY } from "../lib/auth.js";
 import ChannelMark from "../components/ChannelMark.jsx";
@@ -7,7 +7,12 @@ import Icon from "../components/Icon.jsx";
 import { useChannelPrefs } from "../hooks/useChannelPrefs.js";
 import { useChats } from "../hooks/ChatsContext.jsx";
 import Composer from "./Composer.jsx";
-import { MODELS, QUICK_ACTIONS } from "./data.js";
+import {
+  QUICK_ACTIONS,
+  cachedModels,
+  loadModels,
+  mergeWithDisplayMeta,
+} from "./data.js";
 
 /**
  * Empty-state shown at /app when there's no active conversation.
@@ -30,8 +35,29 @@ export default function ChatHome() {
     (claims.email ?? "you@example.com").split("@")[0] ||
     "You";
 
-  // Derive the model object from the prefs string id.
-  const modelObj = MODELS.find((m) => m.id === prefs.model) ?? MODELS[0];
+  // The model allowlist comes from /api/models (issue #148 dropped the
+  // hardcoded fallback). Until it lands we render with the prefs.model
+  // id wrapped in display meta — the Composer can still submit on the
+  // raw id while the picker shows "Loading models…".
+  const [models, setModels] = useState(() => cachedModels());
+
+  useEffect(function fetchModelsOnMount() {
+    // `loadModels()` is internally cached, so a hot mount after another
+    // consumer fetched is a no-op. We still call it so the cache is
+    // populated for the next consumer if we're the first mount.
+    loadModels()
+      .then(setModels)
+      .catch(function onModelsFetchError() { setModels([]); });
+  }, []);
+
+  // Derive the model object from the prefs string id. Use the loaded
+  // allowlist when present; otherwise wrap the id with the local
+  // display-meta map so the Composer's send path still has a usable
+  // `modelObj.id`.
+  const modelObj =
+    (models && models.find((m) => m.id === prefs.model)) ||
+    (models && models[0]) ||
+    mergeWithDisplayMeta({ id: prefs.model });
   const setModelObj = (m) => prefs.setModel(m.id);
 
   const navigate = useNavigate();
@@ -57,6 +83,10 @@ export default function ChatHome() {
     });
   }
 
+  function onQuickActionClick(label) {
+    send(`Help me ${label.toLowerCase()} something.`, []);
+  }
+
   return (
     <div className="home">
       <div className="greet">
@@ -77,7 +107,7 @@ export default function ChatHome() {
             type="button"
             className="qa"
             key={q.id}
-            onClick={() => send(`Help me ${q.label.toLowerCase()} something.`, [])}
+            onClick={() => onQuickActionClick(q.label)}
           >
             <span className="ic"><Icon name={q.icon} size={17} /></span>
             {q.label}

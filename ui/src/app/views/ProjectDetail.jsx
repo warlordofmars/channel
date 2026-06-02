@@ -1,10 +1,16 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
-import React from "react";
+import React, { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import Composer from "../Composer.jsx";
 import Icon from "../../components/Icon.jsx";
 import { useChannelPrefs } from "../../hooks/useChannelPrefs.js";
-import { MODELS, PROJECTS, PROJECT_DOCS } from "../data.js";
+import {
+  PROJECTS,
+  PROJECT_DOCS,
+  cachedModels,
+  loadModels,
+  mergeWithDisplayMeta,
+} from "../data.js";
 import { colorFor, inkFor } from "./artifactHelpers.js";
 
 const PENDING_KEY = "channel-pending-send";
@@ -35,6 +41,13 @@ export default function ProjectDetail() {
   const navigate = useNavigate();
   const prefs = useChannelPrefs();
   const project = PROJECTS.find((p) => p.id === id);
+  const [models, setModels] = useState(() => cachedModels());
+
+  useEffect(function fetchModelsOnMount() {
+    loadModels()
+      .then(setModels)
+      .catch(function onModelsFetchError() { setModels([]); });
+  }, []);
 
   if (!project) {
     return (
@@ -57,7 +70,11 @@ export default function ProjectDetail() {
   }
 
   const chats = PROJECT_CHATS_PLACEHOLDER;
-  const modelObj = MODELS.find((m) => m.id === prefs.model) ?? MODELS[0];
+
+  const modelObj =
+    (models && models.find((m) => m.id === prefs.model)) ||
+    (models && models[0]) ||
+    mergeWithDisplayMeta({ id: prefs.model });
   const setModelObj = (m) => prefs.setModel(m.id);
 
   function startChat(text, atts) {

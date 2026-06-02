@@ -3,9 +3,23 @@ import React from "react";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import Conversation from "./Conversation.jsx";
-import { MODELS } from "./data.js";
+import { __resetModelsCacheForTest, loadModels } from "./data.js";
 import { __resetChannelPrefsForTest } from "../hooks/useChannelPrefs.js";
+
+vi.mock("../api.js", () => ({
+  listModels: vi.fn(),
+}));
+
+import * as api from "../api.js";
+import Conversation from "./Conversation.jsx";
+
+// Synthetic test allowlist — mirrors what /api/models serves.
+const SERVER_ALLOWLIST = [
+  { id: "claude-opus-4-6", label: "Claude Opus 4.6", tier: "Flagship" },
+  { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6", tier: "Balanced" },
+  { id: "claude-haiku-4-5", label: "Claude Haiku 4.5", tier: "Fast" },
+];
+const OPUS_ID = "claude-opus-4-6";
 
 vi.mock("../hooks/useChatStream.js", () => ({
   useChatStream: vi.fn(),
@@ -53,7 +67,7 @@ function renderAt(path, state) {
 
 describe("Conversation", () => {
   let storage;
-  beforeEach(() => {
+  beforeEach(async () => {
     storage = {};
     vi.stubGlobal("localStorage", {
       getItem: (k) => storage[k] ?? null,
@@ -64,10 +78,18 @@ describe("Conversation", () => {
       matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn(),
     }));
     __resetChannelPrefsForTest();
+    __resetModelsCacheForTest();
+    api.listModels.mockReset();
+    api.listModels.mockResolvedValue({ models: SERVER_ALLOWLIST });
+    // Pre-warm the module-level cache so synchronous renders see the
+    // models immediately — the production component reads `cachedModels()`
+    // in its useState initializer.
+    await loadModels();
     useChatStreamModule.useChatStream.mockReset();
   });
   afterEach(() => {
     vi.unstubAllGlobals();
+    __resetModelsCacheForTest();
   });
 
   it("passes the URL :id through to useChatStream", () => {
@@ -246,7 +268,7 @@ describe("Conversation", () => {
     const stream = mockStream();
     const firstMessage = {
       message: "kick off",
-      model: MODELS[0],
+      model: OPUS_ID,
       effort: "High",
       attachments: [],
     };
@@ -257,7 +279,7 @@ describe("Conversation", () => {
 
   it("does NOT send firstMessage twice on re-render", () => {
     const stream = mockStream();
-    const firstMessage = { message: "once", model: MODELS[0], effort: "High", attachments: [] };
+    const firstMessage = { message: "once", model: OPUS_ID, effort: "High", attachments: [] };
     const { rerender } = renderAt("/app/c/c1", { firstMessage });
     rerender(
       <MemoryRouter initialEntries={[{ pathname: "/app/c/c1", state: { firstMessage } }]}>
@@ -271,7 +293,7 @@ describe("Conversation", () => {
 
   it("does NOT double-send firstMessage under React.StrictMode", () => {
     const stream = mockStream();
-    const firstMessage = { message: "once", model: MODELS[0], effort: "High", attachments: [] };
+    const firstMessage = { message: "once", model: OPUS_ID, effort: "High", attachments: [] };
     render(
       <React.StrictMode>
         <MemoryRouter initialEntries={[{ pathname: "/app/c/c1", state: { firstMessage } }]}>
@@ -288,7 +310,7 @@ describe("Conversation", () => {
     const stream = mockStream();
     const firstMessage = {
       message: "kick off",
-      model: MODELS[0],
+      model: OPUS_ID,
       effort: "High",
       attachments: [],
     };
@@ -319,7 +341,7 @@ describe("Conversation", () => {
     const stream = mockStream();
     const firstMessage = {
       message: "kick off",
-      model: MODELS[0],
+      model: OPUS_ID,
       effort: "High",
       attachments: [],
     };
@@ -447,7 +469,7 @@ describe("Conversation", () => {
 
   it("picking a different model in the follow-up Composer persists via setModel", () => {
     mockStream();
-    storage["channel-model"] = MODELS[0].id;
+    storage["channel-model"] = OPUS_ID;
     __resetChannelPrefsForTest();
     renderAt("/app/c/c1");
     fireEvent.click(screen.getByRole("button", { name: /Opus 4.6/i }));
@@ -461,7 +483,7 @@ describe("Conversation", () => {
     expect(document.body.querySelector(".turn")).toBeNull();
   });
 
-  it("falls back to first MODELS entry when prefs.model is unknown (and Send uses it)", () => {
+  it("falls back to the first API allowlist entry when prefs.model is unknown (and Send uses it)", () => {
     const stream = mockStream();
     storage["channel-model"] = "no-such-model";
     __resetChannelPrefsForTest();
@@ -471,7 +493,7 @@ describe("Conversation", () => {
     fireEvent.click(screen.getByTitle("Send"));
     // followUp passes the short id (`model.id`), not the full picker
     // object — backend expects `model: str | None`.
-    expect(stream.send.mock.calls[0][0].model).toBe(MODELS[0].id);
+    expect(stream.send.mock.calls[0][0].model).toBe(OPUS_ID);
   });
 
   it("renders friendly model label, not raw ARN", () => {
@@ -515,7 +537,7 @@ describe("Conversation", () => {
     expect(screen.getByText(expected)).toBeInTheDocument();
   });
 
-  it("falls back to raw model id when not found in MODELS", () => {
+  it("falls back to raw model id when not found in the API allowlist", () => {
     mockStream({
       turns: [
         { role: "user", text: "hi", msg_id: "u1" },
@@ -532,6 +554,49 @@ describe("Conversation", () => {
     expect(
       screen.getByText("anthropic.totally-unknown-model"),
     ).toBeInTheDocument();
+  });
+
+  it("renders the raw model id verbatim before the API allowlist loads", async () => {
+    // Clear the cache so the component mounts with `models` still null.
+    __resetModelsCacheForTest();
+    let resolvePromise;
+    api.listModels.mockReturnValue(new Promise((resolve) => { resolvePromise = resolve; }));
+    mockStream({
+      turns: [
+        { role: "user", text: "hi", msg_id: "u1" },
+        {
+          role: "assistant",
+          text: "ok",
+          msg_id: "a1",
+          model: "us.anthropic.claude-sonnet-4-6",
+          streaming: false,
+        },
+      ],
+    });
+    renderAt("/app/c/c1");
+    // Until the allowlist arrives, modelLabelFromList returns the raw value.
+    expect(screen.getByText("us.anthropic.claude-sonnet-4-6")).toBeInTheDocument();
+    resolvePromise({ models: SERVER_ALLOWLIST });
+  });
+
+  it("renders an empty model label when the turn has no model attribute", () => {
+    mockStream({
+      turns: [
+        { role: "user", text: "hi", msg_id: "u1" },
+        {
+          role: "assistant",
+          text: "ok",
+          msg_id: "a1",
+          model: undefined,
+          streaming: false,
+        },
+      ],
+    });
+    const { container } = renderAt("/app/c/c1");
+    // The `.mdl` span renders but is empty (modelLabelFromList returns "").
+    const mdl = container.querySelector(".mdl");
+    expect(mdl).toBeTruthy();
+    expect(mdl.textContent).toBe("");
   });
 
   it("retry icon on the last assistant turn calls hook.regenerate", () => {

@@ -1,5 +1,5 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
-import React, { useEffect, useRef } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import ChannelMark from "../components/ChannelMark.jsx";
 import ChatHeader from "./ChatHeader.jsx";
@@ -9,27 +9,24 @@ import { useChannelPrefs } from "../hooks/useChannelPrefs.js";
 import { useChats } from "../hooks/ChatsContext.jsx";
 import { useChatStream } from "../hooks/useChatStream.js";
 import { renderMarkdown } from "./renderMarkdown.jsx";
-import { MODELS } from "./data.js";
+import { cachedModels, loadModels, mergeWithDisplayMeta } from "./data.js";
 
-function resolveModel(modelId) {
-  return MODELS.find((m) => m.id === modelId) ?? MODELS[0];
-}
-
+// Strip Bedrock's id wrappers down to the short id the API serves.
 // Bedrock returns model ids like `us.anthropic.claude-sonnet-4-6`
 // (cross-region inference profile) or `anthropic.claude-sonnet-4-6`
-// (base foundation-model). Strip whichever prefix is present before
-// looking up the friendly display name in MODELS. Unknown ids fall back
-// to the raw value (acceptable visual debug hint).
-function modelLabel(raw) {
-  if (!raw) return "";
-  // Strip inference-profile prefix (us./global.) + vendor namespace +
-  // the trailing date-and-version suffix (e.g. ``-20251001-v1:0`` or
-  // ``-v1``) so we can match on the short id the SPA's MODELS array
-  // is keyed by (e.g. ``claude-opus-4-6``).
-  const shortId = raw
+// (base foundation-model). We also strip the trailing date-and-version
+// suffix (e.g. `-20251001-v1:0` or `-v1`) before lookup.
+function stripBedrockPrefix(raw) {
+  return raw
     .replace(/^(us|global)\.anthropic\.|^anthropic\./, "")
     .replace(/(-\d{8})?-v\d+(:\d+)?$/, "");
-  const display = MODELS.find((m) => m.id === shortId);
+}
+
+function modelLabelFromList(raw, models) {
+  if (!raw) return "";
+  if (!models) return raw;
+  const shortId = stripBedrockPrefix(raw);
+  const display = models.find((m) => m.id === shortId);
   return display ? display.name : raw;
 }
 
@@ -70,8 +67,21 @@ export default function Conversation() {
   const sentFirstRef = useRef(false);
   const composerRef = useRef(null);
 
+  // Model allowlist comes from /api/models (issue #148 dropped the
+  // hardcoded fallback). Until it lands we wrap the prefs.model id in
+  // local display meta so the Composer can still send.
+  const [models, setModels] = useState(() => cachedModels());
+
+  useEffect(function loadModelAllowlist() {
+    // `loadModels()` is internally cached, so a hot mount after another
+    // consumer fetched is a no-op.
+    loadModels()
+      .then(setModels)
+      .catch(function onModelsFetchError() { setModels([]); });
+  }, []);
+
   // Auto-scroll to the bottom on any turns change (catches each stream tick).
-  useEffect(() => {
+  useEffect(function autoScrollOnTurns() {
     const el = ref.current;
     el.scrollTop = el.scrollHeight;
   }, [turns]);
@@ -82,7 +92,7 @@ export default function Conversation() {
   // (e.g. clicking the same chat in the sidebar later) doesn't re-fire
   // the send and ask the agent to respond to its own historical first
   // user message.
-  useEffect(() => {
+  useEffect(function consumeFirstMessage() {
     if (sentFirstRef.current) return;
     const first = location.state?.firstMessage;
     if (chatId && first) {
@@ -92,7 +102,10 @@ export default function Conversation() {
     }
   }, [chatId, location.state, location.pathname, navigate, send]);
 
-  const modelObj = resolveModel(prefs.model);
+  const modelObj =
+    (models && models.find((m) => m.id === prefs.model)) ||
+    (models && models[0]) ||
+    mergeWithDisplayMeta({ id: prefs.model });
   const setModelObj = (m) => prefs.setModel(m.id);
   const followUp = (text, atts) =>
     // Backend expects model as a short id string, not the picker's display object.
@@ -147,7 +160,7 @@ export default function Conversation() {
                 <div className="assistant-head">
                   <ChannelMark size={20} />
                   <span className="nm">Channel</span>
-                  <span className="mdl">{modelLabel(t.model)}</span>
+                  <span className="mdl">{modelLabelFromList(t.model, models)}</span>
                 </div>
                 <div className="msg">{renderMarkdown(t.text, t.streaming)}</div>
                 {t.artifact && (

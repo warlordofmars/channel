@@ -1,10 +1,5 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
-
-export const MODELS = [
-  { id: "claude-opus-4-6",   name: "Claude Opus 4.6",   short: "Opus 4.6",   tier: "Flagship", desc: "Most capable — complex reasoning, long-horizon agentic coding, and high-autonomy work." },
-  { id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6", short: "Sonnet 4.6", tier: "Balanced", desc: "The best blend of speed and intelligence. The right default for most work." },
-  { id: "claude-haiku-4-5",  name: "Claude Haiku 4.5",  short: "Haiku 4.5",  tier: "Fast",     desc: "Fastest and most cost-effective for simple, high-volume tasks." },
-];
+import { listModels } from "../api.js";
 
 export const EFFORTS = ["Low", "Medium", "High", "Max"];
 
@@ -14,6 +9,92 @@ export const QUICK_ACTIONS = [
   { id: "code",    icon: "code",      label: "Code" },
   { id: "analyze", icon: "customize", label: "Analyze data" },
 ];
+
+// ──────────────────────────────────────────────────────────────────────────
+// Model allowlist + display metadata
+//
+// `GET /api/models` is the source of truth for which model ids the picker
+// may offer. There is no client-side fallback allowlist — when the API is
+// unreachable, consumers render a "Loading…" affordance rather than a
+// stale hardcoded list. See issue #148.
+//
+// `MODEL_DISPLAY_META` is optional display chrome (short button label +
+// one-line description) keyed by id. The API response provides `label`
+// and `tier`; the meta map provides `short` and `desc`. Ids the API
+// returns but the meta map doesn't cover fall back to `label` for both.
+// Drift here is benign — the meta map is just UI sugar, not an
+// allowlist.
+// ──────────────────────────────────────────────────────────────────────────
+
+export const MODEL_DISPLAY_META = {
+  "claude-opus-4-6": {
+    short: "Opus 4.6",
+    desc: "Most capable — complex reasoning, long-horizon agentic coding, and high-autonomy work.",
+  },
+  "claude-sonnet-4-6": {
+    short: "Sonnet 4.6",
+    desc: "The best blend of speed and intelligence. The right default for most work.",
+  },
+  "claude-haiku-4-5": {
+    short: "Haiku 4.5",
+    desc: "Fastest and most cost-effective for simple, high-volume tasks.",
+  },
+};
+
+// Module-level cache so every mounted consumer shares one API round-trip.
+// Cold-start invalidates (page reload re-fetches). The in-flight Promise
+// dedupes concurrent calls during the initial mount stampede.
+let _cachedAllowlist = null;
+let _inFlightFetch = null;
+
+export function __resetModelsCacheForTest() {
+  _cachedAllowlist = null;
+  _inFlightFetch = null;
+}
+
+/**
+ * Return the cached server allowlist, or null if not yet loaded.
+ * Synchronous — consumers read this between renders without re-fetching.
+ */
+export function cachedModels() {
+  return _cachedAllowlist;
+}
+
+/**
+ * Fetch the server allowlist and cache it for the lifetime of the page.
+ * Concurrent calls during the initial mount stampede share the same
+ * Promise. Failures bubble up — the consumer decides whether to retry
+ * or render a fallback affordance.
+ */
+export async function loadModels() {
+  if (_cachedAllowlist) return _cachedAllowlist;
+  if (_inFlightFetch) return _inFlightFetch;
+  _inFlightFetch = listModels()
+    .then(({ models }) => {
+      const merged = models.map(mergeWithDisplayMeta);
+      _cachedAllowlist = merged;
+      return merged;
+    })
+    .finally(() => {
+      _inFlightFetch = null;
+    });
+  return _inFlightFetch;
+}
+
+/**
+ * Merge a single API model row with the optional client display meta.
+ * The API row's `id` and `label` always win; the meta map supplies
+ * `short` + `desc` when known.
+ */
+export function mergeWithDisplayMeta(apiModel) {
+  const meta = MODEL_DISPLAY_META[apiModel.id] ?? {};
+  return {
+    ...apiModel,
+    name: apiModel.label ?? apiModel.id,
+    short: meta.short ?? apiModel.label ?? apiModel.id,
+    desc: meta.desc ?? "",
+  };
+}
 
 // Mock projects — used by /app/projects (grid) and /app/projects/:id
 // (detail page). Lifted verbatim from design-sources/app/data.jsx.
