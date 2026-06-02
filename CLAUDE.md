@@ -370,14 +370,15 @@ Don't re-derive sub-project boundaries (A/B/C/D) here — cite the spec.
 - Trivy dependency audit (SARIF → GitHub Security tab)
 - SonarCloud scan
 - On push to `development`: deploy to dev + smoke-test the dev API
-  (the per-suite e2e tests are pending reauthor — see `tests/e2e/`)
+  (`/health` curl; the two Phase 7c/7d e2e suites in `tests/e2e/`
+  are not yet wired into CI — see backlog)
 - On push to `main`: release + deploy to prod + back-merge to development
 
 Other workflows:
 
 - `deploy-dev.yml` — manual dev deploy via `workflow_dispatch`
 - `security.yml` — scheduled security scans
-- `synthetic-traffic.yml` — scheduled synthetic load against dev environment
+- `backup-test.yml` — scheduled DynamoDB PITR restore validation
 
 Deploy order: React SPA → docs site (docs depend on SPA deployment completing
 first).
@@ -652,11 +653,11 @@ Must be re-run after every `inv dev` restart (DynamoDB Local is ephemeral).
 
 ### Running UI e2e tests locally
 
-> **Note:** `tests/e2e/` currently contains only `__init__.py` and
-> `conftest.py` — the per-suite test modules are pending reauthor.
-> The commands below will collect zero tests until those suites land
-> (`pytest` exit 5 — "no tests ran"). Documented here so the wiring
-> stays correct for when the suites are restored.
+> **Note:** `tests/e2e/` currently contains the Phase 7c memory-write
+> suite (`test_memory_writes.py`) and the Phase 7d recall + auto-titling
+> suite (`test_memory_recall_and_titling.py`). The chats CRUD, auth, CSP,
+> regenerate, and idempotency suites have not yet been authored — those
+> flows are exercised only by unit + integration tests today.
 
 ```bash
 # Auto-detects the Vite port — no env vars to set manually
