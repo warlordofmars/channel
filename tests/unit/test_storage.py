@@ -12,7 +12,14 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from boto3.dynamodb.conditions import And, BeginsWith, ConditionBase, Equals
+from boto3.dynamodb.conditions import (
+    And,
+    AttributeNotExists,
+    BeginsWith,
+    ConditionBase,
+    Equals,
+    Or,
+)
 
 from channel.models import MessageRole
 from channel.storage import (
@@ -53,6 +60,30 @@ def _extract_conditions(expr: ConditionBase) -> dict[str, tuple[str, Any]]:
     return result
 
 
+def _evaluate_filter(expr: ConditionBase | None, item: dict[str, Any]) -> bool:
+    """Evaluate a boto3 ``FilterExpression`` against a single fake-table item.
+
+    Handles the small set of operators ``channel.storage`` actually
+    emits: ``Attr(name).not_exists()``, ``Attr(name).eq(value)``, and
+    their ``|`` (Or) / ``&`` (And) combinations. Anything else is a
+    test bug; raise so the test author notices.
+    """
+
+    if expr is None:
+        return True
+    if isinstance(expr, Or):
+        return any(_evaluate_filter(child, item) for child in expr._values)
+    if isinstance(expr, And):
+        return all(_evaluate_filter(child, item) for child in expr._values)
+    if isinstance(expr, AttributeNotExists):
+        (attr,) = expr._values
+        return attr.name not in item
+    if isinstance(expr, Equals):
+        attr, value = expr._values
+        return item.get(attr.name) == value
+    raise NotImplementedError(f"FakeTable filter does not understand {type(expr).__name__}")
+
+
 class FakeTable:
     """Minimal in-memory stand-in for ``boto3.resource('dynamodb').Table``."""
 
@@ -76,6 +107,7 @@ class FakeTable:
         # condition tree alone is sufficient to find them whether the
         # caller meant the main table or the GSI.
         conds = _extract_conditions(kwargs["KeyConditionExpression"])
+        filter_expr = kwargs.get("FilterExpression")
         limit = kwargs.get("Limit")
         scan_forward = kwargs.get("ScanIndexForward", True)
         exclusive_start = kwargs.get("ExclusiveStartKey")
@@ -117,6 +149,11 @@ class FakeTable:
                     items = [i for i in items if i.get("SK", "") > cursor_sk]
                 else:
                     items = []
+        # DynamoDB applies FilterExpression AFTER Limit on the wire.
+        # Mirror that ordering here: limit first, then filter — so a
+        # page that contains archived rows surfaces as "fewer than
+        # ``limit`` items, still has a cursor" exactly like production.
+        # See ``list_chats_for_user``'s docstring for the trade-off.
         result: dict[str, Any] = {}
         if limit is not None and len(items) > limit:
             returned = items[:limit]
@@ -125,6 +162,8 @@ class FakeTable:
             items = returned
         elif limit is not None:
             items = items[:limit]
+        if filter_expr is not None:
+            items = [i for i in items if _evaluate_filter(filter_expr, i)]
         result["Items"] = items
         return result
 
@@ -226,6 +265,49 @@ def test_list_chats_returns_newest_first(table: FakeTable) -> None:
     chats, cursor = list_chats_for_user("u-1", limit=10, cursor=None)
     assert [c.chat_id for c in chats] == [b.chat_id, a.chat_id]
     assert cursor is None
+
+
+def test_list_chats_excludes_archived_by_default(table: FakeTable) -> None:
+    """Default ``include_archived=False`` filters archived rows server-side."""
+
+    keeper = create_chat(user_id="u-1", title=None, model_default="m")
+    hidden = create_chat(user_id="u-1", title=None, model_default="m")
+    patch_chat(user_id="u-1", chat=hidden, title=None, archived=True)
+
+    chats, _ = list_chats_for_user("u-1", limit=10, cursor=None)
+    assert [c.chat_id for c in chats] == [keeper.chat_id]
+
+
+def test_list_chats_includes_archived_when_flag_set(table: FakeTable) -> None:
+    """Explicit ``include_archived=True`` returns archived rows too."""
+
+    a = create_chat(user_id="u-1", title=None, model_default="m")
+    b = create_chat(user_id="u-1", title=None, model_default="m")
+    patch_chat(user_id="u-1", chat=b, title=None, archived=True)
+
+    chats, _ = list_chats_for_user("u-1", limit=10, cursor=None, include_archived=True)
+    # Newest-first: b (archived) comes before a.
+    assert [c.chat_id for c in chats] == [b.chat_id, a.chat_id]
+
+
+def test_list_chats_keeps_legacy_rows_lacking_archived_attribute(
+    table: FakeTable,
+) -> None:
+    """Pre-archived-field rows (no ``archived`` attribute) still appear in the default list.
+
+    The filter uses ``attribute_not_exists(archived) OR archived = false``
+    so old chats migrated in before the field existed are still visible.
+    """
+
+    legacy = create_chat(user_id="u-1", title=None, model_default="m")
+    # Reach into the fake table and delete the attribute to simulate
+    # a row written before the ``archived`` column existed.
+    for item in table.items.values():
+        if item.get("chat_id") == legacy.chat_id and item["SK"].startswith("CHAT#"):
+            item.pop("archived", None)
+
+    chats, _ = list_chats_for_user("u-1", limit=10, cursor=None)
+    assert [c.chat_id for c in chats] == [legacy.chat_id]
 
 
 def test_list_chats_paginates_with_cursor(table: FakeTable) -> None:

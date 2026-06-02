@@ -40,9 +40,11 @@ const GROUP_ORDER = ["Today", "Yesterday", "Previous 7 days", "Older"];
  * Sign out clears the JWT and sends the user back to the marketing site at /.
  *
  * The `chats` prop holds API-shaped chats `{chat_id, title,
- * last_message_at, archived, ...}`. Archived chats are filtered out
- * here (not in the hook) so the Recents list never shows them while
- * `useChatList` still owns the full set for rename / unarchive flows.
+ * last_message_at, archived, ...}`. The server now filters archived
+ * chats out of the default `list_chats` response (see issue #143), so
+ * the Recents list naturally hides them. `useChatList` still owns the
+ * full set the API returned; archive-management surfaces that need
+ * archived rows opt in via `?include_archived=1`.
  * `onNewChat` fires when the user clicks the "New chat" primary action —
  * Shell wires this to `createChat()` + `navigate(/app/c/{id})`.
  */
@@ -101,8 +103,9 @@ export default function Sidebar({
 
   const groups = useMemo(() => {
     const now = Date.now();
-    const visible = chats.filter((c) => !c.archived);
-    const filtered = visible.filter((c) =>
+    // Archived chats are filtered server-side by default (issue #143);
+    // the Sidebar receives only non-archived rows for the Recents list.
+    const filtered = chats.filter((c) =>
       (c.title ?? "").toLowerCase().includes(search.toLowerCase())
     );
     const byName = new Map();
