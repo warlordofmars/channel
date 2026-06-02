@@ -1346,6 +1346,8 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+    env:
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v4
 
@@ -1360,3 +1362,65 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: uv run inv back-merge
+
+      - name: Check back-merge PR for conflicts
+        id: conflict_check
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Find the open back-merge PR (head=main, base=development).
+          # GitHub computes mergeability asynchronously, so poll for up to
+          # ~60s before concluding it's truly DIRTY (conflict) — UNKNOWN
+          # often resolves to MERGEABLE within seconds of PR creation.
+          #
+          # `// empty` ensures jq prints an empty string (not the literal
+          # "null") when no PR matches — without it, `[ -z "$PR_NUMBER" ]`
+          # mis-treats "null" as a real PR number and the next `gh pr view "null"`
+          # call fails with a confusing error.
+          PR_NUMBER=$(gh pr list --base development --head main \
+            --state open --json number --jq '.[0].number // empty' || true)
+          if [ -z "$PR_NUMBER" ]; then
+            echo "No back-merge PR open — branches already in sync"
+            echo "status=in_sync" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Found back-merge PR #$PR_NUMBER — polling mergeable_state"
+          STATE=""
+          for _ in 1 2 3 4 5 6; do
+            STATE=$(gh pr view "$PR_NUMBER" --json mergeStateStatus \
+              --jq '.mergeStateStatus' || true)
+            echo "  mergeStateStatus=$STATE"
+            if [ "$STATE" != "UNKNOWN" ] && [ -n "$STATE" ]; then
+              break
+            fi
+            sleep 10
+          done
+          echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "merge_state=$STATE" >> "$GITHUB_OUTPUT"
+          if [ "$STATE" = "DIRTY" ]; then
+            echo "status=conflict" >> "$GITHUB_OUTPUT"
+            echo "::error::Back-merge PR #$PR_NUMBER has conflicts — manual resolution required"
+            exit 1
+          fi
+          echo "status=ok" >> "$GITHUB_OUTPUT"
+
+      # Gated on `status == 'conflict'`, NOT generic `failure()`, so transient
+      # gh CLI / API errors (rate limits, 5xx) don't masquerade as conflict
+      # alerts. Pipeline failures from other causes are already surfaced by
+      # the top-level `notify-pipeline-failure` job — this Slack message is
+      # specifically the "I saw the PR sit in DIRTY state" alarm.
+      - name: Notify Slack — back-merge conflict
+        if: steps.conflict_check.outputs.status == 'conflict' && env.SLACK_WEBHOOK_URL != ''
+        uses: slackapi/slack-github-action@45a88b9581bfab2566dc881e2cd66d334e621e2c # v3.0.3
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "text": ":warning: Back-merge main → development has conflicts — manual resolution required",
+              "attachments": [{
+                "color": "warning",
+                "text": "PR #${{ steps.conflict_check.outputs.pr_number }} cannot auto-merge (mergeStateStatus=${{ steps.conflict_check.outputs.merge_state }}). Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+              }]
+            }
