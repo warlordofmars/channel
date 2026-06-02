@@ -1113,12 +1113,55 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           VERSION=$(uv run inv version)
+          TAG="v$VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag "v$VERSION"
-          git push origin "v$VERSION"
-          gh release create "v$VERSION" --generate-notes --title "v$VERSION"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+          # Idempotency: if the tag already exists on origin, verify it
+          # points at the current HEAD commit. If the existing tag is on
+          # a DIFFERENT SHA (e.g. created by mistake or by a previous
+          # buggy run), halt — silently advancing past would publish a
+          # release that doesn't reflect the merged main commit.
+          # publish-desktop-mac waits up to 5 min for `gh release view`,
+          # so as long as the release exists *and* the tag matches HEAD,
+          # the downstream step is happy.
+          HEAD_SHA=$(git rev-parse HEAD)
+          REMOTE_TAG_SHA=$(git ls-remote --tags origin "refs/tags/$TAG" | awk '{print $1}')
+          if [ -n "$REMOTE_TAG_SHA" ]; then
+            # ls-remote prints the tag-object SHA for annotated tags; resolve
+            # to the commit it points to via the ^{} peeled-ref form.
+            REMOTE_TAG_COMMIT=$(git ls-remote --tags origin "refs/tags/$TAG^{}" | awk '{print $1}')
+            REMOTE_COMMIT="${REMOTE_TAG_COMMIT:-$REMOTE_TAG_SHA}"
+            if [ "$REMOTE_COMMIT" != "$HEAD_SHA" ]; then
+              echo "::error::Tag $TAG exists on origin at $REMOTE_COMMIT, not HEAD ($HEAD_SHA). Halting — manual cleanup required."
+              exit 1
+            fi
+            echo "Tag $TAG already exists on origin at HEAD — skipping tag creation"
+          else
+            # Annotated tag so `git describe` and `git for-each-ref` show
+            # the release as a proper release point, not a lightweight ref.
+            git tag -a "$TAG" -m "Release $TAG"
+            git push origin "$TAG"
+          fi
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists — skipping release creation"
+            exit 0
+          fi
+
+          # Prefer the curated CHANGELOG section as the release body; fall
+          # back to auto-generated notes if no section exists yet (e.g. an
+          # automated release for a version that wasn't pre-curated).
+          uv run python scripts/extract_changelog.py "$VERSION" > release-notes.md
+          if [ -s release-notes.md ]; then
+            echo "Using curated CHANGELOG.md section as release body"
+            gh release create "$TAG" --title "$TAG" --notes-file release-notes.md
+          else
+            echo "No CHANGELOG.md section for $VERSION — using --generate-notes"
+            gh release create "$TAG" --title "$TAG" --generate-notes
+          fi
 
   deploy-prod:
     name: Deploy (prod)
