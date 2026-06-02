@@ -141,3 +141,31 @@ def test_record_chat_delete_memory_wipe_outcome_signature_locks_out_dimensions()
         f"record_chat_delete_memory_wipe_outcome must NOT accept {leaked} "
         "— per-actor/chat dimensions cause CloudWatch cardinality blowup"
     )
+
+
+@pytest.mark.asyncio
+async def test_record_followup_outcome_success_emits_success_counter():
+    from channel.metrics import record_followup_outcome
+
+    with patch("channel.metrics.emit_metric", new=AsyncMock()) as mock_emit:
+        await record_followup_outcome(success=True)
+    mock_emit.assert_awaited_once_with("FollowupGenSuccesses")
+
+
+@pytest.mark.asyncio
+async def test_record_followup_outcome_failure_emits_failure_counter():
+    from channel.metrics import record_followup_outcome
+
+    with patch("channel.metrics.emit_metric", new=AsyncMock()) as mock_emit:
+        await record_followup_outcome(success=False)
+    mock_emit.assert_awaited_once_with("FollowupGenFailures")
+
+
+def test_record_followup_outcome_signature_locks_out_dimensions():
+    """Same cardinality guard as the other counter helpers."""
+    import inspect
+
+    from channel.metrics import record_followup_outcome
+
+    sig = inspect.signature(record_followup_outcome)
+    assert list(sig.parameters.keys()) == ["success"]

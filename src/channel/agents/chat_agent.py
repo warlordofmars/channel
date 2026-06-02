@@ -56,6 +56,16 @@ _TITLER_SYSTEM_PROMPT = (
     "title in the sidebar."
 )
 
+_DEFAULT_FOLLOWUPS_MODEL = "claude-haiku-4-5"
+_FOLLOWUPS_MAX_TOKENS = 120
+
+_FOLLOWUPS_SYSTEM_PROMPT = (
+    "Given the user message and the assistant's reply, suggest 2 to 3 "
+    "short follow-up prompts the user might want to send next. Return "
+    "ONE prompt per line. No numbering, no quotes, no preamble. Each "
+    "prompt under 12 words."
+)
+
 
 def resolve_model_id(short_id: str) -> str:
     """Map a caller-supplied short id to a full Bedrock model ARN."""
@@ -133,5 +143,25 @@ def build_titler_agent() -> Agent:
     return Agent(
         model=bedrock,
         system_prompt=_TITLER_SYSTEM_PROMPT,
+        hooks=[],
+    )
+
+
+def build_followups_agent() -> Agent:
+    """Build a one-shot Strands Agent for follow-up prompt suggestions.
+
+    Mirrors :func:`build_titler_agent`: cheap model (Haiku by default;
+    ``STARTER_FOLLOWUPS_MODEL`` overrides), tight max_tokens, NO memory
+    hooks — follow-up generation runs after the assistant turn is
+    persisted and must not write anything to AgentCore Memory itself.
+    """
+    model_id = os.environ.get("STARTER_FOLLOWUPS_MODEL", _DEFAULT_FOLLOWUPS_MODEL)
+    bedrock = BedrockModel(
+        model_id=resolve_model_id(model_id),
+        max_tokens=_FOLLOWUPS_MAX_TOKENS,
+    )
+    return Agent(
+        model=bedrock,
+        system_prompt=_FOLLOWUPS_SYSTEM_PROMPT,
         hooks=[],
     )

@@ -20,17 +20,27 @@ from fastapi.responses import StreamingResponse
 from strands.types.exceptions import MaxTokensReachedException
 
 from channel import storage
-from channel.agents.chat_agent import build_agent, build_titler_agent, resolve_model_id
+from channel.agents.chat_agent import (
+    build_agent,
+    build_followups_agent,
+    build_titler_agent,
+    resolve_model_id,
+)
 from channel.agents.memory import _sanitize_actor_id, get_or_create_memory
 from channel.agents.strands_sse import (
     sse_delta,
     sse_done,
+    sse_follow_ups_suggested,
     sse_title_suggested,
     sse_user_persisted,
     translate_event,
 )
 from channel.api._auth import require_mgmt_user
-from channel.metrics import record_auto_title_outcome, record_chat_delete_memory_wipe_outcome
+from channel.metrics import (
+    record_auto_title_outcome,
+    record_chat_delete_memory_wipe_outcome,
+    record_followup_outcome,
+)
 from channel.models import (
     Chat,
     ChatCreate,
@@ -270,6 +280,10 @@ async def _stream_bedrock_reply(
     # Auto-title block below uses it to fire exactly once per chat
     # (Phase 7d idempotency).
     was_first_round_trip = chat.message_count == 0
+    # Load prefs once at stream start. Used by the follow-ups block
+    # after the assistant turn lands; defaults are applied at the
+    # storage layer when no row exists.
+    prefs = storage.get_prefs(claims["sub"])
 
     # Load the chat's stored history BEFORE persisting the new user
     # message so the loaded list is the true prior context. For
@@ -391,6 +405,63 @@ async def _stream_bedrock_reply(
                 exc_info=True,
             )
             await record_auto_title_outcome(success=False)
+
+    # Follow-up suggestions. Runs after auto-title so the SPA gets the
+    # title first (sidebar refresh) and the chips appear under the
+    # assistant turn. Gated by both an env kill-switch and the user's
+    # ``suggest_followups`` pref (default True). Fail-soft: a generation
+    # error logs + EMF + swallow; the stream has already completed
+    # successfully by this point.
+    followups_enabled = os.environ.get("STARTER_FOLLOWUPS_ENABLED", "1") == "1"
+    if followups_enabled and prefs.suggest_followups:
+        try:
+            followups_agent = build_followups_agent()
+            followups_prompt = (
+                f"User: {user_message}\n\nAssistant: {assistant_text[:1000]}\n\n"
+                "Follow-up prompts:"
+            )
+            chunks: list[str] = []
+            try:
+                async for event in followups_agent.stream_async(followups_prompt):
+                    kind, payload = translate_event(event)
+                    if kind == "delta":
+                        chunks.append(payload)
+            except MaxTokensReachedException:
+                # Strands emits deltas BEFORE raising on token-cap; any
+                # already-accumulated lines below are still usable.
+                pass
+            suggestions = _parse_followups("".join(chunks))
+            if suggestions:
+                yield sse_follow_ups_suggested(
+                    chat_id=chat.chat_id,
+                    message_id=assistant_msg.msg_id,
+                    suggestions=suggestions,
+                )
+                await record_followup_outcome(success=True)
+            else:
+                await record_followup_outcome(success=False)
+        except Exception as exc:
+            logger.warning(
+                "followups_generation_failed chat_id=%s",
+                chat.chat_id,
+                extra={"error_type": type(exc).__name__, "error_message": str(exc)},
+                exc_info=True,
+            )
+            await record_followup_outcome(success=False)
+
+
+def _parse_followups(raw: str) -> list[str]:
+    """Parse a free-form Haiku reply into a list of 2-3 follow-up prompts.
+
+    Trims numbering, list bullets, trailing punctuation, and empty
+    lines. Caps at 3 suggestions to keep the chip row visually bounded.
+    """
+    suggestions: list[str] = []
+    for line in raw.splitlines():
+        cleaned = line.strip().lstrip("-*•0123456789. ").rstrip(".,;:")
+        if cleaned:
+            suggestions.append(cleaned)
+    return suggestions[:3]
 
 
 @router.post("/{chat_id}/messages")

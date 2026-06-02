@@ -81,6 +81,25 @@ def sse_title_suggested(*, chat_id: str, title: str) -> bytes:
     return _sse({"type": "title_suggested", "chat_id": chat_id, "title": title})
 
 
+def sse_follow_ups_suggested(
+    *, chat_id: str, message_id: str, suggestions: list[str]
+) -> bytes:
+    """Emit a ``follow_ups_suggested`` SSE event.
+
+    Carries 2-3 short prompts the user might want to send next. The
+    SPA's ``useChatStream`` attaches them to the matching assistant
+    turn so ``Conversation`` can render a chip row below it.
+    """
+    return _sse(
+        {
+            "type": "follow_ups_suggested",
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "suggestions": suggestions,
+        }
+    )
+
+
 def sse_done(
     *,
     msg_id: str,
