@@ -115,9 +115,10 @@ def test_post_chat_uses_default_model_when_unspecified(
 def test_list_returns_chats_for_authenticated_user(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def fake_list(user_id: str, *, limit: int, cursor: str | None):
+    def fake_list(user_id: str, *, limit: int, cursor: str | None, include_archived: bool = False):
         assert user_id == "u-1"
         assert limit == 50
+        assert include_archived is False
         return (
             [
                 Chat(
@@ -145,15 +146,49 @@ def test_list_returns_chats_for_authenticated_user(
 def test_list_honors_limit_and_cursor(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, Any] = {}
 
-    def fake_list(user_id: str, *, limit: int, cursor: str | None):
-        captured.update({"limit": limit, "cursor": cursor})
+    def fake_list(user_id: str, *, limit: int, cursor: str | None, include_archived: bool = False):
+        captured.update({"limit": limit, "cursor": cursor, "include_archived": include_archived})
         return ([], "next-cursor-token")
 
     monkeypatch.setattr("channel.api.chats.storage.list_chats_for_user", fake_list)
     response = client.get("/api/chats?limit=5&cursor=abc")
     assert response.status_code == 200
-    assert captured == {"limit": 5, "cursor": "abc"}
+    assert captured == {"limit": 5, "cursor": "abc", "include_archived": False}
     assert response.json()["next_cursor"] == "next-cursor-token"
+
+
+def test_list_defaults_to_excluding_archived(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No query param → ``include_archived=False`` reaches storage."""
+
+    captured: dict[str, Any] = {}
+
+    def fake_list(user_id: str, *, limit: int, cursor: str | None, include_archived: bool = False):
+        captured["include_archived"] = include_archived
+        return ([], None)
+
+    monkeypatch.setattr("channel.api.chats.storage.list_chats_for_user", fake_list)
+    response = client.get("/api/chats")
+    assert response.status_code == 200
+    assert captured == {"include_archived": False}
+
+
+def test_list_passes_include_archived_query_param(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``?include_archived=1`` forwards the flag to storage."""
+
+    captured: dict[str, Any] = {}
+
+    def fake_list(user_id: str, *, limit: int, cursor: str | None, include_archived: bool = False):
+        captured["include_archived"] = include_archived
+        return ([], None)
+
+    monkeypatch.setattr("channel.api.chats.storage.list_chats_for_user", fake_list)
+    response = client.get("/api/chats?include_archived=1")
+    assert response.status_code == 200
+    assert captured == {"include_archived": True}
 
 
 def test_get_chat_returns_chat_and_messages(

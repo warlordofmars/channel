@@ -94,11 +94,22 @@ async def create_chat(
 async def list_chats(
     limit: int = 50,
     cursor: str | None = None,
+    include_archived: bool = False,
     claims: dict[str, Any] = Depends(require_mgmt_user),
 ) -> dict[str, Any]:
-    """List the authenticated user's chats, newest first."""
+    """List the authenticated user's chats, newest first.
 
-    chats, next_cursor = storage.list_chats_for_user(claims["sub"], limit=limit, cursor=cursor)
+    Archived chats are filtered out server-side by default. The SPA's
+    Recents list relies on that. Pass ``?include_archived=1`` to fetch
+    everything (used by archive-management surfaces).
+    """
+
+    chats, next_cursor = storage.list_chats_for_user(
+        claims["sub"],
+        limit=limit,
+        cursor=cursor,
+        include_archived=include_archived,
+    )
     return {
         "items": [c.model_dump() for c in chats],
         "next_cursor": next_cursor,

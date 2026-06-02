@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import boto3
-from boto3.dynamodb.conditions import Key
+from boto3.dynamodb.conditions import Attr, Key
 from botocore.exceptions import ClientError
 
 from channel.models import Chat, Message, MessageRole, Prefs
@@ -99,9 +99,29 @@ def get_chat_by_id(chat_id: str) -> Chat | None:
 
 
 def list_chats_for_user(
-    user_id: str, *, limit: int, cursor: Any | None
+    user_id: str,
+    *,
+    limit: int,
+    cursor: Any | None,
+    include_archived: bool = False,
 ) -> tuple[list[Chat], Any | None]:
-    """List chats for a user, newest first, paginated by SK cursor."""
+    """List chats for a user, newest first, paginated by SK cursor.
+
+    When ``include_archived`` is ``False`` (the default), a DDB
+    ``FilterExpression`` drops archived rows server-side. The filter
+    matches rows whose ``archived`` attribute is missing
+    (older rows that pre-date the field) OR explicitly ``False``.
+
+    Trade-off: DynamoDB applies ``FilterExpression`` *after* ``Limit``,
+    so a page may return fewer than ``limit`` rows when archived chats
+    sit in the queried window. We deliberately do NOT over-fetch and
+    trim here — that would silently skip items between trimmed pages.
+    Instead, the response stays a true "up to ``limit`` rows, here's
+    the cursor"; callers that need exactly N visible rows should poll
+    ``next_cursor`` until they've gathered enough. The SPA sidebar
+    requests 50 rows by default which is well over the typical
+    archived-ratio for active users.
+    """
 
     kwargs: dict[str, Any] = {
         "KeyConditionExpression": (
@@ -110,6 +130,8 @@ def list_chats_for_user(
         "Limit": limit,
         "ScanIndexForward": False,
     }
+    if not include_archived:
+        kwargs["FilterExpression"] = Attr("archived").not_exists() | Attr("archived").eq(False)
     if cursor:
         kwargs["ExclusiveStartKey"] = cursor
     result = _get_table().query(**kwargs)

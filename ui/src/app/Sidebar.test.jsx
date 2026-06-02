@@ -66,12 +66,10 @@ function makeChats() {
       last_message_at: isoAgo(20 * DAY),
       archived: false,
     },
-    {
-      chat_id: "c5",
-      title: "Archived secret chat",
-      last_message_at: isoAgo(1 * HOUR),
-      archived: true,
-    },
+    // Note: archived chats are filtered out by the API server-side
+    // (issue #143); the Sidebar trusts the list it receives and does
+    // not double-filter. The dedicated server-trust test below
+    // exercises the contract.
   ];
 }
 
@@ -125,9 +123,25 @@ describe("Sidebar", () => {
     expect(screen.getByText("Tax documents checklist")).toBeTruthy();
   });
 
-  it("filters out archived chats", () => {
-    renderSidebar();
-    expect(screen.queryByText("Archived secret chat")).toBeNull();
+  it("trusts the API to omit archived chats (server-side filter, issue #143)", () => {
+    // If an archived row does slip into the prop (e.g. stale cache),
+    // the Sidebar renders it — the server is the source of truth and
+    // the SPA no longer double-filters.
+    render(
+      <MemoryRouter>
+        <Sidebar
+          chats={[
+            {
+              chat_id: "stale",
+              title: "Archived secret chat",
+              last_message_at: isoAgo(1 * HOUR),
+              archived: true,
+            },
+          ]}
+        />
+      </MemoryRouter>
+    );
+    expect(screen.getByText("Archived secret chat")).toBeTruthy();
   });
 
   it("renders safely with an empty chats array (no recents, no error)", () => {
