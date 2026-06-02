@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Server-side user preferences. `/app/customize` now persists across
+  devices via a new `PK=USER#{u}, SK=PREFS` DDB row exposed at
+  `GET / PUT /api/me/prefs`. The `useChannelPrefs` hook hydrates from
+  the server once on first mount when a mgmt JWT is present, and
+  debounce-writes each change back (200ms per-key, last value wins).
+  localStorage stays the canonical source of truth so the UI never
+  blocks on network. Part of #113.
+- Send on Enter toggle in `/app/customize` is now live. When on
+  (default), Enter sends and Shift+Enter inserts a newline. When off,
+  Enter inserts a newline and Cmd/Ctrl+Enter sends — matches Slack /
+  GitHub / Discord convention. Part of #113.
+- Follow-up suggestion chips. When the Suggest follow-ups pref is on
+  (default), each assistant reply is followed by a chip row carrying
+  2-3 generated prompts; clicking a chip drops its text into the
+  composer for editing (no auto-send). Backend emits a new
+  `follow_ups_suggested` SSE event powered by a Haiku one-shot
+  Strands Agent that runs after the auto-title block, behind the
+  `STARTER_FOLLOWUPS_ENABLED` (default on) and `STARTER_FOLLOWUPS_MODEL`
+  (default `claude-haiku-4-5`) env knobs. Generation failures log +
+  emit a `FollowupGenFailures` CloudWatch counter and are swallowed —
+  no visible regression to the chat reply. Part of #113.
 - Conversation view now shows a header strip with the chat title and
   a menu trigger. Clicking the title opens the same Pin / Rename /
   Change project / Remove from project / Delete menu that the

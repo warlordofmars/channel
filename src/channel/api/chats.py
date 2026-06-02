@@ -417,8 +417,7 @@ async def _stream_bedrock_reply(
         try:
             followups_agent = build_followups_agent()
             followups_prompt = (
-                f"User: {user_message}\n\nAssistant: {assistant_text[:1000]}\n\n"
-                "Follow-up prompts:"
+                f"User: {user_message}\n\nAssistant: {assistant_text[:1000]}\n\nFollow-up prompts:"
             )
             chunks: list[str] = []
             try:

@@ -81,9 +81,7 @@ def sse_title_suggested(*, chat_id: str, title: str) -> bytes:
     return _sse({"type": "title_suggested", "chat_id": chat_id, "title": title})
 
 
-def sse_follow_ups_suggested(
-    *, chat_id: str, message_id: str, suggestions: list[str]
-) -> bytes:
+def sse_follow_ups_suggested(*, chat_id: str, message_id: str, suggestions: list[str]) -> bytes:
     """Emit a ``follow_ups_suggested`` SSE event.
 
     Carries 2-3 short prompts the user might want to send next. The

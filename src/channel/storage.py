@@ -347,9 +347,7 @@ def delete_last_assistant_message(chat_id: str) -> Message | None:
 def get_prefs(user_id: str) -> Prefs:
     """Return the user's prefs, or default Prefs if no row exists."""
 
-    result = _get_table().get_item(
-        Key={"PK": f"USER#{user_id}", "SK": "PREFS"}
-    )
+    result = _get_table().get_item(Key={"PK": f"USER#{user_id}", "SK": "PREFS"})
     item = result.get("Item")
     if not item:
         return Prefs()

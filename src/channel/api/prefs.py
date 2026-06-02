@@ -6,6 +6,7 @@ into the ``Prefs`` model so a missing row returns the canonical
 defaults at hydration time. Partial PUTs are allowed; unknown keys
 are rejected (422) to prevent stale-client silent drift.
 """
+
 from __future__ import annotations
 
 from typing import Any

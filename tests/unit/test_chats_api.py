@@ -29,9 +29,7 @@ def _stub_get_prefs(monkeypatch: pytest.MonkeyPatch) -> None:
     production code would hit boto3 / Bedrock; tests that care about
     follow-up behaviour override these inline.
     """
-    monkeypatch.setattr(
-        "channel.api.chats.storage.get_prefs", lambda _user_id: Prefs()
-    )
+    monkeypatch.setattr("channel.api.chats.storage.get_prefs", lambda _user_id: Prefs())
 
     async def _empty_stream(self, prompt: str):  # noqa: ANN001, ANN201
         if False:  # pragma: no cover
@@ -40,9 +38,7 @@ def _stub_get_prefs(monkeypatch: pytest.MonkeyPatch) -> None:
     class _NoopFollowupsAgent:
         stream_async = _empty_stream
 
-    monkeypatch.setattr(
-        "channel.api.chats.build_followups_agent", lambda: _NoopFollowupsAgent()
-    )
+    monkeypatch.setattr("channel.api.chats.build_followups_agent", lambda: _NoopFollowupsAgent())
 
 
 @pytest.fixture
@@ -660,9 +656,7 @@ def test_post_message_emits_follow_ups_suggested_when_pref_on(
     class FakeFollowups:
         stream_async = fake_followups
 
-    monkeypatch.setattr(
-        "channel.api.chats.build_followups_agent", lambda: FakeFollowups()
-    )
+    monkeypatch.setattr("channel.api.chats.build_followups_agent", lambda: FakeFollowups())
 
     response = client.post(
         "/api/chats/c1/messages",
@@ -771,9 +765,7 @@ def test_post_message_follow_ups_failure_is_swallowed(
             raise RuntimeError("haiku unavailable")
 
     monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
-    monkeypatch.setattr(
-        "channel.api.chats.build_followups_agent", lambda: FakeFollowups()
-    )
+    monkeypatch.setattr("channel.api.chats.build_followups_agent", lambda: FakeFollowups())
 
     response = client.post(
         "/api/chats/c1/messages",
@@ -809,9 +801,7 @@ def test_post_message_follow_ups_empty_result_records_failure(
         stream_async = empty_followups
 
     monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
-    monkeypatch.setattr(
-        "channel.api.chats.build_followups_agent", lambda: FakeFollowups()
-    )
+    monkeypatch.setattr("channel.api.chats.build_followups_agent", lambda: FakeFollowups())
 
     response = client.post(
         "/api/chats/c1/messages",
@@ -846,9 +836,7 @@ def test_post_message_follow_ups_caps_at_three_suggestions(
         stream_async = fake_followups
 
     monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
-    monkeypatch.setattr(
-        "channel.api.chats.build_followups_agent", lambda: FakeFollowups()
-    )
+    monkeypatch.setattr("channel.api.chats.build_followups_agent", lambda: FakeFollowups())
 
     response = client.post(
         "/api/chats/c1/messages",
@@ -866,9 +854,11 @@ def test_post_message_follow_ups_caps_at_three_suggestions(
 def test_parse_followups_strips_numbering_and_bullets():
     from channel.api.chats import _parse_followups
 
-    assert _parse_followups(
-        "1. Build a feature\n- Refactor X\n• Test Z\n* Deploy"
-    ) == ["Build a feature", "Refactor X", "Test Z"]
+    assert _parse_followups("1. Build a feature\n- Refactor X\n• Test Z\n* Deploy") == [
+        "Build a feature",
+        "Refactor X",
+        "Test Z",
+    ]
 
 
 def test_parse_followups_returns_empty_for_blank_input():
@@ -902,9 +892,7 @@ def test_post_message_follow_ups_salvages_partial_output_on_max_tokens(
             raise MaxTokensReachedException("hit cap")
 
     monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
-    monkeypatch.setattr(
-        "channel.api.chats.build_followups_agent", lambda: FakeFollowups()
-    )
+    monkeypatch.setattr("channel.api.chats.build_followups_agent", lambda: FakeFollowups())
 
     response = client.post(
         "/api/chats/c1/messages",
