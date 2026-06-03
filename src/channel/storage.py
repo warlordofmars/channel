@@ -405,6 +405,52 @@ def put_prefs(user_id: str, updates: dict[str, Any]) -> Prefs:
     return merged
 
 
+def _audit_retention_seconds() -> int:
+    """Resolve the audit-log TTL from ``STARTER_AUDIT_RETENTION_DAYS``.
+
+    Default 365 days, matching CLAUDE.md §"DynamoDB single table design".
+    The env var is read at call time (not import time) so tests can vary
+    retention windows without re-importing the module.
+    """
+
+    return int(os.environ.get("STARTER_AUDIT_RETENTION_DAYS", "365")) * 86400
+
+
+def put_audit_event(
+    *,
+    event_type: str,
+    actor_id: str,
+    details: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Append an immutable audit-log entry to the single table.
+
+    Hour-sharded ``PK=AUDIT#{date}#{hour}`` with ``SK={timestamp}#{uuid}``
+    per CLAUDE.md §"DynamoDB single table design" and the dynamodb-item
+    skill. TTL comes from ``STARTER_AUDIT_RETENTION_DAYS`` (default 365);
+    DynamoDB's TTL service requires an integer Unix timestamp under the
+    table-configured ``ttl`` attribute.
+
+    Returns the persisted item dict so callers can log / assert on the
+    generated ``event_id`` and ``created_at``.
+    """
+
+    now = datetime.now(timezone.utc)
+    event_id = str(uuid.uuid4())
+    item: dict[str, Any] = {
+        "PK": f"AUDIT#{now:%Y-%m-%d}#{now:%H}",
+        "SK": f"{int(now.timestamp())}#{event_id}",
+        "event_id": event_id,
+        "event_type": event_type,
+        "actor_id": actor_id,
+        "created_at": now.isoformat(timespec="microseconds"),
+        "ttl": int(now.timestamp()) + _audit_retention_seconds(),
+    }
+    if details:
+        item["details"] = details
+    _get_table().put_item(Item=item)
+    return item
+
+
 def _chat_from_item(item: dict[str, Any]) -> Chat:
     return Chat(
         chat_id=item["chat_id"],

@@ -20,6 +20,7 @@ from channel.api.chats import router as chats_router
 from channel.api.csp import router as csp_router
 from channel.api.models import router as models_router
 from channel.api.prefs import router as prefs_router
+from channel.auth.logout import router as logout_router
 from channel.auth.mgmt_auth import router as mgmt_auth_router
 from channel.logging_config import (
     configure_logging,
@@ -129,6 +130,12 @@ async def _verify_origin_secret(request: Request, call_next):
 
 # Management UI auth endpoints (unauthenticated — issues mgmt JWTs)
 app.include_router(mgmt_auth_router)
+
+# Management UI logout endpoint — requires a valid mgmt JWT to validate
+# the caller before writing the audit entry. No /api prefix: the logout
+# verb sits alongside /auth/login + /auth/callback in the auth namespace
+# so the SPA can hit /auth/logout symmetrically.
+app.include_router(logout_router)
 
 # CSP report receiver — unauthenticated by design
 app.include_router(csp_router, prefix="/api")

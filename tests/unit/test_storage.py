@@ -645,3 +645,85 @@ def test_put_prefs_partial_update_preserves_other_keys(table: FakeTable) -> None
     prefs = storage.get_prefs("user-1")
     assert prefs.theme == "light"
     assert prefs.accent == "150"
+
+
+# ---------------------------------------------------------------------------
+# Audit log (issue #151)
+# ---------------------------------------------------------------------------
+
+
+def test_put_audit_event_writes_hour_sharded_row(table: FakeTable) -> None:
+    from channel import storage
+
+    item = storage.put_audit_event(
+        event_type="auth.logout",
+        actor_id="user@example.com",
+        details={"role": "user"},
+    )
+
+    # PK shape: AUDIT#YYYY-MM-DD#HH (hour-sharded per CLAUDE.md §"DynamoDB
+    # single table design" and the dynamodb-item skill §4).
+    assert item["PK"].startswith("AUDIT#")
+    parts = item["PK"].split("#")
+    assert len(parts) == 3
+    # parts[1] is the date, parts[2] the zero-padded hour.
+    assert len(parts[1]) == 10  # "YYYY-MM-DD"
+    assert len(parts[2]) == 2 and parts[2].isdigit()
+
+    # SK shape: {unix_timestamp}#{event_id}; both pieces non-empty.
+    sk_ts, _, sk_event_id = item["SK"].partition("#")
+    assert sk_ts.isdigit()
+    assert sk_event_id == item["event_id"]
+    assert item["event_type"] == "auth.logout"
+    assert item["actor_id"] == "user@example.com"
+    assert item["details"] == {"role": "user"}
+
+    # Row is actually persisted to the fake table under the same key.
+    stored = table.items[(item["PK"], item["SK"])]
+    assert stored["event_type"] == "auth.logout"
+
+
+def test_put_audit_event_sets_ttl_from_retention_default(
+    table: FakeTable, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from channel import storage
+
+    monkeypatch.delenv("STARTER_AUDIT_RETENTION_DAYS", raising=False)
+    item = storage.put_audit_event(event_type="auth.logout", actor_id="u-1")
+    # SK encodes the issuance timestamp; ttl - created_ts should equal
+    # 365 * 86400 seconds (the default retention window).
+    created_ts = int(item["SK"].split("#", 1)[0])
+    assert item["ttl"] - created_ts == 365 * 86400
+
+
+def test_put_audit_event_honours_retention_override(
+    table: FakeTable, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from channel import storage
+
+    monkeypatch.setenv("STARTER_AUDIT_RETENTION_DAYS", "7")
+    item = storage.put_audit_event(event_type="auth.logout", actor_id="u-1")
+    created_ts = int(item["SK"].split("#", 1)[0])
+    assert item["ttl"] - created_ts == 7 * 86400
+
+
+def test_put_audit_event_omits_details_when_none(table: FakeTable) -> None:
+    """A bare audit row (no caller-supplied details) skips the details key."""
+
+    from channel import storage
+
+    item = storage.put_audit_event(event_type="auth.logout", actor_id="u-1")
+    assert "details" not in item
+    stored = table.items[(item["PK"], item["SK"])]
+    assert "details" not in stored
+
+
+def test_put_audit_event_unique_event_id_per_call(table: FakeTable) -> None:
+    """Two writes in the same partition land under distinct SKs."""
+
+    from channel import storage
+
+    a = storage.put_audit_event(event_type="auth.logout", actor_id="u-1")
+    b = storage.put_audit_event(event_type="auth.logout", actor_id="u-1")
+    assert a["event_id"] != b["event_id"]
+    assert (a["PK"], a["SK"]) != (b["PK"], b["SK"])

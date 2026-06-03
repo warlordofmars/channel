@@ -7,6 +7,7 @@ import {
   getPrefs,
   listChats,
   listModels,
+  logout,
   patchChat,
   putPrefs,
   regenerate,
@@ -333,6 +334,34 @@ describe("chats wrappers", () => {
       await expect(putPrefs({ bogus: "x" })).rejects.toThrow(
         /putPrefs failed: 422/,
       );
+    });
+  });
+
+  // ---- logout -------------------------------------------------------------
+
+  describe("logout", () => {
+    it("POSTs /auth/logout with the bearer token and resolves on 204", async () => {
+      fetchMock.mockResolvedValue({ ok: true, status: 204 });
+      await logout();
+      const [url, opts] = fetchMock.mock.calls[0];
+      expect(url).toBe("/auth/logout");
+      expect(opts.method).toBe("POST");
+      expect(opts.headers.Authorization).toBe("Bearer tok-abc");
+    });
+
+    it("throws on non-ok so callers can decide to log+ignore", async () => {
+      // The SPA's sign-out wraps logout() in .catch(...) — that's the
+      // contract this rejection enables, even though the API client
+      // itself doesn't swallow errors.
+      mockFail(500);
+      await expect(logout()).rejects.toThrow(/logout 500/);
+    });
+
+    it("omits Authorization when no token is stored", async () => {
+      delete storage["starter_mgmt_token"];
+      fetchMock.mockResolvedValue({ ok: true, status: 204 });
+      await logout();
+      expect(fetchMock.mock.calls[0][1].headers.Authorization).toBeUndefined();
     });
   });
 });
