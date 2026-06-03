@@ -111,9 +111,13 @@ function CopyButton({ text }) {
  *
  * State machine per row:
  *   - `null`             — no feedback recorded yet (default).
- *   - `"up"` / `"down"`  — that thumb is "filled". Click the SAME thumb
- *                          again to clear (set back to `null`); click
- *                          the OTHER thumb to swap.
+ *   - `"up"` / `"down"`  — that thumb is "filled". Clicking the OTHER
+ *                          thumb swaps the active state. Re-clicking
+ *                          the ACTIVE thumb is a no-op until the
+ *                          backend grows a server-side clear operation
+ *                          (e.g. DELETE) — otherwise the optimistic
+ *                          clear would diverge from the stored signal
+ *                          and skew evaluation data on reload.
  *   - `pending` boolean  — disables both buttons during an in-flight
  *                          submitFeedback call so a double-click can't
  *                          race the optimistic update.
@@ -130,13 +134,7 @@ function FeedbackButtons({ chatId, msgId, initialKind }) {
     setKind(nextKind);
     setPending(true);
     try {
-      // Server takes only "up" / "down" today; treating a re-click of
-      // the same thumb as "clear" is purely a SPA affordance. We send
-      // the canonical kind for the active state; clearing simply
-      // overwrites with the same kind (idempotent) — a follow-up will
-      // add an explicit DELETE endpoint.
-      const wireKind = nextKind ?? prevKind;
-      await submitFeedback(chatId, msgId, { kind: wireKind, note: null });
+      await submitFeedback(chatId, msgId, { kind: nextKind, note: null });
     } catch {
       setKind(prevKind);
     } finally {
@@ -145,12 +143,13 @@ function FeedbackButtons({ chatId, msgId, initialKind }) {
   }
 
   function handleUp() {
-    const next = kind === "up" ? null : "up";
-    submitOrRevert(next, kind);
+    // Re-clicking the active thumb is a no-op (see component docstring).
+    if (kind === "up") return;
+    submitOrRevert("up", kind);
   }
   function handleDown() {
-    const next = kind === "down" ? null : "down";
-    submitOrRevert(next, kind);
+    if (kind === "down") return;
+    submitOrRevert("down", kind);
   }
 
   const upActive = kind === "up";

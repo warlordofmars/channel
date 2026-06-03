@@ -292,7 +292,11 @@ describe("Conversation", () => {
       expect(screen.getByTitle("Good").className).not.toContain("is-active");
     });
 
-    it("clicking the same thumb again clears the active state optimistically", async () => {
+    it("clicking the already-active thumbs-up is a no-op (no API call)", async () => {
+      // Until a server-side clear lands, re-clicking the active thumb
+      // can't be allowed to clear visual state without diverging from
+      // the stored signal (Copilot review iteration 2). Behaviour:
+      // ignore the click entirely so the row stays self-consistent.
       mockStream({
         turns: assistantTurnWith({ feedback: { kind: "up", note: null } }),
       });
@@ -300,15 +304,14 @@ describe("Conversation", () => {
       const upBtn = screen.getByTitle("Good");
       expect(upBtn.className).toContain("is-active");
       fireEvent.click(upBtn);
-      await vi.waitFor(() => expect(api.submitFeedback).toHaveBeenCalled());
-      // After the click both buttons should be neutral.
-      expect(screen.getByTitle("Good").className).not.toContain("is-active");
-      expect(screen.getByTitle("Bad").className).not.toContain("is-active");
+      // Microtask flush so any erroneously-fired async submit would
+      // have landed by now.
+      await Promise.resolve();
+      expect(api.submitFeedback).not.toHaveBeenCalled();
+      expect(screen.getByTitle("Good").className).toContain("is-active");
     });
 
-    it("clicking the active thumbs-down again clears the active state", async () => {
-      // Mirrors the same-thumb-clears-state test for the down branch so
-      // both arms of `kind === "down" ? null : "down"` are exercised.
+    it("clicking the already-active thumbs-down is a no-op (no API call)", async () => {
       mockStream({
         turns: assistantTurnWith({ feedback: { kind: "down", note: null } }),
       });
@@ -316,9 +319,9 @@ describe("Conversation", () => {
       const downBtn = screen.getByTitle("Bad");
       expect(downBtn.className).toContain("is-active");
       fireEvent.click(downBtn);
-      await vi.waitFor(() => expect(api.submitFeedback).toHaveBeenCalled());
-      expect(screen.getByTitle("Good").className).not.toContain("is-active");
-      expect(screen.getByTitle("Bad").className).not.toContain("is-active");
+      await Promise.resolve();
+      expect(api.submitFeedback).not.toHaveBeenCalled();
+      expect(screen.getByTitle("Bad").className).toContain("is-active");
     });
 
     it("reverts the optimistic state when submitFeedback rejects", async () => {
