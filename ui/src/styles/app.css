@@ -115,6 +115,13 @@ html.is-electron-mac .sb-top {
   transition: background .12s, color .12s;
 }
 .icon-btn:hover { background: var(--hover); color: var(--ink); }
+/* Pressed state for the thumbs-up / thumbs-down feedback buttons on
+   assistant messages (issue #146). Stays distinguishable from the
+   default + hover states so a recorded feedback signal is visible at
+   a glance. */
+.icon-btn.is-active { background: var(--sel); color: var(--accent); }
+.icon-btn.is-active:hover { background: var(--sel); color: var(--accent); }
+.icon-btn[disabled] { cursor: default; opacity: 0.6; }
 
 .tabs {
   display: flex;

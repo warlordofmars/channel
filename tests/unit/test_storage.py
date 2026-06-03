@@ -20,6 +20,7 @@ from boto3.dynamodb.conditions import (
     Equals,
     Or,
 )
+from botocore.exceptions import ClientError
 
 from channel.models import MessageRole
 from channel.storage import (
@@ -727,3 +728,324 @@ def test_put_audit_event_unique_event_id_per_call(table: FakeTable) -> None:
     b = storage.put_audit_event(event_type="auth.logout", actor_id="u-1")
     assert a["event_id"] != b["event_id"]
     assert (a["PK"], a["SK"]) != (b["PK"], b["SK"])
+
+
+# ---------------------------------------------------------------------------
+# put_message_feedback (issue #146)
+# ---------------------------------------------------------------------------
+
+
+def test_put_message_feedback_writes_feedback_attribute_on_message_row(
+    table: FakeTable,
+) -> None:
+    """Happy path: feedback is persisted on the matching MSG# row."""
+    from channel import storage
+    from channel.models import FeedbackKind
+
+    chat = create_chat(user_id="u-1", title=None, model_default="m")
+    msg = put_message(chat_id=chat.chat_id, role=MessageRole.ASSISTANT, text="reply", model="m")
+
+    result = storage.put_message_feedback(
+        chat_id=chat.chat_id,
+        msg_id=msg.msg_id,
+        kind=FeedbackKind.UP,
+        note=None,
+    )
+
+    assert result is not None
+    assert result.kind is FeedbackKind.UP
+    assert result.note is None
+    assert result.created_at  # ISO-8601 timestamp populated by storage
+
+    stored = next(
+        item
+        for item in table.items.values()
+        if item["PK"] == f"CHAT#{chat.chat_id}" and item.get("msg_id") == msg.msg_id
+    )
+    assert stored["feedback"]["kind"] == "up"
+    assert stored["feedback"]["note"] is None
+
+
+def test_put_message_feedback_persists_note_when_supplied(table: FakeTable) -> None:
+    """The optional `note` round-trips into the stored feedback attribute."""
+    from channel import storage
+    from channel.models import FeedbackKind
+
+    chat = create_chat(user_id="u-1", title=None, model_default="m")
+    msg = put_message(chat_id=chat.chat_id, role=MessageRole.ASSISTANT, text="reply", model="m")
+
+    result = storage.put_message_feedback(
+        chat_id=chat.chat_id,
+        msg_id=msg.msg_id,
+        kind=FeedbackKind.DOWN,
+        note="this answer was wrong",
+    )
+
+    assert result is not None
+    assert result.kind is FeedbackKind.DOWN
+    assert result.note == "this answer was wrong"
+
+    stored = next(
+        item
+        for item in table.items.values()
+        if item["PK"] == f"CHAT#{chat.chat_id}" and item.get("msg_id") == msg.msg_id
+    )
+    assert stored["feedback"]["kind"] == "down"
+    assert stored["feedback"]["note"] == "this answer was wrong"
+
+
+def test_put_message_feedback_overwrites_prior_feedback(table: FakeTable) -> None:
+    """Submitting feedback twice keeps only the latest record on the row."""
+    from channel import storage
+    from channel.models import FeedbackKind
+
+    chat = create_chat(user_id="u-1", title=None, model_default="m")
+    msg = put_message(chat_id=chat.chat_id, role=MessageRole.ASSISTANT, text="reply", model="m")
+
+    first = storage.put_message_feedback(
+        chat_id=chat.chat_id, msg_id=msg.msg_id, kind=FeedbackKind.UP, note=None
+    )
+    second = storage.put_message_feedback(
+        chat_id=chat.chat_id, msg_id=msg.msg_id, kind=FeedbackKind.DOWN, note="bad"
+    )
+
+    assert first is not None
+    assert second is not None
+    stored = next(
+        item
+        for item in table.items.values()
+        if item["PK"] == f"CHAT#{chat.chat_id}" and item.get("msg_id") == msg.msg_id
+    )
+    assert stored["feedback"]["kind"] == "down"
+    assert stored["feedback"]["note"] == "bad"
+
+
+def test_put_message_feedback_returns_none_when_message_unknown(
+    table: FakeTable,
+) -> None:
+    """An unknown msg_id surfaces as None (the API layer turns into 404)."""
+    from channel import storage
+    from channel.models import FeedbackKind
+
+    chat = create_chat(user_id="u-1", title=None, model_default="m")
+    # Plant a message so the chat partition isn't empty; ask for a different msg_id.
+    put_message(chat_id=chat.chat_id, role=MessageRole.ASSISTANT, text="reply", model="m")
+
+    result = storage.put_message_feedback(
+        chat_id=chat.chat_id,
+        msg_id="does-not-exist",
+        kind=FeedbackKind.UP,
+        note=None,
+    )
+
+    assert result is None
+
+
+def test_put_message_feedback_paginates_across_50_row_pages(
+    table: FakeTable,
+) -> None:
+    """The lookup loop walks the message rows past the 50-row page boundary.
+
+    Plant 60 messages and request feedback on the last one — the loop
+    must consume the first page (cursor returned), then find the target
+    on the second page. Guards against an off-by-one in the
+    LastEvaluatedKey handling.
+    """
+    from channel import storage
+    from channel.models import FeedbackKind
+
+    chat = create_chat(user_id="u-1", title=None, model_default="m")
+    target_msg = None
+    for i in range(60):
+        msg = put_message(chat_id=chat.chat_id, role=MessageRole.ASSISTANT, text=f"r{i}", model="m")
+        if i == 59:
+            target_msg = msg
+    assert target_msg is not None
+
+    result = storage.put_message_feedback(
+        chat_id=chat.chat_id,
+        msg_id=target_msg.msg_id,
+        kind=FeedbackKind.UP,
+        note=None,
+    )
+
+    assert result is not None
+    stored = next(
+        item
+        for item in table.items.values()
+        if item["PK"] == f"CHAT#{chat.chat_id}" and item.get("msg_id") == target_msg.msg_id
+    )
+    assert stored["feedback"]["kind"] == "up"
+
+
+def test_message_from_item_hydrates_feedback_attribute(table: FakeTable) -> None:
+    """list_messages returns Message objects with feedback populated when present."""
+    from channel import storage
+    from channel.models import FeedbackKind
+
+    chat = create_chat(user_id="u-1", title=None, model_default="m")
+    msg = put_message(chat_id=chat.chat_id, role=MessageRole.ASSISTANT, text="reply", model="m")
+    storage.put_message_feedback(
+        chat_id=chat.chat_id, msg_id=msg.msg_id, kind=FeedbackKind.UP, note=None
+    )
+
+    msgs, _ = list_messages(chat.chat_id, limit=10, cursor=None)
+    assert len(msgs) == 1
+    assert msgs[0].feedback is not None
+    assert msgs[0].feedback.kind is FeedbackKind.UP
+
+
+def test_message_from_item_leaves_feedback_none_when_absent(table: FakeTable) -> None:
+    """A message with no feedback attribute reads back as feedback=None."""
+    chat = create_chat(user_id="u-1", title=None, model_default="m")
+    put_message(chat_id=chat.chat_id, role=MessageRole.ASSISTANT, text="reply", model="m")
+
+    msgs, _ = list_messages(chat.chat_id, limit=10, cursor=None)
+    assert len(msgs) == 1
+    assert msgs[0].feedback is None
+
+
+def test_message_from_item_treats_malformed_feedback_as_none(table: FakeTable) -> None:
+    """Stale schema or partial feedback payload should not break list_messages."""
+    chat = create_chat(user_id="u-1", title=None, model_default="m")
+    msg = put_message(chat_id=chat.chat_id, role=MessageRole.ASSISTANT, text="reply", model="m")
+    # Tamper the stored row to simulate a stale schema: missing
+    # ``created_at`` field would fail pydantic validation.
+    stored_key = next(
+        key
+        for key, item in table.items.items()
+        if item["PK"] == f"CHAT#{chat.chat_id}" and item.get("msg_id") == msg.msg_id
+    )
+    table.items[stored_key]["feedback"] = {"kind": "up"}  # missing created_at
+
+    msgs, _ = list_messages(chat.chat_id, limit=10, cursor=None)
+    assert len(msgs) == 1
+    assert msgs[0].feedback is None  # gracefully degraded
+    assert msgs[0].text == "reply"  # rest of the message still hydrates
+
+
+def test_put_message_feedback_caps_note_at_max_length(table: FakeTable) -> None:
+    """Storage truncates oversized notes as defence-in-depth (API caps too)."""
+    from channel import storage
+    from channel.models import FeedbackKind
+    from channel.storage import _FEEDBACK_NOTE_MAX_CHARS
+
+    chat = create_chat(user_id="u-1", title=None, model_default="m")
+    msg = put_message(chat_id=chat.chat_id, role=MessageRole.ASSISTANT, text="reply", model="m")
+
+    long_note = "x" * (_FEEDBACK_NOTE_MAX_CHARS + 500)
+    result = storage.put_message_feedback(
+        chat_id=chat.chat_id,
+        msg_id=msg.msg_id,
+        kind=FeedbackKind.UP,
+        note=long_note,
+    )
+    assert result is not None
+    assert result.note is not None
+    assert len(result.note) == _FEEDBACK_NOTE_MAX_CHARS
+
+    stored = next(
+        item
+        for item in table.items.values()
+        if item["PK"] == f"CHAT#{chat.chat_id}" and item.get("msg_id") == msg.msg_id
+    )
+    assert len(stored["feedback"]["note"]) == _FEEDBACK_NOTE_MAX_CHARS
+
+
+def test_put_message_feedback_returns_none_on_concurrent_delete(
+    table: FakeTable, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Race: the message row is deleted between query and update_item.
+
+    The ConditionExpression on update_item refuses the upsert and
+    raises ConditionalCheckFailedException; the helper surfaces the
+    same None-return as a never-existed msg_id so the API layer can
+    still 404 cleanly without inventing a phantom feedback row.
+    """
+    from channel import storage
+    from channel.models import FeedbackKind
+
+    chat = create_chat(user_id="u-1", title=None, model_default="m")
+    msg = put_message(chat_id=chat.chat_id, role=MessageRole.ASSISTANT, text="reply", model="m")
+
+    original_update = table.update_item
+
+    def fake_update(*args: Any, **kwargs: Any) -> Any:
+        # Simulate the row vanishing between query and update.
+        raise ClientError(
+            {"Error": {"Code": "ConditionalCheckFailedException", "Message": "gone"}},
+            "UpdateItem",
+        )
+
+    monkeypatch.setattr(table, "update_item", fake_update)
+    result = storage.put_message_feedback(
+        chat_id=chat.chat_id,
+        msg_id=msg.msg_id,
+        kind=FeedbackKind.UP,
+        note=None,
+    )
+    assert result is None
+
+    # Restore so any subsequent table interaction is unaffected.
+    monkeypatch.setattr(table, "update_item", original_update)
+
+
+def test_put_message_feedback_rejects_user_message_rows(table: FakeTable) -> None:
+    """Feedback is for assistant turns only — user-message msg_id → None.
+
+    Surfaces the same as a missing msg_id so the API layer can 404
+    without leaking which msg_ids exist. Guards against data pollution
+    (e.g. self-feedback on user messages skewing evaluation data).
+    """
+    from channel import storage
+    from channel.models import FeedbackKind
+
+    chat = create_chat(user_id="u-1", title=None, model_default="m")
+    user_msg = put_message(chat_id=chat.chat_id, role=MessageRole.USER, text="hi", model=None)
+
+    result = storage.put_message_feedback(
+        chat_id=chat.chat_id,
+        msg_id=user_msg.msg_id,
+        kind=FeedbackKind.UP,
+        note=None,
+    )
+
+    assert result is None
+    # And the user row stays free of any feedback attribute.
+    stored = next(
+        item
+        for item in table.items.values()
+        if item["PK"] == f"CHAT#{chat.chat_id}" and item.get("msg_id") == user_msg.msg_id
+    )
+    assert "feedback" not in stored
+
+
+def test_put_message_feedback_propagates_unexpected_client_errors(
+    table: FakeTable, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-Conditional error from DDB (e.g. throttling) is re-raised."""
+    from channel import storage
+    from channel.models import FeedbackKind
+
+    chat = create_chat(user_id="u-1", title=None, model_default="m")
+    msg = put_message(chat_id=chat.chat_id, role=MessageRole.ASSISTANT, text="reply", model="m")
+
+    def fake_update(*args: Any, **kwargs: Any) -> Any:
+        raise ClientError(
+            {
+                "Error": {
+                    "Code": "ProvisionedThroughputExceededException",
+                    "Message": "slow down",
+                }
+            },
+            "UpdateItem",
+        )
+
+    monkeypatch.setattr(table, "update_item", fake_update)
+    with pytest.raises(ClientError):
+        storage.put_message_feedback(
+            chat_id=chat.chat_id,
+            msg_id=msg.msg_id,
+            kind=FeedbackKind.UP,
+            note=None,
+        )

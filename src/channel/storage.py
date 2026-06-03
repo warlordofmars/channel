@@ -24,8 +24,9 @@ from typing import Any
 import boto3
 from boto3.dynamodb.conditions import Attr, Key
 from botocore.exceptions import ClientError
+from pydantic import ValidationError
 
-from channel.models import Chat, Message, MessageRole, Prefs
+from channel.models import Chat, Feedback, FeedbackKind, Message, MessageRole, Prefs
 
 _CHAT_INDEX_GSI = "ChatByIdIndex"
 _DEFAULT_TITLE = "New chat"
@@ -366,6 +367,92 @@ def delete_last_assistant_message(chat_id: str) -> Message | None:
     return None
 
 
+_FEEDBACK_NOTE_MAX_CHARS = 1000
+
+
+def put_message_feedback(
+    *, chat_id: str, msg_id: str, kind: FeedbackKind, note: str | None
+) -> Feedback | None:
+    """Persist a thumbs-up / thumbs-down feedback record on a message row.
+
+    Returns the persisted ``Feedback`` on success, or ``None`` when the
+    message row does not exist under ``chat_id`` OR is not an assistant
+    turn — the API layer turns that into a 404 so user-message-feedback
+    attempts surface the same as msg_id-never-existed. Overwrites any
+    prior feedback for the same message (issue #146).
+
+    The message SK is ``MSG#{created_at}#{msg_id}`` and we don't know
+    ``created_at`` from ``msg_id`` alone, so this paginates the chat's
+    message rows to find the one whose ``msg_id`` matches. The lookup
+    query uses ``ProjectionExpression`` to fetch only the PK/SK/msg_id/
+    role attributes — message ``text`` and ``attachments`` can be large
+    and we don't need them to locate the row.
+
+    ``note`` is capped at ``_FEEDBACK_NOTE_MAX_CHARS`` here as
+    defence-in-depth — the API layer's ``FeedbackRequest`` already
+    rejects longer values with 422, but capping again ensures the
+    storage helper stays safe if it's ever called from a non-HTTP
+    path (e.g. an internal backfill or admin script).
+    """
+
+    table = _get_table()
+    capped_note = note[:_FEEDBACK_NOTE_MAX_CHARS] if note is not None else None
+    last_evaluated_key: dict[str, Any] | None = None
+    while True:
+        kwargs: dict[str, Any] = {
+            "KeyConditionExpression": (
+                Key("PK").eq(f"CHAT#{chat_id}") & Key("SK").begins_with("MSG#")
+            ),
+            # Project only the attrs the lookup needs — message text /
+            # attachments can be large and DDB charges for fetched bytes.
+            # The role projection lets us reject user-message feedback
+            # without a second round trip.
+            "ProjectionExpression": "PK, SK, msg_id, #r",
+            "ExpressionAttributeNames": {"#r": "role"},
+            "Limit": 50,
+        }
+        if last_evaluated_key:
+            kwargs["ExclusiveStartKey"] = last_evaluated_key
+        page = table.query(**kwargs)
+        for item in page.get("Items") or []:
+            if item.get("msg_id") != msg_id:
+                continue
+            # Feedback is for assistant turns only — silently surface
+            # user-message attempts as "not found" so the API stays at
+            # 404 and chat/message existence isn't leaked.
+            if item.get("role") != MessageRole.ASSISTANT.value:
+                return None
+            feedback = Feedback(
+                kind=kind,
+                note=capped_note,
+                created_at=_now_iso(),
+            )
+            try:
+                table.update_item(
+                    Key={"PK": item["PK"], "SK": item["SK"]},
+                    UpdateExpression="SET feedback = :f",
+                    # Guard against a race where the message row is
+                    # deleted between the query above and this update
+                    # — DDB's UpdateItem is otherwise an upsert and
+                    # would create a partial row containing only
+                    # PK/SK/feedback, corrupting list_messages.
+                    ConditionExpression="attribute_exists(PK)",
+                    ExpressionAttributeValues={":f": feedback.model_dump(mode="json")},
+                )
+            except ClientError as exc:
+                code = exc.response.get("Error", {}).get("Code", "")
+                if code == "ConditionalCheckFailedException":
+                    # Row was deleted after the query — caller sees
+                    # the same surface as msg_id-never-existed.
+                    return None
+                raise
+            return feedback
+        last_evaluated_key = page.get("LastEvaluatedKey")
+        if not last_evaluated_key:
+            break
+    return None
+
+
 def get_prefs(user_id: str) -> Prefs:
     """Return the user's prefs, or default Prefs if no row exists.
 
@@ -466,6 +553,21 @@ def _chat_from_item(item: dict[str, Any]) -> Chat:
 
 
 def _message_from_item(item: dict[str, Any]) -> Message:
+    feedback_raw = item.get("feedback")
+    feedback: Feedback | None
+    if feedback_raw:
+        # Defensive hydration: a stale or partial schema (e.g. missing
+        # required field, unknown kind value) should NOT take down the
+        # whole list_messages call — surface as no-feedback instead so
+        # the rest of the chat is still readable. Narrowly catch
+        # validation / type errors so genuine programmer errors elsewhere
+        # in this function still propagate up.
+        try:
+            feedback = Feedback(**feedback_raw)
+        except (ValidationError, TypeError):
+            feedback = None
+    else:
+        feedback = None
     return Message(
         chat_id=item["chat_id"],
         msg_id=item["msg_id"],
@@ -477,4 +579,5 @@ def _message_from_item(item: dict[str, Any]) -> Message:
         artifacts=item.get("artifacts"),
         attachments=item.get("attachments"),
         created_at=item["created_at"],
+        feedback=feedback,
     )
