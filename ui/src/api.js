@@ -103,6 +103,24 @@ export async function regenerate(chatId, { model, effort, signal } = {}) {
   return response;
 }
 
+// ---- Auth ---------------------------------------------------------------
+//
+// POST /auth/logout records an immutable audit-log entry on the server
+// (event_type=auth.logout) so a stolen-laptop scenario has a server-side
+// signal for remediation. The endpoint does NOT invalidate the JWT (no
+// JTI denylist today — see #114); the caller is responsible for
+// clearing the local token. Best-effort by design — the SPA wraps the
+// call in `.catch(...)` so transient API outages don't strand a
+// signed-in user.
+
+export async function logout() {
+  const res = await fetch(`${BASE}/auth/logout`, {
+    method: "POST",
+    headers: authHeader(),
+  });
+  if (!res.ok) throw new Error(`logout ${res.status}`);
+}
+
 // ---- User preferences ----------------------------------------------------
 
 export async function getPrefs() {

@@ -20,6 +20,14 @@ vi.mock("../hooks/ChatsContext.jsx", () => ({
   useChats: () => mockChatsCtx,
 }));
 
+// Mock the api module so the Sidebar's signOut() best-effort POST to
+// /auth/logout doesn't hit the network during component tests. Tests
+// assert on `mockApiLogout.mock.calls` to verify the call fires.
+const mockApiLogout = vi.fn();
+vi.mock("../api.js", () => ({
+  logout: (...args) => mockApiLogout(...args),
+}));
+
 function makeToken({ email = "ada@example.com", display_name } = {}) {
   const exp = Math.floor(Date.now() / 1000) + 3600;
   const claims = { exp, sub: "u1", role: "user", email };
@@ -93,6 +101,8 @@ describe("Sidebar", () => {
     assignSpy = vi.fn();
     vi.stubGlobal("location", { ...globalThis.location, assign: assignSpy });
     vi.spyOn(Date, "now").mockReturnValue(NOW);
+    mockApiLogout.mockReset();
+    mockApiLogout.mockResolvedValue(undefined);
   });
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -213,6 +223,28 @@ describe("Sidebar", () => {
     fireEvent.click(screen.getByText("Sign out"));
     expect(storage[TOKEN_KEY]).toBeUndefined();
     expect(assignSpy).toHaveBeenCalledWith("/");
+  });
+
+  it("Sign out fires a best-effort POST /auth/logout (issue #151)", () => {
+    renderSidebar();
+    fireEvent.click(screen.getByText("ada@example.com").closest("button"));
+    fireEvent.click(screen.getByText("Sign out"));
+    expect(mockApiLogout).toHaveBeenCalledTimes(1);
+  });
+
+  it("Sign out completes locally even if the audit POST rejects", async () => {
+    // The user-visible logout must not depend on the audit endpoint
+    // succeeding. Simulate a transient API failure and assert the
+    // local token clear + redirect both still run.
+    mockApiLogout.mockRejectedValueOnce(new Error("API offline"));
+    renderSidebar();
+    fireEvent.click(screen.getByText("ada@example.com").closest("button"));
+    fireEvent.click(screen.getByText("Sign out"));
+    expect(storage[TOKEN_KEY]).toBeUndefined();
+    expect(assignSpy).toHaveBeenCalledWith("/");
+    // Drain the rejected promise so vitest doesn't flag an
+    // unhandled-rejection warning.
+    await Promise.resolve();
   });
 
   it("clicking the search button reveals the search input", () => {

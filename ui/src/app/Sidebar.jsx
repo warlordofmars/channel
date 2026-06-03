@@ -2,6 +2,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { parseToken, TOKEN_KEY } from "../lib/auth.js";
+import { logout as apiLogout } from "../api.js";
 import Icon from "../components/Icon.jsx";
 import AccountPopover from "./AccountPopover.jsx";
 import ChatRowMenu from "./ChatRowMenu.jsx";
@@ -136,6 +137,10 @@ export default function Sidebar({
   const hasResults = groups.some((g) => g.items.length > 0);
 
   function signOut() {
+    // Fire-and-forget audit signal. If the API is down or the request
+    // races the navigation, the visible logout still completes — local
+    // token clear + redirect happens unconditionally. See issue #151.
+    apiLogout().catch(() => {});
     localStorage.removeItem(TOKEN_KEY);
     globalThis.location.assign("/");
   }
