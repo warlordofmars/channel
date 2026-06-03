@@ -306,6 +306,21 @@ describe("Conversation", () => {
       expect(screen.getByTitle("Bad").className).not.toContain("is-active");
     });
 
+    it("clicking the active thumbs-down again clears the active state", async () => {
+      // Mirrors the same-thumb-clears-state test for the down branch so
+      // both arms of `kind === "down" ? null : "down"` are exercised.
+      mockStream({
+        turns: assistantTurnWith({ feedback: { kind: "down", note: null } }),
+      });
+      renderAt("/app/c/c-fb");
+      const downBtn = screen.getByTitle("Bad");
+      expect(downBtn.className).toContain("is-active");
+      fireEvent.click(downBtn);
+      await vi.waitFor(() => expect(api.submitFeedback).toHaveBeenCalled());
+      expect(screen.getByTitle("Good").className).not.toContain("is-active");
+      expect(screen.getByTitle("Bad").className).not.toContain("is-active");
+    });
+
     it("reverts the optimistic state when submitFeedback rejects", async () => {
       api.submitFeedback.mockRejectedValueOnce(new Error("network"));
       mockStream({ turns: assistantTurnWith() });
