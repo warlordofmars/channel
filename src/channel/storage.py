@@ -366,6 +366,9 @@ def delete_last_assistant_message(chat_id: str) -> Message | None:
     return None
 
 
+_FEEDBACK_NOTE_MAX_CHARS = 1000
+
+
 def put_message_feedback(
     *, chat_id: str, msg_id: str, kind: FeedbackKind, note: str | None
 ) -> Feedback | None:
@@ -382,9 +385,16 @@ def put_message_feedback(
     pattern ``delete_last_assistant_message`` uses for its single-row
     lookup. Chats can hold many messages; pagination keeps memory
     bounded.
+
+    ``note`` is capped at ``_FEEDBACK_NOTE_MAX_CHARS`` here as
+    defence-in-depth — the API layer's ``FeedbackRequest`` already
+    rejects longer values with 422, but capping again ensures the
+    storage helper stays safe if it's ever called from a non-HTTP
+    path (e.g. an internal backfill or admin script).
     """
 
     table = _get_table()
+    capped_note = note[:_FEEDBACK_NOTE_MAX_CHARS] if note is not None else None
     last_evaluated_key: dict[str, Any] | None = None
     while True:
         kwargs: dict[str, Any] = {
@@ -401,14 +411,28 @@ def put_message_feedback(
                 continue
             feedback = Feedback(
                 kind=kind,
-                note=note,
+                note=capped_note,
                 created_at=_now_iso(),
             )
-            table.update_item(
-                Key={"PK": item["PK"], "SK": item["SK"]},
-                UpdateExpression="SET feedback = :f",
-                ExpressionAttributeValues={":f": feedback.model_dump(mode="json")},
-            )
+            try:
+                table.update_item(
+                    Key={"PK": item["PK"], "SK": item["SK"]},
+                    UpdateExpression="SET feedback = :f",
+                    # Guard against a race where the message row is
+                    # deleted between the query above and this update
+                    # — DDB's UpdateItem is otherwise an upsert and
+                    # would create a partial row containing only
+                    # PK/SK/feedback, corrupting list_messages.
+                    ConditionExpression="attribute_exists(PK)",
+                    ExpressionAttributeValues={":f": feedback.model_dump(mode="json")},
+                )
+            except ClientError as exc:
+                code = exc.response.get("Error", {}).get("Code", "")
+                if code == "ConditionalCheckFailedException":
+                    # Row was deleted after the query — caller sees
+                    # the same surface as msg_id-never-existed.
+                    return None
+                raise
             return feedback
         last_evaluated_key = page.get("LastEvaluatedKey")
         if not last_evaluated_key:
@@ -517,7 +541,18 @@ def _chat_from_item(item: dict[str, Any]) -> Chat:
 
 def _message_from_item(item: dict[str, Any]) -> Message:
     feedback_raw = item.get("feedback")
-    feedback = Feedback(**feedback_raw) if feedback_raw else None
+    feedback: Feedback | None
+    if feedback_raw:
+        # Defensive hydration: a stale or partial schema (e.g. missing
+        # required field, unknown kind value) should NOT take down the
+        # whole list_messages call — surface as no-feedback instead so
+        # the rest of the chat is still readable.
+        try:
+            feedback = Feedback(**feedback_raw)
+        except Exception:
+            feedback = None
+    else:
+        feedback = None
     return Message(
         chat_id=item["chat_id"],
         msg_id=item["msg_id"],

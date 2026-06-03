@@ -20,6 +20,7 @@ from boto3.dynamodb.conditions import (
     Equals,
     Or,
 )
+from botocore.exceptions import ClientError
 
 from channel.models import MessageRole
 from channel.storage import (
@@ -902,3 +903,127 @@ def test_message_from_item_leaves_feedback_none_when_absent(table: FakeTable) ->
     msgs, _ = list_messages(chat.chat_id, limit=10, cursor=None)
     assert len(msgs) == 1
     assert msgs[0].feedback is None
+
+
+def test_message_from_item_treats_malformed_feedback_as_none(table: FakeTable) -> None:
+    """Stale schema or partial feedback payload should not break list_messages."""
+    chat = create_chat(user_id="u-1", title=None, model_default="m")
+    msg = put_message(
+        chat_id=chat.chat_id, role=MessageRole.ASSISTANT, text="reply", model="m"
+    )
+    # Tamper the stored row to simulate a stale schema: missing
+    # ``created_at`` field would fail pydantic validation.
+    stored_key = next(
+        key
+        for key, item in table.items.items()
+        if item["PK"] == f"CHAT#{chat.chat_id}" and item.get("msg_id") == msg.msg_id
+    )
+    table.items[stored_key]["feedback"] = {"kind": "up"}  # missing created_at
+
+    msgs, _ = list_messages(chat.chat_id, limit=10, cursor=None)
+    assert len(msgs) == 1
+    assert msgs[0].feedback is None  # gracefully degraded
+    assert msgs[0].text == "reply"  # rest of the message still hydrates
+
+
+def test_put_message_feedback_caps_note_at_max_length(table: FakeTable) -> None:
+    """Storage truncates oversized notes as defence-in-depth (API caps too)."""
+    from channel import storage
+    from channel.models import FeedbackKind
+    from channel.storage import _FEEDBACK_NOTE_MAX_CHARS
+
+    chat = create_chat(user_id="u-1", title=None, model_default="m")
+    msg = put_message(
+        chat_id=chat.chat_id, role=MessageRole.ASSISTANT, text="reply", model="m"
+    )
+
+    long_note = "x" * (_FEEDBACK_NOTE_MAX_CHARS + 500)
+    result = storage.put_message_feedback(
+        chat_id=chat.chat_id,
+        msg_id=msg.msg_id,
+        kind=FeedbackKind.UP,
+        note=long_note,
+    )
+    assert result is not None
+    assert result.note is not None
+    assert len(result.note) == _FEEDBACK_NOTE_MAX_CHARS
+
+    stored = next(
+        item
+        for item in table.items.values()
+        if item["PK"] == f"CHAT#{chat.chat_id}" and item.get("msg_id") == msg.msg_id
+    )
+    assert len(stored["feedback"]["note"]) == _FEEDBACK_NOTE_MAX_CHARS
+
+
+def test_put_message_feedback_returns_none_on_concurrent_delete(
+    table: FakeTable, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Race: the message row is deleted between query and update_item.
+
+    The ConditionExpression on update_item refuses the upsert and
+    raises ConditionalCheckFailedException; the helper surfaces the
+    same None-return as a never-existed msg_id so the API layer can
+    still 404 cleanly without inventing a phantom feedback row.
+    """
+    from channel import storage
+    from channel.models import FeedbackKind
+
+    chat = create_chat(user_id="u-1", title=None, model_default="m")
+    msg = put_message(
+        chat_id=chat.chat_id, role=MessageRole.ASSISTANT, text="reply", model="m"
+    )
+
+    original_update = table.update_item
+
+    def fake_update(*args: Any, **kwargs: Any) -> Any:
+        # Simulate the row vanishing between query and update.
+        raise ClientError(
+            {"Error": {"Code": "ConditionalCheckFailedException", "Message": "gone"}},
+            "UpdateItem",
+        )
+
+    monkeypatch.setattr(table, "update_item", fake_update)
+    result = storage.put_message_feedback(
+        chat_id=chat.chat_id,
+        msg_id=msg.msg_id,
+        kind=FeedbackKind.UP,
+        note=None,
+    )
+    assert result is None
+
+    # Restore so any subsequent table interaction is unaffected.
+    monkeypatch.setattr(table, "update_item", original_update)
+
+
+def test_put_message_feedback_propagates_unexpected_client_errors(
+    table: FakeTable, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-Conditional error from DDB (e.g. throttling) is re-raised."""
+    from channel import storage
+    from channel.models import FeedbackKind
+
+    chat = create_chat(user_id="u-1", title=None, model_default="m")
+    msg = put_message(
+        chat_id=chat.chat_id, role=MessageRole.ASSISTANT, text="reply", model="m"
+    )
+
+    def fake_update(*args: Any, **kwargs: Any) -> Any:
+        raise ClientError(
+            {
+                "Error": {
+                    "Code": "ProvisionedThroughputExceededException",
+                    "Message": "slow down",
+                }
+            },
+            "UpdateItem",
+        )
+
+    monkeypatch.setattr(table, "update_item", fake_update)
+    with pytest.raises(ClientError):
+        storage.put_message_feedback(
+            chat_id=chat.chat_id,
+            msg_id=msg.msg_id,
+            kind=FeedbackKind.UP,
+            note=None,
+        )
