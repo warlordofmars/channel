@@ -990,6 +990,36 @@ def test_put_message_feedback_returns_none_on_concurrent_delete(
     monkeypatch.setattr(table, "update_item", original_update)
 
 
+def test_put_message_feedback_rejects_user_message_rows(table: FakeTable) -> None:
+    """Feedback is for assistant turns only — user-message msg_id → None.
+
+    Surfaces the same as a missing msg_id so the API layer can 404
+    without leaking which msg_ids exist. Guards against data pollution
+    (e.g. self-feedback on user messages skewing evaluation data).
+    """
+    from channel import storage
+    from channel.models import FeedbackKind
+
+    chat = create_chat(user_id="u-1", title=None, model_default="m")
+    user_msg = put_message(chat_id=chat.chat_id, role=MessageRole.USER, text="hi", model=None)
+
+    result = storage.put_message_feedback(
+        chat_id=chat.chat_id,
+        msg_id=user_msg.msg_id,
+        kind=FeedbackKind.UP,
+        note=None,
+    )
+
+    assert result is None
+    # And the user row stays free of any feedback attribute.
+    stored = next(
+        item
+        for item in table.items.values()
+        if item["PK"] == f"CHAT#{chat.chat_id}" and item.get("msg_id") == user_msg.msg_id
+    )
+    assert "feedback" not in stored
+
+
 def test_put_message_feedback_propagates_unexpected_client_errors(
     table: FakeTable, monkeypatch: pytest.MonkeyPatch
 ) -> None:

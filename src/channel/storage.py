@@ -376,16 +376,17 @@ def put_message_feedback(
     """Persist a thumbs-up / thumbs-down feedback record on a message row.
 
     Returns the persisted ``Feedback`` on success, or ``None`` when the
-    message row does not exist under ``chat_id`` — the API layer turns
-    that into a 404. Overwrites any prior feedback for the same message
-    (issue #146).
+    message row does not exist under ``chat_id`` OR is not an assistant
+    turn — the API layer turns that into a 404 so user-message-feedback
+    attempts surface the same as msg_id-never-existed. Overwrites any
+    prior feedback for the same message (issue #146).
 
     The message SK is ``MSG#{created_at}#{msg_id}`` and we don't know
     ``created_at`` from ``msg_id`` alone, so this paginates the chat's
-    message rows to find the one whose ``msg_id`` matches — the same
-    pattern ``delete_last_assistant_message`` uses for its single-row
-    lookup. Chats can hold many messages; pagination keeps memory
-    bounded.
+    message rows to find the one whose ``msg_id`` matches. The lookup
+    query uses ``ProjectionExpression`` to fetch only the PK/SK/msg_id/
+    role attributes — message ``text`` and ``attachments`` can be large
+    and we don't need them to locate the row.
 
     ``note`` is capped at ``_FEEDBACK_NOTE_MAX_CHARS`` here as
     defence-in-depth — the API layer's ``FeedbackRequest`` already
@@ -402,6 +403,12 @@ def put_message_feedback(
             "KeyConditionExpression": (
                 Key("PK").eq(f"CHAT#{chat_id}") & Key("SK").begins_with("MSG#")
             ),
+            # Project only the attrs the lookup needs — message text /
+            # attachments can be large and DDB charges for fetched bytes.
+            # The role projection lets us reject user-message feedback
+            # without a second round trip.
+            "ProjectionExpression": "PK, SK, msg_id, #r",
+            "ExpressionAttributeNames": {"#r": "role"},
             "Limit": 50,
         }
         if last_evaluated_key:
@@ -410,6 +417,11 @@ def put_message_feedback(
         for item in page.get("Items") or []:
             if item.get("msg_id") != msg_id:
                 continue
+            # Feedback is for assistant turns only — silently surface
+            # user-message attempts as "not found" so the API stays at
+            # 404 and chat/message existence isn't leaked.
+            if item.get("role") != MessageRole.ASSISTANT.value:
+                return None
             feedback = Feedback(
                 kind=kind,
                 note=capped_note,

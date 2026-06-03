@@ -217,7 +217,7 @@ describe("Conversation", () => {
     expect(screen.getByTitle("Bad")).toBeTruthy();
   });
 
-  it("clicking the Retry placeholder does not throw", () => {
+  it("clicking Retry on the last assistant turn does not throw when no user message precedes it", () => {
     mockStream({
       turns: [
         {
@@ -229,9 +229,10 @@ describe("Conversation", () => {
       ],
     });
     renderAt("/app/c/c1");
-    // Retry is the regenerate trigger on the last assistant turn; in
-    // this test the chat has no preceding user message so the Retry
-    // handler is a no-op. Copy + Feedback have dedicated suites below.
+    // Retry is the regenerate trigger on the last assistant turn; here
+    // there's no preceding user message so the handler short-circuits
+    // (`regenerate({})` is wired but useChatStream's mock send simply
+    // records the call). Copy + Feedback have dedicated suites below.
     expect(() => fireEvent.click(screen.getByTitle("Retry"))).not.toThrow();
   });
 
