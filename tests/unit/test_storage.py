@@ -908,9 +908,7 @@ def test_message_from_item_leaves_feedback_none_when_absent(table: FakeTable) ->
 def test_message_from_item_treats_malformed_feedback_as_none(table: FakeTable) -> None:
     """Stale schema or partial feedback payload should not break list_messages."""
     chat = create_chat(user_id="u-1", title=None, model_default="m")
-    msg = put_message(
-        chat_id=chat.chat_id, role=MessageRole.ASSISTANT, text="reply", model="m"
-    )
+    msg = put_message(chat_id=chat.chat_id, role=MessageRole.ASSISTANT, text="reply", model="m")
     # Tamper the stored row to simulate a stale schema: missing
     # ``created_at`` field would fail pydantic validation.
     stored_key = next(
@@ -933,9 +931,7 @@ def test_put_message_feedback_caps_note_at_max_length(table: FakeTable) -> None:
     from channel.storage import _FEEDBACK_NOTE_MAX_CHARS
 
     chat = create_chat(user_id="u-1", title=None, model_default="m")
-    msg = put_message(
-        chat_id=chat.chat_id, role=MessageRole.ASSISTANT, text="reply", model="m"
-    )
+    msg = put_message(chat_id=chat.chat_id, role=MessageRole.ASSISTANT, text="reply", model="m")
 
     long_note = "x" * (_FEEDBACK_NOTE_MAX_CHARS + 500)
     result = storage.put_message_feedback(
@@ -970,9 +966,7 @@ def test_put_message_feedback_returns_none_on_concurrent_delete(
     from channel.models import FeedbackKind
 
     chat = create_chat(user_id="u-1", title=None, model_default="m")
-    msg = put_message(
-        chat_id=chat.chat_id, role=MessageRole.ASSISTANT, text="reply", model="m"
-    )
+    msg = put_message(chat_id=chat.chat_id, role=MessageRole.ASSISTANT, text="reply", model="m")
 
     original_update = table.update_item
 
@@ -1004,9 +998,7 @@ def test_put_message_feedback_propagates_unexpected_client_errors(
     from channel.models import FeedbackKind
 
     chat = create_chat(user_id="u-1", title=None, model_default="m")
-    msg = put_message(
-        chat_id=chat.chat_id, role=MessageRole.ASSISTANT, text="reply", model="m"
-    )
+    msg = put_message(chat_id=chat.chat_id, role=MessageRole.ASSISTANT, text="reply", model="m")
 
     def fake_update(*args: Any, **kwargs: Any) -> Any:
         raise ClientError(
