@@ -80,12 +80,13 @@ APPLE_CERT_PASSWORD     Updated YYYY-MM-DD
 
 ## 6. Verify locally
 
-`desktop/scripts/sign_local.sh` requires three env vars: the path to
-the `.p8` (default `~/secrets/AuthKey.p8`, override with
-`APPLE_API_KEY_PATH`), the key id, and the issuer id. The script
-defaults the signing identity to `Developer ID Application` — that
-matches the cert from step 2 as long as only one such cert exists in
-the login Keychain.
+`desktop/scripts/sign_local.sh` requires `APPLE_API_KEY_ID` and
+`APPLE_API_ISSUER_ID`; `APPLE_API_KEY_PATH` is optional and defaults
+to `~/secrets/AuthKey.p8`. Since step 4 stored the `.p8` as
+`AuthKey_<KEY_ID>.p8`, set `APPLE_API_KEY_PATH` explicitly (or rename
+the file to drop the suffix). The script defaults the signing
+identity to `Developer ID Application` — that matches the cert from
+step 2 as long as only one such cert exists in the login Keychain.
 
 ```bash
 cd desktop && npm run build:current && cd ..
