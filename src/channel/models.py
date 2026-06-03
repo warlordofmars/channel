@@ -21,6 +21,31 @@ class MessageRole(str, Enum):
     ASSISTANT = "assistant"
 
 
+class FeedbackKind(str, Enum):
+    """Thumbs-up / thumbs-down feedback on an assistant message.
+
+    The wire-format spelling matches what the SPA already uses on its
+    UI buttons (``Good`` → ``up``, ``Bad`` → ``down``). Any other value
+    fails request validation with 422.
+    """
+
+    UP = "up"
+    DOWN = "down"
+
+
+class Feedback(BaseModel):
+    """Per-message feedback record persisted on the message DDB row.
+
+    Stored as an inline attribute on the ``MSG#`` row — overwritten on
+    each new submission for the same message (issue #146). Future
+    follow-ups may surface ``note`` via a modal in the UI.
+    """
+
+    kind: FeedbackKind
+    note: str | None = None
+    created_at: str
+
+
 class Chat(BaseModel):
     """Chat-index row — one per chat, partition key USER#{user_id}."""
 
@@ -55,6 +80,7 @@ class Message(BaseModel):
     attachments: list[dict[str, Any]] | None = None
     created_at: str
     ttl: int | None = None
+    feedback: Feedback | None = None
 
 
 class ChatCreate(BaseModel):
@@ -85,6 +111,19 @@ class RegenerateRequest(BaseModel):
 
     model: str | None = None
     effort: str | None = None
+
+
+class FeedbackRequest(BaseModel):
+    """Request body for POST /api/chats/{id}/messages/{msg_id}/feedback.
+
+    ``note`` is reserved for a future note-input modal — v1 always sends
+    ``null`` (issue #146). The pydantic validator caps ``note`` at
+    1000 chars defensively so a bad client can't smuggle a huge string
+    into the row.
+    """
+
+    kind: FeedbackKind
+    note: str | None = Field(default=None, max_length=1000)
 
 
 class Prefs(BaseModel):

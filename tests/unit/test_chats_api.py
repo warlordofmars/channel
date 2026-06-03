@@ -1896,3 +1896,182 @@ def test_titler_outer_except_catches_unrelated_errors(
     assert response.status_code == 200
     assert '"type": "title_suggested"' not in response.text
     assert patched == []
+
+
+# ---------------------------------------------------------------------------
+# POST /api/chats/{chat_id}/messages/{msg_id}/feedback (issue #146)
+# ---------------------------------------------------------------------------
+
+
+def _stub_owned_chat(
+    monkeypatch: pytest.MonkeyPatch, *, chat_id: str = "c1", user_id: str = "u-1"
+) -> Chat:
+    chat = Chat(
+        chat_id=chat_id,
+        user_id=user_id,
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="m",
+    )
+    monkeypatch.setattr("channel.api.chats.storage.get_chat_by_id", lambda _: chat)
+    return chat
+
+
+def test_submit_feedback_returns_204_and_calls_storage(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Happy path: POST stores up-feedback and returns 204 No Content."""
+    from channel.models import Feedback, FeedbackKind
+
+    _stub_owned_chat(monkeypatch)
+    captured: dict[str, Any] = {}
+
+    def fake_put(*, chat_id: str, msg_id: str, kind: FeedbackKind, note: str | None) -> Feedback:
+        captured.update({"chat_id": chat_id, "msg_id": msg_id, "kind": kind, "note": note})
+        return Feedback(kind=kind, note=note, created_at="2026-06-03T00:00:00Z")
+
+    monkeypatch.setattr("channel.api.chats.storage.put_message_feedback", fake_put)
+
+    response = client.post(
+        "/api/chats/c1/messages/m1/feedback",
+        json={"kind": "up", "note": None},
+    )
+
+    assert response.status_code == 204
+    assert response.content == b""
+    assert captured == {
+        "chat_id": "c1",
+        "msg_id": "m1",
+        "kind": FeedbackKind.UP,
+        "note": None,
+    }
+
+
+def test_submit_feedback_persists_down_kind_with_note(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Thumbs-down + optional note round-trip through the endpoint."""
+    from channel.models import Feedback, FeedbackKind
+
+    _stub_owned_chat(monkeypatch)
+    captured: dict[str, Any] = {}
+
+    def fake_put(**kwargs: Any) -> Feedback:
+        captured.update(kwargs)
+        return Feedback(kind=kwargs["kind"], note=kwargs["note"], created_at="2026-06-03T00:00:00Z")
+
+    monkeypatch.setattr("channel.api.chats.storage.put_message_feedback", fake_put)
+
+    response = client.post(
+        "/api/chats/c1/messages/m1/feedback",
+        json={"kind": "down", "note": "wrong answer"},
+    )
+
+    assert response.status_code == 204
+    assert captured["kind"] is FeedbackKind.DOWN
+    assert captured["note"] == "wrong answer"
+
+
+def test_submit_feedback_404s_on_unknown_chat(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Caller doesn't own the chat (or it doesn't exist) → 404."""
+    monkeypatch.setattr("channel.api.chats.storage.get_chat_by_id", lambda _: None)
+
+    response = client.post(
+        "/api/chats/c-missing/messages/m1/feedback",
+        json={"kind": "up", "note": None},
+    )
+
+    assert response.status_code == 404
+
+
+def test_submit_feedback_404s_on_cross_user_chat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Caller is authenticated but the chat belongs to a different user → 404."""
+    chat = Chat(
+        chat_id="c-other",
+        user_id="u-owner",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="m",
+    )
+    monkeypatch.setattr("channel.api.chats.storage.get_chat_by_id", lambda _: chat)
+
+    def _stub_intruder() -> dict[str, Any]:
+        return {"sub": "u-intruder", "role": "user"}
+
+    app.dependency_overrides[require_mgmt_user] = _stub_intruder
+    try:
+        intruder = TestClient(app)
+        resp = intruder.post(
+            "/api/chats/c-other/messages/m1/feedback",
+            json={"kind": "up", "note": None},
+        )
+        assert resp.status_code == 404
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_submit_feedback_404s_when_message_unknown(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Storage returns None (msg_id not in chat) → API surfaces 404."""
+    _stub_owned_chat(monkeypatch)
+    monkeypatch.setattr("channel.api.chats.storage.put_message_feedback", lambda **_: None)
+
+    response = client.post(
+        "/api/chats/c1/messages/m-missing/feedback",
+        json={"kind": "up", "note": None},
+    )
+
+    assert response.status_code == 404
+
+
+def test_submit_feedback_422s_on_invalid_kind(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unknown `kind` values are rejected by pydantic with a 422."""
+    _stub_owned_chat(monkeypatch)
+
+    def _must_not_run(**_: Any) -> None:
+        raise AssertionError("storage must not be called on validation failure")
+
+    monkeypatch.setattr("channel.api.chats.storage.put_message_feedback", _must_not_run)
+
+    response = client.post(
+        "/api/chats/c1/messages/m1/feedback",
+        json={"kind": "sideways", "note": None},
+    )
+
+    assert response.status_code == 422
+
+
+def test_submit_feedback_422s_on_missing_kind(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Missing required `kind` field fails validation."""
+    _stub_owned_chat(monkeypatch)
+
+    response = client.post(
+        "/api/chats/c1/messages/m1/feedback",
+        json={"note": "hi"},
+    )
+
+    assert response.status_code == 422
+
+
+def test_submit_feedback_requires_auth() -> None:
+    """Without the auth override, the endpoint requires a mgmt JWT."""
+    # Build a fresh TestClient without any dependency override so the
+    # real require_mgmt_user runs and rejects the unauthenticated call.
+    app.dependency_overrides.clear()
+    unauth = TestClient(app)
+    resp = unauth.post(
+        "/api/chats/c1/messages/m1/feedback",
+        json={"kind": "up", "note": None},
+    )
+    assert resp.status_code in {401, 403}

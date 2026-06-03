@@ -45,6 +45,7 @@ from channel.models import (
     Chat,
     ChatCreate,
     ChatPatch,
+    FeedbackRequest,
     Message,
     MessageRole,
     RegenerateRequest,
@@ -575,3 +576,30 @@ async def regenerate(
         ),
         media_type="text/event-stream",
     )
+
+
+@router.post("/{chat_id}/messages/{msg_id}/feedback", status_code=204)
+async def submit_feedback(
+    payload: FeedbackRequest,
+    chat_id: str = Path(...),
+    msg_id: str = Path(...),
+    claims: dict[str, Any] = Depends(require_mgmt_user),
+) -> Response:
+    """Persist a thumbs-up / thumbs-down feedback record for a message.
+
+    Idempotent overwrite — submitting again replaces the prior record
+    on the same message. ``msg_id`` must belong to ``chat_id`` and the
+    chat must be owned by the caller. Mismatches return 404 so chat /
+    message existence isn't leaked.
+    """
+
+    chat = await _load_owned_chat(chat_id, claims["sub"])
+    feedback = storage.put_message_feedback(
+        chat_id=chat.chat_id,
+        msg_id=msg_id,
+        kind=payload.kind,
+        note=payload.note,
+    )
+    if feedback is None:
+        raise HTTPException(status_code=404, detail="Message not found")
+    return Response(status_code=204)

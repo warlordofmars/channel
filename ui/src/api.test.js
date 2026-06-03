@@ -12,6 +12,7 @@ import {
   putPrefs,
   regenerate,
   streamMessage,
+  submitFeedback,
 } from "./api.js";
 
 // ---------------------------------------------------------------------------
@@ -362,6 +363,37 @@ describe("chats wrappers", () => {
       fetchMock.mockResolvedValue({ ok: true, status: 204 });
       await logout();
       expect(fetchMock.mock.calls[0][1].headers.Authorization).toBeUndefined();
+    });
+  });
+
+  // ---- submitFeedback -----------------------------------------------------
+
+  describe("submitFeedback", () => {
+    it("POSTs to the feedback URL with kind + note in the body", async () => {
+      fetchMock.mockResolvedValue({ ok: true, status: 204 });
+      await submitFeedback("c1", "m1", { kind: "up", note: null });
+      const [url, opts] = fetchMock.mock.calls[0];
+      expect(url).toBe("/api/chats/c1/messages/m1/feedback");
+      expect(opts.method).toBe("POST");
+      expect(opts.headers.Authorization).toBe("Bearer tok-abc");
+      expect(opts.headers["Content-Type"]).toBe("application/json");
+      expect(JSON.parse(opts.body)).toEqual({ kind: "up", note: null });
+    });
+
+    it("defaults note to null when omitted", async () => {
+      fetchMock.mockResolvedValue({ ok: true, status: 204 });
+      await submitFeedback("c1", "m1", { kind: "down" });
+      expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
+        kind: "down",
+        note: null,
+      });
+    });
+
+    it("throws on non-ok response so callers can revert optimistic state", async () => {
+      mockFail(404);
+      await expect(
+        submitFeedback("c1", "m-bad", { kind: "up", note: null }),
+      ).rejects.toThrow(/submitFeedback 404/);
     });
   });
 });

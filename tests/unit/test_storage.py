@@ -727,3 +727,178 @@ def test_put_audit_event_unique_event_id_per_call(table: FakeTable) -> None:
     b = storage.put_audit_event(event_type="auth.logout", actor_id="u-1")
     assert a["event_id"] != b["event_id"]
     assert (a["PK"], a["SK"]) != (b["PK"], b["SK"])
+
+
+# ---------------------------------------------------------------------------
+# put_message_feedback (issue #146)
+# ---------------------------------------------------------------------------
+
+
+def test_put_message_feedback_writes_feedback_attribute_on_message_row(
+    table: FakeTable,
+) -> None:
+    """Happy path: feedback is persisted on the matching MSG# row."""
+    from channel import storage
+    from channel.models import FeedbackKind
+
+    chat = create_chat(user_id="u-1", title=None, model_default="m")
+    msg = put_message(chat_id=chat.chat_id, role=MessageRole.ASSISTANT, text="reply", model="m")
+
+    result = storage.put_message_feedback(
+        chat_id=chat.chat_id,
+        msg_id=msg.msg_id,
+        kind=FeedbackKind.UP,
+        note=None,
+    )
+
+    assert result is not None
+    assert result.kind is FeedbackKind.UP
+    assert result.note is None
+    assert result.created_at  # ISO-8601 timestamp populated by storage
+
+    stored = next(
+        item
+        for item in table.items.values()
+        if item["PK"] == f"CHAT#{chat.chat_id}" and item.get("msg_id") == msg.msg_id
+    )
+    assert stored["feedback"]["kind"] == "up"
+    assert stored["feedback"]["note"] is None
+
+
+def test_put_message_feedback_persists_note_when_supplied(table: FakeTable) -> None:
+    """The optional `note` round-trips into the stored feedback attribute."""
+    from channel import storage
+    from channel.models import FeedbackKind
+
+    chat = create_chat(user_id="u-1", title=None, model_default="m")
+    msg = put_message(chat_id=chat.chat_id, role=MessageRole.ASSISTANT, text="reply", model="m")
+
+    result = storage.put_message_feedback(
+        chat_id=chat.chat_id,
+        msg_id=msg.msg_id,
+        kind=FeedbackKind.DOWN,
+        note="this answer was wrong",
+    )
+
+    assert result is not None
+    assert result.kind is FeedbackKind.DOWN
+    assert result.note == "this answer was wrong"
+
+    stored = next(
+        item
+        for item in table.items.values()
+        if item["PK"] == f"CHAT#{chat.chat_id}" and item.get("msg_id") == msg.msg_id
+    )
+    assert stored["feedback"]["kind"] == "down"
+    assert stored["feedback"]["note"] == "this answer was wrong"
+
+
+def test_put_message_feedback_overwrites_prior_feedback(table: FakeTable) -> None:
+    """Submitting feedback twice keeps only the latest record on the row."""
+    from channel import storage
+    from channel.models import FeedbackKind
+
+    chat = create_chat(user_id="u-1", title=None, model_default="m")
+    msg = put_message(chat_id=chat.chat_id, role=MessageRole.ASSISTANT, text="reply", model="m")
+
+    first = storage.put_message_feedback(
+        chat_id=chat.chat_id, msg_id=msg.msg_id, kind=FeedbackKind.UP, note=None
+    )
+    second = storage.put_message_feedback(
+        chat_id=chat.chat_id, msg_id=msg.msg_id, kind=FeedbackKind.DOWN, note="bad"
+    )
+
+    assert first is not None
+    assert second is not None
+    stored = next(
+        item
+        for item in table.items.values()
+        if item["PK"] == f"CHAT#{chat.chat_id}" and item.get("msg_id") == msg.msg_id
+    )
+    assert stored["feedback"]["kind"] == "down"
+    assert stored["feedback"]["note"] == "bad"
+
+
+def test_put_message_feedback_returns_none_when_message_unknown(
+    table: FakeTable,
+) -> None:
+    """An unknown msg_id surfaces as None (the API layer turns into 404)."""
+    from channel import storage
+    from channel.models import FeedbackKind
+
+    chat = create_chat(user_id="u-1", title=None, model_default="m")
+    # Plant a message so the chat partition isn't empty; ask for a different msg_id.
+    put_message(chat_id=chat.chat_id, role=MessageRole.ASSISTANT, text="reply", model="m")
+
+    result = storage.put_message_feedback(
+        chat_id=chat.chat_id,
+        msg_id="does-not-exist",
+        kind=FeedbackKind.UP,
+        note=None,
+    )
+
+    assert result is None
+
+
+def test_put_message_feedback_paginates_across_50_row_pages(
+    table: FakeTable,
+) -> None:
+    """The lookup loop walks the message rows past the 50-row page boundary.
+
+    Plant 60 messages and request feedback on the last one — the loop
+    must consume the first page (cursor returned), then find the target
+    on the second page. Guards against an off-by-one in the
+    LastEvaluatedKey handling.
+    """
+    from channel import storage
+    from channel.models import FeedbackKind
+
+    chat = create_chat(user_id="u-1", title=None, model_default="m")
+    target_msg = None
+    for i in range(60):
+        msg = put_message(chat_id=chat.chat_id, role=MessageRole.ASSISTANT, text=f"r{i}", model="m")
+        if i == 59:
+            target_msg = msg
+    assert target_msg is not None
+
+    result = storage.put_message_feedback(
+        chat_id=chat.chat_id,
+        msg_id=target_msg.msg_id,
+        kind=FeedbackKind.UP,
+        note=None,
+    )
+
+    assert result is not None
+    stored = next(
+        item
+        for item in table.items.values()
+        if item["PK"] == f"CHAT#{chat.chat_id}" and item.get("msg_id") == target_msg.msg_id
+    )
+    assert stored["feedback"]["kind"] == "up"
+
+
+def test_message_from_item_hydrates_feedback_attribute(table: FakeTable) -> None:
+    """list_messages returns Message objects with feedback populated when present."""
+    from channel import storage
+    from channel.models import FeedbackKind
+
+    chat = create_chat(user_id="u-1", title=None, model_default="m")
+    msg = put_message(chat_id=chat.chat_id, role=MessageRole.ASSISTANT, text="reply", model="m")
+    storage.put_message_feedback(
+        chat_id=chat.chat_id, msg_id=msg.msg_id, kind=FeedbackKind.UP, note=None
+    )
+
+    msgs, _ = list_messages(chat.chat_id, limit=10, cursor=None)
+    assert len(msgs) == 1
+    assert msgs[0].feedback is not None
+    assert msgs[0].feedback.kind is FeedbackKind.UP
+
+
+def test_message_from_item_leaves_feedback_none_when_absent(table: FakeTable) -> None:
+    """A message with no feedback attribute reads back as feedback=None."""
+    chat = create_chat(user_id="u-1", title=None, model_default="m")
+    put_message(chat_id=chat.chat_id, role=MessageRole.ASSISTANT, text="reply", model="m")
+
+    msgs, _ = list_messages(chat.chat_id, limit=10, cursor=None)
+    assert len(msgs) == 1
+    assert msgs[0].feedback is None

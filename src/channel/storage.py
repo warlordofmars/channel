@@ -25,7 +25,7 @@ import boto3
 from boto3.dynamodb.conditions import Attr, Key
 from botocore.exceptions import ClientError
 
-from channel.models import Chat, Message, MessageRole, Prefs
+from channel.models import Chat, Feedback, FeedbackKind, Message, MessageRole, Prefs
 
 _CHAT_INDEX_GSI = "ChatByIdIndex"
 _DEFAULT_TITLE = "New chat"
@@ -366,6 +366,56 @@ def delete_last_assistant_message(chat_id: str) -> Message | None:
     return None
 
 
+def put_message_feedback(
+    *, chat_id: str, msg_id: str, kind: FeedbackKind, note: str | None
+) -> Feedback | None:
+    """Persist a thumbs-up / thumbs-down feedback record on a message row.
+
+    Returns the persisted ``Feedback`` on success, or ``None`` when the
+    message row does not exist under ``chat_id`` — the API layer turns
+    that into a 404. Overwrites any prior feedback for the same message
+    (issue #146).
+
+    The message SK is ``MSG#{created_at}#{msg_id}`` and we don't know
+    ``created_at`` from ``msg_id`` alone, so this paginates the chat's
+    message rows to find the one whose ``msg_id`` matches — the same
+    pattern ``delete_last_assistant_message`` uses for its single-row
+    lookup. Chats can hold many messages; pagination keeps memory
+    bounded.
+    """
+
+    table = _get_table()
+    last_evaluated_key: dict[str, Any] | None = None
+    while True:
+        kwargs: dict[str, Any] = {
+            "KeyConditionExpression": (
+                Key("PK").eq(f"CHAT#{chat_id}") & Key("SK").begins_with("MSG#")
+            ),
+            "Limit": 50,
+        }
+        if last_evaluated_key:
+            kwargs["ExclusiveStartKey"] = last_evaluated_key
+        page = table.query(**kwargs)
+        for item in page.get("Items") or []:
+            if item.get("msg_id") != msg_id:
+                continue
+            feedback = Feedback(
+                kind=kind,
+                note=note,
+                created_at=_now_iso(),
+            )
+            table.update_item(
+                Key={"PK": item["PK"], "SK": item["SK"]},
+                UpdateExpression="SET feedback = :f",
+                ExpressionAttributeValues={":f": feedback.model_dump(mode="json")},
+            )
+            return feedback
+        last_evaluated_key = page.get("LastEvaluatedKey")
+        if not last_evaluated_key:
+            break
+    return None
+
+
 def get_prefs(user_id: str) -> Prefs:
     """Return the user's prefs, or default Prefs if no row exists.
 
@@ -466,6 +516,8 @@ def _chat_from_item(item: dict[str, Any]) -> Chat:
 
 
 def _message_from_item(item: dict[str, Any]) -> Message:
+    feedback_raw = item.get("feedback")
+    feedback = Feedback(**feedback_raw) if feedback_raw else None
     return Message(
         chat_id=item["chat_id"],
         msg_id=item["msg_id"],
@@ -477,4 +529,5 @@ def _message_from_item(item: dict[str, Any]) -> Message:
         artifacts=item.get("artifacts"),
         attachments=item.get("attachments"),
         created_at=item["created_at"],
+        feedback=feedback,
     )
