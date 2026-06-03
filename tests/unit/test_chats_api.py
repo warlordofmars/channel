@@ -386,6 +386,172 @@ def test_post_message_returns_sse_via_strands(
     assert [m.role for m in persisted] == [MessageRole.USER, MessageRole.ASSISTANT]
 
 
+def _stub_storage_for_one_turn(
+    monkeypatch: pytest.MonkeyPatch, *, prefs_effort: str = "Medium"
+) -> Chat:
+    """Minimal storage stubs for a single-turn streaming test."""
+
+    chat = Chat(
+        chat_id="c1",
+        user_id="u-1",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="claude-sonnet-4-6",
+        # Non-zero message_count keeps the auto-titler block from
+        # firing in these tests (it gates on the first round-trip).
+        # Follow-ups are gated by ``prefs.suggest_followups`` + env, not
+        # by message_count — we don't disable them explicitly here
+        # because the FakeAgent's stream is short enough that the
+        # follow-ups call would simply be best-effort and harmless.
+        message_count=2,
+    )
+    monkeypatch.setattr("channel.api.chats.storage.get_chat_by_id", lambda _: chat)
+    monkeypatch.setattr(
+        "channel.api.chats.storage.put_message",
+        lambda **kwargs: Message(
+            chat_id=kwargs["chat_id"],
+            msg_id="m",
+            role=kwargs["role"],
+            text=kwargs["text"],
+            model=kwargs.get("model"),
+            created_at="t",
+        ),
+    )
+    monkeypatch.setattr("channel.api.chats.storage.update_chat_index", lambda **_: None)
+    monkeypatch.setattr(
+        "channel.api.chats.storage.list_messages",
+        lambda *_a, **_kw: ([], None),
+    )
+    monkeypatch.setattr(
+        "channel.api.chats.storage.get_prefs",
+        lambda _user: Prefs(effort=prefs_effort),
+    )
+    return chat
+
+
+def _fake_streaming_agent_factory(captured: dict[str, Any]):
+    """Return a build_agent stub that records its kwargs and yields a tiny stream."""
+
+    async def fake_stream(self, prompt):
+        yield {"event": {"contentBlockDelta": {"delta": {"text": "hi"}}}}
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+        yield {"event": {"metadata": {"usage": {"inputTokens": 1, "outputTokens": 1}}}}
+
+    class FakeAgent:
+        stream_async = fake_stream
+
+    def factory(**kwargs):
+        captured["build_agent_kwargs"] = kwargs
+        return FakeAgent()
+
+    return factory
+
+
+def test_post_message_forwards_payload_effort_to_build_agent(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ``effort`` field on the request body reaches ``build_agent``."""
+
+    _stub_storage_for_one_turn(monkeypatch, prefs_effort="Medium")
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        "channel.api.chats.build_agent",
+        _fake_streaming_agent_factory(captured),
+    )
+
+    response = client.post(
+        "/api/chats/c1/messages",
+        json={"message": "hi", "model": "claude-sonnet-4-6", "effort": "Low"},
+    )
+    assert response.status_code == 200
+    assert captured["build_agent_kwargs"]["effort"] == "Low"
+
+
+def test_post_message_falls_back_to_prefs_effort_when_payload_omits_it(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the request has no ``effort``, the saved pref is used."""
+
+    _stub_storage_for_one_turn(monkeypatch, prefs_effort="High")
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        "channel.api.chats.build_agent",
+        _fake_streaming_agent_factory(captured),
+    )
+
+    response = client.post(
+        "/api/chats/c1/messages",
+        json={"message": "hi", "model": "claude-sonnet-4-6"},
+    )
+    assert response.status_code == 200
+    assert captured["build_agent_kwargs"]["effort"] == "High"
+
+
+def test_regenerate_forwards_payload_effort_to_build_agent(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regenerate also plumbs effort through (RegenerateRequest accepts it)."""
+
+    chat = Chat(
+        chat_id="c1",
+        user_id="u-1",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="claude-sonnet-4-6",
+        message_count=4,
+    )
+    monkeypatch.setattr("channel.api.chats.storage.get_chat_by_id", lambda _: chat)
+    monkeypatch.setattr(
+        "channel.api.chats.storage.delete_last_assistant_message",
+        lambda _cid: None,
+    )
+    monkeypatch.setattr(
+        "channel.api.chats.storage.put_message",
+        lambda **kwargs: Message(
+            chat_id=kwargs["chat_id"],
+            msg_id="m",
+            role=kwargs["role"],
+            text=kwargs["text"],
+            model=kwargs.get("model"),
+            created_at="t",
+        ),
+    )
+    monkeypatch.setattr("channel.api.chats.storage.update_chat_index", lambda **_: None)
+    user_msg = Message(
+        chat_id="c1",
+        msg_id="u",
+        role=MessageRole.USER,
+        text="prior question",
+        model=None,
+        created_at="t",
+    )
+    monkeypatch.setattr(
+        "channel.api.chats.storage.list_messages",
+        lambda *_a, **_kw: ([user_msg], None),
+    )
+    monkeypatch.setattr(
+        "channel.api.chats.storage.get_prefs",
+        lambda _user: Prefs(effort="Medium"),
+    )
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        "channel.api.chats.build_agent",
+        _fake_streaming_agent_factory(captured),
+    )
+
+    response = client.post(
+        "/api/chats/c1/regenerate",
+        json={"model": "claude-sonnet-4-6", "effort": "High"},
+    )
+    assert response.status_code == 200
+    assert captured["build_agent_kwargs"]["effort"] == "High"
+
+
 # ---------------------------------------------------------------------------
 # Phase 7d auto-title
 # ---------------------------------------------------------------------------

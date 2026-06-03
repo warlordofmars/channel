@@ -11,6 +11,7 @@ from channel.agents.chat_agent import (
     DEFAULT_MAX_TOKENS,
     DEFAULT_SYSTEM_PROMPT,
     build_agent,
+    max_tokens_for_effort,
     resolve_model_id,
 )
 
@@ -41,6 +42,113 @@ def test_default_system_prompt_is_non_empty_string():
 
 def test_default_max_tokens_is_positive_int():
     assert isinstance(DEFAULT_MAX_TOKENS, int) and DEFAULT_MAX_TOKENS > 0
+
+
+@pytest.mark.parametrize(
+    "effort, expected",
+    [
+        ("low", 1024),
+        ("medium", 4096),
+        ("high", 16384),
+        ("max", 32768),
+        # Case-insensitive — UI ships capitalized values.
+        ("Low", 1024),
+        ("HIGH", 16384),
+    ],
+)
+def test_max_tokens_for_effort_known_tiers(effort, expected):
+    assert max_tokens_for_effort(effort) == expected
+
+
+def test_max_tokens_for_effort_none_falls_back_to_default():
+    assert max_tokens_for_effort(None) == DEFAULT_MAX_TOKENS
+
+
+def test_max_tokens_for_effort_unknown_value_falls_back_to_default():
+    # Stale clients or future tier names must not error — they get the
+    # default budget so the response still streams.
+    assert max_tokens_for_effort("turbo") == DEFAULT_MAX_TOKENS
+
+
+def _patch_strands(monkeypatch, captured):
+    """Common stub for build_agent's Strands + memory dependencies."""
+
+    class FakeBedrockModel:
+        def __init__(self, **kwargs):
+            captured["bedrock_kwargs"] = kwargs
+
+    class FakeAgent:
+        def __init__(self, model, system_prompt=None, **kwargs):
+            captured["agent_model"] = model
+
+    monkeypatch.setattr("channel.agents.chat_agent.BedrockModel", FakeBedrockModel)
+    monkeypatch.setattr("channel.agents.chat_agent.Agent", FakeAgent)
+    monkeypatch.setattr("channel.agents.chat_agent.get_or_create_memory", lambda env: "mem-test")
+    monkeypatch.setattr("channel.agents.chat_agent.AgentCoreMemoryHook", lambda **kw: object())
+    monkeypatch.setattr("channel.agents.chat_agent.AgentCoreRecallHook", lambda **kw: object())
+
+
+def test_build_agent_with_effort_low_sets_max_tokens_1024(monkeypatch):
+    captured: dict[str, object] = {}
+    _patch_strands(monkeypatch, captured)
+    build_agent(
+        model_id="claude-sonnet-4-6",
+        user_id="u-1",
+        chat_id="c-1",
+        effort="low",
+    )
+    assert captured["bedrock_kwargs"]["max_tokens"] == 1024
+
+
+def test_build_agent_with_effort_high_sets_max_tokens_16384(monkeypatch):
+    captured: dict[str, object] = {}
+    _patch_strands(monkeypatch, captured)
+    build_agent(
+        model_id="claude-sonnet-4-6",
+        user_id="u-1",
+        chat_id="c-1",
+        effort="high",
+    )
+    assert captured["bedrock_kwargs"]["max_tokens"] == 16384
+
+
+def test_build_agent_with_effort_max_sets_max_tokens_32768(monkeypatch):
+    captured: dict[str, object] = {}
+    _patch_strands(monkeypatch, captured)
+    build_agent(
+        model_id="claude-sonnet-4-6",
+        user_id="u-1",
+        chat_id="c-1",
+        effort="Max",
+    )
+    assert captured["bedrock_kwargs"]["max_tokens"] == 32768
+
+
+def test_build_agent_effort_overrides_explicit_max_tokens(monkeypatch):
+    """When both are set, ``effort`` wins — it's the higher-level intent."""
+
+    captured: dict[str, object] = {}
+    _patch_strands(monkeypatch, captured)
+    build_agent(
+        model_id="claude-sonnet-4-6",
+        user_id="u-1",
+        chat_id="c-1",
+        max_tokens=999,
+        effort="low",
+    )
+    assert captured["bedrock_kwargs"]["max_tokens"] == 1024
+
+
+def test_build_agent_without_effort_keeps_explicit_max_tokens(monkeypatch):
+    captured: dict[str, object] = {}
+    _patch_strands(monkeypatch, captured)
+    build_agent(
+        model_id="claude-sonnet-4-6",
+        user_id="u-1",
+        chat_id="c-1",
+        max_tokens=2048,
+    )
+    assert captured["bedrock_kwargs"]["max_tokens"] == 2048
 
 
 def test_build_agent_constructs_strands_agent_with_bedrock_model(monkeypatch):

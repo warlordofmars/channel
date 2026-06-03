@@ -267,6 +267,7 @@ async def _stream_bedrock_reply(
     state: dict[str, Any] | None = None,
     persist_user: bool = True,
     index_delta_count: int = 2,
+    effort: str | None = None,
 ) -> Any:
     """Persist the user turn, stream Strands events, persist the assistant turn.
 
@@ -282,6 +283,10 @@ async def _stream_bedrock_reply(
     is the net change to ``message_count`` on the chat-index row — 2 for a
     fresh send (user + assistant), 0 for regenerate (deleted assistant +
     new assistant cancel out).
+
+    ``effort`` overrides the per-turn ``max_tokens`` budget on the
+    Strands BedrockModel (issue #154). When omitted, the user's saved
+    pref tier applies.
     """
 
     state = state if state is not None else {}
@@ -293,8 +298,11 @@ async def _stream_bedrock_reply(
     was_first_round_trip = chat.message_count == 0
     # Load prefs once at stream start. Used by the follow-ups block
     # after the assistant turn lands; defaults are applied at the
-    # storage layer when no row exists.
+    # storage layer when no row exists. Per-request ``effort`` overrides
+    # the saved pref so the segmented control in the Composer takes
+    # priority over the Customize default.
     prefs = storage.get_prefs(claims["sub"])
+    effective_effort = effort if effort is not None else prefs.effort
 
     # Load the chat's stored history BEFORE persisting the new user
     # message so the loaded list is the true prior context. For
@@ -322,6 +330,7 @@ async def _stream_bedrock_reply(
         user_id=claims["sub"],
         chat_id=chat.chat_id,
         prior_messages=prior_messages,
+        effort=effective_effort,
     )
     accumulated: list[str] = []
     stop_reason = "end_turn"
@@ -510,6 +519,7 @@ async def post_message(
             model=model,
             claims=claims,
             state=state,
+            effort=payload.effort,
         ):
             yield chunk
         if idempotency_key and state.get("assistant_msg_id"):
@@ -561,6 +571,7 @@ async def regenerate(
             claims=claims,
             persist_user=False,
             index_delta_count=0,
+            effort=payload.effort,
         ),
         media_type="text/event-stream",
     )
