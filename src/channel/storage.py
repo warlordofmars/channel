@@ -24,6 +24,7 @@ from typing import Any
 import boto3
 from boto3.dynamodb.conditions import Attr, Key
 from botocore.exceptions import ClientError
+from pydantic import ValidationError
 
 from channel.models import Chat, Feedback, FeedbackKind, Message, MessageRole, Prefs
 
@@ -546,10 +547,12 @@ def _message_from_item(item: dict[str, Any]) -> Message:
         # Defensive hydration: a stale or partial schema (e.g. missing
         # required field, unknown kind value) should NOT take down the
         # whole list_messages call — surface as no-feedback instead so
-        # the rest of the chat is still readable.
+        # the rest of the chat is still readable. Narrowly catch
+        # validation / type errors so genuine programmer errors elsewhere
+        # in this function still propagate up.
         try:
             feedback = Feedback(**feedback_raw)
-        except Exception:
+        except (ValidationError, TypeError):
             feedback = None
     else:
         feedback = None

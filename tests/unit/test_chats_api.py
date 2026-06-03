@@ -2066,12 +2066,20 @@ def test_submit_feedback_422s_on_missing_kind(
 
 def test_submit_feedback_requires_auth() -> None:
     """Without the auth override, the endpoint requires a mgmt JWT."""
-    # Build a fresh TestClient without any dependency override so the
-    # real require_mgmt_user runs and rejects the unauthenticated call.
+    # Snapshot + restore overrides so a parallel-randomized test order
+    # can't see this test's mid-flight clear and leak across cases.
+    # The `client` fixture's autouse teardown already clears overrides
+    # per-test; this restoration is defence-in-depth for any test that
+    # constructs `app` directly without going through that fixture.
+    saved_overrides = dict(app.dependency_overrides)
     app.dependency_overrides.clear()
-    unauth = TestClient(app)
-    resp = unauth.post(
-        "/api/chats/c1/messages/m1/feedback",
-        json={"kind": "up", "note": None},
-    )
-    assert resp.status_code in {401, 403}
+    try:
+        unauth = TestClient(app)
+        resp = unauth.post(
+            "/api/chats/c1/messages/m1/feedback",
+            json={"kind": "up", "note": None},
+        )
+        assert resp.status_code in {401, 403}
+    finally:
+        app.dependency_overrides.clear()
+        app.dependency_overrides.update(saved_overrides)
