@@ -117,9 +117,15 @@ def test_presign_happy_path_returns_url_and_token(client: TestClient, fake_s3: _
     assert out["required_headers"]["x-amz-tagging"] == "unreferenced=1"
     assert out["required_headers"]["x-amz-server-side-encryption"] == "aws:kms"
     # Decoded presign_token carries the claims finalize will verify
+    from channel.auth.tokens import ISSUER
+
     claim = jose_jwt.decode(
-        out["presign_token"], os.environ["STARTER_JWT_SECRET"], algorithms=["HS256"]
+        out["presign_token"],
+        os.environ["STARTER_JWT_SECRET"],
+        algorithms=["HS256"],
+        issuer=ISSUER,
     )
+    assert claim["iss"] == ISSUER
     assert claim["typ"] == "att_presign"
     assert claim["sub"] == "u-1"
     assert claim["att_id"] == out["att_id"]
@@ -127,6 +133,7 @@ def test_presign_happy_path_returns_url_and_token(client: TestClient, fake_s3: _
     assert claim["size_bytes"] == 12345
     assert claim["s3_bucket"] == "channel-attachments-test"
     assert claim["s3_key"] == params["Key"]
+    assert "iat" in claim
 
 
 def test_presign_rejects_unknown_mime(client: TestClient, fake_s3: _FakeS3) -> None:
@@ -196,7 +203,10 @@ def test_presign_accepts_each_allowlisted_mime(client: TestClient, fake_s3: _Fak
 def _good_claim(*, sub: str = "u-1", **overrides: Any) -> str:
     """Build a valid presign-claim JWT for finalize tests."""
 
+    from channel.auth.tokens import ISSUER
+
     claim: dict[str, Any] = {
+        "iss": ISSUER,
         "typ": "att_presign",
         "sub": sub,
         "att_id": "att-fin-1",
@@ -205,6 +215,7 @@ def _good_claim(*, sub: str = "u-1", **overrides: Any) -> str:
         "size_bytes": 12345,
         "s3_bucket": "channel-attachments-test",
         "s3_key": f"attachments/user/{sub}/att-fin-1",
+        "iat": int(time.time()),
         "exp": int(time.time()) + 60,
     }
     claim.update(overrides)
@@ -272,10 +283,18 @@ def test_finalize_rejects_cross_user_token(
 def test_finalize_rejects_wrong_token_type(
     client: TestClient, fake_s3: _FakeS3, stub_put_attachment: list[Any]
 ) -> None:
-    """An mgmt-typed JWT must not be redeemable as a presign token."""
+    """An mgmt-typed JWT (same issuer + secret, wrong typ) must not be
+    redeemable as a presign token."""
+
+    from channel.auth.tokens import ISSUER
 
     token = jose_jwt.encode(
-        {"typ": "mgmt", "sub": "u-1", "exp": int(time.time()) + 60},
+        {
+            "iss": ISSUER,
+            "typ": "mgmt",
+            "sub": "u-1",
+            "exp": int(time.time()) + 60,
+        },
         os.environ["STARTER_JWT_SECRET"],
         algorithm="HS256",
     )
@@ -361,8 +380,11 @@ def test_finalize_swallows_tag_flip_failure(
 def test_finalize_rejects_expired_token(
     client: TestClient, fake_s3: _FakeS3, stub_put_attachment: list[Any]
 ) -> None:
+    from channel.auth.tokens import ISSUER
+
     expired = jose_jwt.encode(
         {
+            "iss": ISSUER,
             "typ": "att_presign",
             "sub": "u-1",
             "att_id": "att-fin-1",
@@ -383,6 +405,35 @@ def test_finalize_rejects_expired_token(
     assert resp.status_code == 401
 
 
+def test_finalize_rejects_wrong_issuer_token(
+    client: TestClient, fake_s3: _FakeS3, stub_put_attachment: list[Any]
+) -> None:
+    """A token signed with the correct secret + typ but a foreign issuer
+    must be rejected — guards against secret reuse across services."""
+
+    token = jose_jwt.encode(
+        {
+            "iss": "https://other.example.com",
+            "typ": "att_presign",
+            "sub": "u-1",
+            "att_id": "att-fin-1",
+            "name": "spec.pdf",
+            "mime": "application/pdf",
+            "size_bytes": 12345,
+            "s3_bucket": "channel-attachments-test",
+            "s3_key": "attachments/user/u-1/att-fin-1",
+            "exp": int(time.time()) + 60,
+        },
+        os.environ["STARTER_JWT_SECRET"],
+        algorithm="HS256",
+    )
+    resp = client.post(
+        "/api/attachments",
+        json={"presign_token": token, "checksum_sha256": "x"},
+    )
+    assert resp.status_code == 401
+
+
 # ---- router mount ----------------------------------------------
 
 
@@ -392,3 +443,27 @@ def test_attachments_router_is_mounted(client: TestClient) -> None:
     resp = client.post("/api/attachments/presign", json={})
     # Should be a validation error (422), NOT a 404 not-found.
     assert resp.status_code != 404
+
+
+def test_attachments_endpoints_require_auth() -> None:
+    """Both endpoints must reject unauthenticated requests — guards
+    against the dependency being accidentally removed in a refactor.
+    Mirrors ``test_api_prefs.py:test_get_my_prefs_requires_auth``."""
+
+    # No dependency override — request is unauthenticated.
+    saved = dict(app.dependency_overrides)
+    app.dependency_overrides.clear()
+    try:
+        unauth = TestClient(app)
+        for path in ("/api/attachments/presign", "/api/attachments"):
+            resp = unauth.post(
+                path,
+                json={"name": "x", "mime": "application/pdf", "size_bytes": 1},
+            )
+            # HTTPBearer returns 403 when no Authorization header is supplied;
+            # decode failure returns 401. Either is "rejected for missing auth".
+            assert resp.status_code in (401, 403), (
+                f"{path} returned {resp.status_code} for unauthenticated request"
+            )
+    finally:
+        app.dependency_overrides.update(saved)

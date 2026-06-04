@@ -43,7 +43,7 @@ from pydantic import BaseModel, Field
 
 from channel import storage
 from channel.api._auth import require_mgmt_user
-from channel.auth.tokens import JWT_ALGORITHM, _jwt_secret
+from channel.auth.tokens import ISSUER, JWT_ALGORITHM, _jwt_secret
 from channel.models import Attachment
 from channel.storage import _get_s3_client
 
@@ -119,8 +119,10 @@ async def presign(
         ExpiresIn=PRESIGN_TTL_SECONDS,
     )
 
+    now = int(time.time())
     presign_token = jwt.encode(
         {
+            "iss": ISSUER,
             "typ": PRESIGN_TOKEN_TYPE,
             "sub": user_id,
             "att_id": att_id,
@@ -129,7 +131,8 @@ async def presign(
             "size_bytes": payload.size_bytes,
             "s3_bucket": bucket,
             "s3_key": key,
-            "exp": int(time.time()) + PRESIGN_TTL_SECONDS,
+            "iat": now,
+            "exp": now + PRESIGN_TTL_SECONDS,
         },
         _jwt_secret(),
         algorithm=JWT_ALGORITHM,
@@ -157,7 +160,12 @@ async def finalize(
     """Verify the upload landed, write the canonical row, flip the tag."""
 
     try:
-        claim = jwt.decode(payload.presign_token, _jwt_secret(), algorithms=[JWT_ALGORITHM])
+        claim = jwt.decode(
+            payload.presign_token,
+            _jwt_secret(),
+            algorithms=[JWT_ALGORITHM],
+            issuer=ISSUER,
+        )
     except JWTError as exc:
         raise HTTPException(status_code=401, detail="Invalid presign token") from exc
 
@@ -179,7 +187,10 @@ async def finalize(
             # Object never made it to S3 (upload aborted or expired URL).
             raise HTTPException(status_code=410, detail="Uploaded object not found") from exc
         # Permissions / transient / unknown S3 error — surface as upstream.
-        raise HTTPException(status_code=502, detail=f"S3 error: {code}") from exc
+        # Mirror storage.verify_attachment_object's fallback so an empty
+        # code doesn't render the trailing-colon "S3 error: ".
+        detail = f"S3 error: {code}" if code else "S3 error"
+        raise HTTPException(status_code=502, detail=detail) from exc
 
     if head.get("ContentLength") != claim["size_bytes"]:
         # Hard reject — client could otherwise presign for 1KB and upload 20MB.
