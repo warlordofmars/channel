@@ -1152,6 +1152,25 @@ def test_delete_attachment_is_idempotent(table: FakeTable) -> None:
     storage.delete_attachment(user_id="u-1", att_id="never-existed")
 
 
+def test_mark_attachment_referenced_stamps_iso_timestamp(table: FakeTable) -> None:
+    """#176 — when a message references an attachment, stamp
+    ``referenced_at`` so the lifecycle rule stops eyeing the S3
+    object for GC. Issued via UpdateItem so the existing row's other
+    attributes (name, mime, etc.) stay intact."""
+
+    from channel import storage
+
+    storage.put_attachment(_attachment())
+    storage.mark_attachment_referenced(user_id="u-1", att_id="att-1")
+
+    stored = table.items[("USER#u-1", "ATTACHMENT#att-1")]
+    assert "referenced_at" in stored
+    # ISO-8601 with microseconds — matches _now_iso()'s shape
+    assert stored["referenced_at"].endswith("+00:00") or stored["referenced_at"].endswith("Z")
+    # Other fields preserved
+    assert stored["name"] == "spec.pdf"
+
+
 # ---- S3 verify helper -------------------------------------------
 
 

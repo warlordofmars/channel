@@ -81,6 +81,23 @@ def sse_title_suggested(*, chat_id: str, title: str) -> bytes:
     return _sse({"type": "title_suggested", "chat_id": chat_id, "title": title})
 
 
+def sse_attachment_error(*, attachment_id: str, filename: str, reason: str) -> bytes:
+    """Emit an ``attachment_error`` SSE event (#176).
+
+    Surfaces fetch-time S3 failures (object not found / inaccessible)
+    to the SPA so it can prompt the user to re-upload. Distinct from
+    tool failures because the user fix differs: re-upload vs. retry.
+    """
+    return _sse(
+        {
+            "type": "attachment_error",
+            "attachment_id": attachment_id,
+            "filename": filename,
+            "reason": reason,
+        }
+    )
+
+
 def sse_follow_ups_suggested(*, chat_id: str, message_id: str, suggestions: list[str]) -> bytes:
     """Emit a ``follow_ups_suggested`` SSE event.
 

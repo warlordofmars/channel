@@ -2227,3 +2227,439 @@ def test_delete_chat_swallows_attachment_cascade_exception(
     resp = client.delete("/api/chats/c-cascade-4")
     assert resp.status_code == 204
     record.assert_awaited_once_with(success=False)
+
+
+# ----------------------------------------------------------------
+# Attachment forwarding on send + regenerate (#176)
+# ----------------------------------------------------------------
+
+
+def _att_model(**overrides: Any) -> Any:
+    """Build an Attachment for the send-path stubs."""
+
+    from channel.models import Attachment
+
+    base = {
+        "id": "att-1",
+        "user_id": "u-1",
+        "name": "spec.pdf",
+        "mime": "application/pdf",
+        "size_bytes": 5_242_880,  # 5.0 MB
+        "s3_key": "attachments/user/u-1/att-1",
+        "s3_bucket": "channel-attachments-test",
+        "checksum_sha256": "sha",
+        "created_at": "2026-06-04T00:00:00Z",
+    }
+    base.update(overrides)
+    return Attachment(**base)
+
+
+def _stub_send_path_for_attachments(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    chat: Chat,
+    owned: dict[str, Any],
+    verify: dict[str, tuple[bool, str | None]] | None = None,
+) -> dict[str, list]:
+    """Common stubs for the send path with attachments.
+
+    Returns a capture dict where the agent's received prompt + the
+    persisted message attachments + the mark_attachment_referenced
+    call ids land for assertions.
+    """
+
+    capture: dict[str, list] = {
+        "agent_prompts": [],
+        "persisted": [],
+        "referenced": [],
+    }
+
+    monkeypatch.setattr("channel.api.chats.storage.get_chat_by_id", lambda _: chat)
+    monkeypatch.setattr("channel.api.chats.storage.list_messages", lambda *_a, **_kw: ([], None))
+    monkeypatch.setattr("channel.api.chats.storage.update_chat_index", lambda **_: None)
+
+    # Resolve attachments by id — return None for ids not in `owned`.
+    monkeypatch.setattr(
+        "channel.api.chats.storage.get_attachment",
+        lambda *, user_id, att_id: owned.get(att_id),
+    )
+
+    # HEAD-verify outcomes — default to success for every attachment
+    # owned by the caller.
+    verify_map = verify or {a.id: (True, None) for a in owned.values()}
+    monkeypatch.setattr(
+        "channel.api.chats.storage.verify_attachment_object",
+        lambda att: verify_map[att.id],
+    )
+
+    monkeypatch.setattr(
+        "channel.api.chats.storage.mark_attachment_referenced",
+        lambda *, user_id, att_id: capture["referenced"].append(att_id),
+    )
+
+    def fake_put(**kwargs: Any) -> Message:
+        msg = Message(
+            chat_id=kwargs["chat_id"],
+            msg_id=f"m-{len(capture['persisted'])}",
+            role=kwargs["role"],
+            text=kwargs["text"],
+            attachments=kwargs.get("attachments"),
+            model=kwargs.get("model"),
+            input_tokens=kwargs.get("input_tokens"),
+            output_tokens=kwargs.get("output_tokens"),
+            created_at="t",
+        )
+        capture["persisted"].append(msg)
+        return msg
+
+    monkeypatch.setattr("channel.api.chats.storage.put_message", fake_put)
+
+    async def fake_stream(self, prompt):
+        capture["agent_prompts"].append(prompt)
+        yield {"event": {"contentBlockDelta": {"delta": {"text": "ok"}}}}
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+        yield {"event": {"metadata": {"usage": {"inputTokens": 1, "outputTokens": 1}}}}
+
+    class FakeAgent:
+        stream_async = fake_stream
+
+    monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
+    return capture
+
+
+def test_post_message_with_attachments_builds_labeled_content_blocks(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two attachments (PDF + PNG) produce a 5-element content-block list
+    in user-supplied order: header + document + header + image + text."""
+
+    chat = Chat(
+        chat_id="c-att-1",
+        user_id="u-1",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="claude-sonnet-4-6",
+    )
+    owned = {
+        "att-pdf": _att_model(
+            id="att-pdf",
+            name="spec.pdf",
+            mime="application/pdf",
+            size_bytes=5_242_880,
+            s3_key="attachments/user/u-1/att-pdf",
+        ),
+        "att-png": _att_model(
+            id="att-png",
+            name="screenshot.png",
+            mime="image/png",
+            size_bytes=204_800,
+            s3_key="attachments/user/u-1/att-png",
+        ),
+    }
+    cap = _stub_send_path_for_attachments(monkeypatch, chat=chat, owned=owned)
+
+    response = client.post(
+        "/api/chats/c-att-1/messages",
+        json={
+            "message": "Compare these",
+            "attachments": [{"id": "att-pdf"}, {"id": "att-png"}],
+        },
+    )
+    assert response.status_code == 200
+
+    # Agent saw a content-block list (not a bare string).
+    assert len(cap["agent_prompts"]) == 1
+    blocks = cap["agent_prompts"][0]
+    assert isinstance(blocks, list)
+    # Expected: label + document + label + image + user text
+    assert len(blocks) == 5
+    assert blocks[0] == {"text": "[attachment_1: spec.pdf, 5.0MB, PDF]"}
+    assert blocks[1]["document"]["format"] == "pdf"
+    assert blocks[1]["document"]["name"] == "spec.pdf"
+    assert blocks[1]["document"]["source"]["s3Location"]["uri"] == (
+        "s3://channel-attachments-test/attachments/user/u-1/att-pdf"
+    )
+    assert blocks[2] == {"text": "[attachment_2: screenshot.png, 0.2MB, image]"}
+    assert blocks[3]["image"]["format"] == "png"
+    assert blocks[3]["image"]["source"]["s3Location"]["uri"] == (
+        "s3://channel-attachments-test/attachments/user/u-1/att-png"
+    )
+    assert blocks[4] == {"text": "Compare these"}
+
+
+def test_post_message_attachments_snapshot_persists_on_message_row(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The user message row carries denormalised
+    [{id, name, mime, size_bytes}] — message rendering needs no join."""
+
+    chat = Chat(
+        chat_id="c-att-2",
+        user_id="u-1",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="claude-sonnet-4-6",
+    )
+    owned = {
+        "att-pdf": _att_model(id="att-pdf", name="x.pdf", mime="application/pdf", size_bytes=1),
+    }
+    cap = _stub_send_path_for_attachments(monkeypatch, chat=chat, owned=owned)
+
+    client.post(
+        "/api/chats/c-att-2/messages",
+        json={"message": "hi", "attachments": [{"id": "att-pdf"}]},
+    )
+    user_msg = cap["persisted"][0]
+    assert user_msg.attachments == [
+        {"id": "att-pdf", "name": "x.pdf", "mime": "application/pdf", "size_bytes": 1}
+    ]
+
+
+def test_post_message_marks_verified_attachments_referenced(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``mark_attachment_referenced`` fires once per successfully-verified
+    attachment so the lifecycle rule stops eyeing the S3 object for GC."""
+
+    chat = Chat(
+        chat_id="c-att-3",
+        user_id="u-1",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="claude-sonnet-4-6",
+    )
+    owned = {
+        "att-a": _att_model(id="att-a"),
+        "att-b": _att_model(id="att-b"),
+    }
+    cap = _stub_send_path_for_attachments(monkeypatch, chat=chat, owned=owned)
+
+    client.post(
+        "/api/chats/c-att-3/messages",
+        json={"message": "hi", "attachments": [{"id": "att-a"}, {"id": "att-b"}]},
+    )
+    assert sorted(cap["referenced"]) == ["att-a", "att-b"]
+
+
+def test_post_message_rejects_unowned_attachment_with_400(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An attachment id with no canonical row (or owned by a different
+    user) is a hard 400 — no partial persist."""
+
+    chat = Chat(
+        chat_id="c-att-4",
+        user_id="u-1",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="m",
+    )
+    cap = _stub_send_path_for_attachments(monkeypatch, chat=chat, owned={})
+
+    resp = client.post(
+        "/api/chats/c-att-4/messages",
+        json={"message": "hi", "attachments": [{"id": "ghost"}]},
+    )
+    assert resp.status_code == 400
+    # No user turn should have been persisted.
+    assert cap["persisted"] == []
+    assert cap["agent_prompts"] == []
+
+
+def test_post_message_failed_verify_emits_failure_marker_and_sse(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When verify_attachment_object returns (False, reason) for one
+    attachment, the others still go through. A failure-marker text
+    block replaces the would-be media block, and an attachment_error
+    SSE event lands in the stream so the SPA can prompt re-upload."""
+
+    chat = Chat(
+        chat_id="c-att-5",
+        user_id="u-1",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="claude-sonnet-4-6",
+    )
+    owned = {
+        "att-ok": _att_model(id="att-ok", name="ok.pdf", mime="application/pdf", size_bytes=1024),
+        "att-gone": _att_model(
+            id="att-gone", name="gone.pdf", mime="application/pdf", size_bytes=1024
+        ),
+    }
+    verify = {
+        "att-ok": (True, None),
+        "att-gone": (False, "S3 object not found"),
+    }
+    cap = _stub_send_path_for_attachments(monkeypatch, chat=chat, owned=owned, verify=verify)
+
+    resp = client.post(
+        "/api/chats/c-att-5/messages",
+        json={
+            "message": "two files",
+            "attachments": [{"id": "att-ok"}, {"id": "att-gone"}],
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.text
+    assert '"type": "attachment_error"' in body
+    assert '"attachment_id": "att-gone"' in body
+    assert "S3 object not found" in body
+
+    # Content blocks: ok → label + doc; gone → label-with-FAILED only.
+    blocks = cap["agent_prompts"][0]
+    assert any("[attachment_1: ok.pdf" in (b.get("text") or "") for b in blocks)
+    assert any(
+        "[attachment_2: gone.pdf — FAILED: S3 object not found]" in (b.get("text") or "")
+        for b in blocks
+    )
+    # The failed attachment must NOT have a media block.
+    failed_media = [b for b in blocks if "document" in b and b["document"]["name"] == "gone.pdf"]
+    assert failed_media == []
+    # Only the verified attachment is marked referenced.
+    assert cap["referenced"] == ["att-ok"]
+
+
+def test_post_message_with_empty_attachments_list_acts_like_none(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty `attachments: []` array should behave identically to no
+    attachments — agent receives a plain string, no extra DDB calls."""
+
+    chat = Chat(
+        chat_id="c-att-6",
+        user_id="u-1",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="m",
+    )
+    cap = _stub_send_path_for_attachments(monkeypatch, chat=chat, owned={})
+
+    resp = client.post(
+        "/api/chats/c-att-6/messages",
+        json={"message": "no files", "attachments": []},
+    )
+    assert resp.status_code == 200
+    # Agent receives the bare string, not a content-block list.
+    assert cap["agent_prompts"][0] == "no files"
+    assert cap["referenced"] == []
+
+
+def test_post_message_rejects_attachment_entry_missing_id_with_400(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An attachment entry that's not a dict, or a dict without an `id`
+    key, is a structurally invalid request — 400."""
+
+    chat = Chat(
+        chat_id="c-att-7",
+        user_id="u-1",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="claude-sonnet-4-6",
+    )
+    _stub_send_path_for_attachments(monkeypatch, chat=chat, owned={})
+
+    resp = client.post(
+        "/api/chats/c-att-7/messages",
+        json={"message": "hi", "attachments": [{}]},
+    )
+    assert resp.status_code == 400
+
+
+def test_post_message_unsupported_mime_falls_through_as_failure_marker(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A canonical row whose MIME isn't in either format map (defensive
+    against an upstream allowlist leak from #175) emits a labeled
+    FAILED block instead of a media block — the model can voice the
+    gap rather than silently dropping."""
+
+    chat = Chat(
+        chat_id="c-att-8",
+        user_id="u-1",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="claude-sonnet-4-6",
+    )
+    owned = {
+        "att-weird": _att_model(
+            id="att-weird",
+            name="strange.bin",
+            mime="application/x-weird",
+            size_bytes=1024,
+        ),
+    }
+    cap = _stub_send_path_for_attachments(monkeypatch, chat=chat, owned=owned)
+
+    resp = client.post(
+        "/api/chats/c-att-8/messages",
+        json={"message": "weird file", "attachments": [{"id": "att-weird"}]},
+    )
+    assert resp.status_code == 200
+    body = resp.text
+    assert '"type": "attachment_error"' in body
+    assert "unsupported mime application/x-weird" in body
+
+    blocks = cap["agent_prompts"][0]
+    # Failure marker text block + user text — no media block for the
+    # unsupported MIME.
+    assert any("FAILED: unsupported mime" in (b.get("text") or "") for b in blocks)
+    assert not any("document" in b or "image" in b for b in blocks)
+    # Not marked referenced since verify didn't pass for it.
+    assert cap["referenced"] == []
+
+
+def test_regenerate_replays_attachments_from_prior_user_turn(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regenerate must rebuild content blocks from the prior user
+    message's `attachments` snapshot — otherwise the model loses
+    multimodal context on the second-shot reply."""
+
+    chat = Chat(
+        chat_id="c-regen-1",
+        user_id="u-1",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="claude-sonnet-4-6",
+    )
+    owned = {
+        "att-r": _att_model(id="att-r", name="r.pdf", mime="application/pdf", size_bytes=1),
+    }
+    cap = _stub_send_path_for_attachments(monkeypatch, chat=chat, owned=owned)
+
+    # The "prior user turn" carries the denormalised snapshot.
+    prior_user = Message(
+        chat_id="c-regen-1",
+        msg_id="m-prev",
+        role=MessageRole.USER,
+        text="redo this",
+        attachments=[{"id": "att-r", "name": "r.pdf", "mime": "application/pdf", "size_bytes": 1}],
+        created_at="t",
+    )
+    monkeypatch.setattr(
+        "channel.api.chats.storage.list_messages",
+        lambda *_a, **_kw: ([prior_user], None),
+    )
+    monkeypatch.setattr(
+        "channel.api.chats.storage.delete_last_assistant_message", lambda *_a, **_kw: None
+    )
+
+    resp = client.post("/api/chats/c-regen-1/regenerate", json={})
+    assert resp.status_code == 200
+
+    # Strands received a content-block list — not a bare string.
+    blocks = cap["agent_prompts"][0]
+    assert isinstance(blocks, list)
+    assert any("[attachment_1: r.pdf" in (b.get("text") or "") for b in blocks)
+    assert any(b.get("document", {}).get("name") == "r.pdf" for b in blocks)
