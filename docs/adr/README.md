@@ -33,3 +33,5 @@ What are the trade-offs, follow-on work, or constraints this decision creates?
 | [0006](0006-skills-system.md) | Skills system for agent-loaded reference material | Accepted |
 | [0007](0007-orchestrator-protocol-codification.md) | Codify orchestrator protocols surfaced during skills epic | Accepted |
 | [0008](0008-issue-worker-push-discipline.md) | Issue-worker push discipline against wholesale-push damage | Accepted |
+| [0009](0009-unified-context-budget.md) | Unified context budget across history, recall, attachments, and tool results | Accepted |
+| [0010](0010-electron-release-pipeline.md) | Electron desktop release pipeline + macOS signing | Accepted |

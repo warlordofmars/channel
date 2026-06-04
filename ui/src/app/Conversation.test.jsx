@@ -8,6 +8,7 @@ import { __resetChannelPrefsForTest } from "../hooks/useChannelPrefs.js";
 
 vi.mock("../api.js", () => ({
   listModels: vi.fn(),
+  submitFeedback: vi.fn(),
 }));
 
 import * as api from "../api.js";
@@ -81,6 +82,8 @@ describe("Conversation", () => {
     __resetModelsCacheForTest();
     api.listModels.mockReset();
     api.listModels.mockResolvedValue({ models: SERVER_ALLOWLIST });
+    api.submitFeedback.mockReset();
+    api.submitFeedback.mockResolvedValue(undefined);
     // Pre-warm the module-level cache so synchronous renders see the
     // models immediately — the production component reads `cachedModels()`
     // in its useState initializer.
@@ -214,7 +217,7 @@ describe("Conversation", () => {
     expect(screen.getByTitle("Bad")).toBeTruthy();
   });
 
-  it("clicking the message-actions buttons does not throw", () => {
+  it("clicking Retry on the last assistant turn does not throw when no user message precedes it", () => {
     mockStream({
       turns: [
         {
@@ -226,11 +229,152 @@ describe("Conversation", () => {
       ],
     });
     renderAt("/app/c/c1");
-    // Retry / Good / Bad are still placeholders; Copy has its own
-    // clipboard tests below.
-    for (const title of ["Retry", "Good", "Bad"]) {
-      expect(() => fireEvent.click(screen.getByTitle(title))).not.toThrow();
+    // Retry is the regenerate trigger on the last assistant turn; here
+    // there's no preceding user message so the handler short-circuits
+    // (`regenerate({})` is wired but useChatStream's mock send simply
+    // records the call). Copy + Feedback have dedicated suites below.
+    expect(() => fireEvent.click(screen.getByTitle("Retry"))).not.toThrow();
+  });
+
+  describe("Feedback buttons (issue #146)", () => {
+    function assistantTurnWith({ msg_id = "a1", feedback = null } = {}) {
+      return [
+        { msg_id, role: "assistant", text: "reply", streaming: false, feedback },
+      ];
     }
+
+    it("clicking thumbs-up calls submitFeedback with kind=up", async () => {
+      mockStream({ turns: assistantTurnWith() });
+      renderAt("/app/c/c-fb");
+      fireEvent.click(screen.getByTitle("Good"));
+      await vi.waitFor(() =>
+        expect(api.submitFeedback).toHaveBeenCalledWith("c-fb", "a1", {
+          kind: "up",
+          note: null,
+        }),
+      );
+    });
+
+    it("clicking thumbs-down calls submitFeedback with kind=down", async () => {
+      mockStream({ turns: assistantTurnWith() });
+      renderAt("/app/c/c-fb");
+      fireEvent.click(screen.getByTitle("Bad"));
+      await vi.waitFor(() =>
+        expect(api.submitFeedback).toHaveBeenCalledWith("c-fb", "a1", {
+          kind: "down",
+          note: null,
+        }),
+      );
+    });
+
+    it("the clicked thumb gets the is-active class optimistically", async () => {
+      // Hold submitFeedback open so the optimistic state is observable
+      // before the request settles.
+      let resolveFn;
+      api.submitFeedback.mockImplementation(
+        () => new Promise((r) => { resolveFn = r; }),
+      );
+      mockStream({ turns: assistantTurnWith() });
+      renderAt("/app/c/c-fb");
+      const upBtn = screen.getByTitle("Good");
+      fireEvent.click(upBtn);
+      expect(upBtn.className).toContain("is-active");
+      expect(upBtn.getAttribute("aria-pressed")).toBe("true");
+      resolveFn();
+      await vi.waitFor(() => expect(api.submitFeedback).toHaveBeenCalled());
+    });
+
+    it("hydrates the active state from initialKind on first render", () => {
+      mockStream({
+        turns: assistantTurnWith({ feedback: { kind: "down", note: null } }),
+      });
+      renderAt("/app/c/c-fb");
+      expect(screen.getByTitle("Bad").className).toContain("is-active");
+      expect(screen.getByTitle("Good").className).not.toContain("is-active");
+    });
+
+    it("clicking the already-active thumbs-up is a no-op (no API call)", async () => {
+      // Until a server-side clear lands, re-clicking the active thumb
+      // can't be allowed to clear visual state without diverging from
+      // the stored signal (Copilot review iteration 2). Behaviour:
+      // ignore the click entirely so the row stays self-consistent.
+      mockStream({
+        turns: assistantTurnWith({ feedback: { kind: "up", note: null } }),
+      });
+      renderAt("/app/c/c-fb");
+      const upBtn = screen.getByTitle("Good");
+      expect(upBtn.className).toContain("is-active");
+      fireEvent.click(upBtn);
+      // Microtask flush so any erroneously-fired async submit would
+      // have landed by now.
+      await Promise.resolve();
+      expect(api.submitFeedback).not.toHaveBeenCalled();
+      expect(screen.getByTitle("Good").className).toContain("is-active");
+    });
+
+    it("clicking the already-active thumbs-down is a no-op (no API call)", async () => {
+      mockStream({
+        turns: assistantTurnWith({ feedback: { kind: "down", note: null } }),
+      });
+      renderAt("/app/c/c-fb");
+      const downBtn = screen.getByTitle("Bad");
+      expect(downBtn.className).toContain("is-active");
+      fireEvent.click(downBtn);
+      await Promise.resolve();
+      expect(api.submitFeedback).not.toHaveBeenCalled();
+      expect(screen.getByTitle("Bad").className).toContain("is-active");
+    });
+
+    it("reverts the optimistic state when submitFeedback rejects", async () => {
+      api.submitFeedback.mockRejectedValueOnce(new Error("network"));
+      mockStream({ turns: assistantTurnWith() });
+      renderAt("/app/c/c-fb");
+      const upBtn = screen.getByTitle("Good");
+      fireEvent.click(upBtn);
+      // Wait for the rejection handler to flip state back; waitFor
+      // re-runs the assertion until it passes (covers the async gap
+      // between fireEvent.click and the catch block running).
+      await vi.waitFor(() =>
+        expect(screen.getByTitle("Good").className).not.toContain("is-active"),
+      );
+      expect(screen.getByTitle("Bad").className).not.toContain("is-active");
+    });
+
+    it("clicking the OTHER thumb swaps the active state", async () => {
+      mockStream({
+        turns: assistantTurnWith({ feedback: { kind: "up", note: null } }),
+      });
+      renderAt("/app/c/c-fb");
+      expect(screen.getByTitle("Good").className).toContain("is-active");
+      fireEvent.click(screen.getByTitle("Bad"));
+      await vi.waitFor(() =>
+        expect(api.submitFeedback).toHaveBeenCalledWith("c-fb", "a1", {
+          kind: "down",
+          note: null,
+        }),
+      );
+      expect(screen.getByTitle("Good").className).not.toContain("is-active");
+      expect(screen.getByTitle("Bad").className).toContain("is-active");
+    });
+
+    it("disables both buttons while a request is pending", async () => {
+      let resolveFn;
+      api.submitFeedback.mockImplementation(
+        () => new Promise((r) => { resolveFn = r; }),
+      );
+      mockStream({ turns: assistantTurnWith() });
+      renderAt("/app/c/c-fb");
+      fireEvent.click(screen.getByTitle("Good"));
+      // While pending, both thumbs carry the `disabled` attribute —
+      // React's synthetic event system suppresses onClick for those
+      // buttons so a double-click can't race the optimistic update.
+      expect(screen.getByTitle("Good").disabled).toBe(true);
+      expect(screen.getByTitle("Bad").disabled).toBe(true);
+      resolveFn();
+      await vi.waitFor(() =>
+        expect(screen.getByTitle("Good").disabled).toBe(false),
+      );
+    });
   });
 
   describe("Copy button", () => {

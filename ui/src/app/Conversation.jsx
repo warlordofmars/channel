@@ -5,6 +5,7 @@ import ChannelMark from "../components/ChannelMark.jsx";
 import ChatHeader from "./ChatHeader.jsx";
 import Composer from "./Composer.jsx";
 import Icon from "../components/Icon.jsx";
+import { submitFeedback } from "../api.js";
 import { useChannelPrefs } from "../hooks/useChannelPrefs.js";
 import { useChats } from "../hooks/ChatsContext.jsx";
 import { useChatStream } from "../hooks/useChatStream.js";
@@ -101,6 +102,83 @@ function CopyButton({ text }) {
     >
       <Icon name={copied ? "check" : "copy"} size={16} />
     </button>
+  );
+}
+
+/**
+ * Thumbs-up / thumbs-down pair rendered on the message-actions row of
+ * every settled assistant turn (issue #146).
+ *
+ * State machine per row:
+ *   - `null`             — no feedback recorded yet (default).
+ *   - `"up"` / `"down"`  — that thumb is "filled". Clicking the OTHER
+ *                          thumb swaps the active state. Re-clicking
+ *                          the ACTIVE thumb is a no-op until the
+ *                          backend grows a server-side clear operation
+ *                          (e.g. DELETE) — otherwise the optimistic
+ *                          clear would diverge from the stored signal
+ *                          and skew evaluation data on reload.
+ *   - `pending` boolean  — disables both buttons during an in-flight
+ *                          submitFeedback call so a double-click can't
+ *                          race the optimistic update.
+ *
+ * Optimistic: the visual state updates immediately on click; on a
+ * network error we revert and surface nothing to the user (the SSE
+ * stream / chat is unaffected — feedback is best-effort).
+ */
+function FeedbackButtons({ chatId, msgId, initialKind }) {
+  const [kind, setKind] = useState(initialKind ?? null);
+  const [pending, setPending] = useState(false);
+
+  async function submitOrRevert(nextKind, prevKind) {
+    setKind(nextKind);
+    setPending(true);
+    try {
+      await submitFeedback(chatId, msgId, { kind: nextKind, note: null });
+    } catch {
+      setKind(prevKind);
+    } finally {
+      setPending(false);
+    }
+  }
+
+  function handleUp() {
+    // Re-clicking the active thumb is a no-op (see component docstring).
+    if (kind === "up") return;
+    submitOrRevert("up", kind);
+  }
+  function handleDown() {
+    if (kind === "down") return;
+    submitOrRevert("down", kind);
+  }
+
+  const upActive = kind === "up";
+  const downActive = kind === "down";
+  return (
+    <>
+      <button
+        type="button"
+        className={upActive ? "icon-btn is-active" : "icon-btn"}
+        title="Good"
+        aria-label="Good"
+        aria-pressed={upActive}
+        onClick={handleUp}
+        disabled={pending}
+      >
+        <Icon name="thumb-up" size={16} />
+      </button>
+      <button
+        type="button"
+        className={downActive ? "icon-btn is-active" : "icon-btn"}
+        title="Bad"
+        aria-label="Bad"
+        aria-pressed={downActive}
+        onClick={handleDown}
+        disabled={pending}
+      >
+        <Icon name="thumb-down" size={16} />
+      </button>
+    </>
   );
 }
 
@@ -263,12 +341,11 @@ export default function Conversation() {
                     >
                       <Icon name="refresh" size={16} />
                     </button>
-                    <button type="button" className="icon-btn" title="Good" onClick={noop}>
-                      <Icon name="thumb-up" size={16} />
-                    </button>
-                    <button type="button" className="icon-btn" title="Bad" onClick={noop}>
-                      <Icon name="thumb-down" size={16} />
-                    </button>
+                    <FeedbackButtons
+                      chatId={chatId}
+                      msgId={t.msg_id}
+                      initialKind={t.feedback?.kind ?? null}
+                    />
                   </div>
                 )}
                 {isLast && t.followUps && t.followUps.length > 0 && (

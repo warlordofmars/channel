@@ -103,6 +103,22 @@ export async function regenerate(chatId, { model, effort, signal } = {}) {
   return response;
 }
 
+// Per-message thumbs-up / thumbs-down feedback (issue #146).
+// Overwrites any prior feedback for the same message; 204 on success,
+// 404 if the chat or message is unknown. `note` is reserved for a
+// future note-input modal — v1 callers always pass null.
+export async function submitFeedback(chatId, msgId, { kind, note = null } = {}) {
+  const response = await fetch(
+    `${BASE}/api/chats/${chatId}/messages/${msgId}/feedback`,
+    {
+      method: "POST",
+      headers: { ...authHeader(), "Content-Type": "application/json" },
+      body: JSON.stringify({ kind, note }),
+    },
+  );
+  if (!response.ok) throw new Error(`submitFeedback ${response.status}`);
+}
+
 // ---- Auth ---------------------------------------------------------------
 //
 // POST /auth/logout records an immutable audit-log entry on the server
