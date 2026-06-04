@@ -404,6 +404,113 @@ class ChannelStack(cdk.Stack):
         if not is_prod:
             common_env["STARTER_ENABLE_DEBUG_ENDPOINTS"] = "1"
 
+        # ----------------------------------------------------------------
+        # Attachments S3 bucket (#173) — file attachments + vision (epic #109)
+        # ----------------------------------------------------------------
+        # Browser uploads land here via presigned PUT (presign + finalize
+        # endpoints arrive in #175). Bedrock fetches the bytes directly via
+        # Strands' s3Location source — Lambda never holds the payload.
+        #
+        # CORS PUT must be allowed from the SPA origin. In prod that's the
+        # CloudFront custom domain; in dev/personal envs we also allow the
+        # localhost port range that ``inv dev`` uses (mirrors CORS_ORIGINS
+        # in tasks.py around line 432).
+        attachments_cors_origins = [f"https://{custom_domain}"]
+        if not is_prod:
+            attachments_cors_origins += [
+                f"http://localhost:{port}" for port in range(5173, 5180)
+            ]
+
+        # SSE-KMS via the AWS-managed ``aws/s3`` key. No dedicated CMK —
+        # the AWS-managed key auto-grants any IAM principal in the account
+        # that has the matching ``s3:`` permission on the bucket. The
+        # IAM grants below add the canonical kms:ViaService statement so
+        # encrypt/decrypt is wired explicitly for the Lambda role.
+        attachments_bucket = s3.Bucket(
+            self,
+            "AttachmentsBucket",
+            encryption=s3.BucketEncryption.KMS_MANAGED,
+            bucket_key_enabled=True,
+            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
+            enforce_ssl=True,
+            removal_policy=data_removal,
+            auto_delete_objects=not is_prod,
+            cors=[
+                s3.CorsRule(
+                    allowed_methods=[s3.HttpMethods.PUT],
+                    allowed_origins=attachments_cors_origins,
+                    allowed_headers=["*"],
+                    exposed_headers=["ETag"],
+                    max_age=3000,
+                ),
+            ],
+            lifecycle_rules=[
+                # Presign tags new objects ``unreferenced=1``; finalize
+                # (#175) removes the tag. Objects that still carry the
+                # tag after 24h get garbage-collected — the typical
+                # "user picks a file then cancels" leak. S3 lifecycle's
+                # smallest expiration unit is one day, so actual deletion
+                # runs between 24h and ~48h after upload depending on the
+                # daily sweep.
+                s3.LifecycleRule(
+                    id="ExpireUnreferencedUploads",
+                    enabled=True,
+                    expiration=cdk.Duration.days(1),
+                    tag_filters={"unreferenced": "1"},
+                ),
+            ],
+        )
+
+        # IAM grants — scoped to the ``attachments/user/*`` prefix so the
+        # Lambda role can never reach into other buckets or other prefixes.
+        attachments_bucket.grant_put(api_role, "attachments/user/*")
+        attachments_bucket.grant_read(api_role, "attachments/user/*")
+        attachments_bucket.grant_delete(api_role, "attachments/user/*")
+        api_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["s3:PutObjectTagging", "s3:DeleteObjectTagging"],
+                resources=[
+                    attachments_bucket.arn_for_objects("attachments/user/*")
+                ],
+            )
+        )
+        # CDK's grant_read does NOT inject KMS permissions when the bucket
+        # uses ``KMS_MANAGED`` (no key construct exists to grant against).
+        # The aws/s3 key policy auto-grants account principals, but only
+        # for calls coming through the S3 service — codify that with the
+        # canonical kms:ViaService condition so the IAM role's intent is
+        # explicit at synth time.
+        api_role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["kms:Decrypt", "kms:GenerateDataKey"],
+                resources=["*"],
+                conditions={
+                    "StringEquals": {
+                        "kms:ViaService": f"s3.{self.region}.amazonaws.com",
+                    },
+                },
+            )
+        )
+
+        common_env["STARTER_ATTACHMENTS_BUCKET"] = attachments_bucket.bucket_name
+
+        # Server access logging is deferred — CloudTrail data events plus
+        # the ChatDeleteAttachmentWipeFailures EMF metric (added in #174)
+        # cover the v1 audit needs for attachment lifecycle.
+        NagSuppressions.add_resource_suppressions(
+            attachments_bucket,
+            [
+                NagPackSuppression(
+                    id="AwsSolutions-S1",
+                    reason=(
+                        "Server access logging deferred; CloudTrail data events "
+                        "and ChatDeleteAttachmentWipeFailures EMF metric cover "
+                        "v1 audit needs."
+                    ),
+                ),
+            ],
+        )
+
         api_fn = lambda_.Function(
             self,
             "ApiFunction",

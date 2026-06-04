@@ -121,3 +121,91 @@ def test_lambda_role_grants_agentcore_write_and_lookup_actions(dev_template):
 
     missing = required - granted
     assert not missing, f"AgentCore IAM actions missing from synth: {missing}"
+
+
+# ----------------------------------------------------------------
+# Attachments S3 bucket (#173) — epic #109 file attachments + vision
+# ----------------------------------------------------------------
+
+
+def _attachments_bucket(template: assertions.Template) -> dict:
+    buckets = template.find_resources("AWS::S3::Bucket")
+    attach = {key: val for key, val in buckets.items() if "AttachmentsBucket" in key}
+    assert len(attach) == 1, f"expected exactly one AttachmentsBucket, got {list(attach)}"
+    return next(iter(attach.values()))
+
+
+def test_attachments_bucket_uses_sse_kms(dev_template):
+    bucket = _attachments_bucket(dev_template)
+    rules = bucket["Properties"]["BucketEncryption"]["ServerSideEncryptionConfiguration"]
+    assert any(r["ServerSideEncryptionByDefault"]["SSEAlgorithm"] == "aws:kms" for r in rules), (
+        "Attachments bucket must use SSE-KMS (aws/s3 AWS-managed key)"
+    )
+
+
+def test_attachments_bucket_blocks_public_access(dev_template):
+    bucket = _attachments_bucket(dev_template)
+    pab = bucket["Properties"]["PublicAccessBlockConfiguration"]
+    assert pab["BlockPublicAcls"] is True
+    assert pab["BlockPublicPolicy"] is True
+    assert pab["IgnorePublicAcls"] is True
+    assert pab["RestrictPublicBuckets"] is True
+
+
+def test_attachments_bucket_lifecycle_expires_unreferenced(dev_template):
+    bucket = _attachments_bucket(dev_template)
+    rules = bucket["Properties"]["LifecycleConfiguration"]["Rules"]
+    unreferenced = [
+        r
+        for r in rules
+        if any(
+            t.get("Key") == "unreferenced" and t.get("Value") == "1"
+            for t in (r.get("TagFilters") or [])
+        )
+    ]
+    assert len(unreferenced) == 1, (
+        f"expected exactly one unreferenced lifecycle rule, got {len(unreferenced)}"
+    )
+    rule = unreferenced[0]
+    assert rule["Status"] == "Enabled"
+    assert rule["ExpirationInDays"] == 1
+
+
+def test_attachments_bucket_cors_allows_cloudfront_in_prod(prod_template):
+    bucket = _attachments_bucket(prod_template)
+    cors_rules = bucket["Properties"]["CorsConfiguration"]["CorsRules"]
+    assert len(cors_rules) == 1
+    rule = cors_rules[0]
+    assert "PUT" in rule["AllowedMethods"]
+    assert "https://channel.warlordofmars.net" in rule["AllowedOrigins"]
+    # Prod must NOT include localhost — keeps direct-PUT attack surface
+    # tied to the production CloudFront origin.
+    assert not any("localhost" in o for o in rule["AllowedOrigins"]), (
+        "Prod CORS must not include localhost origins"
+    )
+
+
+def test_attachments_bucket_cors_allows_localhost_in_dev(dev_template):
+    bucket = _attachments_bucket(dev_template)
+    cors_rules = bucket["Properties"]["CorsConfiguration"]["CorsRules"]
+    assert len(cors_rules) == 1
+    rule = cors_rules[0]
+    assert "PUT" in rule["AllowedMethods"]
+    # Whole 5173-5179 port range — matches CORS_ORIGINS in tasks.py:432.
+    for port in range(5173, 5180):
+        assert f"http://localhost:{port}" in rule["AllowedOrigins"], (
+            f"dev CORS missing localhost:{port}"
+        )
+
+
+def test_lambda_env_has_attachments_bucket_var(dev_template):
+    api_fn = _api_function(dev_template)
+    env_vars = api_fn["Properties"]["Environment"]["Variables"]
+    assert "STARTER_ATTACHMENTS_BUCKET" in env_vars
+    # Per #173 design: we use the AWS-managed aws/s3 key, so there's no
+    # CMK ARN to plumb. Issue body originally listed
+    # STARTER_ATTACHMENTS_KMS_KEY_ARN; the AWS-managed-key choice made
+    # it redundant.
+    assert "STARTER_ATTACHMENTS_KMS_KEY_ARN" not in env_vars, (
+        "AWS-managed key has no CMK ARN to plumb — see #173"
+    )
