@@ -425,6 +425,24 @@ re-derive these during design review — cite them.
   `f"{jwt_sub}:{session_id}"` Bedrock sessionId namespacing — Strands'
   `BedrockModel` doesn't expose Bedrock's session machinery, so the
   cross-user guard happens at the API layer instead.
+- **Tool payloads never persist to AgentCore Memory.** Conclusions and
+  tool-use META facts may. The `[meta]`-prefixed synthetic ASSISTANT
+  message is the canonical META-fact shape, written via the existing
+  `CreateEvent` path from the `AfterToolCallEvent` hook. Codified by
+  ADR-0009 (recall pool budget) and the existing drop in
+  `src/channel/agents/memory.py:240` (`_payload_from_messages` strips
+  `toolUse` / `toolResult` content blocks before serializing).
+- **Tool integrations use Strands' native `BedrockModel` + `MCPClient` +
+  tool hooks.** Don't build a parallel tool-calling shim. Verified in
+  Strands 1.41.0: `strands/types/tools.py` (`ToolUse` / `ToolResult`),
+  `strands/models/bedrock.py` (Converse `toolConfig` build + tool-block
+  translation + `stop_reason: "tool_use"`),
+  `strands/event_loop/event_loop.py` (`_handle_tool_execution`),
+  `strands/hooks/events.py` (`BeforeToolCallEvent` / `AfterToolCallEvent`),
+  `strands/types/_events.py` (`ToolUseStreamEvent` / `ToolResultEvent` /
+  `ToolStreamEvent` / `ToolCancelEvent` / `ToolInterruptEvent`),
+  `strands/tools/mcp/mcp_client.py` (`MCPClient` is itself a
+  `ToolProvider`).
 
 ## UI conventions
 
