@@ -131,3 +131,26 @@ budget primitive.
 Future work — once #131, #128, and the recall hook implement this
 ADR, revisit and tighten the constants (history floor, recall slice,
 attachment allocation fraction) based on real chain measurements.
+
+## Genesis
+
+This ADR was produced by a four-node collaboration loop on
+2026-06-03:
+
+- A human operator (John Carter) chatting with Channel-the-product
+  about what improvements Channel itself wanted.
+- Channel-the-product, given depth on its own design via the
+  rubber-duck offer to comment on #128's design pass, surfaced the
+  cross-cutting observation that history, recall, attachments, and
+  tool results share one budget envelope.
+- Claude Code, routing that observation into the active #128
+  design-review work as comment 4617260888 rather than logging it
+  as user feedback.
+- A `design-review` agent that recognized the observation was
+  load-bearing across multiple epics and extracted it into this
+  ADR rather than letting it stay implicit per-epic.
+
+The contribution model is worth preserving: AI-system observations
+about its own architecture become inputs to the design process
+when the routing is set up to treat them as inputs, not outputs.
+ADR-0009 exists because that routing existed.
