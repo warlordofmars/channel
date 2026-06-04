@@ -947,6 +947,13 @@ jobs:
         working-directory: ui
         env:
           VITE_GA_MEASUREMENT_ID: ${{ secrets.VITE_GA_MEASUREMENT_ID }}
+          # Marketing Download page → /releases/download/dev/<asset> on
+          # the dev site (ADR-0010). ``inv deploy --env dev`` rebuilds
+          # the SPA and propagates the same value via tasks.py, but
+          # setting it here keeps the explicit build step's output
+          # consistent with the deployed bundle in case the deploy
+          # task ever drops the rebuild.
+          VITE_RELEASE_CHANNEL: dev
         run: npm install && npm run build
 
       - name: Build docs site
@@ -956,6 +963,7 @@ jobs:
       - name: Deploy dev stack
         env:
           VITE_GA_MEASUREMENT_ID: ${{ secrets.VITE_GA_MEASUREMENT_ID }}
+          VITE_RELEASE_CHANNEL: dev
         run: uv run inv deploy --env dev
 
       - name: Export stack URLs
@@ -1208,6 +1216,12 @@ jobs:
         working-directory: ui
         env:
           VITE_GA_MEASUREMENT_ID: ${{ secrets.VITE_GA_MEASUREMENT_ID }}
+          # Marketing Download page → /releases/latest/download/<asset> on
+          # prod (ADR-0010 — the GitHub redirect that resolves to the most
+          # recent non-prerelease release at click time). ``latest`` is
+          # also the Download.jsx default when the var is unset, but
+          # making it explicit keeps the per-env split visible in CI.
+          VITE_RELEASE_CHANNEL: latest
         run: npm install && npm run build
 
       - name: Build docs site
@@ -1218,6 +1232,7 @@ jobs:
         env:
           APP_VERSION: ${{ needs.release.outputs.version }}
           VITE_GA_MEASUREMENT_ID: ${{ secrets.VITE_GA_MEASUREMENT_ID }}
+          VITE_RELEASE_CHANNEL: latest
         run: uv run inv deploy --env prod
 
       - name: Export stack URLs
