@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-os.environ.setdefault("STARTER_JWT_SECRET", os.environ["STARTER_JWT_SECRET"])
+os.environ.setdefault("STARTER_JWT_SECRET", "test-secret-for-unit-tests")
 os.environ.setdefault("STARTER_ATTACHMENTS_BUCKET", "channel-attachments-test")
 os.environ.setdefault("STARTER_TABLE_NAME", "channel-test")
 
