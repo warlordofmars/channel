@@ -16,6 +16,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from channel.api._auth import require_admin  # noqa: F401 — re-exported for route use
+from channel.api.attachments import router as attachments_router
 from channel.api.chats import router as chats_router
 from channel.api.csp import router as csp_router
 from channel.api.models import router as models_router
@@ -146,6 +147,9 @@ app.include_router(chats_router, prefix="/api")
 # Models allowlist — served at /api/models (separate router so the
 # /models path isn't nested under chats_router's "/chats" prefix)
 app.include_router(models_router, prefix="/api")
+
+# Attachments presign + finalize — served at /api/attachments/* (#175)
+app.include_router(attachments_router, prefix="/api")
 
 # User preferences — GET/PUT /api/me/prefs (full paths declared on the
 # router so no prefix needed here)
