@@ -169,3 +169,43 @@ def test_record_followup_outcome_signature_locks_out_dimensions():
 
     sig = inspect.signature(record_followup_outcome)
     assert list(sig.parameters.keys()) == ["success"]
+
+
+# ----------------------------------------------------------------
+# ChatDeleteAttachmentWipe (#174) — file attachments + vision (#109)
+# ----------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_record_chat_delete_attachment_wipe_outcome_success_emits_success_counter():
+    from channel.metrics import record_chat_delete_attachment_wipe_outcome
+
+    with patch("channel.metrics.emit_metric", new=AsyncMock()) as mock_emit:
+        await record_chat_delete_attachment_wipe_outcome(success=True)
+    mock_emit.assert_awaited_once_with("ChatDeleteAttachmentWipeSuccesses")
+
+
+@pytest.mark.asyncio
+async def test_record_chat_delete_attachment_wipe_outcome_failure_emits_failure_counter():
+    from channel.metrics import record_chat_delete_attachment_wipe_outcome
+
+    with patch("channel.metrics.emit_metric", new=AsyncMock()) as mock_emit:
+        await record_chat_delete_attachment_wipe_outcome(success=False)
+    mock_emit.assert_awaited_once_with("ChatDeleteAttachmentWipeFailures")
+
+
+def test_record_chat_delete_attachment_wipe_outcome_signature_locks_out_dimensions():
+    """Per-actor / per-chat / per-attachment-id dimensions blow up
+    CloudWatch cardinality — codify the locked signature."""
+
+    from channel.metrics import record_chat_delete_attachment_wipe_outcome
+
+    sig = inspect.signature(record_chat_delete_attachment_wipe_outcome)
+    param_names = set(sig.parameters)
+    forbidden = {"actor_id", "chat_id", "user_id", "attachment_id"}
+    leaked = param_names & forbidden
+    assert not leaked, (
+        f"record_chat_delete_attachment_wipe_outcome must NOT accept {leaked} "
+        "— per-actor/chat dimensions cause CloudWatch cardinality blowup"
+    )
+    assert list(sig.parameters.keys()) == ["success"]

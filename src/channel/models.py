@@ -9,9 +9,9 @@ schema evolution doesn't require model surgery.
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class MessageRole(str, Enum):
@@ -66,6 +66,86 @@ class Chat(BaseModel):
         return value[:120]
 
 
+class Citation(BaseModel):
+    """One source citation on an assistant message turn (#174).
+
+    Polymorphic shape pinned per Channel's 2026-06-03 design input —
+    ``source_type`` is an open enum so future sources (web_search,
+    code_output, memory_recall) slot in without a schema bump.
+    ``location`` stays a free-form dict with per-``source_type``
+    validation so DDB persistence is one column, not a discriminated
+    union.
+
+    v1 always populates ``Message.citations`` as ``None``; this model
+    locks the shape so #128 (calibration), web-search, and the recall
+    hook can fill it later.
+    """
+
+    source_type: Literal["attachment", "web_search", "code_output", "memory_recall"]
+    source_id: str
+    source_name: str
+    location: dict[str, Any]
+    excerpt: str | None = None
+    confidence: Literal["high", "medium", "low"] | None = None
+
+    # Compatibility table — keyed by ``source_type``, value is the set
+    # of ``location.type`` strings that source type accepts. For source
+    # types whose location schema hasn't been pinned yet (code_output,
+    # memory_recall — owned by #128 and the recall hook), the empty set
+    # means "accept any non-empty location dict with a type key" —
+    # forward-compat scaffolding so those sub-issues can lock in their
+    # schemas without breaking v1.
+    _ALLOWED_LOCATION_TYPES: dict[str, set[str]] = {
+        "attachment": {"page", "cell", "region", "timestamp"},
+        "web_search": {"url"},
+        "code_output": set(),
+        "memory_recall": set(),
+    }
+
+    @model_validator(mode="after")
+    def _validate_location_shape(self) -> Citation:
+        loc_type = self.location.get("type")
+        if not isinstance(loc_type, str) or not loc_type:
+            raise ValueError("Citation.location must include a 'type' string")
+        allowed = self._ALLOWED_LOCATION_TYPES.get(self.source_type, set())
+        # Empty set = "schema not yet pinned, accept any type" — see class
+        # docstring for the rationale.
+        if allowed and loc_type not in allowed:
+            raise ValueError(
+                f"Citation.location.type={loc_type!r} not allowed for "
+                f"source_type={self.source_type!r} (allowed: {sorted(allowed)})"
+            )
+        return self
+
+
+class Attachment(BaseModel):
+    """Canonical attachment row — partition key USER#{user_id} (#174).
+
+    One row per uploaded file, written by the finalize endpoint (#175)
+    after the browser PUTs to S3. The S3 object itself is the payload;
+    this row carries the metadata (filename, mime, size, checksum) and
+    the S3 coordinates so the cascade in
+    :func:`storage.delete_chat_attachments` can wipe both sides on
+    chat deletion.
+
+    ``referenced_at`` is set the first time a message references this
+    attachment (#175 finalize handler or #176's content-block builder).
+    Distinct from ``created_at`` so the lifecycle rule on the bucket
+    (``unreferenced=1`` tag) can garbage-collect orphans.
+    """
+
+    id: str
+    user_id: str
+    name: str
+    mime: str
+    size_bytes: int
+    s3_key: str
+    s3_bucket: str
+    checksum_sha256: str
+    created_at: str
+    referenced_at: str | None = None
+
+
 class Message(BaseModel):
     """One turn in a chat — partition key CHAT#{chat_id}."""
 
@@ -78,9 +158,20 @@ class Message(BaseModel):
     output_tokens: int | None = None
     artifacts: list[dict[str, Any]] | None = None
     attachments: list[dict[str, Any]] | None = None
+    citations: list[Citation] | None = None
     created_at: str
     ttl: int | None = None
     feedback: Feedback | None = None
+
+    @model_validator(mode="after")
+    def _citations_assistant_only(self) -> Message:
+        # Citations are produced by the model; user turns never carry
+        # them. Per the #174 issue body's reading of Channel's
+        # 2026-06-03 input — citations point AT sources, and a user
+        # turn isn't a source.
+        if self.citations and self.role == MessageRole.USER:
+            raise ValueError("citations may not be set on user-role messages")
+        return self
 
 
 class ChatCreate(BaseModel):

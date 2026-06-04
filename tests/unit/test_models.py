@@ -7,9 +7,11 @@ import pytest
 from pydantic import ValidationError
 
 from channel.models import (
+    Attachment,
     Chat,
     ChatCreate,
     ChatPatch,
+    Citation,
     Message,
     MessageRole,
     Prefs,
@@ -127,3 +129,175 @@ def test_prefs_defaults():
 def test_prefs_rejects_unknown_keys():
     with pytest.raises(ValidationError):
         Prefs(unknown_key="x")
+
+
+# ----------------------------------------------------------------
+# Attachment + Citation (#174) — file attachments + vision (epic #109)
+# ----------------------------------------------------------------
+
+
+def _att_kwargs(**overrides):
+    """Minimal valid kwargs for Attachment construction."""
+
+    base = {
+        "id": "att-1",
+        "user_id": "u-1",
+        "name": "spec.pdf",
+        "mime": "application/pdf",
+        "size_bytes": 12345,
+        "s3_key": "attachments/user/u-1/att-1",
+        "s3_bucket": "channel-attachments-dev",
+        "checksum_sha256": "abc123",
+        "created_at": "2026-06-03T00:00:00Z",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_attachment_roundtrips_with_required_fields():
+    att = Attachment(**_att_kwargs())
+    assert att.id == "att-1"
+    assert att.referenced_at is None  # optional, defaults to None
+
+
+def test_attachment_referenced_at_optional():
+    att = Attachment(**_att_kwargs(referenced_at="2026-06-03T00:01:00Z"))
+    assert att.referenced_at == "2026-06-03T00:01:00Z"
+
+
+def _cit_kwargs(**overrides):
+    """Minimal valid kwargs for Citation (attachment source)."""
+
+    base = {
+        "source_type": "attachment",
+        "source_id": "att-1",
+        "source_name": "spec.pdf",
+        "location": {"type": "page", "value": 1},
+    }
+    base.update(overrides)
+    return base
+
+
+def test_citation_happy_path_attachment_page():
+    cit = Citation(**_cit_kwargs())
+    assert cit.source_type == "attachment"
+    assert cit.location["type"] == "page"
+    assert cit.excerpt is None
+    assert cit.confidence is None
+
+
+def test_citation_rejects_unknown_source_type():
+    with pytest.raises(ValidationError):
+        Citation(**_cit_kwargs(source_type="unknown"))
+
+
+def test_citation_rejects_attachment_with_url_location():
+    """``attachment`` source type only accepts page/cell/region/timestamp."""
+
+    with pytest.raises(ValidationError):
+        Citation(**_cit_kwargs(location={"type": "url", "value": "https://x"}))
+
+
+def test_citation_accepts_attachment_cell_region_timestamp_locations():
+    for loc_type in ("cell", "region", "timestamp"):
+        cit = Citation(**_cit_kwargs(location={"type": loc_type, "value": "x"}))
+        assert cit.location["type"] == loc_type
+
+
+def test_citation_web_search_requires_url_location():
+    cit = Citation(
+        source_type="web_search",
+        source_id="s-1",
+        source_name="search",
+        location={"type": "url", "value": "https://example.com"},
+    )
+    assert cit.source_type == "web_search"
+
+    # Mismatch — web_search with page is rejected
+    with pytest.raises(ValidationError):
+        Citation(
+            source_type="web_search",
+            source_id="s-1",
+            source_name="search",
+            location={"type": "page", "value": 1},
+        )
+
+
+def test_citation_code_output_accepts_any_typed_location():
+    """``code_output`` / ``memory_recall`` schemas aren't pinned yet — the
+    validator accepts any non-empty location dict with a ``type`` key so
+    the recall hook and code-output owners can fill in the shape later."""
+
+    cit = Citation(
+        source_type="code_output",
+        source_id="tool-1",
+        source_name="python",
+        location={"type": "stdout", "lines": [1, 2]},
+    )
+    assert cit.location["type"] == "stdout"
+
+
+def test_citation_memory_recall_accepts_any_typed_location():
+    cit = Citation(
+        source_type="memory_recall",
+        source_id="evt-1",
+        source_name="recall",
+        location={"type": "event", "value": "evt-1"},
+    )
+    assert cit.source_type == "memory_recall"
+
+
+def test_citation_rejects_location_without_type_key():
+    with pytest.raises(ValidationError):
+        Citation(**_cit_kwargs(location={"value": 1}))  # missing "type"
+
+
+def test_citation_confidence_accepts_high_medium_low():
+    for value in ("high", "medium", "low"):
+        cit = Citation(**_cit_kwargs(confidence=value))
+        assert cit.confidence == value
+
+
+def test_citation_rejects_unknown_confidence():
+    with pytest.raises(ValidationError):
+        Citation(**_cit_kwargs(confidence="probably"))
+
+
+def test_message_carries_citations_on_assistant_turn():
+    msg = Message(
+        chat_id="abc",
+        msg_id="m-1",
+        role=MessageRole.ASSISTANT,
+        text="see [1]",
+        created_at="2026-06-03T00:00:00Z",
+        citations=[Citation(**_cit_kwargs())],
+    )
+    assert msg.citations is not None
+    assert len(msg.citations) == 1
+
+
+def test_message_rejects_citations_on_user_turn():
+    """Citations are produced by the model — user-role turns must never
+    carry them. Per Channel's 2026-06-03 design input (issue body)."""
+
+    with pytest.raises(ValidationError):
+        Message(
+            chat_id="abc",
+            msg_id="m-1",
+            role=MessageRole.USER,
+            text="hi",
+            created_at="2026-06-03T00:00:00Z",
+            citations=[Citation(**_cit_kwargs())],
+        )
+
+
+def test_message_user_turn_with_none_citations_is_fine():
+    msg = Message(
+        chat_id="abc",
+        msg_id="m-1",
+        role=MessageRole.USER,
+        text="hi",
+        created_at="2026-06-03T00:00:00Z",
+        citations=None,
+    )
+    assert msg.citations is None
