@@ -529,15 +529,18 @@ async def _stream_bedrock_reply(
         )
         state["user_msg_id"] = user_msg.msg_id
         yield sse_user_persisted(msg_id=user_msg.msg_id, seq=0)
-        # Stamp referenced_at on each successfully-verified attachment so
-        # the bucket lifecycle rule stops eyeing the S3 object for GC.
-        for att_id in verified_ids:
-            storage.mark_attachment_referenced(user_id=claims["sub"], att_id=att_id)
-        # Surface fetch-time S3 failures to the SPA so it can prompt
-        # re-upload. The failure-marker is also in the prompt below so
-        # the model can voice the gap.
-        for err in errors_list:
-            yield sse_attachment_error(**err)
+
+    # Attachment side-effects fire on BOTH the initial send and regenerate.
+    # The original send-side ``referenced_at`` stamp is preserved across
+    # regenerate (the re-stamp is harmless idempotent under the
+    # ``attribute_exists(PK)`` guard in storage). And the SPA needs the
+    # ``attachment_error`` event whenever a verify fails — regenerate
+    # replays the same attachments, so a freshly-expired S3 object should
+    # still prompt the re-upload UI on the second-shot stream.
+    for att_id in verified_ids:
+        storage.mark_attachment_referenced(user_id=claims["sub"], att_id=att_id)
+    for err in errors_list:
+        yield sse_attachment_error(**err)
 
     agent = build_agent(
         model_id=model,

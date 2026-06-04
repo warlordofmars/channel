@@ -678,13 +678,32 @@ def mark_attachment_referenced(*, user_id: str, att_id: str) -> None:
     message reference. Doesn't touch other attributes (name, mime,
     etc.) — UpdateItem on a single attribute keeps the row's prior
     state intact.
+
+    ``ConditionExpression="attribute_exists(PK)"`` guards the narrow
+    window where a concurrent chat-delete cascade could remove the
+    canonical row between the send-path ``get_attachment`` lookup and
+    this stamp — without the condition, DynamoDB silently creates a
+    ghost item with only ``PK``/``SK``/``referenced_at``. The race
+    loss is harmless (the attachment is gone), so we swallow the
+    conditional failure.
     """
 
-    _get_table().update_item(
-        Key={"PK": f"USER#{user_id}", "SK": _attachment_sk(att_id)},
-        UpdateExpression="SET referenced_at = :now",
-        ExpressionAttributeValues={":now": _now_iso()},
-    )
+    try:
+        _get_table().update_item(
+            Key={"PK": f"USER#{user_id}", "SK": _attachment_sk(att_id)},
+            UpdateExpression="SET referenced_at = :now",
+            ExpressionAttributeValues={":now": _now_iso()},
+            ConditionExpression="attribute_exists(PK)",
+        )
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            logger.warning(
+                "attachment.mark_referenced_lost_race user_id=%s att_id=%s",
+                user_id,
+                att_id,
+            )
+            return
+        raise
 
 
 def verify_attachment_object(att: Attachment) -> tuple[bool, str | None]:

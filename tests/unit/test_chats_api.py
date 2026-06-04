@@ -2618,6 +2618,64 @@ def test_post_message_unsupported_mime_falls_through_as_failure_marker(
     assert cap["referenced"] == []
 
 
+def test_regenerate_emits_sse_attachment_error_on_failed_verify(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regenerate replays attachments via the same content-block path,
+    so a freshly-expired S3 object on the second-shot stream must
+    still emit ``sse_attachment_error`` to the SPA — the re-upload
+    prompt belongs on regenerate too, not just on the original send."""
+
+    chat = Chat(
+        chat_id="c-regen-fail",
+        user_id="u-1",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="claude-sonnet-4-6",
+    )
+    owned = {
+        "att-vanished": _att_model(
+            id="att-vanished",
+            name="vanished.pdf",
+            mime="application/pdf",
+            size_bytes=1,
+        ),
+    }
+    verify = {"att-vanished": (False, "S3 object not found")}
+    _stub_send_path_for_attachments(monkeypatch, chat=chat, owned=owned, verify=verify)
+
+    prior_user = Message(
+        chat_id="c-regen-fail",
+        msg_id="m-prev",
+        role=MessageRole.USER,
+        text="redo this",
+        attachments=[
+            {
+                "id": "att-vanished",
+                "name": "vanished.pdf",
+                "mime": "application/pdf",
+                "size_bytes": 1,
+            }
+        ],
+        created_at="t",
+    )
+    monkeypatch.setattr(
+        "channel.api.chats.storage.list_messages",
+        lambda *_a, **_kw: ([prior_user], None),
+    )
+    monkeypatch.setattr(
+        "channel.api.chats.storage.delete_last_assistant_message",
+        lambda *_a, **_kw: None,
+    )
+
+    resp = client.post("/api/chats/c-regen-fail/regenerate", json={})
+    assert resp.status_code == 200
+    body = resp.text
+    assert '"type": "attachment_error"' in body
+    assert "S3 object not found" in body
+
+
 def test_regenerate_replays_attachments_from_prior_user_turn(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

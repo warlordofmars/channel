@@ -1152,6 +1152,46 @@ def test_delete_attachment_is_idempotent(table: FakeTable) -> None:
     storage.delete_attachment(user_id="u-1", att_id="never-existed")
 
 
+def test_mark_attachment_referenced_swallows_conditional_check_failure(
+    table: FakeTable, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the canonical row was deleted between get_attachment and the
+    update (concurrent chat-delete cascade race), DynamoDB raises
+    ConditionalCheckFailedException — swallow it instead of creating a
+    ghost item with just PK/SK/referenced_at."""
+
+    from channel import storage
+
+    def fake_update(**kwargs: Any) -> Any:
+        raise ClientError(
+            {"Error": {"Code": "ConditionalCheckFailedException", "Message": "no row"}},
+            "UpdateItem",
+        )
+
+    monkeypatch.setattr(table, "update_item", fake_update)
+    # Should NOT raise — race losses are harmless.
+    storage.mark_attachment_referenced(user_id="u-1", att_id="att-1")
+
+
+def test_mark_attachment_referenced_re_raises_other_client_errors(
+    table: FakeTable, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unrelated DDB errors (throttling, etc.) must still propagate so the
+    caller sees the real failure instead of a silent drop."""
+
+    from channel import storage
+
+    def fake_update(**kwargs: Any) -> Any:
+        raise ClientError(
+            {"Error": {"Code": "ProvisionedThroughputExceededException"}},
+            "UpdateItem",
+        )
+
+    monkeypatch.setattr(table, "update_item", fake_update)
+    with pytest.raises(ClientError):
+        storage.mark_attachment_referenced(user_id="u-1", att_id="att-1")
+
+
 def test_mark_attachment_referenced_stamps_iso_timestamp(table: FakeTable) -> None:
     """#176 — when a message references an attachment, stamp
     ``referenced_at`` so the lifecycle rule stops eyeing the S3
