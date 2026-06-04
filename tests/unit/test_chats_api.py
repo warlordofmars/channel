@@ -40,6 +40,14 @@ def _stub_get_prefs(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr("channel.api.chats.build_followups_agent", lambda: _NoopFollowupsAgent())
 
+    # Default the attachments cascade (#174) to a no-op so the existing
+    # delete_chat tests that don't care about the cascade keep passing.
+    # Tests that exercise cascade behaviour override this inline.
+    monkeypatch.setattr(
+        "channel.api.chats.storage.delete_chat_attachments",
+        lambda **_kwargs: (0, 0),
+    )
+
 
 @pytest.fixture
 def client() -> TestClient:
@@ -2083,3 +2091,139 @@ def test_submit_feedback_requires_auth() -> None:
     finally:
         app.dependency_overrides.clear()
         app.dependency_overrides.update(saved_overrides)
+
+
+# ----------------------------------------------------------------
+# Attachment cascade on chat delete (#174)
+# ----------------------------------------------------------------
+
+
+def _stub_delete_handler_storage_and_agentcore(monkeypatch: pytest.MonkeyPatch, chat: Chat) -> None:
+    """Common stubs for the delete_chat handler: chat lookup, DDB delete,
+    and the AgentCore session wipe. Tests layer attachment-specific
+    stubs on top."""
+    from unittest.mock import MagicMock
+
+    monkeypatch.setattr("channel.api.chats.storage.get_chat_by_id", lambda _: chat)
+    monkeypatch.setattr("channel.api.chats.storage.delete_chat", lambda **_: None)
+    fake_ac = MagicMock()
+    fake_ac.list_events.return_value = {"events": []}
+    monkeypatch.setattr("channel.api.chats._agentcore_client", lambda: fake_ac)
+    monkeypatch.setattr("channel.api.chats._memory_id_for_env", lambda: "channel_test-FAKEMEMID")
+
+
+def test_delete_chat_invokes_attachment_cascade(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The delete_chat handler MUST call storage.delete_chat_attachments
+    with the chat id and the authenticated user's JWT sub."""
+
+    chat = Chat(
+        chat_id="c-cascade-1",
+        user_id="u-1",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="m",
+    )
+    _stub_delete_handler_storage_and_agentcore(monkeypatch, chat)
+
+    seen: list[dict[str, Any]] = []
+
+    def fake_cascade(**kwargs: Any) -> tuple[int, int]:
+        seen.append(kwargs)
+        return (3, 0)
+
+    monkeypatch.setattr("channel.api.chats.storage.delete_chat_attachments", fake_cascade)
+
+    resp = client.delete("/api/chats/c-cascade-1")
+    assert resp.status_code == 204
+    assert seen == [{"chat_id": "c-cascade-1", "user_id": "u-1"}]
+
+
+def test_delete_chat_emits_attachment_success_metric_when_cascade_clean(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cascade returns (N, 0) → success metric."""
+
+    from unittest.mock import AsyncMock
+
+    chat = Chat(
+        chat_id="c-cascade-2",
+        user_id="u-1",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="m",
+    )
+    _stub_delete_handler_storage_and_agentcore(monkeypatch, chat)
+    monkeypatch.setattr(
+        "channel.api.chats.storage.delete_chat_attachments",
+        lambda **_: (2, 0),
+    )
+    record = AsyncMock()
+    monkeypatch.setattr("channel.api.chats.record_chat_delete_attachment_wipe_outcome", record)
+
+    resp = client.delete("/api/chats/c-cascade-2")
+    assert resp.status_code == 204
+    record.assert_awaited_once_with(success=True)
+
+
+def test_delete_chat_emits_attachment_failure_metric_on_partial_failure(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cascade returns (N, M>0) → failure metric. Partial-success counts as
+    failure so alarming triggers on any attachment leftover."""
+
+    from unittest.mock import AsyncMock
+
+    chat = Chat(
+        chat_id="c-cascade-3",
+        user_id="u-1",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="m",
+    )
+    _stub_delete_handler_storage_and_agentcore(monkeypatch, chat)
+    monkeypatch.setattr(
+        "channel.api.chats.storage.delete_chat_attachments",
+        lambda **_: (1, 1),
+    )
+    record = AsyncMock()
+    monkeypatch.setattr("channel.api.chats.record_chat_delete_attachment_wipe_outcome", record)
+
+    resp = client.delete("/api/chats/c-cascade-3")
+    assert resp.status_code == 204
+    record.assert_awaited_once_with(success=False)
+
+
+def test_delete_chat_swallows_attachment_cascade_exception(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cascade raising must NOT prevent the 204 — DDB is source of truth
+    for chat existence; orphan attachments are an out-of-band cleanup
+    concern. Failure metric is recorded."""
+
+    from unittest.mock import AsyncMock
+
+    chat = Chat(
+        chat_id="c-cascade-4",
+        user_id="u-1",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="m",
+    )
+    _stub_delete_handler_storage_and_agentcore(monkeypatch, chat)
+
+    def fake_cascade(**_: Any) -> tuple[int, int]:
+        raise RuntimeError("ddb query blew up")
+
+    monkeypatch.setattr("channel.api.chats.storage.delete_chat_attachments", fake_cascade)
+    record = AsyncMock()
+    monkeypatch.setattr("channel.api.chats.record_chat_delete_attachment_wipe_outcome", record)
+
+    resp = client.delete("/api/chats/c-cascade-4")
+    assert resp.status_code == 204
+    record.assert_awaited_once_with(success=False)

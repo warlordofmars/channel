@@ -38,6 +38,7 @@ from channel.agents.strands_sse import (
 from channel.api._auth import require_mgmt_user
 from channel.metrics import (
     record_auto_title_outcome,
+    record_chat_delete_attachment_wipe_outcome,
     record_chat_delete_memory_wipe_outcome,
     record_followup_outcome,
 )
@@ -256,6 +257,32 @@ async def delete_chat(
             exc_info=True,
         )
         await record_chat_delete_memory_wipe_outcome(success=False)
+    # #174 — cascade-delete S3 objects + ATTACHMENT rows referenced by
+    # the chat's messages. Best-effort, mirrors the AgentCore wipe
+    # pattern: DDB is source of truth for chat existence, so cascade
+    # failures are observability noise, not user-visible errors.
+    try:
+        deleted, failed = await asyncio.to_thread(
+            storage.delete_chat_attachments,
+            chat_id=chat_id,
+            user_id=claims["sub"],
+        )
+        await record_chat_delete_attachment_wipe_outcome(success=(failed == 0))
+        if failed:
+            logger.warning(
+                "attachment.chat_delete_partial_failure chat_id=%s deleted=%d failed=%d",
+                chat_id,
+                deleted,
+                failed,
+            )
+    except Exception as exc:
+        logger.warning(
+            "attachment.chat_delete_wipe_failed chat_id=%s",
+            chat_id,
+            extra={"error_type": type(exc).__name__, "error_message": str(exc)},
+            exc_info=True,
+        )
+        await record_chat_delete_attachment_wipe_outcome(success=False)
     return Response(status_code=204)
 
 
