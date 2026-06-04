@@ -4,18 +4,35 @@ import { Link } from "react-router-dom";
 import SiteLayout from "../SiteLayout.jsx";
 
 /**
- * Marketing Download page. Download URLs point at the GitHub Releases
- * ``releases/latest/download/<asset>`` redirect so the link never goes
- * stale — GitHub resolves ``latest`` to the most recent non-prerelease,
- * non-draft release at click time, then 302s to the tagged asset.
+ * Marketing Download page. Download URLs resolve per environment using
+ * ``VITE_RELEASE_CHANNEL`` — ADR-0010 codifies the two-channel split
+ * (dev env → ``dev`` channel, prod env → ``latest``) and CI passes the
+ * matching value into the SPA build per branch.
  *
- * If no stable release has shipped yet, the redirect 404s — that's
- * acceptable per issue #119 acceptance criteria ("Link works whether
- * or not a release exists yet; the buttons themselves must render").
+ * Two URL shapes:
+ *   - ``latest`` (prod) → ``/releases/latest/download/<asset>`` — the
+ *     GitHub special redirect that resolves to the most recent
+ *     non-prerelease, non-draft release at click time.
+ *   - any other channel (e.g. ``dev``) → ``/releases/download/<tag>/<asset>``
+ *     — the explicit-tag form that pins to the named pre-release. The
+ *     ``dev`` pre-release is force-updated on every push to the
+ *     ``development`` branch (see ``publish-dev-artifacts`` in ci.yml).
+ *
+ * When ``VITE_RELEASE_CHANNEL`` is unset, the default is ``latest`` —
+ * preserves the prod behaviour without needing the env var set on the
+ * prod build.
+ *
  * macOS builds are signed + notarised (sub-project B); Windows and
  * Linux are unsigned in this round.
  */
-const RELEASE_BASE = "https://github.com/warlordofmars/channel/releases/latest/download";
+// Use `||` (not `??`) so an empty-string ``VITE_RELEASE_CHANNEL=``
+// (a common CI foot-gun) falls back to ``"latest"`` rather than
+// producing ``/releases/download//<asset>`` (double-slash, 404).
+const CHANNEL = import.meta.env.VITE_RELEASE_CHANNEL || "latest";
+const RELEASE_BASE =
+  CHANNEL === "latest"
+    ? "https://github.com/warlordofmars/channel/releases/latest/download"
+    : `https://github.com/warlordofmars/channel/releases/download/${CHANNEL}`;
 
 export default function Download() {
   return (
