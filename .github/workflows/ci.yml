@@ -72,10 +72,10 @@ jobs:
         run: npm install
 
       - name: pip-audit
-        # CVE-2026-3219 and CVE-2026-6357 affect the pip bundled with the venv
-        # itself, not anything in our pyproject.toml. pip is build-time only —
-        # the deployed Lambda runtime has no pip.
-        run: uv run pip-audit --skip-editable --ignore-vuln CVE-2026-3219 --ignore-vuln CVE-2026-6357
+        # CVE-2026-3219 / CVE-2026-6357 / PYSEC-2026-196 all affect the pip
+        # bundled with the venv itself, not anything in our pyproject.toml.
+        # pip is build-time only — the deployed Lambda runtime has no pip.
+        run: uv run pip-audit --skip-editable --ignore-vuln CVE-2026-3219 --ignore-vuln CVE-2026-6357 --ignore-vuln PYSEC-2026-196
 
       - name: npm audit
         working-directory: ui
