@@ -668,6 +668,44 @@ def delete_attachment(*, user_id: str, att_id: str) -> None:
     _get_table().delete_item(Key={"PK": f"USER#{user_id}", "SK": _attachment_sk(att_id)})
 
 
+def mark_attachment_referenced(*, user_id: str, att_id: str) -> None:
+    """Stamp ``referenced_at = now`` on the canonical ATTACHMENT row (#176).
+
+    Called from the send path AFTER ``verify_attachment_object`` returns
+    success — the lifecycle rule on the attachments bucket targets
+    objects still tagged ``unreferenced=1``; this marker is the
+    DDB-side counterpart that ties an S3 object to at least one
+    message reference. Doesn't touch other attributes (name, mime,
+    etc.) — UpdateItem on a single attribute keeps the row's prior
+    state intact.
+
+    ``ConditionExpression="attribute_exists(PK)"`` guards the narrow
+    window where a concurrent chat-delete cascade could remove the
+    canonical row between the send-path ``get_attachment`` lookup and
+    this stamp — without the condition, DynamoDB silently creates a
+    ghost item with only ``PK``/``SK``/``referenced_at``. The race
+    loss is harmless (the attachment is gone), so we swallow the
+    conditional failure.
+    """
+
+    try:
+        _get_table().update_item(
+            Key={"PK": f"USER#{user_id}", "SK": _attachment_sk(att_id)},
+            UpdateExpression="SET referenced_at = :now",
+            ExpressionAttributeValues={":now": _now_iso()},
+            ConditionExpression="attribute_exists(PK)",
+        )
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            logger.warning(
+                "attachment.mark_referenced_lost_race user_id=%s att_id=%s",
+                user_id,
+                att_id,
+            )
+            return
+        raise
+
+
 def verify_attachment_object(att: Attachment) -> tuple[bool, str | None]:
     """HEAD the S3 object to confirm it still exists at turn time.
 

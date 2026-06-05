@@ -28,6 +28,7 @@ from channel.agents.chat_agent import (
 )
 from channel.agents.memory import _sanitize_actor_id, get_or_create_memory
 from channel.agents.strands_sse import (
+    sse_attachment_error,
     sse_delta,
     sse_done,
     sse_follow_ups_suggested,
@@ -72,6 +73,168 @@ def _to_strands_messages(messages: list[Message]) -> list[dict[str, Any]]:
     chronological order (``ScanIndexForward=True``), so no reordering.
     """
     return [{"role": m.role.value, "content": [{"text": m.text}]} for m in messages]
+
+
+# ----------------------------------------------------------------
+# Attachment resolution for the send path (#176)
+# ----------------------------------------------------------------
+
+
+# MIME → Strands DocumentFormat / ImageFormat literal. The two unions
+# share no overlap so format also tells us which content-block key
+# (``document`` vs. ``image``) to emit.
+_MIME_TO_DOC_FORMAT: dict[str, str] = {
+    "application/pdf": "pdf",
+    "text/csv": "csv",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+    "text/plain": "txt",
+    "text/markdown": "md",
+}
+_MIME_TO_IMG_FORMAT: dict[str, str] = {
+    "image/png": "png",
+    "image/jpeg": "jpeg",
+    "image/gif": "gif",
+    "image/webp": "webp",
+}
+# MIME → user-facing family label inside the attachment header text.
+_MIME_TO_FAMILY: dict[str, str] = {
+    "application/pdf": "PDF",
+    "image/png": "image",
+    "image/jpeg": "image",
+    "image/gif": "image",
+    "image/webp": "image",
+    "text/csv": "CSV",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "spreadsheet",
+    "text/plain": "text",
+    "text/markdown": "markdown",
+}
+
+
+def _attachment_label(*, index: int, name: str, size_bytes: int, mime: str) -> str:
+    size_mb = f"{size_bytes / 1024 / 1024:.1f}MB"
+    family = _MIME_TO_FAMILY.get(mime, "file")
+    return f"[attachment_{index}: {name}, {size_mb}, {family}]"
+
+
+def _attachment_failure_label(*, index: int, name: str, reason: str) -> str:
+    return f"[attachment_{index}: {name} — FAILED: {reason}]"
+
+
+def _resolve_attachments_for_send(
+    *,
+    user_id: str,
+    attachments: list[dict[str, Any]] | None,
+) -> tuple[
+    list[dict[str, Any]],
+    list[dict[str, Any]] | None,
+    list[dict[str, Any]],
+    list[str],
+]:
+    """Resolve a request's ``attachments`` list into Strands content blocks
+    plus the denormalised message-row snapshots, the SSE error payloads
+    for any S3-verify failures, and the list of att_ids that should
+    have ``referenced_at`` stamped.
+
+    Returns ``(content_blocks, snapshots, errors, verified_ids)``.
+
+    Raises ``HTTPException(400)`` if any attachment id is missing or
+    owned by a different user — the request is structurally invalid
+    and no partial persist is allowed (per #176 spec).
+    """
+
+    if not attachments:
+        return [], None, [], []
+
+    # 1. Resolve canonical rows. Hard-reject on the first miss.
+    resolved: list[Any] = []
+    for entry in attachments:
+        att_id = entry.get("id") if isinstance(entry, dict) else None
+        if not att_id:
+            raise HTTPException(status_code=400, detail="Attachment entry missing id")
+        att = storage.get_attachment(user_id=user_id, att_id=att_id)
+        if att is None:
+            # Could be: id doesn't exist, OR row exists under another
+            # user. Either way the caller has no claim to it; 400.
+            raise HTTPException(status_code=400, detail=f"Attachment {att_id} not found")
+        resolved.append(att)
+
+    # 2. Snapshot the denormalised metadata for the message row.
+    snapshots = [
+        {"id": a.id, "name": a.name, "mime": a.mime, "size_bytes": a.size_bytes} for a in resolved
+    ]
+
+    # 3. HEAD-verify each S3 object, building content blocks + errors
+    #    in user-supplied order. ``index`` is the 1-based attachment
+    #    number that appears in the labeled headers.
+    content_blocks: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    verified_ids: list[str] = []
+    for index, att in enumerate(resolved, start=1):
+        ok, reason = storage.verify_attachment_object(att)
+        if not ok:
+            content_blocks.append(
+                {
+                    "text": _attachment_failure_label(
+                        index=index, name=att.name, reason=reason or "unknown"
+                    )
+                }
+            )
+            errors.append(
+                {
+                    "attachment_id": att.id,
+                    "filename": att.name,
+                    "reason": reason or "unknown",
+                }
+            )
+            continue
+
+        header = _attachment_label(
+            index=index, name=att.name, size_bytes=att.size_bytes, mime=att.mime
+        )
+        content_blocks.append({"text": header})
+        uri = f"s3://{att.s3_bucket}/{att.s3_key}"
+        if att.mime in _MIME_TO_DOC_FORMAT:
+            content_blocks.append(
+                {
+                    "document": {
+                        "format": _MIME_TO_DOC_FORMAT[att.mime],
+                        "name": att.name,
+                        "source": {"s3Location": {"uri": uri}},
+                    }
+                }
+            )
+        elif att.mime in _MIME_TO_IMG_FORMAT:
+            content_blocks.append(
+                {
+                    "image": {
+                        "format": _MIME_TO_IMG_FORMAT[att.mime],
+                        "source": {"s3Location": {"uri": uri}},
+                    }
+                }
+            )
+        else:
+            # MIME outside the v1 allowlist — should have been caught at
+            # presign (#175). Fall through with a labeled FAILED marker
+            # so the model can voice the gap rather than silently dropping.
+            content_blocks[-1] = {
+                "text": _attachment_failure_label(
+                    index=index,
+                    name=att.name,
+                    reason=f"unsupported mime {att.mime}",
+                )
+            }
+            errors.append(
+                {
+                    "attachment_id": att.id,
+                    "filename": att.name,
+                    "reason": f"unsupported mime {att.mime}",
+                }
+            )
+            continue
+
+        verified_ids.append(att.id)
+
+    return content_blocks, snapshots, errors, verified_ids
 
 
 router = APIRouter(prefix="/chats", tags=["chats"])
@@ -296,6 +459,10 @@ async def _stream_bedrock_reply(
     persist_user: bool = True,
     index_delta_count: int = 2,
     effort: str | None = None,
+    attachment_content_blocks: list[dict[str, Any]] | None = None,
+    attachment_snapshots: list[dict[str, Any]] | None = None,
+    attachment_errors: list[dict[str, Any]] | None = None,
+    verified_attachment_ids: list[str] | None = None,
 ) -> Any:
     """Persist the user turn, stream Strands events, persist the assistant turn.
 
@@ -343,15 +510,37 @@ async def _stream_bedrock_reply(
         prior_msgs = prior_msgs[:-1]
     prior_messages = _to_strands_messages(prior_msgs)
 
+    # Attachments are resolved by the route handler BEFORE this
+    # generator starts so HTTPException(400) on unowned/missing ids
+    # surfaces as a clean 400 instead of mid-stream chaos. By the time
+    # we see the resolved tuple here, ownership has already been
+    # validated and only S3-verify failures (soft) remain.
+    content_blocks = attachment_content_blocks or []
+    verified_ids = verified_attachment_ids or []
+    errors_list = attachment_errors or []
+
     if persist_user:
         user_msg = storage.put_message(
             chat_id=chat.chat_id,
             role=MessageRole.USER,
             text=user_message,
             model=None,
+            attachments=attachment_snapshots,
         )
         state["user_msg_id"] = user_msg.msg_id
         yield sse_user_persisted(msg_id=user_msg.msg_id, seq=0)
+
+    # Attachment side-effects fire on BOTH the initial send and regenerate.
+    # The original send-side ``referenced_at`` stamp is preserved across
+    # regenerate (the re-stamp is harmless idempotent under the
+    # ``attribute_exists(PK)`` guard in storage). And the SPA needs the
+    # ``attachment_error`` event whenever a verify fails — regenerate
+    # replays the same attachments, so a freshly-expired S3 object should
+    # still prompt the re-upload UI on the second-shot stream.
+    for att_id in verified_ids:
+        storage.mark_attachment_referenced(user_id=claims["sub"], att_id=att_id)
+    for err in errors_list:
+        yield sse_attachment_error(**err)
 
     agent = build_agent(
         model_id=model,
@@ -365,7 +554,14 @@ async def _stream_bedrock_reply(
     input_tokens = 0
     output_tokens = 0
 
-    async for event in agent.stream_async(user_message):
+    # When attachments are present, Strands gets the labeled content-block
+    # list with the user's text appended; otherwise the bare string keeps
+    # the existing happy path.
+    user_payload: Any = (
+        [*content_blocks, {"text": user_message}] if content_blocks else user_message
+    )
+
+    async for event in agent.stream_async(user_payload):
         kind, payload = translate_event(event)
         if kind == "delta":
             accumulated.append(payload)
@@ -523,6 +719,14 @@ async def post_message(
     chat = await _load_owned_chat(chat_id, claims["sub"])
     model = payload.model or _DEFAULT_MODEL
 
+    # Resolve attachments BEFORE the streaming response begins so the
+    # 400-on-unowned-id surfaces cleanly. S3 verify happens here too;
+    # individual failures become labeled blocks + SSE errors inside
+    # the stream (soft fail), not 400s.
+    content_blocks, snapshots, att_errors, verified_ids = _resolve_attachments_for_send(
+        user_id=claims["sub"], attachments=payload.attachments
+    )
+
     replay: dict[str, Any] | None = None
     if idempotency_key:
         existing = storage.reserve_idempotency_key(user_id=claims["sub"], key=idempotency_key)
@@ -548,6 +752,10 @@ async def post_message(
             claims=claims,
             state=state,
             effort=payload.effort,
+            attachment_content_blocks=content_blocks,
+            attachment_snapshots=snapshots,
+            attachment_errors=att_errors,
+            verified_attachment_ids=verified_ids,
         ):
             yield chunk
         if idempotency_key and state.get("assistant_msg_id"):
@@ -591,6 +799,17 @@ async def regenerate(
             status_code=400, detail="Cannot regenerate — chat has no user messages."
         )
 
+    # #176 — replay any attachments the prior user turn carried. The
+    # snapshot is denormalised so we only need the ids; the resolver
+    # re-fetches the canonical rows and rebuilds the content blocks
+    # exactly as the original send did.
+    replay_attachments = [
+        {"id": s.get("id")} for s in (last_user.attachments or []) if s.get("id")
+    ] or None
+    content_blocks, snapshots, att_errors, verified_ids = _resolve_attachments_for_send(
+        user_id=claims["sub"], attachments=replay_attachments
+    )
+
     return StreamingResponse(
         _stream_bedrock_reply(
             chat=chat,
@@ -600,6 +819,10 @@ async def regenerate(
             persist_user=False,
             index_delta_count=0,
             effort=payload.effort,
+            attachment_content_blocks=content_blocks,
+            attachment_snapshots=snapshots,
+            attachment_errors=att_errors,
+            verified_attachment_ids=verified_ids,
         ),
         media_type="text/event-stream",
     )

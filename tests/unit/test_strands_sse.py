@@ -129,3 +129,23 @@ def test_sse_follow_ups_suggested_emits_chat_id_message_id_and_suggestions():
         "message_id": "m-1",
         "suggestions": ["First", "Second", "Third"],
     }
+
+
+def test_sse_attachment_error_emits_id_filename_and_reason():
+    """#176 — fetch-time S3 failure surfaces via attachment_error SSE so
+    the SPA can prompt the user to re-upload."""
+
+    from channel.agents.strands_sse import sse_attachment_error
+
+    raw = sse_attachment_error(
+        attachment_id="att-1",
+        filename="spec.pdf",
+        reason="S3 object not found",
+    )
+    payload = json.loads(raw[6:-2])
+    assert payload == {
+        "type": "attachment_error",
+        "attachment_id": "att-1",
+        "filename": "spec.pdf",
+        "reason": "S3 object not found",
+    }
