@@ -167,13 +167,18 @@ const _HEX = "0123456789abcdef";
  * browsers, Node, and jsdom — and the cost is one byte copy.
  */
 export async function sha256Hex(blob) {
-  const buf = await new Promise((resolve, reject) => {
+  const result = await new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(reader.result);
     reader.onerror = () => reject(reader.error);
     reader.readAsArrayBuffer(blob);
   });
-  const digest = await crypto.subtle.digest("SHA-256", buf);
+  // Wrap defensively: CI's jsdom v24 returns a Buffer-flavoured value
+  // that ``crypto.subtle.digest`` rejected with ``ERR_INVALID_ARG_TYPE``
+  // even though it carries the right bytes. Coercing through Uint8Array
+  // gives a guaranteed TypedArray that every env accepts.
+  const view = new Uint8Array(result);
+  const digest = await crypto.subtle.digest("SHA-256", view);
   const bytes = new Uint8Array(digest);
   let out = "";
   for (let i = 0; i < bytes.length; i += 1) {
