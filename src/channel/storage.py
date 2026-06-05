@@ -24,6 +24,7 @@ from typing import Any
 
 import boto3
 from boto3.dynamodb.conditions import Attr, Key
+from botocore.config import Config
 from botocore.exceptions import ClientError
 from pydantic import ValidationError
 
@@ -56,8 +57,23 @@ def _get_table() -> Any:  # pragma: no cover - tests replace this seam
     return boto3.resource("dynamodb", **kwargs).Table(table_name)
 
 
-def _get_s3_client() -> Any:  # pragma: no cover - tests replace this seam
-    return boto3.client("s3", region_name=os.environ.get("AWS_DEFAULT_REGION", "us-east-1"))
+def _get_s3_client() -> Any:
+    """Return a boto3 S3 client pinned to SigV4 (#196).
+
+    SSE-KMS PUTs ``REQUIRE`` SigV4 — S3 rejects SigV2-signed presigned URLs
+    with ``InvalidArgument: Requests specifying Server Side Encryption with
+    AWS KMS managed keys require AWS Signature Version 4``. The bucket
+    enforces SSE-KMS by default (per #173), so every presigned PUT we mint
+    must use SigV4. ``Config(signature_version="s3v4")`` applies that
+    pinning to every operation this client performs — presigned URLs,
+    HEAD checks, deletes, tagging.
+    """
+
+    return boto3.client(
+        "s3",
+        region_name=os.environ.get("AWS_DEFAULT_REGION", "us-east-1"),
+        config=Config(signature_version="s3v4"),
+    )
 
 
 def _chat_index_sk(created_at: str, chat_id: str) -> str:
