@@ -137,6 +137,69 @@ export async function logout() {
   if (!res.ok) throw new Error(`logout ${res.status}`);
 }
 
+// ---- Attachments (#177) --------------------------------------------------
+//
+// Three-step browser flow:
+//   1. ``presignAttachment`` — POST metadata, get back a presigned PUT
+//      URL + the headers the browser must send + a short-lived JWT that
+//      ``finalizeAttachment`` redeems.
+//   2. ``uploadToPresigned`` — PUT the raw bytes directly to S3. No
+//      Authorization header (the presigned URL carries its own auth).
+//   3. ``finalizeAttachment`` — POST presign_token + checksum to write
+//      the canonical ``ATTACHMENT#{id}`` row and flip the lifecycle tag.
+//
+// User-facing copy in the surrounding UI must say "attach"/"attached"
+// (never "upload"/"uploaded") per Channel's 2026-06-03 design input —
+// these identifiers are implementation detail and stay as-is.
+
+const _HEX = "0123456789abcdef";
+
+/**
+ * Compute the lowercase hex SHA-256 digest of a Blob/File via
+ * ``crypto.subtle``. Reusable helper — used by the attach pipeline
+ * before ``finalizeAttachment`` to hand the canonical row a fingerprint.
+ */
+export async function sha256Hex(blob) {
+  const buf = await blob.arrayBuffer();
+  const digest = await crypto.subtle.digest("SHA-256", buf);
+  const bytes = new Uint8Array(digest);
+  let out = "";
+  for (let i = 0; i < bytes.length; i += 1) {
+    const b = bytes[i];
+    out += _HEX[b >> 4] + _HEX[b & 0xf];
+  }
+  return out;
+}
+
+export async function presignAttachment({ name, mime, size_bytes }) {
+  const response = await fetch(`${BASE}/api/attachments/presign`, {
+    method: "POST",
+    headers: { ...authHeader(), "Content-Type": "application/json" },
+    body: JSON.stringify({ name, mime, size_bytes }),
+  });
+  if (!response.ok) throw new Error(`presignAttachment ${response.status}`);
+  return response.json();
+}
+
+export async function uploadToPresigned(url, headers, blob) {
+  const response = await fetch(url, {
+    method: "PUT",
+    headers,
+    body: blob,
+  });
+  if (!response.ok) throw new Error(`uploadToPresigned ${response.status}`);
+}
+
+export async function finalizeAttachment({ presign_token, checksum_sha256 }) {
+  const response = await fetch(`${BASE}/api/attachments`, {
+    method: "POST",
+    headers: { ...authHeader(), "Content-Type": "application/json" },
+    body: JSON.stringify({ presign_token, checksum_sha256 }),
+  });
+  if (!response.ok) throw new Error(`finalizeAttachment ${response.status}`);
+  return response.json();
+}
+
 // ---- User preferences ----------------------------------------------------
 
 export async function getPrefs() {

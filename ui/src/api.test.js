@@ -3,16 +3,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createChat,
   deleteChat,
+  finalizeAttachment,
   getChat,
   getPrefs,
   listChats,
   listModels,
   logout,
   patchChat,
+  presignAttachment,
   putPrefs,
   regenerate,
+  sha256Hex,
   streamMessage,
   submitFeedback,
+  uploadToPresigned,
 } from "./api.js";
 
 // ---------------------------------------------------------------------------
@@ -394,6 +398,120 @@ describe("chats wrappers", () => {
       await expect(
         submitFeedback("c1", "m-bad", { kind: "up", note: null }),
       ).rejects.toThrow(/submitFeedback 404/);
+    });
+  });
+
+  // ---- attachments: presign + upload + finalize (#177) -------------------
+
+  describe("sha256Hex", () => {
+    it("returns the lowercase hex digest of a blob's bytes", async () => {
+      // Known SHA-256 of "hello" → 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
+      const blob = new Blob(["hello"], { type: "text/plain" });
+      const digest = await sha256Hex(blob);
+      expect(digest).toBe(
+        "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+      );
+    });
+  });
+
+  describe("presignAttachment", () => {
+    it("POSTs name/mime/size_bytes and returns the presign payload", async () => {
+      mockOk({
+        att_id: "att-1",
+        url: "https://s3.example/upload",
+        required_headers: { "Content-Type": "application/pdf" },
+        presign_token: "jwt.abc",
+      });
+      const out = await presignAttachment({
+        name: "spec.pdf",
+        mime: "application/pdf",
+        size_bytes: 1024,
+      });
+      expect(fetchMock.mock.calls[0][0]).toBe("/api/attachments/presign");
+      const opts = fetchMock.mock.calls[0][1];
+      expect(opts.method).toBe("POST");
+      expect(opts.headers.Authorization).toBe("Bearer tok-abc");
+      expect(JSON.parse(opts.body)).toEqual({
+        name: "spec.pdf",
+        mime: "application/pdf",
+        size_bytes: 1024,
+      });
+      expect(out.att_id).toBe("att-1");
+      expect(out.presign_token).toBe("jwt.abc");
+    });
+
+    it("throws on non-ok response", async () => {
+      mockFail(400);
+      await expect(
+        presignAttachment({ name: "x", mime: "evil/bin", size_bytes: 1 }),
+      ).rejects.toThrow(/presignAttachment 400/);
+    });
+  });
+
+  describe("uploadToPresigned", () => {
+    it("PUTs the blob with the required headers", async () => {
+      fetchMock.mockResolvedValue({ ok: true, status: 200 });
+      const blob = new Blob(["bytes"], { type: "application/pdf" });
+      await uploadToPresigned(
+        "https://s3.example/u",
+        {
+          "Content-Type": "application/pdf",
+          "x-amz-tagging": "unreferenced=1",
+        },
+        blob,
+      );
+      const [url, opts] = fetchMock.mock.calls[0];
+      expect(url).toBe("https://s3.example/u");
+      expect(opts.method).toBe("PUT");
+      expect(opts.headers["Content-Type"]).toBe("application/pdf");
+      expect(opts.headers["x-amz-tagging"]).toBe("unreferenced=1");
+      expect(opts.body).toBe(blob);
+      // No Authorization header — the presigned URL carries its own auth.
+      expect(opts.headers.Authorization).toBeUndefined();
+    });
+
+    it("throws on non-2xx S3 response", async () => {
+      fetchMock.mockResolvedValue({ ok: false, status: 403 });
+      const blob = new Blob(["x"], { type: "application/pdf" });
+      await expect(
+        uploadToPresigned("https://s3.example/u", {}, blob),
+      ).rejects.toThrow(/uploadToPresigned 403/);
+    });
+  });
+
+  describe("finalizeAttachment", () => {
+    it("POSTs presign_token + checksum and returns the Attachment", async () => {
+      mockOk({
+        id: "att-1",
+        user_id: "u-1",
+        name: "spec.pdf",
+        mime: "application/pdf",
+        size_bytes: 1024,
+        s3_key: "attachments/user/u-1/att-1",
+        s3_bucket: "bk",
+        checksum_sha256: "sha",
+        created_at: "2026-06-04T00:00:00Z",
+      });
+      const out = await finalizeAttachment({
+        presign_token: "jwt.abc",
+        checksum_sha256: "sha",
+      });
+      expect(fetchMock.mock.calls[0][0]).toBe("/api/attachments");
+      const opts = fetchMock.mock.calls[0][1];
+      expect(opts.method).toBe("POST");
+      expect(opts.headers.Authorization).toBe("Bearer tok-abc");
+      expect(JSON.parse(opts.body)).toEqual({
+        presign_token: "jwt.abc",
+        checksum_sha256: "sha",
+      });
+      expect(out.id).toBe("att-1");
+    });
+
+    it("throws on non-ok response", async () => {
+      mockFail(401);
+      await expect(
+        finalizeAttachment({ presign_token: "bad", checksum_sha256: "x" }),
+      ).rejects.toThrow(/finalizeAttachment 401/);
     });
   });
 });

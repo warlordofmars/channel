@@ -11,6 +11,21 @@ globalThis.URL.revokeObjectURL = vi.fn();
 // do not throw and coverage branches are reachable.
 globalThis.HTMLElement.prototype.scrollIntoView = function () {};
 
+// jsdom v24's Blob shim is missing ``arrayBuffer()``. The #177 attach
+// pipeline uses ``crypto.subtle.digest`` on a Blob/File's bytes; without
+// this polyfill the sha256Hex helper throws under test. Real browsers +
+// Node's native Blob ship the method natively.
+if (typeof globalThis.Blob.prototype.arrayBuffer !== "function") {
+  globalThis.Blob.prototype.arrayBuffer = function arrayBufferPolyfill() {
+    return new Promise((resolve, reject) => {
+      const reader = new globalThis.FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(reader.error);
+      reader.readAsArrayBuffer(this);
+    });
+  };
+}
+
 // jsdom v24 ships localStorage but requires a --localstorage-file path to back
 // it. Without a valid path the object exists but its methods are no-ops or
 // missing. Replace it with a plain in-memory implementation so all tests get
