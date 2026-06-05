@@ -412,6 +412,34 @@ describe("chats wrappers", () => {
         "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
       );
     });
+
+    it("rejects when FileReader fires an error", async () => {
+      // Stub FileReader so readAsArrayBuffer immediately fires onerror.
+      // This exercises the rejection path in sha256Hex without depending
+      // on jsdom's actual error conditions.
+      class ErroringFileReader {
+        constructor() {
+          this.error = new Error("read failed");
+          this.onload = null;
+          this.onerror = null;
+        }
+        readAsArrayBuffer() {
+          // Defer so the caller has a chance to wire up handlers.
+          queueMicrotask(() => this.onerror && this.onerror());
+        }
+      }
+      const originalFileReader = globalThis.FileReader;
+      vi.stubGlobal("FileReader", ErroringFileReader);
+      try {
+        await expect(sha256Hex(new Blob(["x"]))).rejects.toThrow(/read failed/);
+      } finally {
+        // afterEach's vi.unstubAllGlobals would do this too, but we
+        // restore explicitly so coverage doesn't depend on order.
+        if (originalFileReader) {
+          vi.stubGlobal("FileReader", originalFileReader);
+        }
+      }
+    });
   });
 
   describe("presignAttachment", () => {

@@ -158,9 +158,21 @@ const _HEX = "0123456789abcdef";
  * Compute the lowercase hex SHA-256 digest of a Blob/File via
  * ``crypto.subtle``. Reusable helper — used by the attach pipeline
  * before ``finalizeAttachment`` to hand the canonical row a fingerprint.
+ *
+ * Reads the blob via ``FileReader`` rather than ``Blob.arrayBuffer``
+ * or ``Response``: jsdom v24's ``Blob.arrayBuffer`` is undefined and
+ * its ``Response(blob)`` path reads the literal string
+ * ``[object Blob]`` instead of the bytes, breaking unit tests under
+ * vitest. ``FileReader.readAsArrayBuffer`` works identically in real
+ * browsers, Node, and jsdom — and the cost is one byte copy.
  */
 export async function sha256Hex(blob) {
-  const buf = await blob.arrayBuffer();
+  const buf = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsArrayBuffer(blob);
+  });
   const digest = await crypto.subtle.digest("SHA-256", buf);
   const bytes = new Uint8Array(digest);
   let out = "";
