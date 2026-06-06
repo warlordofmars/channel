@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -40,11 +41,11 @@ def test_payload_from_messages_pairs_user_and_assistant_text():
     ]
 
 
-def test_payload_from_messages_concatenates_multi_block_content():
-    # Strands sometimes emits multiple text blocks within one message
-    # (e.g. when a tool result is interleaved). Concatenate text blocks;
-    # non-text blocks (toolUse, toolResult) are dropped — AgentCore's
-    # v1 payload spec only accepts text.
+def test_payload_from_messages_invariant_drops_tool_use_blocks():
+    """INVARIANT: Tool payloads (toolUse / toolResult blocks) never
+    persist to AgentCore Memory. Verified by a fixture that emits both
+    block types interleaved with text and asserting neither leaks into
+    the produced payload."""
     messages = [
         {
             "role": "assistant",
@@ -54,18 +55,25 @@ def test_payload_from_messages_concatenates_multi_block_content():
                 {"text": "The answer is 4."},
             ],
         },
+        {
+            "role": "user",
+            "content": [
+                {"toolResult": {"name": "calc", "output": {"y": 4}}},
+                {"text": "Thanks."},
+            ],
+        },
     ]
 
     payload = _payload_from_messages(messages)
 
-    assert payload == [
-        {
-            "conversational": {
-                "role": "ASSISTANT",
-                "content": {"text": "Let me check. The answer is 4."},
-            },
-        },
-    ]
+    # 1. Text concatenation still works
+    assert payload[0]["conversational"]["content"]["text"] == "Let me check. The answer is 4."
+    assert payload[1]["conversational"]["content"]["text"] == "Thanks."
+
+    # 2. Invariant: NO toolUse or toolResult key appears anywhere in payload
+    serialised = json.dumps(payload)
+    assert "toolUse" not in serialised
+    assert "toolResult" not in serialised
 
 
 def test_payload_from_messages_raises_on_unknown_role():
@@ -395,3 +403,51 @@ async def test_hook_sanitizes_actor_id_passed_to_create_event():
 
     kwargs = fake_client.create_event.call_args.kwargs
     assert kwargs["actorId"] == "alice_example_com"
+
+
+def test_write_meta_event_calls_create_event_with_meta_prefix():
+    """[meta] synthetic ASSISTANT messages flow through CreateEvent
+    via the existing boto3 client. The '[meta]' prefix tags the event
+    for the recall hook to render distinctly."""
+    captured: dict[str, Any] = {}
+
+    class FakeClient:
+        def create_event(self, **kwargs: Any) -> dict[str, Any]:
+            captured.update(kwargs)
+            return {}
+
+    hook = AgentCoreMemoryHook(
+        memory_id="mem-x",
+        actor_id="user-1",
+        session_id="chat-1",
+        client=FakeClient(),
+    )
+    hook.write_meta_event("used current_time to get current UTC time")
+
+    assert captured["memoryId"] == "mem-x"
+    assert captured["actorId"] == "user-1"
+    assert captured["sessionId"] == "chat-1"
+    # The synthetic ASSISTANT message text starts with [meta]
+    payload = captured["payload"]
+    assert payload[0]["conversational"]["role"] == "ASSISTANT"
+    assert payload[0]["conversational"]["content"]["text"].startswith("[meta] ")
+
+
+def test_write_meta_event_swallows_client_exceptions():
+    """Fail-soft contract: write_meta_event must not raise even when the
+    boto3 client blows up. Tool result is already in the chain; failure
+    to record the META fact must not break the user-visible reply."""
+
+    class BoomClient:
+        def create_event(self, **_: Any) -> dict[str, Any]:
+            raise RuntimeError("agentcore down")
+
+    hook = AgentCoreMemoryHook(
+        memory_id="m",
+        actor_id="a",
+        session_id="s",
+        client=BoomClient(),
+    )
+
+    # MUST NOT raise.
+    hook.write_meta_event("used calc with x=2")

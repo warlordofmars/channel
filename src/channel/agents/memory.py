@@ -226,9 +226,55 @@ class AgentCoreMemoryHook:
             )
             await record_memory_write_outcome(success=False)
 
+    def write_meta_event(self, text: str) -> None:
+        """Write a ``[meta]``-prefixed synthetic ASSISTANT message via CreateEvent.
+
+        Called by ``ToolCallTelemetryHook`` after each tool call (epic
+        #128 decision 6). One event per tool call, not per chain. The
+        recall hook (``recall.py``) tags ``[meta]``-prefixed events and
+        renders them differently in the system-prompt addendum.
+
+        Fail-soft: errors log + swallow but never raise — the tool
+        result is already in the chain; failure to record the META
+        fact must not break the user-visible reply. No EMF counter is
+        emitted here (cf. ``_on_after_invocation_async`` which does
+        bump ``MemoryWriteFailures``) — META writes are best-effort
+        side-channel telemetry, not the primary memory write path.
+        """
+        try:
+            self._client.create_event(
+                memoryId=self._memory_id,
+                actorId=self._actor_id,
+                sessionId=self._session_id,
+                eventTimestamp=datetime.now(timezone.utc),
+                payload=[
+                    {
+                        "conversational": {
+                            "role": "ASSISTANT",
+                            "content": {"text": f"[meta] {text}"},
+                        }
+                    }
+                ],
+            )
+        except Exception as exc:
+            logger.warning(
+                "agentcore.write_meta_event_failed actor_id=%s session_id=%s",
+                self._actor_id,
+                self._session_id,
+                extra={"error_type": type(exc).__name__, "error_message": str(exc)},
+                exc_info=True,
+            )
+
 
 def _payload_from_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Translate Strands message dicts to AgentCore ``CreateEvent`` payload.
+
+    INVARIANT (epic #128 decision 7, 2026-06-03): Tool payloads —
+    ``toolUse`` and ``toolResult`` content blocks — never persist to
+    AgentCore Memory. Only conclusion-shaped text survives. Tool-use
+    META facts are recorded separately via the AfterToolCallEvent hook
+    (see ``src/channel/agents/tool_hooks.py``). Verified explicitly by
+    ``tests/unit/test_memory.py::test_payload_from_messages_invariant_drops_tool_use_blocks``.
 
     Strands messages have shape
     ``{"role": str, "content": [{"text": str}, ...]}``. AgentCore's
@@ -236,8 +282,7 @@ def _payload_from_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any
     upper-cased and ``content.text`` as a single string.
 
     Multi-block content (text + toolUse interleaved) gets its text
-    blocks concatenated. Non-text blocks (toolUse, toolResult) are
-    dropped — AgentCore's v1 payload spec only accepts text.
+    blocks concatenated; non-text blocks are dropped per the invariant.
     """
     out: list[dict[str, Any]] = []
     for msg in messages:
