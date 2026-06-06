@@ -822,6 +822,38 @@ jobs:
             --config.productName="${{ steps.env.outputs.product_name }}" \
             --config.appId="${{ steps.env.outputs.app_id }}"
 
+      - name: Generate latest-mac.yml (electron-updater manifest)
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          # `electron-builder --publish=never` skips the entire publish
+          # phase, INCLUDING latest-mac.yml generation. We compute the
+          # manifest ourselves from the .zip electron-builder produced
+          # — same format `electron-updater` expects (version + file
+          # entry with base64 SHA-512 + size + releaseDate).
+          cd desktop/release
+          ZIP=$(ls Channel-*-mac.zip | head -1)
+          if [[ -z "$ZIP" ]]; then
+            echo "::error::expected to find Channel-*-mac.zip in desktop/release/"
+            ls -la
+            exit 1
+          fi
+          SHA=$(openssl dgst -sha512 -binary "$ZIP" | openssl base64 -A)
+          SIZE=$(stat -f %z "$ZIP" 2>/dev/null || stat -c %s "$ZIP")
+          RELEASE_DATE=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
+          cat > latest-mac.yml <<EOF
+          version: ${VERSION}
+          files:
+            - url: ${ZIP}
+              sha512: ${SHA}
+              size: ${SIZE}
+          path: ${ZIP}
+          sha512: ${SHA}
+          releaseDate: '${RELEASE_DATE}'
+          EOF
+          echo "Generated latest-mac.yml:"
+          cat latest-mac.yml
+
       - name: Upload versioned auto-update bundles to S3 (tagged for lifecycle)
         env:
           BUCKET: ${{ steps.cdk.outputs.bucket }}
