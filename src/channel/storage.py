@@ -15,6 +15,7 @@ production it returns the real boto3 ``Table`` resource.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import time
@@ -25,7 +26,7 @@ from typing import Any
 import boto3
 from boto3.dynamodb.conditions import Attr, Key
 from botocore.config import Config
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 from pydantic import ValidationError
 
 from channel.models import (
@@ -751,7 +752,21 @@ def get_attachment_bytes(att: Attachment) -> tuple[bytes | None, str | None]:
         if code in {"404", "NoSuchKey", "NotFound"}:
             return None, "S3 object not found"
         return None, f"S3 error: {code}" if code else "S3 error"
-    return response["Body"].read(), None
+
+    # StreamingBody wraps an HTTP connection. A mid-read ``ReadTimeoutError``
+    # / ``IncompleteReadError`` / socket failure must convert into the same
+    # ``(None, reason)`` failure shape so the SSE generator can render a
+    # labeled marker instead of 500-ing the stream. ``finally: close()``
+    # releases the pooled connection on both success and failure (a
+    # successful read leaves it benign-to-close anyway).
+    body = response["Body"]
+    try:
+        return body.read(), None
+    except (BotoCoreError, OSError) as exc:
+        return None, f"S3 read error: {type(exc).__name__}"
+    finally:
+        with contextlib.suppress(Exception):
+            body.close()
 
 
 def delete_chat_attachments(*, chat_id: str, user_id: str) -> tuple[int, int]:
