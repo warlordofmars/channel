@@ -448,12 +448,8 @@ def test_build_agent_attaches_chassis_hooks_in_documented_order(monkeypatch):
 
     monkeypatch.setattr("channel.agents.chat_agent.BedrockModel", lambda **_: object())
     monkeypatch.setattr("channel.agents.chat_agent.Agent", FakeAgent)
-    monkeypatch.setattr(
-        "channel.agents.chat_agent.AgentCoreRecallHook", lambda **_: fake_recall
-    )
-    monkeypatch.setattr(
-        "channel.agents.chat_agent.AgentCoreMemoryHook", lambda **_: fake_memory
-    )
+    monkeypatch.setattr("channel.agents.chat_agent.AgentCoreRecallHook", lambda **_: fake_recall)
+    monkeypatch.setattr("channel.agents.chat_agent.AgentCoreMemoryHook", lambda **_: fake_memory)
     monkeypatch.setattr(
         "channel.agents.chat_agent.get_or_create_memory",
         lambda env: "mem-test",
@@ -491,9 +487,7 @@ def test_build_agent_passes_tools_kwarg_to_strands_agent(monkeypatch):
     monkeypatch.setattr("channel.agents.chat_agent.AgentCoreRecallHook", lambda **_: object())
     fake_memory = MagicMock()
     monkeypatch.setattr("channel.agents.chat_agent.AgentCoreMemoryHook", lambda **_: fake_memory)
-    monkeypatch.setattr(
-        "channel.agents.chat_agent.get_or_create_memory", lambda env: "m"
-    )
+    monkeypatch.setattr("channel.agents.chat_agent.get_or_create_memory", lambda env: "m")
 
     build_agent(model_id="claude-sonnet-4-6", user_id="u", chat_id="c")
     assert captured["agent_kwargs"]["tools"] == []
