@@ -827,14 +827,20 @@ jobs:
           BUCKET: ${{ steps.cdk.outputs.bucket }}
           CHANNEL: ${{ steps.env.outputs.channel }}
         run: |
-          # `aws s3 sync` does NOT support --tagging (CLI v2 quirk — sync
-          # is a multi-object operation, tagging is per-object). Use `cp`
-          # in a loop so each .zip and .blockmap gets the lifecycle tag
-          # the bucket rule scopes prune on (see infra/stacks/channel_stack.py).
+          # `aws s3 cp` (high-level wrapper) doesn't accept --tagging either
+          # — only `aws s3api put-object` does. PR #214 mistakenly assumed
+          # `cp` supported it; this corrects with a two-step pattern:
+          # upload via `cp`, then tag via `s3api put-object-tagging`. The
+          # lifecycle rule in infra/stacks/channel_stack.py expires objects
+          # tagged channel-asset-type=versioned-zip after 30 days.
           shopt -s nullglob
           for f in desktop/release/*.zip desktop/release/*.blockmap; do
-            aws s3 cp "$f" "s3://${BUCKET}/updates/${CHANNEL}/$(basename "$f")" \
-              --tagging "channel-asset-type=versioned-zip"
+            KEY="updates/${CHANNEL}/$(basename "$f")"
+            aws s3 cp "$f" "s3://${BUCKET}/${KEY}"
+            aws s3api put-object-tagging \
+              --bucket "$BUCKET" \
+              --key "$KEY" \
+              --tagging 'TagSet=[{Key=channel-asset-type,Value=versioned-zip}]'
           done
 
       - name: Sync stable artefacts (dmg + manifest) to S3 (untagged)
