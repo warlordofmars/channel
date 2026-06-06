@@ -2759,4 +2759,5 @@ def test_regenerate_replays_attachments_from_prior_user_turn(
     blocks = cap["agent_prompts"][0]
     assert isinstance(blocks, list)
     assert any("[attachment_1: r.pdf" in (b.get("text") or "") for b in blocks)
-    assert any(b.get("document", {}).get("name") == "r.pdf" for b in blocks)
+    # Sanitised — Bedrock's document.name rejects periods (#179).
+    assert any(b.get("document", {}).get("name") == "r pdf" for b in blocks)
