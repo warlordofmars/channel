@@ -37,6 +37,7 @@ from channel.agents.strands_sse import (
     sse_user_persisted,
     translate_event,
 )
+from channel.agents.tools.clock import current_time
 from channel.api._auth import require_mgmt_user
 from channel.metrics import (
     record_auto_title_outcome,
@@ -569,12 +570,21 @@ async def _stream_bedrock_reply(
     for err in errors_list:
         yield sse_attachment_error(**err)
 
+    # Tool registry — chassis only registers ``current_time`` behind
+    # ``STARTER_CLOCK_TOOL_ENABLED`` (strategy spec policy P2: smoke-test,
+    # off by default in prod). #182 / #183 will append ``exa`` /
+    # ``code_exec`` here behind their own flags.
+    tool_registry: list[Any] = []
+    if os.environ.get("STARTER_CLOCK_TOOL_ENABLED") == "1":
+        tool_registry.append(current_time)
+
     agent = build_agent(
         model_id=model,
         user_id=claims["sub"],
         chat_id=chat.chat_id,
         prior_messages=prior_messages,
         effort=effective_effort,
+        tools=tool_registry,
     )
     accumulated: list[str] = []
     stop_reason = "end_turn"

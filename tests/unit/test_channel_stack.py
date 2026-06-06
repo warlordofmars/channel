@@ -112,6 +112,28 @@ def test_dev_stack_sets_bypass_google_auth_env_var(dev_template):
     assert env_vars.get("STARTER_BYPASS_GOOGLE_AUTH") == "1"
 
 
+def test_prod_stack_disables_clock_tool_env_var(prod_template):
+    """#181 chassis policy P2 — the ``current_time`` smoke-test tool
+    must NOT register in prod. The chassis registers the tool only
+    when ``STARTER_CLOCK_TOOL_ENABLED=="1"``; prod sets it to ``"0"``
+    explicitly so a future default-shift can't flip it on by accident.
+    """
+
+    api_fn = _api_function(prod_template)
+    env_vars = api_fn["Properties"]["Environment"]["Variables"]
+    assert env_vars.get("STARTER_CLOCK_TOOL_ENABLED") == "0"
+
+
+def test_dev_stack_enables_clock_tool_env_var(dev_template):
+    """Non-prod envs (dev / jc / etc.) get the chassis smoke-test tool
+    so the end-to-end tool path stays exercised — see #181 strategy
+    spec policy P2."""
+
+    api_fn = _api_function(dev_template)
+    env_vars = api_fn["Properties"]["Environment"]["Variables"]
+    assert env_vars.get("STARTER_CLOCK_TOOL_ENABLED") == "1"
+
+
 def test_lambda_role_grants_agentcore_write_and_lookup_actions(dev_template):
     """The IAM policy attached to the API Lambda role must grant the
     AgentCore actions Phase 7c needs. We inspect every IAM::Policy
