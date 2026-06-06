@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 from channel.agents.tool_hooks import (
     ChainState,
     ModelVisibilityAddendumHook,
+    ToolCallGuardHook,
     clear_cancel_signal,
     is_cancel_requested,
     set_cancel_signal,
@@ -175,3 +176,183 @@ def test_addendum_hook_register_hooks_subscribes_to_before_model_call():
     registry = MagicMock()
     hook.register_hooks(registry)
     registry.add_callback.assert_called_once_with(BeforeModelCallEvent, hook.on_before_model_call)
+
+
+# ---------------------------------------------------------------------------
+# ToolCallGuardHook — BeforeToolCallEvent
+#
+# Strands' ``BeforeToolCallEvent`` exposes ``cancel_tool: bool | str`` as a
+# writable dataclass field; assigning a string cancels the tool call and
+# Strands surfaces the string as the tool-result error message. That's the
+# channel by which our reason codes (``cancelled`` / ``chain_cap`` /
+# ``wall_clock``) reach PR-2's ``sse_tool_error`` translator — Strands'
+# tool-result error message becomes the SSE ``error_type``.
+# ---------------------------------------------------------------------------
+
+
+def test_guard_hook_blocks_on_chain_cap():
+    """When the chain cap is exhausted, the guard sets ``cancel_tool`` to
+    the ``chain_cap`` reason string. Strands wraps that into a tool-result
+    error which PR-2's translator surfaces to the SPA as
+    ``error_type=chain_cap``."""
+    hook = ToolCallGuardHook()
+    state = ChainState(tool_calls_max=2)
+    state.increment()
+    state.increment()  # used 2 of 2
+
+    agent = MagicMock()
+    agent.chain_state = state
+    agent.chat_id = "chat-1"
+
+    event = MagicMock()
+    event.agent = agent
+    event.cancel_tool = False
+
+    hook.on_before_tool_call(event)
+
+    assert event.cancel_tool == "chain_cap"
+
+
+def test_guard_hook_blocks_on_cancel_signal():
+    """SSE-client disconnect sets the module-level cancel signal. The next
+    BeforeToolCallEvent reads it and cancels with the ``cancelled``
+    reason."""
+    hook = ToolCallGuardHook()
+    state = ChainState()
+    agent = MagicMock()
+    agent.chain_state = state
+    agent.chat_id = "chat-cancelled"
+
+    set_cancel_signal("chat-cancelled")
+    try:
+        event = MagicMock()
+        event.agent = agent
+        event.cancel_tool = False
+        hook.on_before_tool_call(event)
+        assert event.cancel_tool == "cancelled"
+    finally:
+        clear_cancel_signal("chat-cancelled")
+
+
+def test_guard_hook_blocks_on_wall_clock_exhaustion():
+    """When the soft wall-clock budget is exceeded, the guard cancels with
+    the ``wall_clock`` reason."""
+    hook = ToolCallGuardHook()
+    state = ChainState(wall_clock_budget_sec=10)
+    state.started_at = time.monotonic() - 11  # simulate elapsed
+
+    agent = MagicMock()
+    agent.chain_state = state
+    agent.chat_id = "chat-slow"
+
+    event = MagicMock()
+    event.agent = agent
+    event.cancel_tool = False
+    hook.on_before_tool_call(event)
+    assert event.cancel_tool == "wall_clock"
+
+
+def test_guard_hook_allows_under_caps_with_no_cancel():
+    """Within all caps and with no cancel signal, the guard is a no-op —
+    ``cancel_tool`` stays falsy and Strands proceeds with the call."""
+    hook = ToolCallGuardHook()
+    state = ChainState()
+    state.increment()  # used 1 of 8
+
+    agent = MagicMock()
+    agent.chain_state = state
+    agent.chat_id = "chat-ok"
+
+    event = MagicMock()
+    event.agent = agent
+    event.cancel_tool = False
+    hook.on_before_tool_call(event)
+    assert event.cancel_tool is False
+
+
+def test_guard_hook_cancel_signal_wins_over_chain_cap():
+    """Order matters: a user-initiated cancel is the highest-fidelity
+    intent signal and must take precedence over the structural chain_cap
+    reason. Otherwise the SPA would surface ``chain_cap`` to a user who
+    actually hit the cancel button."""
+    hook = ToolCallGuardHook()
+    state = ChainState(tool_calls_max=1)
+    state.increment()  # also chain-cap-exhausted
+
+    agent = MagicMock()
+    agent.chain_state = state
+    agent.chat_id = "chat-both"
+
+    set_cancel_signal("chat-both")
+    try:
+        event = MagicMock()
+        event.agent = agent
+        event.cancel_tool = False
+        hook.on_before_tool_call(event)
+        assert event.cancel_tool == "cancelled"
+    finally:
+        clear_cancel_signal("chat-both")
+
+
+def test_guard_hook_chain_cap_wins_over_wall_clock():
+    """Chain cap is a structural ceiling; wall-clock is a soft budget.
+    When both fire, surface ``chain_cap`` — it's the more concrete reason
+    for the SPA to surface to the user."""
+    hook = ToolCallGuardHook()
+    state = ChainState(tool_calls_max=1, wall_clock_budget_sec=10)
+    state.increment()
+    state.started_at = time.monotonic() - 11  # both exhausted
+
+    agent = MagicMock()
+    agent.chain_state = state
+    agent.chat_id = "chat-both-budgets"
+
+    event = MagicMock()
+    event.agent = agent
+    event.cancel_tool = False
+    hook.on_before_tool_call(event)
+    assert event.cancel_tool == "chain_cap"
+
+
+def test_guard_hook_no_chain_state_is_noop():
+    """When the agent has no ``chain_state`` attribute (chassis not yet
+    wired through this call path), the hook short-circuits without
+    touching ``cancel_tool``."""
+    hook = ToolCallGuardHook()
+    agent = MagicMock(spec=["chat_id"])
+    agent.chat_id = "chat-x"
+
+    event = MagicMock()
+    event.agent = agent
+    event.cancel_tool = False
+    hook.on_before_tool_call(event)
+    assert event.cancel_tool is False
+
+
+def test_guard_hook_missing_chat_id_skips_cancel_check():
+    """When the agent lacks a ``chat_id`` attribute (defensive — shouldn't
+    happen post-Task 8), the cancel-signal lookup is skipped but the
+    chain-cap / wall-clock checks still run."""
+    hook = ToolCallGuardHook()
+    state = ChainState(tool_calls_max=1)
+    state.increment()
+
+    agent = MagicMock(spec=["chain_state"])
+    agent.chain_state = state
+
+    event = MagicMock()
+    event.agent = agent
+    event.cancel_tool = False
+    hook.on_before_tool_call(event)
+    assert event.cancel_tool == "chain_cap"
+
+
+def test_guard_hook_register_hooks_subscribes_to_before_tool_call():
+    """``register_hooks`` wires the callback onto ``BeforeToolCallEvent``
+    via the registry — matches the HookProvider pattern."""
+    from strands.hooks.events import BeforeToolCallEvent
+
+    hook = ToolCallGuardHook()
+    registry = MagicMock()
+    hook.register_hooks(registry)
+    registry.add_callback.assert_called_once_with(BeforeToolCallEvent, hook.on_before_tool_call)

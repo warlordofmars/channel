@@ -31,7 +31,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from strands.hooks.events import BeforeModelCallEvent
+from strands.hooks.events import BeforeModelCallEvent, BeforeToolCallEvent
 
 
 @dataclass
@@ -129,3 +129,57 @@ class ModelVisibilityAddendumHook:
             f"{_ADDENDUM_CLOSE}"
         )
         agent.system_prompt = base + addendum
+
+
+class ToolCallGuardHook:
+    """Strands ``HookProvider`` that enforces the three pre-call gates:
+    user-initiated cancel, the chain-length cap, and the soft wall-clock
+    budget.
+
+    Subscribes to ``BeforeToolCallEvent``. Reads
+    ``event.agent.chain_state`` (attached by Task 8's ``build_agent``) and
+    ``event.agent.chat_id``. When any gate trips, assigns a reason string
+    to ``event.cancel_tool`` — Strands then wraps the call into a
+    tool-result error whose message is the reason string. PR-2's
+    ``sse_tool_error`` translator surfaces that message verbatim as the
+    SPA-visible ``error_type``, so the reason vocabulary
+    (``cancelled`` / ``chain_cap`` / ``wall_clock``) is the contract
+    between this hook and the SSE layer.
+
+    Order of guards (high-fidelity user intent first):
+
+    1. ``cancelled`` — explicit SSE-client disconnect; the user already
+       decided to stop. Surfacing any other reason would be misleading.
+    2. ``chain_cap`` — structural ceiling on tool-call depth; concrete
+       enough for the SPA to surface.
+    3. ``wall_clock`` — soft budget; last because it's the fuzziest
+       signal and tends to fire after the chain has already produced
+       useful work.
+
+    The ``RemainingBudget`` gate is intentionally absent from v1 — the
+    #131 swap-in PR adds it once the context-budget plumbing lands.
+    """
+
+    def register_hooks(self, registry: Any, **_: Any) -> None:
+        registry.add_callback(BeforeToolCallEvent, self.on_before_tool_call)
+
+    def on_before_tool_call(self, event: BeforeToolCallEvent) -> None:
+        agent = event.agent
+        state = getattr(agent, "chain_state", None)
+        if state is None:
+            return  # chassis not yet wired through this call path
+        chat_id = getattr(agent, "chat_id", None)
+
+        if chat_id and is_cancel_requested(chat_id):
+            event.cancel_tool = "cancelled"
+            return
+
+        if state.is_chain_cap_exhausted():
+            event.cancel_tool = "chain_cap"
+            return
+
+        if state.is_wall_clock_exhausted():
+            event.cancel_tool = "wall_clock"
+            return
+        # RemainingBudget gate stub: always allow under v1. The #131
+        # swap-in PR adds the real check here.
