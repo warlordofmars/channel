@@ -114,3 +114,15 @@ async def record_chat_delete_attachment_wipe_outcome(success: bool) -> None:
     """
     metric = "ChatDeleteAttachmentWipeSuccesses" if success else "ChatDeleteAttachmentWipeFailures"
     await emit_metric(metric)
+
+
+async def record_tool_call_outcome(success: bool) -> None:
+    """Emit a CloudWatch counter for one tool-call attempt (epic #128).
+
+    Counter-only — same cardinality-risk rationale as
+    :func:`record_memory_write_outcome`. No per-tool or per-actor
+    dimensions. Per-tool failure breakdowns belong in structured logs,
+    which CloudWatch Logs Insights can query without dimension blowup.
+    """
+    metric = "ToolCallSuccesses" if success else "ToolCallFailures"
+    await emit_metric(metric)
