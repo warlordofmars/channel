@@ -29,6 +29,9 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from typing import Any
+
+from strands.hooks.events import BeforeModelCallEvent
 
 
 @dataclass
@@ -70,3 +73,59 @@ def clear_cancel_signal(chat_id: str) -> None:
 
 def is_cancel_requested(chat_id: str) -> bool:
     return chat_id in _CANCEL_SIGNALS
+
+
+# Sentinel that marks the addendum block. Used to detect + replace on
+# re-entry so the prompt doesn't grow per turn.
+_ADDENDUM_OPEN = "\n\n<tool-use-budget>"
+_ADDENDUM_CLOSE = "</tool-use-budget>"
+
+
+def _strip_existing_addendum(prompt: str) -> str:
+    idx = prompt.find(_ADDENDUM_OPEN)
+    if idx == -1:
+        return prompt
+    end = prompt.find(_ADDENDUM_CLOSE, idx)
+    if end == -1:
+        return prompt
+    return prompt[:idx] + prompt[end + len(_ADDENDUM_CLOSE) :]
+
+
+class ModelVisibilityAddendumHook:
+    """Strands ``HookProvider`` that renders the chain-progress addendum
+    into the system prompt before each model call.
+
+    Subscribes to ``BeforeModelCallEvent``; reads
+    ``event.agent.chain_state`` (set by ``build_agent`` at Task 8) and
+    appends ``tool calls used: N of M`` to ``event.agent.system_prompt``
+    so the model can economize.
+
+    Policy P1 (epic #128 strategy spec): the ``RemainingBudget`` line is
+    OMITTED under the v1 stub. The #131 swap-in PR adds it for the first
+    time; until then, only ``tool calls used: N of M`` renders.
+
+    Conforms to the ``HookProvider`` protocol (``strands.hooks.registry``)
+    structurally; no explicit base class — Strands uses
+    ``@runtime_checkable`` — matches the pattern in
+    ``AgentCoreMemoryHook`` / ``AgentCoreRecallHook``.
+
+    The addendum is wrapped in ``<tool-use-budget>...</tool-use-budget>``
+    sentinels so re-invocations within the same chain replace rather
+    than compound (otherwise the system prompt grows per turn).
+    """
+
+    def register_hooks(self, registry: Any, **_: Any) -> None:
+        registry.add_callback(BeforeModelCallEvent, self.on_before_model_call)
+
+    def on_before_model_call(self, event: BeforeModelCallEvent) -> None:
+        agent = event.agent
+        state = getattr(agent, "chain_state", None)
+        if state is None:
+            return  # chassis not yet wired through this call path
+        base = _strip_existing_addendum(agent.system_prompt or "")
+        addendum = (
+            f"{_ADDENDUM_OPEN}\n"
+            f"tool calls used: {state.tool_calls_used} of {state.tool_calls_max}\n"
+            f"{_ADDENDUM_CLOSE}"
+        )
+        agent.system_prompt = base + addendum
