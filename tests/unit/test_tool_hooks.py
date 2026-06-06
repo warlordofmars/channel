@@ -36,7 +36,7 @@ def test_chain_state_chain_cap_exhausted():
     assert state.is_chain_cap_exhausted()
 
 
-def test_chain_state_wall_clock_exhausted_uses_real_time(monkeypatch):
+def test_chain_state_wall_clock_exhausted_uses_real_time():
     state = ChainState(wall_clock_budget_sec=10)
     assert not state.is_wall_clock_exhausted()
     # Simulate 11 seconds elapsed

@@ -20,7 +20,7 @@ phenomenology preamble and the rationale behind each.
   ASSISTANT message via ``AgentCoreMemoryHook``'s ``CreateEvent`` path,
   and emits ``ToolCallSuccesses`` / ``ToolCallFailures`` EMF counters.
 
-The cancel-signal registry is a module-level dict keyed by ``chat_id``;
+The cancel-signal registry is a module-level set keyed by ``chat_id``;
 ``chats.py`` calls ``set_cancel_signal(chat_id)`` from the
 ``finally:`` block when the SSE client disconnects.
 """
