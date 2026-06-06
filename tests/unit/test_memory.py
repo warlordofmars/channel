@@ -405,10 +405,20 @@ async def test_hook_sanitizes_actor_id_passed_to_create_event():
     assert kwargs["actorId"] == "alice_example_com"
 
 
-def test_write_meta_event_calls_create_event_with_meta_prefix():
+@pytest.mark.asyncio
+async def test_write_meta_event_calls_create_event_with_meta_prefix():
     """[meta] synthetic ASSISTANT messages flow through CreateEvent
     via the existing boto3 client. The '[meta]' prefix tags the event
-    for the recall hook to render distinctly."""
+    for the recall hook to render distinctly.
+
+    ``write_meta_event`` itself is a sync fire-and-forget entry point
+    (mirrors ``_on_after_invocation``); the boto3 call runs in a
+    thread via ``asyncio.to_thread`` so it doesn't block the event
+    loop during ``agent.stream_async``. Drain the pending task with
+    ``asyncio.sleep(0)`` before asserting.
+    """
+    import asyncio as _asyncio
+
     captured: dict[str, Any] = {}
 
     class FakeClient:
@@ -424,6 +434,11 @@ def test_write_meta_event_calls_create_event_with_meta_prefix():
     )
     hook.write_meta_event("used current_time to get current UTC time")
 
+    # Drain the create_task'd write — to_thread completes on a worker
+    # thread, so yield until the pending set drains.
+    while hook._pending_writes:
+        await _asyncio.sleep(0)
+
     assert captured["memoryId"] == "mem-x"
     assert captured["actorId"] == "user-1"
     assert captured["sessionId"] == "chat-1"
@@ -433,10 +448,17 @@ def test_write_meta_event_calls_create_event_with_meta_prefix():
     assert payload[0]["conversational"]["content"]["text"].startswith("[meta] ")
 
 
-def test_write_meta_event_swallows_client_exceptions():
+@pytest.mark.asyncio
+async def test_write_meta_event_swallows_client_exceptions():
     """Fail-soft contract: write_meta_event must not raise even when the
     boto3 client blows up. Tool result is already in the chain; failure
-    to record the META fact must not break the user-visible reply."""
+    to record the META fact must not break the user-visible reply.
+
+    The sync entry point schedules an ``asyncio.create_task``; the
+    exception is raised inside the async coroutine and caught there,
+    so the sync call must return cleanly AND the task must complete
+    without leaking the exception back to the test runner."""
+    import asyncio as _asyncio
 
     class BoomClient:
         def create_event(self, **_: Any) -> dict[str, Any]:
@@ -449,5 +471,10 @@ def test_write_meta_event_swallows_client_exceptions():
         client=BoomClient(),
     )
 
-    # MUST NOT raise.
+    # MUST NOT raise from the sync entry point.
     hook.write_meta_event("used calc with x=2")
+
+    # Drain the pending task; the exception should be caught inside
+    # the async helper, not propagated here.
+    while hook._pending_writes:
+        await _asyncio.sleep(0)

@@ -13,16 +13,19 @@ phenomenology preamble and the rationale behind each.
 
 * ``ToolCallGuardHook`` — ``BeforeToolCallEvent``. Enforces the
   chain-length cap, the soft wall-clock budget, and the cancel-signal
-  flag (mid-chain interrupt set by ``chats.py`` on SSE disconnect).
+  flag (mid-chain interrupt; PR-2 will set the signal from
+  ``chats.py`` on SSE disconnect — Task 13 of the chassis plan).
 
 * ``ToolCallTelemetryHook`` — ``AfterToolCallEvent``. Increments the
   per-chain counter, fires the ``[meta] used <tool> ...`` synthetic
   ASSISTANT message via ``AgentCoreMemoryHook``'s ``CreateEvent`` path,
   and emits ``ToolCallSuccesses`` / ``ToolCallFailures`` EMF counters.
 
-The cancel-signal registry is a module-level set keyed by ``chat_id``;
-``chats.py`` calls ``set_cancel_signal(chat_id)`` from the
-``finally:`` block when the SSE client disconnects.
+The cancel-signal registry is a module-level set keyed by ``chat_id``.
+PR-2 (Task 13) will call ``set_cancel_signal(chat_id)`` from the
+``finally:`` block of ``chats.py``'s SSE generator when the client
+disconnects. Until then the registry stays empty and the guard
+short-circuits past the cancel check.
 """
 
 from __future__ import annotations
@@ -62,12 +65,13 @@ class ChainState:
         return (time.monotonic() - self.started_at) >= self.wall_clock_budget_sec
 
 
-# Module-level cancel-signal registry. Keyed by chat_id (UUID). The
-# chats.py SSE generator sets the signal in its finally: block when the
-# client disconnects; the next BeforeToolCallEvent reads it and calls
-# event.cancel_tool(). Cold start clears all signals (no persistence
-# needed — a request that hasn't reached its first tool call by the
-# time the Lambda restarts is already dead).
+# Module-level cancel-signal registry. Keyed by chat_id (UUID). PR-2
+# (Task 13) will wire chats.py's SSE generator to set the signal in its
+# finally: block when the client disconnects; the next
+# BeforeToolCallEvent reads it and assigns ``event.cancel_tool =
+# "cancelled"``. Cold start clears all signals (no persistence needed —
+# a request that hasn't reached its first tool call by the time the
+# Lambda restarts is already dead).
 _CANCEL_SIGNALS: set[str] = set()
 
 

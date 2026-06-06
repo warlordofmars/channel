@@ -173,7 +173,8 @@ class AgentCoreMemoryHook:
         self._client = client if client is not None else boto3.client("bedrock-agentcore")
         # Strong refs to in-flight writes — prevents Python's GC from
         # collecting the task before AgentCore replies. See Sonar
-        # python:S7502 and asyncio.create_task() docs.
+        # python:S7502 and asyncio.create_task() docs. Shared by the
+        # per-turn write path and ``write_meta_event``'s async dispatch.
         self._pending_writes: set[asyncio.Task[None]] = set()
 
     def register_hooks(self, registry: Any, **_: Any) -> None:
@@ -227,12 +228,20 @@ class AgentCoreMemoryHook:
             await record_memory_write_outcome(success=False)
 
     def write_meta_event(self, text: str) -> None:
-        """Write a ``[meta]``-prefixed synthetic ASSISTANT message via CreateEvent.
+        """Sync entry point — schedule the async ``CreateEvent``, return immediately.
 
         Called by ``ToolCallTelemetryHook`` after each tool call (epic
         #128 decision 6). One event per tool call, not per chain. The
         recall hook (``recall.py``) tags ``[meta]``-prefixed events and
         renders them differently in the system-prompt addendum.
+
+        **Non-blocking.** Mirrors ``_on_after_invocation`` — boto3's
+        ``create_event`` is sync I/O; calling it directly from this
+        method would block the event loop during ``agent.stream_async``
+        and stall SSE streaming for the duration of the AgentCore round
+        trip. We dispatch via ``asyncio.create_task`` +
+        ``asyncio.to_thread`` so the tool result returns to the model
+        immediately and the META write happens off the event loop.
 
         Fail-soft: errors log + swallow but never raise — the tool
         result is already in the chain; failure to record the META
@@ -241,8 +250,15 @@ class AgentCoreMemoryHook:
         bump ``MemoryWriteFailures``) — META writes are best-effort
         side-channel telemetry, not the primary memory write path.
         """
+        task = asyncio.create_task(self._write_meta_event_async(text))
+        self._pending_writes.add(task)
+        task.add_done_callback(self._pending_writes.discard)
+
+    async def _write_meta_event_async(self, text: str) -> None:
+        """Async write path for ``write_meta_event``. Log + swallow on failure."""
         try:
-            self._client.create_event(
+            await asyncio.to_thread(
+                self._client.create_event,
                 memoryId=self._memory_id,
                 actorId=self._actor_id,
                 sessionId=self._session_id,
