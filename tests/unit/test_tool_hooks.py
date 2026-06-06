@@ -220,7 +220,8 @@ def test_guard_hook_blocks_on_chain_cap():
 def test_guard_hook_blocks_on_cancel_signal():
     """SSE-client disconnect sets the module-level cancel signal. The next
     BeforeToolCallEvent reads it and cancels with the ``cancelled``
-    reason."""
+    reason. The signal is consumed (one-shot) so a subsequent turn on
+    the same chat in a warm Lambda doesn't inherit the stale cancel."""
     hook = ToolCallGuardHook()
     state = ChainState()
     agent = MagicMock()
@@ -234,6 +235,9 @@ def test_guard_hook_blocks_on_cancel_signal():
         event.cancel_tool = False
         hook.on_before_tool_call(event)
         assert event.cancel_tool == "cancelled"
+        # One-shot consume: the guard clears the signal immediately so a
+        # warm-Lambda re-use on the same chat_id doesn't see a stale flag.
+        assert is_cancel_requested("chat-cancelled") is False
     finally:
         clear_cancel_signal("chat-cancelled")
 
@@ -294,6 +298,9 @@ def test_guard_hook_cancel_signal_wins_over_chain_cap():
         event.cancel_tool = False
         hook.on_before_tool_call(event)
         assert event.cancel_tool == "cancelled"
+        # One-shot consume applies here too — even when chain_cap would
+        # have fired anyway, the cancel signal is consumed on observe.
+        assert is_cancel_requested("chat-both") is False
     finally:
         clear_cancel_signal("chat-both")
 
@@ -682,6 +689,59 @@ async def test_telemetry_hook_no_chain_state_skips_increment(monkeypatch):
 
     # EMF still fires — the tool call happened.
     assert emitted == [True]
+
+
+@pytest.mark.asyncio
+async def test_telemetry_hook_swallows_emf_dispatch_errors(monkeypatch):
+    """If ``record_tool_call_outcome`` raises (transient EMF flush failure
+    — network blip, missing IAM permission, etc.), the create_task'd
+    coroutine must swallow + log rather than surfacing as an unhandled
+    "Task exception was never retrieved" warning. The counter still
+    increments — failure to emit telemetry is decoupled from the chain
+    budget bookkeeping.
+
+    We mock the module-level ``logger`` directly rather than using
+    ``caplog`` because the channel logger sets ``propagate = False`` once
+    ``configure_logging`` has been invoked by any prior test in the
+    session, which prevents caplog (attached to the root logger) from
+    seeing the record. Patching the logger sidesteps the global state
+    coupling entirely."""
+
+    async def raising_record(success):  # noqa: ARG001
+        raise RuntimeError("EMF flush failed")
+
+    monkeypatch.setattr(
+        "channel.agents.tool_hooks.record_tool_call_outcome",
+        raising_record,
+    )
+
+    mock_logger = MagicMock()
+    monkeypatch.setattr("channel.agents.tool_hooks.logger", mock_logger)
+
+    hook = ToolCallTelemetryHook()
+    state = ChainState()
+    agent = MagicMock()
+    agent.chain_state = state
+
+    event = MagicMock()
+    event.agent = agent
+    event.exception = None
+    event.cancel_message = None
+    event.result = {"status": "success"}
+    event.tool_use = {"name": "current_time"}
+
+    hook.on_after_tool_call(event)
+    # Drain via gather — if _record_outcome_safe re-raised, gather would
+    # propagate the exception and the test would fail.
+    await asyncio.gather(*hook._pending_tasks)
+
+    # Counter still incremented despite the EMF failure.
+    assert state.tool_calls_used == 1
+    # The wrapper logged the failure at WARNING with exc_info=True.
+    mock_logger.warning.assert_called_once()
+    args, kwargs = mock_logger.warning.call_args
+    assert "tool_call.emf_dispatch_failed" in args[0]
+    assert kwargs.get("exc_info") is True
 
 
 def test_telemetry_hook_register_hooks_subscribes_to_after_tool_call():

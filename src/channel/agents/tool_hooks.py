@@ -31,6 +31,7 @@ short-circuits past the cancel check.
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -43,6 +44,8 @@ from strands.hooks.events import (
 )
 
 from channel.metrics import record_tool_call_outcome
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -183,6 +186,11 @@ class ToolCallGuardHook:
         chat_id = getattr(agent, "chat_id", None)
 
         if chat_id and is_cancel_requested(chat_id):
+            # One-shot consume: clear the signal immediately so it can't
+            # survive into a subsequent turn on the same chat in a warm
+            # Lambda. PR-2's chats.py ``finally:`` block is the primary
+            # clearer; this is defense in depth in case that path fails.
+            clear_cancel_signal(chat_id)
             event.cancel_tool = "cancelled"
             return
 
@@ -266,8 +274,11 @@ class ToolCallTelemetryHook:
         success = exception is None and cancel_message is None and result_status != "error"
 
         # EMF: fire-and-forget. The strong-ref + discard-on-done pattern
-        # mirrors AgentCoreMemoryHook._on_after_invocation.
-        task = asyncio.create_task(record_tool_call_outcome(success=success))
+        # mirrors AgentCoreMemoryHook._on_after_invocation. The wrapper
+        # ``_record_outcome_safe`` swallows + logs any emit failure so the
+        # task never raises into asyncio's "Task exception was never
+        # retrieved" warning channel — EMF telemetry must be best-effort.
+        task = asyncio.create_task(self._record_outcome_safe(success=success))
         self._pending_tasks.add(task)
         task.add_done_callback(self._pending_tasks.discard)
 
@@ -277,3 +288,18 @@ class ToolCallTelemetryHook:
             tool_name = tool_name or "unknown"
             verb = "used" if success else "tried"
             self._memory_writer(f"{verb} {tool_name}")
+
+    async def _record_outcome_safe(self, success: bool) -> None:
+        """Wrap ``record_tool_call_outcome`` so the create_task'd coroutine
+        never raises. EMF emission can fail on transient network /
+        permissions issues; surfacing that as an unhandled task exception
+        produces noisy "Task exception was never retrieved" warnings. The
+        counter is best-effort telemetry — log + swallow."""
+        try:
+            await record_tool_call_outcome(success=success)
+        except Exception:
+            logger.warning(
+                "tool_call.emf_dispatch_failed success=%s",
+                success,
+                exc_info=True,
+            )
