@@ -193,13 +193,20 @@ def _resolve_attachments_for_send(
         )
         content_blocks.append({"text": header})
         uri = f"s3://{att.s3_bucket}/{att.s3_key}"
+        # Strands wraps S3 sources in a ``location`` envelope with an
+        # explicit ``type: "s3"`` discriminator (see
+        # ``strands.models.bedrock._handle_location``). Emitting Bedrock's
+        # raw ``s3Location`` shape directly hits neither branch in
+        # Strands' dispatcher and crashes with ``UnboundLocalError`` mid-
+        # stream — surfaced live on dev after #196 unblocked the upload.
+        s3_source: dict[str, Any] = {"location": {"type": "s3", "uri": uri}}
         if att.mime in _MIME_TO_DOC_FORMAT:
             content_blocks.append(
                 {
                     "document": {
                         "format": _MIME_TO_DOC_FORMAT[att.mime],
                         "name": att.name,
-                        "source": {"s3Location": {"uri": uri}},
+                        "source": s3_source,
                     }
                 }
             )
@@ -208,7 +215,7 @@ def _resolve_attachments_for_send(
                 {
                     "image": {
                         "format": _MIME_TO_IMG_FORMAT[att.mime],
-                        "source": {"s3Location": {"uri": uri}},
+                        "source": s3_source,
                     }
                 }
             )

@@ -2377,14 +2377,23 @@ def test_post_message_with_attachments_builds_labeled_content_blocks(
     assert blocks[0] == {"text": "[attachment_1: spec.pdf, 5.0MB, PDF]"}
     assert blocks[1]["document"]["format"] == "pdf"
     assert blocks[1]["document"]["name"] == "spec.pdf"
-    assert blocks[1]["document"]["source"]["s3Location"]["uri"] == (
-        "s3://channel-attachments-test/attachments/user/u-1/att-pdf"
-    )
+    # Strands' source envelope: {"location": {"type": "s3", "uri": ...}}
+    # — emitting Bedrock's raw ``s3Location`` shape directly throws
+    # UnboundLocalError mid-stream (#199).
+    assert blocks[1]["document"]["source"] == {
+        "location": {
+            "type": "s3",
+            "uri": "s3://channel-attachments-test/attachments/user/u-1/att-pdf",
+        }
+    }
     assert blocks[2] == {"text": "[attachment_2: screenshot.png, 0.2MB, image]"}
     assert blocks[3]["image"]["format"] == "png"
-    assert blocks[3]["image"]["source"]["s3Location"]["uri"] == (
-        "s3://channel-attachments-test/attachments/user/u-1/att-png"
-    )
+    assert blocks[3]["image"]["source"] == {
+        "location": {
+            "type": "s3",
+            "uri": "s3://channel-attachments-test/attachments/user/u-1/att-png",
+        }
+    }
     assert blocks[4] == {"text": "Compare these"}
 
 
