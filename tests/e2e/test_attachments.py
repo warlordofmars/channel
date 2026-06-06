@@ -333,13 +333,25 @@ async def test_chat_delete_cascades_attachment() -> None:
             await _wait_for_assistant_idle(page)
             await _delete_chat(api_url, jwt, chat_id)
 
-            # Chat 404s after delete.
+            # Confirm the chat is gone by querying the list endpoint.
+            # ``GET /api/chats/{chat_id}`` would also work in principle,
+            # but CloudFront's SPA-fallback behaviour rewrites every
+            # API 404 to ``/index.html`` (200 HTML), so the per-chat GET
+            # can't distinguish "chat exists" from "chat absent" once
+            # the request is fronted by CF. The list endpoint never
+            # 404s, so its JSON body is the reliable probe.
             async with httpx.AsyncClient(timeout=15.0) as client:
-                gone = await client.get(
-                    f"{api_url}/api/chats/{chat_id}",
+                list_resp = await client.get(
+                    f"{api_url}/api/chats",
+                    params={"limit": 200, "include_archived": 1},
                     headers={"Authorization": f"Bearer {jwt}"},
                 )
-            assert gone.status_code == 404
+            assert list_resp.status_code == 200, list_resp.text
+            chat_ids = {c["chat_id"] for c in list_resp.json().get("chats", [])}
+            assert chat_id not in chat_ids, (
+                f"Expected chat {chat_id} to be gone after delete, but the "
+                f"list endpoint still returns it among {chat_ids!r}"
+            )
 
             if s3_client and bucket and s3_key:
                 try:
