@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from typing import Any
 
 import boto3
@@ -110,6 +111,26 @@ _MIME_TO_FAMILY: dict[str, str] = {
 }
 
 
+# Bedrock's ConverseStream rejects ``document.name`` values that contain
+# anything outside its strict allowlist (alphanumerics, whitespace,
+# hyphens, parens, square brackets — see ValidationException message).
+# Real user filenames almost always include a period for the extension,
+# so the e2e suite (#179) caught every PDF/XLSX upload silently 500-ing
+# upstream. This sanitizer keeps the original name human-readable while
+# stripping the forbidden bytes — Bedrock only uses the name to label
+# the doc block in its prompt anyway, not to fetch anything.
+_BEDROCK_DOC_NAME_FORBIDDEN_RE = re.compile(r"[^A-Za-z0-9 \-()\[\]]")
+_BEDROCK_DOC_NAME_WS_RE = re.compile(r"\s+")
+
+
+def _sanitize_document_name(name: str) -> str:
+    """Coerce ``name`` into Bedrock's document-name allowlist (#179)."""
+
+    cleaned = _BEDROCK_DOC_NAME_FORBIDDEN_RE.sub(" ", name)
+    cleaned = _BEDROCK_DOC_NAME_WS_RE.sub(" ", cleaned).strip()
+    return cleaned or "attachment"
+
+
 def _attachment_label(*, index: int, name: str, size_bytes: int, mime: str) -> str:
     size_mb = f"{size_bytes / 1024 / 1024:.1f}MB"
     family = _MIME_TO_FAMILY.get(mime, "file")
@@ -204,7 +225,7 @@ def _resolve_attachments_for_send(
                 {
                     "document": {
                         "format": _MIME_TO_DOC_FORMAT[att.mime],
-                        "name": att.name,
+                        "name": _sanitize_document_name(att.name),
                         "source": bytes_source,
                     }
                 }

@@ -2234,6 +2234,34 @@ def test_delete_chat_swallows_attachment_cascade_exception(
 # ----------------------------------------------------------------
 
 
+def test_sanitize_document_name_strips_period_and_other_punctuation() -> None:
+    """Bedrock's ``document.name`` rejects everything outside
+    ``[A-Za-z0-9 \\-()\\[\\]]``. Real filenames almost always include the
+    extension separator (``.pdf``) which silently 500s the
+    ConverseStream — the e2e suite (#179) caught this on jc. The
+    sanitiser must:
+
+    - replace forbidden bytes (periods, underscores, slashes, …) with
+      spaces so the resulting label still reads as the filename;
+    - collapse runs of whitespace introduced by adjacent strips so the
+      ``"name can't contain more than one consecutive whitespace"``
+      sub-rule of the same Bedrock error doesn't fire on
+      ``"weird__name.pdf"``;
+    - never return an empty string (Bedrock rejects empty names too).
+    """
+
+    from channel.api.chats import _sanitize_document_name
+
+    assert _sanitize_document_name("spec.pdf") == "spec pdf"
+    assert _sanitize_document_name("Q3 forecast (final).xlsx") == "Q3 forecast (final) xlsx"
+    assert _sanitize_document_name("weird__name.pdf") == "weird name pdf"
+    assert _sanitize_document_name("only-allowed [chars]") == "only-allowed [chars]"
+    # All-forbidden input collapses to the empty string; fall back to a
+    # sentinel so Bedrock still gets a non-empty name.
+    assert _sanitize_document_name("...") == "attachment"
+    assert _sanitize_document_name("") == "attachment"
+
+
 def _att_model(**overrides: Any) -> Any:
     """Build an Attachment for the send-path stubs."""
 
@@ -2386,7 +2414,8 @@ def test_post_message_with_attachments_builds_labeled_content_blocks(
     assert len(blocks) == 5
     assert blocks[0] == {"text": "[attachment_1: spec.pdf, 5.0MB, PDF]"}
     assert blocks[1]["document"]["format"] == "pdf"
-    assert blocks[1]["document"]["name"] == "spec.pdf"
+    # Sanitised — Bedrock's document.name rejects periods (#179).
+    assert blocks[1]["document"]["name"] == "spec pdf"
     # Inline bytes shape: ``{"bytes": <fetched-payload>}`` — Claude Opus
     # 4.6 rejects ``s3Location`` references with
     # ``ValidationException: This model doesn't support the s3Uri
