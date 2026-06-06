@@ -1214,29 +1214,44 @@ def test_mark_attachment_referenced_stamps_iso_timestamp(table: FakeTable) -> No
 # ---- S3 verify helper -------------------------------------------
 
 
+class _BytesBody:
+    """Stand-in for the StreamingBody returned by ``s3.get_object``.
+
+    boto3's real ``Body`` is a streaming response with a blocking
+    ``read()`` — the helper only needs that one method.
+    """
+
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+
+    def read(self) -> bytes:
+        return self._data
+
+
 class _FakeS3:
     """Minimal stand-in for the boto3 S3 client used by storage helpers."""
 
     def __init__(self) -> None:
         self.objects: dict[tuple[str, str], dict[str, Any]] = {}
+        self.bodies: dict[tuple[str, str], bytes] = {}
         self.deleted: list[tuple[str, str]] = []
         # Lets a test pin a specific ClientError code on a key.
-        self.head_errors: dict[tuple[str, str], str] = {}
+        self.get_errors: dict[tuple[str, str], str] = {}
         self.delete_errors: dict[tuple[str, str], str] = {}
 
-    def head_object(self, *, Bucket: str, Key: str) -> dict[str, Any]:
-        code = self.head_errors.get((Bucket, Key))
+    def get_object(self, *, Bucket: str, Key: str) -> dict[str, Any]:
+        code = self.get_errors.get((Bucket, Key))
         if code is not None:
             raise ClientError(
                 {"Error": {"Code": code, "Message": code}},
-                "HeadObject",
+                "GetObject",
             )
-        if (Bucket, Key) not in self.objects:
+        if (Bucket, Key) not in self.bodies:
             raise ClientError(
                 {"Error": {"Code": "404", "Message": "Not Found"}},
-                "HeadObject",
+                "GetObject",
             )
-        return {}
+        return {"Body": _BytesBody(self.bodies[(Bucket, Key)])}
 
     def delete_object(self, *, Bucket: str, Key: str) -> dict[str, Any]:
         code = self.delete_errors.get((Bucket, Key))
@@ -1257,40 +1272,41 @@ def s3_client(monkeypatch: pytest.MonkeyPatch) -> _FakeS3:
     return fake
 
 
-def test_verify_attachment_object_returns_true_on_head_success(
+def test_get_attachment_bytes_returns_payload_on_success(
     s3_client: _FakeS3,
 ) -> None:
     from channel import storage
 
     att = _attachment()
-    s3_client.objects[(att.s3_bucket, att.s3_key)] = {}
-    ok, reason = storage.verify_attachment_object(att)
-    assert ok is True
+    payload = b"%PDF-1.4 fake pdf bytes"
+    s3_client.bodies[(att.s3_bucket, att.s3_key)] = payload
+    data, reason = storage.get_attachment_bytes(att)
+    assert data == payload
     assert reason is None
 
 
-def test_verify_attachment_object_returns_not_found_on_404(
+def test_get_attachment_bytes_returns_not_found_on_404(
     s3_client: _FakeS3,
 ) -> None:
     from channel import storage
 
-    ok, reason = storage.verify_attachment_object(_attachment())
-    assert ok is False
+    data, reason = storage.get_attachment_bytes(_attachment())
+    assert data is None
     assert reason == "S3 object not found"
 
 
-def test_verify_attachment_object_surfaces_other_error_codes(
+def test_get_attachment_bytes_surfaces_other_error_codes(
     s3_client: _FakeS3,
 ) -> None:
-    """Permissions and other failures must surface a non-empty reason so the
-    structured failure block in #176 can render a useful marker."""
+    """Permissions and other failures must surface a non-empty reason so
+    the structured failure block in #176 can render a useful marker."""
 
     from channel import storage
 
     att = _attachment()
-    s3_client.head_errors[(att.s3_bucket, att.s3_key)] = "AccessDenied"
-    ok, reason = storage.verify_attachment_object(att)
-    assert ok is False
+    s3_client.get_errors[(att.s3_bucket, att.s3_key)] = "AccessDenied"
+    data, reason = storage.get_attachment_bytes(att)
+    assert data is None
     assert reason is not None
     assert "AccessDenied" in reason
 

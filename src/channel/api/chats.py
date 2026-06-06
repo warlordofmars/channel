@@ -170,8 +170,14 @@ def _resolve_attachments_for_send(
     errors: list[dict[str, Any]] = []
     verified_ids: list[str] = []
     for index, att in enumerate(resolved, start=1):
-        ok, reason = storage.verify_attachment_object(att)
-        if not ok:
+        # Fetch the object bytes inline. Bedrock's Converse API exposes
+        # ``s3Location`` references only for select models — Claude
+        # Opus 4.6 rejects them with ``ValidationException: This model
+        # doesn't support the s3Uri field`` (#201). Inline bytes work
+        # everywhere and one GetObject also subsumes the prior HEAD-
+        # verify roundtrip (404 surfaces here too).
+        att_bytes, reason = storage.get_attachment_bytes(att)
+        if att_bytes is None:
             content_blocks.append(
                 {
                     "text": _attachment_failure_label(
@@ -192,21 +198,14 @@ def _resolve_attachments_for_send(
             index=index, name=att.name, size_bytes=att.size_bytes, mime=att.mime
         )
         content_blocks.append({"text": header})
-        uri = f"s3://{att.s3_bucket}/{att.s3_key}"
-        # Strands wraps S3 sources in a ``location`` envelope with an
-        # explicit ``type: "s3"`` discriminator (see
-        # ``strands.models.bedrock._handle_location``). Emitting Bedrock's
-        # raw ``s3Location`` shape directly hits neither branch in
-        # Strands' dispatcher and crashes with ``UnboundLocalError`` mid-
-        # stream — surfaced live on dev after #196 unblocked the upload.
-        s3_source: dict[str, Any] = {"location": {"type": "s3", "uri": uri}}
+        bytes_source: dict[str, Any] = {"bytes": att_bytes}
         if att.mime in _MIME_TO_DOC_FORMAT:
             content_blocks.append(
                 {
                     "document": {
                         "format": _MIME_TO_DOC_FORMAT[att.mime],
                         "name": att.name,
-                        "source": s3_source,
+                        "source": bytes_source,
                     }
                 }
             )
@@ -215,7 +214,7 @@ def _resolve_attachments_for_send(
                 {
                     "image": {
                         "format": _MIME_TO_IMG_FORMAT[att.mime],
-                        "source": s3_source,
+                        "source": bytes_source,
                     }
                 }
             )
