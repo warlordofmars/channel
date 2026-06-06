@@ -87,9 +87,7 @@ async def _open_app(page: Page, ui_url: str, jwt: str) -> None:
     """Land on /app with the bypass JWT pre-injected into localStorage."""
 
     await page.goto(f"{ui_url}/app")
-    await page.evaluate(
-        "(t) => window.localStorage.setItem('starter_mgmt_token', t)", jwt
-    )
+    await page.evaluate("(t) => window.localStorage.setItem('starter_mgmt_token', t)", jwt)
     await page.goto(f"{ui_url}/app")
     await page.wait_for_url(lambda url: "/app" in url, timeout=10_000)
 
@@ -119,7 +117,7 @@ async def _attach_and_send(page: Page, *, text: str, files: list[Path]) -> str:
 
 async def _wait_for_assistant_idle(page: Page, *, n: int = 1) -> None:
     await page.wait_for_function(
-        '(want) => document.querySelectorAll(\'[data-testid="assistant-turn-idle"]\').length >= want',
+        "(want) => document.querySelectorAll('[data-testid=\"assistant-turn-idle\"]').length >= want",
         arg=n,
         timeout=_ASSISTANT_TIMEOUT_MS,
     )
@@ -233,9 +231,7 @@ async def test_xlsx_attachment_surfaces_cell_value() -> None:
             try:
                 await _wait_for_assistant_idle(page)
                 body = (await _assistant_text(page)).upper()
-                assert XLSX_A1_VALUE in body, (
-                    f"Expected {XLSX_A1_VALUE!r} in reply, got: {body!r}"
-                )
+                assert XLSX_A1_VALUE in body, f"Expected {XLSX_A1_VALUE!r} in reply, got: {body!r}"
             finally:
                 await _delete_chat(api_url, jwt, chat_id)
         finally:
@@ -267,12 +263,10 @@ async def test_multiple_attachments_both_referenced() -> None:
             try:
                 await _wait_for_assistant_idle(page)
                 body = await _assistant_text(page)
-                assert PDF_PHRASE in body.upper(), (
-                    f"Expected PDF phrase in reply, got: {body!r}"
+                assert PDF_PHRASE in body.upper(), f"Expected PDF phrase in reply, got: {body!r}"
+                assert any(t in body.lower() for t in {"red", "crimson", "scarlet"}), (
+                    f"Expected the image's red colour in reply, got: {body!r}"
                 )
-                assert any(
-                    t in body.lower() for t in {"red", "crimson", "scarlet"}
-                ), f"Expected the image's red colour in reply, got: {body!r}"
             finally:
                 await _delete_chat(api_url, jwt, chat_id)
         finally:
@@ -362,8 +356,6 @@ async def test_chat_delete_cascades_attachment() -> None:
                         f"Expected S3 object {s3_key!r} to be deleted, got {code!r}"
                     )
                 else:
-                    pytest.fail(
-                        f"S3 object {s3_key!r} still present after chat delete cascade"
-                    )
+                    pytest.fail(f"S3 object {s3_key!r} still present after chat delete cascade")
         finally:
             await browser.close()
