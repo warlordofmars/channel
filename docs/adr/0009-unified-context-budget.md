@@ -15,9 +15,10 @@ shared budget model:
   by a token budget.
 - **Attachments** (#109, finalized 2026-06-03) — user-uploaded PDFs,
   images, spreadsheets forwarded as Strands multipart `ContentBlock`s
-  with `s3Location` sources. Bedrock fetches the bytes; the bytes
-  count against the model's input window even though they don't pass
-  through Lambda.
+  with inline `{"bytes": ...}` sources. Lambda fetches each object
+  from S3 server-side and ships the bytes inline because Claude Opus
+  4.6 rejects Converse's `s3Location` shape (#201); the bytes count
+  against the model's input window.
 - **Tool use** (#128, in design) — tool definitions in `toolConfig`,
   `ToolUse` / `ToolResult` blocks injected per step in a chained call.
 

@@ -1214,29 +1214,63 @@ def test_mark_attachment_referenced_stamps_iso_timestamp(table: FakeTable) -> No
 # ---- S3 verify helper -------------------------------------------
 
 
+class _BytesBody:
+    """Stand-in for the StreamingBody returned by ``s3.get_object``.
+
+    boto3's real ``Body`` is a streaming response with a blocking
+    ``read()`` — the helper needs ``read()`` plus ``close()`` for the
+    finalizer path in :func:`channel.storage.get_attachment_bytes`.
+    A test can pin a ``read_error`` to simulate a mid-stream failure.
+    """
+
+    def __init__(self, data: bytes, read_error: Exception | None = None) -> None:
+        self._data = data
+        self._read_error = read_error
+        self.closed = False
+
+    def read(self) -> bytes:
+        if self._read_error is not None:
+            raise self._read_error
+        return self._data
+
+    def close(self) -> None:
+        self.closed = True
+
+
 class _FakeS3:
     """Minimal stand-in for the boto3 S3 client used by storage helpers."""
 
     def __init__(self) -> None:
         self.objects: dict[tuple[str, str], dict[str, Any]] = {}
+        self.bodies: dict[tuple[str, str], bytes] = {}
         self.deleted: list[tuple[str, str]] = []
         # Lets a test pin a specific ClientError code on a key.
-        self.head_errors: dict[tuple[str, str], str] = {}
+        self.get_errors: dict[tuple[str, str], str] = {}
+        # Per-key mid-read failures: raised from the returned ``Body.read()``.
+        self.body_read_errors: dict[tuple[str, str], Exception] = {}
         self.delete_errors: dict[tuple[str, str], str] = {}
+        # Track every body the fake handed out so a test can assert it was
+        # closed even on the failure path.
+        self.handed_out_bodies: list[_BytesBody] = []
 
-    def head_object(self, *, Bucket: str, Key: str) -> dict[str, Any]:
-        code = self.head_errors.get((Bucket, Key))
+    def get_object(self, *, Bucket: str, Key: str) -> dict[str, Any]:
+        code = self.get_errors.get((Bucket, Key))
         if code is not None:
             raise ClientError(
                 {"Error": {"Code": code, "Message": code}},
-                "HeadObject",
+                "GetObject",
             )
-        if (Bucket, Key) not in self.objects:
+        if (Bucket, Key) not in self.bodies:
             raise ClientError(
                 {"Error": {"Code": "404", "Message": "Not Found"}},
-                "HeadObject",
+                "GetObject",
             )
-        return {}
+        body = _BytesBody(
+            self.bodies[(Bucket, Key)],
+            read_error=self.body_read_errors.get((Bucket, Key)),
+        )
+        self.handed_out_bodies.append(body)
+        return {"Body": body}
 
     def delete_object(self, *, Bucket: str, Key: str) -> dict[str, Any]:
         code = self.delete_errors.get((Bucket, Key))
@@ -1257,42 +1291,100 @@ def s3_client(monkeypatch: pytest.MonkeyPatch) -> _FakeS3:
     return fake
 
 
-def test_verify_attachment_object_returns_true_on_head_success(
+def test_get_attachment_bytes_returns_payload_on_success(
     s3_client: _FakeS3,
 ) -> None:
     from channel import storage
 
     att = _attachment()
-    s3_client.objects[(att.s3_bucket, att.s3_key)] = {}
-    ok, reason = storage.verify_attachment_object(att)
-    assert ok is True
+    payload = b"%PDF-1.4 fake pdf bytes"
+    s3_client.bodies[(att.s3_bucket, att.s3_key)] = payload
+    data, reason = storage.get_attachment_bytes(att)
+    assert data == payload
     assert reason is None
 
 
-def test_verify_attachment_object_returns_not_found_on_404(
+def test_get_attachment_bytes_returns_not_found_on_404(
     s3_client: _FakeS3,
 ) -> None:
     from channel import storage
 
-    ok, reason = storage.verify_attachment_object(_attachment())
-    assert ok is False
+    data, reason = storage.get_attachment_bytes(_attachment())
+    assert data is None
     assert reason == "S3 object not found"
 
 
-def test_verify_attachment_object_surfaces_other_error_codes(
+def test_get_attachment_bytes_surfaces_other_error_codes(
     s3_client: _FakeS3,
 ) -> None:
-    """Permissions and other failures must surface a non-empty reason so the
-    structured failure block in #176 can render a useful marker."""
+    """Permissions and other failures must surface a non-empty reason so
+    the structured failure block in #176 can render a useful marker."""
 
     from channel import storage
 
     att = _attachment()
-    s3_client.head_errors[(att.s3_bucket, att.s3_key)] = "AccessDenied"
-    ok, reason = storage.verify_attachment_object(att)
-    assert ok is False
+    s3_client.get_errors[(att.s3_bucket, att.s3_key)] = "AccessDenied"
+    data, reason = storage.get_attachment_bytes(att)
+    assert data is None
     assert reason is not None
     assert "AccessDenied" in reason
+
+
+def test_get_attachment_bytes_converts_streaming_read_failure(
+    s3_client: _FakeS3,
+) -> None:
+    """A mid-read ``ReadTimeoutError`` (or any boto/OS-level failure) must
+    surface as the ``(None, reason)`` shape so the SSE generator can
+    render a labeled marker — otherwise the exception would crash the
+    in-flight stream."""
+
+    from botocore.exceptions import ReadTimeoutError
+
+    from channel import storage
+
+    att = _attachment()
+    s3_client.bodies[(att.s3_bucket, att.s3_key)] = b"would-be-payload"
+    s3_client.body_read_errors[(att.s3_bucket, att.s3_key)] = ReadTimeoutError(
+        endpoint_url="https://example.com"
+    )
+    data, reason = storage.get_attachment_bytes(att)
+    assert data is None
+    assert reason is not None
+    assert "ReadTimeoutError" in reason
+
+
+def test_get_attachment_bytes_closes_body_on_success(
+    s3_client: _FakeS3,
+) -> None:
+    """Hygiene: the StreamingBody is closed even on the happy path so
+    the underlying HTTP connection returns to the pool."""
+
+    from channel import storage
+
+    att = _attachment()
+    s3_client.bodies[(att.s3_bucket, att.s3_key)] = b"payload"
+    data, _ = storage.get_attachment_bytes(att)
+    assert data == b"payload"
+    assert all(body.closed for body in s3_client.handed_out_bodies)
+
+
+def test_get_attachment_bytes_closes_body_on_read_failure(
+    s3_client: _FakeS3,
+) -> None:
+    """Hygiene under failure: the body still closes after a mid-read
+    exception so a transient timeout doesn't leak a pooled connection."""
+
+    from botocore.exceptions import ReadTimeoutError
+
+    from channel import storage
+
+    att = _attachment()
+    s3_client.bodies[(att.s3_bucket, att.s3_key)] = b"would-be-payload"
+    s3_client.body_read_errors[(att.s3_bucket, att.s3_key)] = ReadTimeoutError(
+        endpoint_url="https://example.com"
+    )
+    storage.get_attachment_bytes(att)
+    assert all(body.closed for body in s3_client.handed_out_bodies)
 
 
 # ---- chat-delete cascade -----------------------------------------

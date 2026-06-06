@@ -187,7 +187,7 @@ async def finalize(
             # Object never made it to S3 (upload aborted or expired URL).
             raise HTTPException(status_code=410, detail="Uploaded object not found") from exc
         # Permissions / transient / unknown S3 error — surface as upstream.
-        # Mirror storage.verify_attachment_object's fallback so an empty
+        # Mirror storage.get_attachment_bytes's fallback so an empty
         # code doesn't render the trailing-colon "S3 error: ".
         detail = f"S3 error: {code}" if code else "S3 error"
         raise HTTPException(status_code=502, detail=detail) from exc

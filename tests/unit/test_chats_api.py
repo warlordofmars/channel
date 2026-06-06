@@ -2266,6 +2266,13 @@ def _stub_send_path_for_attachments(
     Returns a capture dict where the agent's received prompt + the
     persisted message attachments + the mark_attachment_referenced
     call ids land for assertions.
+
+    The ``verify`` argument keeps its legacy ``(ok, reason)`` shape
+    even though the production path now calls ``get_attachment_bytes``
+    rather than ``verify_attachment_object`` (#201). The helper
+    translates ``(True, None)`` into a synthetic byte payload and
+    ``(False, reason)`` into ``(None, reason)`` so existing callers
+    don't have to invent fixture bytes.
     """
 
     capture: dict[str, list] = {
@@ -2284,12 +2291,15 @@ def _stub_send_path_for_attachments(
         lambda *, user_id, att_id: owned.get(att_id),
     )
 
-    # HEAD-verify outcomes — default to success for every attachment
-    # owned by the caller.
+    # Bytes-fetch outcomes — default to a synthetic payload for every
+    # attachment owned by the caller; failure tuples flip ok→None.
     verify_map = verify or {a.id: (True, None) for a in owned.values()}
+    fetch_map: dict[str, tuple[bytes | None, str | None]] = {}
+    for att_id, (ok, reason) in verify_map.items():
+        fetch_map[att_id] = (f"bytes-for-{att_id}".encode(), None) if ok else (None, reason)
     monkeypatch.setattr(
-        "channel.api.chats.storage.verify_attachment_object",
-        lambda att: verify_map[att.id],
+        "channel.api.chats.storage.get_attachment_bytes",
+        lambda att: fetch_map[att.id],
     )
 
     monkeypatch.setattr(
@@ -2377,23 +2387,14 @@ def test_post_message_with_attachments_builds_labeled_content_blocks(
     assert blocks[0] == {"text": "[attachment_1: spec.pdf, 5.0MB, PDF]"}
     assert blocks[1]["document"]["format"] == "pdf"
     assert blocks[1]["document"]["name"] == "spec.pdf"
-    # Strands' source envelope: {"location": {"type": "s3", "uri": ...}}
-    # — emitting Bedrock's raw ``s3Location`` shape directly throws
-    # UnboundLocalError mid-stream (#199).
-    assert blocks[1]["document"]["source"] == {
-        "location": {
-            "type": "s3",
-            "uri": "s3://channel-attachments-test/attachments/user/u-1/att-pdf",
-        }
-    }
+    # Inline bytes shape: ``{"bytes": <fetched-payload>}`` — Claude Opus
+    # 4.6 rejects ``s3Location`` references with
+    # ``ValidationException: This model doesn't support the s3Uri
+    # field``, so the send path fetches each object server-side (#201).
+    assert blocks[1]["document"]["source"] == {"bytes": b"bytes-for-att-pdf"}
     assert blocks[2] == {"text": "[attachment_2: screenshot.png, 0.2MB, image]"}
     assert blocks[3]["image"]["format"] == "png"
-    assert blocks[3]["image"]["source"] == {
-        "location": {
-            "type": "s3",
-            "uri": "s3://channel-attachments-test/attachments/user/u-1/att-png",
-        }
-    }
+    assert blocks[3]["image"]["source"] == {"bytes": b"bytes-for-att-png"}
     assert blocks[4] == {"text": "Compare these"}
 
 

@@ -15,6 +15,7 @@ production it returns the real boto3 ``Table`` resource.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import time
@@ -25,7 +26,7 @@ from typing import Any
 import boto3
 from boto3.dynamodb.conditions import Attr, Key
 from botocore.config import Config
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 from pydantic import ValidationError
 
 from channel.models import (
@@ -687,7 +688,7 @@ def delete_attachment(*, user_id: str, att_id: str) -> None:
 def mark_attachment_referenced(*, user_id: str, att_id: str) -> None:
     """Stamp ``referenced_at = now`` on the canonical ATTACHMENT row (#176).
 
-    Called from the send path AFTER ``verify_attachment_object`` returns
+    Called from the send path AFTER ``get_attachment_bytes`` returns
     success — the lifecycle rule on the attachments bucket targets
     objects still tagged ``unreferenced=1``; this marker is the
     DDB-side counterpart that ties an S3 object to at least one
@@ -722,25 +723,50 @@ def mark_attachment_referenced(*, user_id: str, att_id: str) -> None:
         raise
 
 
-def verify_attachment_object(att: Attachment) -> tuple[bool, str | None]:
-    """HEAD the S3 object to confirm it still exists at turn time.
+def get_attachment_bytes(att: Attachment) -> tuple[bytes | None, str | None]:
+    """Fetch the raw S3 object bytes for ``att`` (#201).
 
-    Returns ``(True, None)`` on success and ``(False, "<reason>")`` on
+    Returns ``(bytes, None)`` on success and ``(None, "<reason>")`` on
     any error. The dedicated ``"S3 object not found"`` reason for HTTP
     404 lets the structured-failure-block builder in #176 surface a
     user-actionable marker (re-upload) distinct from a generic
     permissions / network failure.
+
+    Bedrock's Converse API supports ``s3Location`` references only for
+    select models — Claude Opus 4.6 rejects them with
+    ``ValidationException: This model doesn't support the s3Uri
+    field``. The send path therefore fetches each attachment's bytes
+    inline and passes ``{"bytes": ...}`` to Strands instead.
+
+    Memory footprint is bounded by the #173 hard caps
+    (5 × 20 MB = 100 MB max per turn), which fits inside the Lambda's
+    512 MB. A single ``GetObject`` per attachment also subsumes the
+    prior HEAD-verify roundtrip — 404 surfaces here just as it did from
+    HeadObject before.
     """
 
-    client = _get_s3_client()
     try:
-        client.head_object(Bucket=att.s3_bucket, Key=att.s3_key)
-        return True, None
+        response = _get_s3_client().get_object(Bucket=att.s3_bucket, Key=att.s3_key)
     except ClientError as exc:
         code = exc.response.get("Error", {}).get("Code", "")
         if code in {"404", "NoSuchKey", "NotFound"}:
-            return False, "S3 object not found"
-        return False, f"S3 error: {code}" if code else "S3 error"
+            return None, "S3 object not found"
+        return None, f"S3 error: {code}" if code else "S3 error"
+
+    # StreamingBody wraps an HTTP connection. A mid-read ``ReadTimeoutError``
+    # / ``IncompleteReadError`` / socket failure must convert into the same
+    # ``(None, reason)`` failure shape so the SSE generator can render a
+    # labeled marker instead of 500-ing the stream. ``finally: close()``
+    # releases the pooled connection on both success and failure (a
+    # successful read leaves it benign-to-close anyway).
+    body = response["Body"]
+    try:
+        return body.read(), None
+    except (BotoCoreError, OSError) as exc:
+        return None, f"S3 read error: {type(exc).__name__}"
+    finally:
+        with contextlib.suppress(Exception):
+            body.close()
 
 
 def delete_chat_attachments(*, chat_id: str, user_id: str) -> tuple[int, int]:
