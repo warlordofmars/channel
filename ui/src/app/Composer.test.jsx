@@ -102,6 +102,28 @@ function fireResult(instance, transcript) {
   });
 }
 
+// Shared attachment-pipeline helpers — used by the #177 attachments
+// describe block and the #178 chip-polish describe block. Re-pulling
+// the mocked api fns through dynamic import keeps each test's reset
+// scope correct, and `pickFiles` drives the hidden file input that
+// every chip-render test eventually leans on.
+async function getApiMocks() {
+  const mod = await import("../api.js");
+  return mod;
+}
+
+function makeFile(name, type, size = 1024) {
+  const blob = new Blob([new Uint8Array(size)], { type });
+  return new File([blob], name, { type });
+}
+
+async function pickFiles(files) {
+  const input = screen.getByTestId("attach-file-input");
+  await act(async () => {
+    fireEvent.change(input, { target: { files } });
+  });
+}
+
 describe("Composer", () => {
   let storage;
   let speech;
@@ -431,24 +453,6 @@ describe("Composer", () => {
   // Attachment pipeline (#177)
   // ----------------------------------------------------------------
   describe("attachments (#177)", () => {
-    // Re-pull mocked api fns inside each block so reset/clear is local.
-    async function getApiMocks() {
-      const mod = await import("../api.js");
-      return mod;
-    }
-
-    function makeFile(name, type, size = 1024) {
-      const blob = new Blob([new Uint8Array(size)], { type });
-      return new File([blob], name, { type });
-    }
-
-    async function pickFiles(files) {
-      const input = screen.getByTestId("attach-file-input");
-      await act(async () => {
-        fireEvent.change(input, { target: { files } });
-      });
-    }
-
     it("rejects an oversized file with an inline error and skips the pipeline", async () => {
       const api = await getApiMocks();
       api.presignAttachment.mockClear();
@@ -974,23 +978,6 @@ describe("Composer", () => {
   });
 
   describe("chip polish (#178)", () => {
-    async function getApiMocks() {
-      const mod = await import("../api.js");
-      return mod;
-    }
-
-    function makeFile(name, type, size = 1024) {
-      const blob = new Blob([new Uint8Array(size)], { type });
-      return new File([blob], name, { type });
-    }
-
-    async function pickFiles(files) {
-      const input = screen.getByTestId("attach-file-input");
-      await act(async () => {
-        fireEvent.change(input, { target: { files } });
-      });
-    }
-
     describe("iconForMime", () => {
       it.each([
         ["application/pdf", "file-pdf"],
