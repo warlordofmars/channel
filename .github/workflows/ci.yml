@@ -822,12 +822,20 @@ jobs:
             --config.productName="${{ steps.env.outputs.product_name }}" \
             --config.appId="${{ steps.env.outputs.app_id }}"
 
-      - name: Sync versioned auto-update bundles to S3 (tagged for lifecycle)
+      - name: Upload versioned auto-update bundles to S3 (tagged for lifecycle)
+        env:
+          BUCKET: ${{ steps.cdk.outputs.bucket }}
+          CHANNEL: ${{ steps.env.outputs.channel }}
         run: |
-          aws s3 sync desktop/release/ s3://${{ steps.cdk.outputs.bucket }}/updates/${{ steps.env.outputs.channel }}/ \
-            --exclude '*' \
-            --include '*.zip' --include '*.blockmap' \
-            --tagging "channel-asset-type=versioned-zip"
+          # `aws s3 sync` does NOT support --tagging (CLI v2 quirk — sync
+          # is a multi-object operation, tagging is per-object). Use `cp`
+          # in a loop so each .zip and .blockmap gets the lifecycle tag
+          # the bucket rule scopes prune on (see infra/stacks/channel_stack.py).
+          shopt -s nullglob
+          for f in desktop/release/*.zip desktop/release/*.blockmap; do
+            aws s3 cp "$f" "s3://${BUCKET}/updates/${CHANNEL}/$(basename "$f")" \
+              --tagging "channel-asset-type=versioned-zip"
+          done
 
       - name: Sync stable artefacts (dmg + manifest) to S3 (untagged)
         run: |
