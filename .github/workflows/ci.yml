@@ -832,9 +832,14 @@ jobs:
           # — same format `electron-updater` expects (version + file
           # entry with base64 SHA-512 + size + releaseDate).
           cd desktop/release
-          ZIP=$(ls Channel-*-mac.zip | head -1)
-          if [[ -z "$ZIP" ]]; then
-            echo "::error::expected to find Channel-*-mac.zip in desktop/release/"
+          # Filename is deterministic from electron-builder.yml's mac.zip
+          # artifactName template: `Channel-${version}-${os}.${ext}`.
+          # Compute it from VERSION rather than globbing — globbing fails
+          # silently under `set -e` if no match (ls exits non-zero, step
+          # aborts before any error message we'd write).
+          ZIP="Channel-${VERSION}-mac.zip"
+          if [[ ! -f "$ZIP" ]]; then
+            echo "::error::expected $ZIP in desktop/release/ but found:"
             ls -la
             exit 1
           fi
