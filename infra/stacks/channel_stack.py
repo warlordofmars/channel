@@ -443,6 +443,12 @@ class ChannelStack(cdk.Stack):
         # (``tests/unit/test_channel_stack.py``) guards against leaks.
         if not is_prod:
             common_env["STARTER_ENABLE_DEBUG_ENDPOINTS"] = "1"
+            # #179 — Google-auth bypass for e2e suites. Only activates
+            # when ``?test_email=`` is present, so normal browser flows
+            # are unaffected. Prod stacks MUST NOT set this; a sibling
+            # assertion in ``tests/unit/test_channel_stack.py`` guards
+            # against the same leak shape as the debug-endpoints flag.
+            common_env["STARTER_BYPASS_GOOGLE_AUTH"] = "1"
 
         # ----------------------------------------------------------------
         # Attachments S3 bucket (#173) — file attachments + vision (epic #109)

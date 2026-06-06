@@ -92,6 +92,26 @@ def test_dev_stack_sets_debug_endpoints_env_var(dev_template):
     assert env_vars.get("STARTER_ENABLE_DEBUG_ENDPOINTS") == "1"
 
 
+def test_prod_stack_does_not_set_bypass_google_auth_env_var(prod_template):
+    """#179 — the Google-auth bypass MUST stay off in prod. It only
+    activates when a request carries ``?test_email=``, but a
+    misconfigured prod with the flag set still hands an admin JWT to
+    anyone who can guess that query param. Same risk shape as
+    ``STARTER_ENABLE_DEBUG_ENDPOINTS``."""
+
+    api_fn = _api_function(prod_template)
+    env_vars = api_fn["Properties"]["Environment"]["Variables"]
+    assert "STARTER_BYPASS_GOOGLE_AUTH" not in env_vars, (
+        "Prod stack must NOT enable the Google-auth bypass."
+    )
+
+
+def test_dev_stack_sets_bypass_google_auth_env_var(dev_template):
+    api_fn = _api_function(dev_template)
+    env_vars = api_fn["Properties"]["Environment"]["Variables"]
+    assert env_vars.get("STARTER_BYPASS_GOOGLE_AUTH") == "1"
+
+
 def test_lambda_role_grants_agentcore_write_and_lookup_actions(dev_template):
     """The IAM policy attached to the API Lambda role must grant the
     AgentCore actions Phase 7c needs. We inspect every IAM::Policy
