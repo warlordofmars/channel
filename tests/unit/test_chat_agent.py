@@ -394,6 +394,19 @@ def test_build_agent_accepts_tools_and_attaches_chain_state(monkeypatch):
     from channel.agents.tool_hooks import ChainState
     from channel.agents.tools.clock import current_time
 
+    # Fake Agent mirrors Strands' surface for what this test inspects:
+    # the ``tools`` kwarg becomes a ``tool_names`` list of the registered
+    # tool callables' names. Real Strands does this via a TOOL_SPEC
+    # decorator on @tool — short-circuiting that here keeps the unit
+    # test free of boto3 region lookups.
+    class FakeAgent:
+        def __init__(self, *, tools, **_kw):
+            self.tool_names = [getattr(t, "__name__", None) or t.tool_name for t in tools]
+
+    captured: dict[str, object] = {}
+    _patch_strands(monkeypatch, captured)
+    monkeypatch.setattr("channel.agents.chat_agent.Agent", FakeAgent)
+
     agent = build_agent(
         model_id="claude-sonnet-4-6",
         user_id="user-1",
@@ -415,6 +428,14 @@ def test_build_agent_works_without_tools(monkeypatch):
     state, but attaching it unconditionally keeps the control flow flat.
     """
     from channel.agents.tool_hooks import ChainState
+
+    class FakeAgent:
+        def __init__(self, *, tools, **_kw):
+            self.tool_names = [getattr(t, "__name__", None) or t.tool_name for t in tools]
+
+    captured: dict[str, object] = {}
+    _patch_strands(monkeypatch, captured)
+    monkeypatch.setattr("channel.agents.chat_agent.Agent", FakeAgent)
 
     agent = build_agent(
         model_id="claude-sonnet-4-6",
