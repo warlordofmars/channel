@@ -27,11 +27,19 @@ The cancel-signal registry is a module-level set keyed by ``chat_id``;
 
 from __future__ import annotations
 
+import asyncio
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from strands.hooks.events import BeforeModelCallEvent, BeforeToolCallEvent
+from strands.hooks.events import (
+    AfterToolCallEvent,
+    BeforeModelCallEvent,
+    BeforeToolCallEvent,
+)
+
+from channel.metrics import record_tool_call_outcome
 
 
 @dataclass
@@ -183,3 +191,85 @@ class ToolCallGuardHook:
             return
         # RemainingBudget gate stub: always allow under v1. The #131
         # swap-in PR adds the real check here.
+
+
+class ToolCallTelemetryHook:
+    """Strands ``HookProvider`` for the ``AfterToolCallEvent`` side of the
+    chassis.
+
+    Three responsibilities per tool call:
+
+    1. **Increment ``ChainState.tool_calls_used``** — the chain budget is
+       spent whether the tool succeeded, raised, or was cancelled by the
+       guard. Surfacing failures as "free" would let a misbehaving tool
+       loop indefinitely.
+    2. **Emit ``ToolCallSuccesses`` / ``ToolCallFailures`` EMF** via
+       ``record_tool_call_outcome`` — counter-only, no per-tool
+       dimensions (cf. ``metrics.record_tool_call_outcome`` docstring).
+    3. **Fire a synthetic ``[meta] used <tool>`` ASSISTANT message** via
+       the injected ``memory_writer`` callable (Task 8 wires this to
+       ``AgentCoreMemoryHook.write_meta_event``). The recall hook
+       (``recall.py``) reads these META events back into future system
+       prompts so the model can avoid re-trying a tool that just failed
+       — hence the ``used`` / ``tried`` verb split.
+
+    **Sync callback, async EMF.** Strands' ``AfterToolCallEvent``
+    callback signature is sync (the ``HookEvent`` machinery doesn't
+    await callbacks). ``record_tool_call_outcome`` is async, so this
+    hook fires-and-forgets via ``asyncio.create_task`` with a strong-ref
+    discard callback (Sonar python:S7502 — same pattern as
+    ``AgentCoreMemoryHook._on_after_invocation``).
+
+    **Success criterion**: ``event.exception is None`` AND
+    ``event.cancel_message is None`` AND ``event.result["status"] != "error"``.
+    Any of those three failure signals counts as a tool-call failure —
+    Strands surfaces all three independently (exception is raised by the
+    tool fn; cancel_message is set by the guard's ``cancel_tool`` path;
+    result.status='error' is set by tools that return an error result
+    without raising).
+
+    Conforms to the ``HookProvider`` protocol structurally — no explicit
+    base class, matching the pattern in this module + ``memory.py`` +
+    ``recall.py``.
+    """
+
+    def __init__(self, memory_writer: Callable[[str], None] | None = None) -> None:
+        # memory_writer: sync, fail-soft caller; passed text is the META
+        # body (without the ``[meta]`` prefix — write_meta_event adds it).
+        # Task 8 wires this to AgentCoreMemoryHook.write_meta_event.
+        self._memory_writer = memory_writer
+        # Strong refs to in-flight EMF emissions — without this, Python's
+        # GC can reclaim the task before record_tool_call_outcome
+        # completes. See asyncio.create_task() docs (Sonar python:S7502).
+        self._pending_tasks: set[asyncio.Task[None]] = set()
+
+    def register_hooks(self, registry: Any, **_: Any) -> None:
+        registry.add_callback(AfterToolCallEvent, self.on_after_tool_call)
+
+    def on_after_tool_call(self, event: AfterToolCallEvent) -> None:
+        agent = event.agent
+        state = getattr(agent, "chain_state", None)
+        if state is not None:
+            state.increment()
+
+        # Success = no exception, not cancelled, result status not "error".
+        # Any single failure signal collapses to ``success=False`` so the
+        # EMF counter + META verb both reflect the failure.
+        exception = getattr(event, "exception", None)
+        cancel_message = getattr(event, "cancel_message", None)
+        result = getattr(event, "result", None) or {}
+        result_status = result.get("status") if isinstance(result, dict) else None
+        success = exception is None and cancel_message is None and result_status != "error"
+
+        # EMF: fire-and-forget. The strong-ref + discard-on-done pattern
+        # mirrors AgentCoreMemoryHook._on_after_invocation.
+        task = asyncio.create_task(record_tool_call_outcome(success=success))
+        self._pending_tasks.add(task)
+        task.add_done_callback(self._pending_tasks.discard)
+
+        if self._memory_writer is not None:
+            tool_use = getattr(event, "tool_use", None) or {}
+            tool_name = tool_use.get("name") if isinstance(tool_use, dict) else None
+            tool_name = tool_name or "unknown"
+            verb = "used" if success else "tried"
+            self._memory_writer(f"{verb} {tool_name}")

@@ -3,13 +3,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from unittest.mock import MagicMock
+
+import pytest
 
 from channel.agents.tool_hooks import (
     ChainState,
     ModelVisibilityAddendumHook,
     ToolCallGuardHook,
+    ToolCallTelemetryHook,
     clear_cancel_signal,
     is_cancel_requested,
     set_cancel_signal,
@@ -356,3 +360,336 @@ def test_guard_hook_register_hooks_subscribes_to_before_tool_call():
     registry = MagicMock()
     hook.register_hooks(registry)
     registry.add_callback.assert_called_once_with(BeforeToolCallEvent, hook.on_before_tool_call)
+
+
+# ---------------------------------------------------------------------------
+# ToolCallTelemetryHook — AfterToolCallEvent
+#
+# Strands' ``AfterToolCallEvent`` exposes:
+#   * ``tool_use`` (TypedDict with ``name`` / ``toolUseId`` / ``input``)
+#   * ``result`` (ToolResult — ``status: "success" | "error"``)
+#   * ``exception: Exception | None``  — populated when the tool raised
+#   * ``cancel_message: str | None``   — populated when the guard cancelled
+#
+# Success = no exception AND result.status != "error" AND not cancelled.
+# Callbacks are sync (same shape as AgentCoreMemoryHook._on_after_invocation);
+# async work (``record_tool_call_outcome``) is dispatched via
+# ``asyncio.create_task`` with a strong-ref discard callback per Sonar
+# python:S7502.
+# ---------------------------------------------------------------------------
+
+
+async def _drain_pending_tasks() -> None:
+    """Yield control to the event loop so create_task'd coroutines run.
+
+    The telemetry hook fires-and-forgets via ``asyncio.create_task``;
+    tests need to await the pending tasks before asserting EMF calls.
+    """
+    # One yield is sufficient — the inner coroutine just appends to a list.
+    await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_telemetry_hook_increments_counter_on_success(monkeypatch):
+    """Success path: no exception, result.status == 'success'. Counter
+    increments and ``record_tool_call_outcome(True)`` fires."""
+    emitted = []
+
+    async def fake_record(success):
+        emitted.append(success)
+
+    monkeypatch.setattr(
+        "channel.agents.tool_hooks.record_tool_call_outcome",
+        fake_record,
+    )
+
+    hook = ToolCallTelemetryHook()
+    state = ChainState()
+    agent = MagicMock()
+    agent.chain_state = state
+
+    event = MagicMock()
+    event.agent = agent
+    event.exception = None
+    event.cancel_message = None
+    event.result = {"status": "success"}
+    event.tool_use = {"name": "current_time"}
+
+    hook.on_after_tool_call(event)
+    await _drain_pending_tasks()
+
+    assert state.tool_calls_used == 1
+    assert emitted == [True]
+
+
+@pytest.mark.asyncio
+async def test_telemetry_hook_records_failure_when_event_has_exception(monkeypatch):
+    """The tool raised — ``event.exception`` is set. Counter still
+    increments (the chain budget is spent regardless), and
+    ``record_tool_call_outcome(False)`` fires."""
+    emitted = []
+
+    async def fake_record(success):
+        emitted.append(success)
+
+    monkeypatch.setattr(
+        "channel.agents.tool_hooks.record_tool_call_outcome",
+        fake_record,
+    )
+
+    hook = ToolCallTelemetryHook()
+    state = ChainState()
+    agent = MagicMock()
+    agent.chain_state = state
+
+    event = MagicMock()
+    event.agent = agent
+    event.exception = RuntimeError("upstream 5xx")
+    event.cancel_message = None
+    event.result = {"status": "error"}
+    event.tool_use = {"name": "current_time"}
+
+    hook.on_after_tool_call(event)
+    await _drain_pending_tasks()
+
+    # Counter still increments — the chain budget is spent regardless.
+    assert state.tool_calls_used == 1
+    assert emitted == [False]
+
+
+@pytest.mark.asyncio
+async def test_telemetry_hook_records_failure_when_result_status_is_error(monkeypatch):
+    """No exception, but the tool returned an error-status result.
+    Strands surfaces this as ``result.status == 'error'`` without raising
+    — still counts as a tool-call failure."""
+    emitted = []
+
+    async def fake_record(success):
+        emitted.append(success)
+
+    monkeypatch.setattr(
+        "channel.agents.tool_hooks.record_tool_call_outcome",
+        fake_record,
+    )
+
+    hook = ToolCallTelemetryHook()
+    state = ChainState()
+    agent = MagicMock()
+    agent.chain_state = state
+
+    event = MagicMock()
+    event.agent = agent
+    event.exception = None
+    event.cancel_message = None
+    event.result = {"status": "error"}
+    event.tool_use = {"name": "current_time"}
+
+    hook.on_after_tool_call(event)
+    await _drain_pending_tasks()
+
+    assert state.tool_calls_used == 1
+    assert emitted == [False]
+
+
+@pytest.mark.asyncio
+async def test_telemetry_hook_records_failure_on_cancelled(monkeypatch):
+    """The guard cancelled the tool call — ``event.cancel_message`` is set.
+    Counter increments + records failure (the cancel still spent a slot
+    in the chain budget; surfacing that as success would be misleading)."""
+    emitted = []
+
+    async def fake_record(success):
+        emitted.append(success)
+
+    monkeypatch.setattr(
+        "channel.agents.tool_hooks.record_tool_call_outcome",
+        fake_record,
+    )
+
+    hook = ToolCallTelemetryHook()
+    state = ChainState()
+    agent = MagicMock()
+    agent.chain_state = state
+
+    event = MagicMock()
+    event.agent = agent
+    event.exception = None
+    event.cancel_message = "cancelled"
+    event.result = {"status": "error"}
+    event.tool_use = {"name": "current_time"}
+
+    hook.on_after_tool_call(event)
+    await _drain_pending_tasks()
+
+    assert state.tool_calls_used == 1
+    assert emitted == [False]
+
+
+@pytest.mark.asyncio
+async def test_telemetry_hook_calls_memory_writer_with_used_verb_on_success(monkeypatch):
+    """On success, the META message uses the ``used <tool>`` verb so the
+    recall hook can surface "the model successfully used X" in future
+    system prompts."""
+
+    async def fake_record(success):  # noqa: ARG001
+        return None
+
+    monkeypatch.setattr(
+        "channel.agents.tool_hooks.record_tool_call_outcome",
+        fake_record,
+    )
+
+    calls = []
+    hook = ToolCallTelemetryHook(memory_writer=lambda text: calls.append(text))
+    agent = MagicMock()
+    agent.chain_state = ChainState()
+
+    event = MagicMock()
+    event.agent = agent
+    event.exception = None
+    event.cancel_message = None
+    event.result = {"status": "success"}
+    event.tool_use = {"name": "current_time"}
+
+    hook.on_after_tool_call(event)
+    await _drain_pending_tasks()
+    assert calls == ["used current_time"]
+
+
+@pytest.mark.asyncio
+async def test_telemetry_hook_calls_memory_writer_with_tried_verb_on_failure(monkeypatch):
+    """On failure, the META message uses the ``tried <tool>`` verb. The
+    recall hook reads these back into future system prompts so the model
+    can avoid re-trying a tool that just failed."""
+
+    async def fake_record(success):  # noqa: ARG001
+        return None
+
+    monkeypatch.setattr(
+        "channel.agents.tool_hooks.record_tool_call_outcome",
+        fake_record,
+    )
+
+    calls = []
+    hook = ToolCallTelemetryHook(memory_writer=lambda text: calls.append(text))
+    agent = MagicMock()
+    agent.chain_state = ChainState()
+
+    event = MagicMock()
+    event.agent = agent
+    event.exception = RuntimeError("boom")
+    event.cancel_message = None
+    event.result = {"status": "error"}
+    event.tool_use = {"name": "current_time"}
+
+    hook.on_after_tool_call(event)
+    await _drain_pending_tasks()
+    assert calls == ["tried current_time"]
+
+
+@pytest.mark.asyncio
+async def test_telemetry_hook_memory_writer_handles_missing_tool_name(monkeypatch):
+    """Defensive: if ``tool_use`` is missing a ``name`` key (Strands
+    contract violation — shouldn't happen, but fail-soft), fall back to
+    ``unknown`` rather than crashing."""
+
+    async def fake_record(success):  # noqa: ARG001
+        return None
+
+    monkeypatch.setattr(
+        "channel.agents.tool_hooks.record_tool_call_outcome",
+        fake_record,
+    )
+
+    calls = []
+    hook = ToolCallTelemetryHook(memory_writer=lambda text: calls.append(text))
+    agent = MagicMock()
+    agent.chain_state = ChainState()
+
+    event = MagicMock()
+    event.agent = agent
+    event.exception = None
+    event.cancel_message = None
+    event.result = {"status": "success"}
+    event.tool_use = {}  # no "name"
+
+    hook.on_after_tool_call(event)
+    await _drain_pending_tasks()
+    assert calls == ["used unknown"]
+
+
+@pytest.mark.asyncio
+async def test_telemetry_hook_no_memory_writer_is_noop(monkeypatch):
+    """When ``memory_writer`` is None (e.g. unit tests, or AgentCore
+    Memory disabled), the hook still increments + emits EMF but skips
+    the META event write."""
+    emitted = []
+
+    async def fake_record(success):
+        emitted.append(success)
+
+    monkeypatch.setattr(
+        "channel.agents.tool_hooks.record_tool_call_outcome",
+        fake_record,
+    )
+
+    hook = ToolCallTelemetryHook(memory_writer=None)
+    state = ChainState()
+    agent = MagicMock()
+    agent.chain_state = state
+
+    event = MagicMock()
+    event.agent = agent
+    event.exception = None
+    event.cancel_message = None
+    event.result = {"status": "success"}
+    event.tool_use = {"name": "current_time"}
+
+    hook.on_after_tool_call(event)
+    await _drain_pending_tasks()
+
+    assert state.tool_calls_used == 1
+    assert emitted == [True]
+
+
+@pytest.mark.asyncio
+async def test_telemetry_hook_no_chain_state_skips_increment(monkeypatch):
+    """When the agent has no ``chain_state`` attribute (chassis not yet
+    wired through this call path), the hook still emits EMF but skips
+    the counter increment."""
+    emitted = []
+
+    async def fake_record(success):
+        emitted.append(success)
+
+    monkeypatch.setattr(
+        "channel.agents.tool_hooks.record_tool_call_outcome",
+        fake_record,
+    )
+
+    hook = ToolCallTelemetryHook()
+    agent = MagicMock(spec=[])  # no chain_state
+
+    event = MagicMock()
+    event.agent = agent
+    event.exception = None
+    event.cancel_message = None
+    event.result = {"status": "success"}
+    event.tool_use = {"name": "current_time"}
+
+    hook.on_after_tool_call(event)
+    await _drain_pending_tasks()
+
+    # EMF still fires — the tool call happened.
+    assert emitted == [True]
+
+
+def test_telemetry_hook_register_hooks_subscribes_to_after_tool_call():
+    """``register_hooks`` wires the callback onto ``AfterToolCallEvent``
+    via the registry — matches the HookProvider pattern."""
+    from strands.hooks.events import AfterToolCallEvent
+
+    hook = ToolCallTelemetryHook()
+    registry = MagicMock()
+    hook.register_hooks(registry)
+    registry.add_callback.assert_called_once_with(AfterToolCallEvent, hook.on_after_tool_call)
