@@ -1474,3 +1474,23 @@ def test_delete_chat_attachments_counts_ddb_delete_failures(
     assert (deleted, failed) == (1, 1)
     # S3 side ran for both — the failure is on the DDB side.
     assert ("channel-attachments-dev", "attachments/user/u-1/att-2") in s3_client.deleted
+
+
+# ----------------------------------------------------------------
+# S3 client signature config (#196)
+# ----------------------------------------------------------------
+
+
+def test_get_s3_client_uses_sigv4(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Boto3's default signature for ``s3.amazonaws.com`` is SigV2, and
+    S3 rejects SigV2-signed presigned PUTs against KMS-encrypted buckets
+    with ``InvalidArgument``. ``_get_s3_client`` must pin SigV4 so every
+    presigned URL the Lambda mints is acceptable to S3.
+
+    Regression for #196. See the issue body for the live-dev repro."""
+
+    from channel import storage
+
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
+    client = storage._get_s3_client()
+    assert client.meta.config.signature_version == "s3v4"
