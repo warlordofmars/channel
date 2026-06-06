@@ -32,6 +32,46 @@ function nextTempId() {
 }
 
 /**
+ * Map an attachment MIME to the matching ``Icon.jsx`` glyph name.
+ * Falls back to the generic ``"file"`` glyph for unknown types so a
+ * future MIME doesn't render as a blank tile.
+ */
+export function iconForMime(mime) {
+  if (mime === "application/pdf") return "file-pdf";
+  if (typeof mime === "string" && mime.startsWith("image/")) return "file-image";
+  if (
+    mime === "text/csv" ||
+    mime === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+  ) {
+    return "file-sheet";
+  }
+  if (mime === "text/plain" || mime === "text/markdown") return "file-text";
+  return "file";
+}
+
+/**
+ * Format ``bytes`` for chip display. Sub-MB stays in KB so single-page
+ * PDFs and PNGs read sensibly; ≥1MB switches to a one-decimal MB to
+ * match the 20MB cap the user sees in the AttachMenu hint.
+ */
+export function formatAttachmentSize(bytes) {
+  if (bytes < 1024 * 1024) {
+    return Math.max(1, Math.round(bytes / 1024)) + " KB";
+  }
+  return (bytes / 1024 / 1024).toFixed(1) + " MB";
+}
+
+/**
+ * Clip ``name`` to ``max`` chars with a trailing ellipsis so chips
+ * stay readable. The full filename is mirrored into ``title=`` on the
+ * chip so hover restores the original.
+ */
+export function truncateName(name, max = 20) {
+  if (name.length <= max) return name;
+  return name.slice(0, max - 1) + "…";
+}
+
+/**
  * Auto-growing textarea + attach + model picker + mic + send. Translated
  * from design-sources/app/chat.jsx `Composer` function.
  *
@@ -347,19 +387,22 @@ const Composer = forwardRef(function Composer(
                 className={"chip attach-chip status-" + a.status}
                 key={a.tempId}
                 data-status={a.status}
+                title={a.name}
               >
                 <span className="tile">
                   {a.status === "attaching" ? (
                     <span className="spinner" aria-label="Attaching" />
                   ) : (
-                    // Failed + attached both use the file icon; status
-                    // colour comes from the chip-border + tile-background
-                    // CSS rules so the visual state is unambiguous
-                    // without needing a separate icon set.
-                    <Icon name="file" size={15} />
+                    // MIME-typed glyph so a sidebar full of pending
+                    // chips scans at a glance. Status colour still comes
+                    // from the chip-border + tile-background CSS so the
+                    // attached / failed state is unambiguous on top of
+                    // the format hint.
+                    <Icon name={iconForMime(a.mime)} size={15} />
                   )}
                 </span>
-                <span className="nm">{a.name}</span>
+                <span className="nm">{truncateName(a.name)}</span>
+                <span className="sz">{formatAttachmentSize(a.size_bytes)}</span>
                 {a.status === "failed" && (
                   <button
                     type="button"

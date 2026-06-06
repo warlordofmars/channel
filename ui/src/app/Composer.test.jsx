@@ -32,7 +32,11 @@ vi.mock("../api.js", () => ({
   }),
 }));
 
-import Composer from "./Composer.jsx";
+import Composer, {
+  formatAttachmentSize,
+  iconForMime,
+  truncateName,
+} from "./Composer.jsx";
 import { __resetModelsCacheForTest } from "./data.js";
 import {
   STORAGE_KEYS,
@@ -966,6 +970,142 @@ describe("Composer", () => {
       });
       const chip = screen.getByText("bad.pdf").closest(".attach-chip");
       expect(chip.getAttribute("data-status")).toBe("failed");
+    });
+  });
+
+  describe("chip polish (#178)", () => {
+    async function getApiMocks() {
+      const mod = await import("../api.js");
+      return mod;
+    }
+
+    function makeFile(name, type, size = 1024) {
+      const blob = new Blob([new Uint8Array(size)], { type });
+      return new File([blob], name, { type });
+    }
+
+    async function pickFiles(files) {
+      const input = screen.getByTestId("attach-file-input");
+      await act(async () => {
+        fireEvent.change(input, { target: { files } });
+      });
+    }
+
+    describe("iconForMime", () => {
+      it.each([
+        ["application/pdf", "file-pdf"],
+        ["image/png", "file-image"],
+        ["image/jpeg", "file-image"],
+        ["image/gif", "file-image"],
+        ["image/webp", "file-image"],
+        ["text/csv", "file-sheet"],
+        [
+          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          "file-sheet",
+        ],
+        ["text/plain", "file-text"],
+        ["text/markdown", "file-text"],
+      ])("maps %s to '%s'", (mime, expected) => {
+        expect(iconForMime(mime)).toBe(expected);
+      });
+
+      it("falls back to the generic 'file' icon for unknown MIMEs", () => {
+        expect(iconForMime("application/octet-stream")).toBe("file");
+        expect(iconForMime(undefined)).toBe("file");
+      });
+    });
+
+    describe("formatAttachmentSize", () => {
+      it.each([
+        [0, "1 KB"],
+        [512, "1 KB"],
+        [1024, "1 KB"],
+        [204_800, "200 KB"],
+        [1024 * 1024, "1.0 MB"],
+        [5_242_880, "5.0 MB"],
+        [20 * 1024 * 1024, "20.0 MB"],
+      ])("formats %d bytes as '%s'", (bytes, expected) => {
+        expect(formatAttachmentSize(bytes)).toBe(expected);
+      });
+    });
+
+    describe("truncateName", () => {
+      it("returns the name unchanged when ≤20 chars", () => {
+        expect(truncateName("spec.pdf")).toBe("spec.pdf");
+        expect(truncateName("just-on-the-edge.pdf")).toBe("just-on-the-edge.pdf");
+      });
+
+      it("appends an ellipsis when the name exceeds 20 chars", () => {
+        // max=20: slice(0, 19) + "…" → 19-char prefix + ellipsis = 20 chars.
+        expect(truncateName("very-long-filename-with-extra-tail.pdf")).toBe(
+          "very-long-filename-…",
+        );
+      });
+    });
+
+    it("renders the MIME-typed icon inside each pending chip", async () => {
+      const api = await getApiMocks();
+      api.finalizeAttachment.mockResolvedValueOnce({
+        id: "att-pdf-1",
+        user_id: "u",
+        name: "spec.pdf",
+        mime: "application/pdf",
+        size_bytes: 1024,
+        s3_key: "k",
+        s3_bucket: "bk",
+        checksum_sha256: "sha",
+        created_at: "t",
+      });
+      render(<Composer {...defaultProps()} />);
+      await pickFiles([makeFile("spec.pdf", "application/pdf", 1024)]);
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0));
+      });
+      const chip = screen.getByText("spec.pdf").closest(".attach-chip");
+      // The chip's tile carries the MIME-typed icon. SVG glyph identity
+      // isn't directly inspectable on the rendered element, so we
+      // assert via the helper's contract (covered above) and the
+      // presence of an svg inside the tile.
+      expect(chip.querySelector(".tile svg")).toBeTruthy();
+    });
+
+    it("shows the attachment size next to the filename", async () => {
+      const api = await getApiMocks();
+      api.finalizeAttachment.mockResolvedValueOnce({
+        id: "att-png-1",
+        user_id: "u",
+        name: "shot.png",
+        mime: "image/png",
+        size_bytes: 524_288,
+        s3_key: "k",
+        s3_bucket: "bk",
+        checksum_sha256: "sha",
+        created_at: "t",
+      });
+      render(<Composer {...defaultProps()} />);
+      await pickFiles([makeFile("shot.png", "image/png", 524_288)]);
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0));
+      });
+      const chip = screen.getByText("shot.png").closest(".attach-chip");
+      expect(chip.querySelector(".sz").textContent).toBe("512 KB");
+    });
+
+    it("exposes the full filename via title= on the chip", async () => {
+      render(<Composer {...defaultProps()} />);
+      const longName = "very-long-attachment-filename.pdf";
+      await pickFiles([makeFile(longName, "application/pdf", 1024)]);
+      const chip = screen.getByTitle(longName);
+      expect(chip.classList.contains("attach-chip")).toBe(true);
+      // The visible label is truncated but the title carries the full
+      // name so hover reveals it.
+      expect(chip.querySelector(".nm").textContent).not.toBe(longName);
+      expect(chip.querySelector(".nm").textContent.endsWith("…")).toBe(true);
+      // Cleanup: settle the in-flight pipeline so afterEach has nothing
+      // pending.
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0));
+      });
     });
   });
 });
