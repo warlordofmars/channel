@@ -446,7 +446,7 @@ async def test_telemetry_hook_records_failure_when_event_has_exception(monkeypat
     event.agent = agent
     event.exception = RuntimeError("upstream 5xx")
     event.cancel_message = None
-    event.result = {"status": "error"}
+    event.result = {"status": "success"}
     event.tool_use = {"name": "current_time"}
 
     hook.on_after_tool_call(event)
@@ -515,7 +515,7 @@ async def test_telemetry_hook_records_failure_on_cancelled(monkeypatch):
     event.agent = agent
     event.exception = None
     event.cancel_message = "cancelled"
-    event.result = {"status": "error"}
+    event.result = {"status": "success"}
     event.tool_use = {"name": "current_time"}
 
     hook.on_after_tool_call(event)
@@ -579,7 +579,7 @@ async def test_telemetry_hook_calls_memory_writer_with_tried_verb_on_failure(mon
     event.agent = agent
     event.exception = RuntimeError("boom")
     event.cancel_message = None
-    event.result = {"status": "error"}
+    event.result = {"status": "success"}
     event.tool_use = {"name": "current_time"}
 
     hook.on_after_tool_call(event)
