@@ -179,7 +179,7 @@ export function useChatStream(chatId, { onTitleSuggested } = {}) {
               ),
             );
           } else if (event.type === "tool_started") {
-            // #181 PR-2: push a new running step onto the in-flight
+            // #181 PR-3: push a new running step onto the in-flight
             // assistant turn's toolSteps array. The active assistant
             // turn is the one matching tempAsstId (set when send /
             // regenerate seeded the streaming row).
