@@ -95,7 +95,8 @@ Hidden from the model (set server-side, not surfaced as params):
 | Var | Default jc/dev | Default prod | Meaning |
 | --- | --- | --- | --- |
 | `STARTER_WEB_SEARCH_ENABLED` | `1` | `1` | Kill switch — `chats.py` skips tool registration if `0` |
-| `EXA_API_KEY` | (from SSM) | (from SSM) | Injected from `/channel/{env}/exa-api-key` at deploy time |
+| `STARTER_EXA_API_KEY_PARAM` | `/channel/jc/exa-api-key` | `/channel/prod/exa-api-key` | SSM parameter **name** (path), injected by CDK at deploy time. `_resolve_exa_api_key()` fetches the value at Lambda cold-start via boto3. Mirrors `STARTER_JWT_SECRET_PARAM` in `src/channel/auth/tokens.py::_jwt_secret` |
+| `EXA_API_KEY` (optional, local dev) | unset (or set manually) | unset | If set, short-circuits the SSM fetch. Used by `inv dev`, which pulls the jc key from SSM into this env var at startup |
 
 `STARTER_WEB_SEARCH_ENABLED=1` in **all** environments for v1 — there's no progressive rollout plan; the flag exists for emergency kill, not staged enable. (Contrast with `STARTER_CLOCK_TOOL_ENABLED` which is intentionally off in prod because `current_time` is a smoke-test tool, not a product feature.)
 

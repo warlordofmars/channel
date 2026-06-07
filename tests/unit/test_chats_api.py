@@ -501,11 +501,10 @@ def test_post_message_falls_back_to_prefs_effort_when_payload_omits_it(
 # Tool flags currently mounted on the chassis. Each row is
 # ``(env_var, tool_name)``. The two parametrized tests below assert that
 # (a) flipping any one flag on registers exactly its matching tool and
-# (b) leaving all flags off keeps the tools list empty. Chassis policy
-# P2 (#181 strategy spec): each tool is off by default in prod, on in
-# dev/jc envs via the CDK env-var diff in
-# ``infra/stacks/channel_stack.py``. #182 added Exa ``web_search``
-# behind its own flag.
+# (b) leaving all flags off keeps the tools list empty. Per-tool prod
+# policy (see ``infra/stacks/channel_stack.py``): ``current_time`` is
+# off in prod (smoke-test only, on in dev/jc); ``web_search`` is on in
+# all envs (the flag is an emergency kill switch, not a rollout knob).
 _TOOL_FLAGS: list[tuple[str, str]] = [
     ("STARTER_CLOCK_TOOL_ENABLED", "current_time"),
     ("STARTER_WEB_SEARCH_ENABLED", "web_search"),

@@ -179,3 +179,18 @@ def test_resolve_exa_api_key_prefers_env_var(monkeypatch):
     _resolve_exa_api_key.cache_clear()
 
     assert _resolve_exa_api_key() == "ek-from-env"
+
+
+def test_web_search_returns_missing_key_when_resolve_fails(monkeypatch):
+    """When ``_resolve_exa_api_key()`` raises (no env var + no SSM
+    access), the wrapper returns the structured error rather than
+    letting the exception bubble up through the chassis."""
+    from channel.agents.tools.web_search import _resolve_exa_api_key, web_search
+
+    _resolve_exa_api_key.cache_clear()
+    monkeypatch.delenv("EXA_API_KEY", raising=False)
+    monkeypatch.delenv("STARTER_EXA_API_KEY_PARAM", raising=False)
+
+    result = web_search(query="anything")
+
+    assert result == {"status": "error", "error_type": "missing_key"}

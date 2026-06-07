@@ -84,8 +84,18 @@ def web_search(
         exclude_domains: Optional list of domains to exclude.
     """
     # Make the key available to strands_tools.exa, which reads it from
-    # the environment at call time.
-    os.environ["EXA_API_KEY"] = _resolve_exa_api_key()
+    # the environment at call time. ``_resolve_exa_api_key`` can raise
+    # for multiple reasons (``KeyError`` when ``STARTER_EXA_API_KEY_PARAM``
+    # is unset in local dev, ``botocore`` ``ClientError`` for SSM
+    # failures, network errors during boto3 client init, etc.). The
+    # bare ``Exception`` catch is intentional: the contract requires a
+    # stable ``error_type`` the SPA can render distinctly rather than
+    # bubbling raw exceptions through the chassis.
+    try:
+        os.environ["EXA_API_KEY"] = _resolve_exa_api_key()
+    except Exception as exc:
+        logger.warning("web_search.config_error %r", exc)
+        return {"status": "error", "error_type": "missing_key"}
     clamped = max(_NUM_RESULTS_MIN, min(num_results, _NUM_RESULTS_MAX))
     try:
         return exa_search(
