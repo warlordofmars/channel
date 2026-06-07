@@ -560,19 +560,22 @@ def dev(ctx, seed=False):
         "STARTER_AUTO_TITLE_ENABLED": "1",
     }
     # #182 — pull Exa API key from SSM into the local Lambda env so the
-    # web_search tool can call Exa during `inv dev` smoke tests. Skip
-    # cleanly if the parameter isn't set in jc — the tool only fires when
+    # web_search tool can call Exa during `inv dev` smoke tests. Path
+    # derives from STARTER_ENV (default "jc") so dev clones pointing at
+    # `/channel/dev/exa-api-key` (or any other env) load the right key.
+    # Skip cleanly if the parameter isn't set — the tool only fires when
     # STARTER_WEB_SEARCH_ENABLED=1 AND the user asks something that needs
     # it, so missing key = clear runtime error when it's actually needed.
+    exa_param = f"/channel/{dev_env['STARTER_ENV']}/exa-api-key"
     try:
         import boto3
 
         ssm = boto3.client("ssm", region_name=REGION)
-        resp = ssm.get_parameter(Name="/channel/jc/exa-api-key", WithDecryption=True)
+        resp = ssm.get_parameter(Name=exa_param, WithDecryption=True)
         dev_env["EXA_API_KEY"] = resp["Parameter"]["Value"]
     except Exception as exc:
         print(
-            f"  warn: could not read /channel/jc/exa-api-key from SSM ({exc}); "
+            f"  warn: could not read {exa_param} from SSM ({exc}); "
             "web_search will fail until you set EXA_API_KEY manually"
         )
     ui_env = {
