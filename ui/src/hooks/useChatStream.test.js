@@ -919,6 +919,54 @@ describe("useChatStream", () => {
     expect(asst.toolSteps[0].statusText).toBe("ticking");
   });
 
+  it("is a no-op when tool_started arrives after the temp msg_id has been swapped (done already fired)", async () => {
+    // After `done`, the assistant turn's msg_id swaps from tempAsstId
+    // to the persisted server id. A late `tool_started` (or one whose
+    // tempAsstId can't be correlated) must NOT fabricate a fresh state
+    // update — Copilot iteration: skip the React setter no-op when no
+    // turn matches by returning `prev` unchanged. Hard to detect from
+    // outside other than via the run-without-throwing path here; the
+    // important contract is no toolStep appears on any non-matching
+    // turn and existing state is untouched.
+    const result = await runToolStream([
+      { type: "delta", text: "ok" },
+      doneEvent("a-late"),
+      // tool_started arrives AFTER done — the turn's msg_id is now the
+      // persisted id, no longer matches tempAsstId.
+      toolStarted({ id: "tu-late" }),
+    ]);
+
+    const asst = result.current.turns.find((t) => t.msg_id === "a-late");
+    // No toolSteps fabricated because no turn matched tempAsstId at the
+    // point the late tool_started arrived.
+    expect(asst.toolSteps).toBeUndefined();
+  });
+
+  it("defaults partialResultCount to 0 when tool_error omits partial_result_count", async () => {
+    // Older / partial backends may emit tool_error without
+    // partial_result_count. Copilot iteration: defensive `?? 0` keeps
+    // the chain-cap copy stable (`{N} steps completed`) rather than
+    // rendering `undefined` into the UI.
+    const result = await runToolStream([
+      toolStarted({ id: "tu-no-count" }),
+      {
+        type: "tool_error",
+        tool_use_id: "tu-no-count",
+        error_type: "chain_cap",
+        // partial_result_count intentionally omitted
+      },
+      doneEvent("a-t-no-count"),
+    ]);
+
+    const asst = result.current.turns.find((t) => t.msg_id === "a-t-no-count");
+    expect(asst.toolSteps[0]).toMatchObject({
+      toolUseId: "tu-no-count",
+      errorType: "chain_cap",
+      partialResultCount: 0,
+      status: "error",
+    });
+  });
+
   it("clears stale turns when switching chats (loadedChatIdRef branch)", async () => {
     // Covers the loadedChatIdRef.current !== chatId branch: switching
     // from one chat with turns to a different chat clears the old

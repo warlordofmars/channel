@@ -232,19 +232,21 @@ function ToolStepRow({ step }) {
  * tool name + status so the user can see "the hands moved" without
  * expanding. Click the toggle to reveal the full step list with
  * `ToolResultBlock` per finished step.
+ *
+ * `expanded` + `onToggle` are owned by the parent (`Conversation`) so
+ * the state survives the assistant turn's `msg_id` swap from the temp
+ * client id to the persisted server id on the `done` SSE event. If
+ * state lived here, that swap would remount this component and
+ * collapse the list right as the stream finalises.
  */
-function ToolStepList({ steps }) {
-  const [expanded, setExpanded] = useState(false);
-  function toggleExpanded() {
-    setExpanded(function flip(prev) { return !prev; });
-  }
+function ToolStepList({ steps, expanded, onToggle }) {
   const noun = steps.length === 1 ? "step" : "steps";
   return (
     <div className="tool-steps">
       <button
         type="button"
         className="tool-steps-toggle"
-        onClick={toggleExpanded}
+        onClick={onToggle}
         aria-expanded={expanded}
       >
         <Icon name={expanded ? "chevron-down" : "chevron-right"} size={14} />
@@ -310,6 +312,22 @@ export default function Conversation() {
   // hardcoded fallback). Until it lands we wrap the prefs.model id in
   // local display meta so the Composer can still send.
   const [models, setModels] = useState(() => cachedModels());
+
+  // Tool-step expand/collapse state lives here (not in ToolStepList) so
+  // it survives the streaming-assistant-turn `msg_id` swap from the
+  // temp client id to the persisted server id on the `done` SSE event.
+  // Keyed by the first step's `toolUseId` — backend-supplied via
+  // `tool_started` and stable for the lifetime of the assistant turn.
+  // Conversation itself doesn't remount on the swap; only the per-turn
+  // row subtree does, so this Map persists across that remount.
+  const [expandedSteps, setExpandedSteps] = useState(() => new Map());
+  function toggleStepsExpanded(key) {
+    setExpandedSteps(function flipKey(prev) {
+      const next = new Map(prev);
+      next.set(key, !(prev.get(key) ?? false));
+      return next;
+    });
+  }
 
   useEffect(function loadModelAllowlist() {
     // `loadModels()` is internally cached, so a hot mount after another
@@ -403,7 +421,11 @@ export default function Conversation() {
                 </div>
                 <div className="msg">{renderMarkdown(t.text, t.streaming)}</div>
                 {t.toolSteps && t.toolSteps.length > 0 && (
-                  <ToolStepList steps={t.toolSteps} />
+                  <ToolStepList
+                    steps={t.toolSteps}
+                    expanded={expandedSteps.get(t.toolSteps[0].toolUseId) ?? false}
+                    onToggle={() => toggleStepsExpanded(t.toolSteps[0].toolUseId)}
+                  />
                 )}
                 {t.artifact && (
                   <div className="art-inline" onClick={noop}>

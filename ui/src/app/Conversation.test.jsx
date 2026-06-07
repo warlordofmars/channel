@@ -1259,5 +1259,74 @@ describe("Conversation", () => {
       expect(screen.getByText(/current_time/)).toBeInTheDocument();
       expect(screen.getByText(/running/)).toBeInTheDocument();
     });
+
+    it("preserves expanded state when the assistant turn's msg_id swaps from temp to persisted", () => {
+      // Streaming-phase turn carries a temp msg_id while SSE deltas
+      // flow. The `done` event swaps it to the persisted server id —
+      // which remounts the per-turn row subtree (the row's React key is
+      // msg_id). The expanded/collapsed state for the ToolStepList
+      // would reset to `false` if it lived inside ToolStepList. The fix
+      // lifts the state into Conversation, keyed by the first step's
+      // toolUseId (stable across the swap because the backend assigns
+      // it once).
+      const step = {
+        toolUseId: "tu-stable-1",
+        toolName: "current_time",
+        status: "finished",
+        summary: "13:37 UTC",
+      };
+      mockStream({
+        turns: [
+          {
+            msg_id: "tmp-a-abc",
+            role: "assistant",
+            text: "the time",
+            streaming: false,
+            toolSteps: [step],
+          },
+        ],
+      });
+      const { rerender } = renderAt("/app/c/c-swap");
+
+      // Expand the list — the summary becomes visible.
+      const toggle = screen.getByRole("button", { name: /tool step/i });
+      expect(toggle.getAttribute("aria-expanded")).toBe("false");
+      fireEvent.click(toggle);
+      expect(toggle.getAttribute("aria-expanded")).toBe("true");
+      expect(screen.getByText("13:37 UTC")).toBeInTheDocument();
+
+      // Simulate the `done` SSE event: temp msg_id → persisted msg_id.
+      // The toolSteps array (and its first step's toolUseId) is
+      // unchanged — that's the stable key the parent uses for lookup.
+      useChatStreamModule.useChatStream.mockReturnValue({
+        turns: [
+          {
+            msg_id: "persisted-msg-xyz",
+            role: "assistant",
+            text: "the time",
+            streaming: false,
+            toolSteps: [step],
+          },
+        ],
+        send: vi.fn(),
+        regenerate: vi.fn(),
+        abort: vi.fn(),
+        status: "idle",
+        error: null,
+      });
+      rerender(
+        <MemoryRouter initialEntries={["/app/c/c-swap"]}>
+          <Routes>
+            <Route path="/app/c/:id" element={<Conversation />} />
+          </Routes>
+        </MemoryRouter>,
+      );
+
+      // Toggle still reads `aria-expanded="true"` and summary still
+      // visible — expanded state survived the msg_id swap.
+      const toggleAfter = screen.getByRole("button", { name: /tool step/i });
+      expect(toggleAfter.getAttribute("aria-expanded")).toBe("true");
+      expect(screen.getByText("13:37 UTC")).toBeInTheDocument();
+    });
   });
 });

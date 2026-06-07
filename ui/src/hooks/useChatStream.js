@@ -182,9 +182,15 @@ export function useChatStream(chatId, { onTitleSuggested } = {}) {
             // #181 PR-3: push a new running step onto the in-flight
             // assistant turn's toolSteps array. The active assistant
             // turn is the one matching tempAsstId (set when send /
-            // regenerate seeded the streaming row).
-            setTurns((prev) =>
-              prev.map((t) => {
+            // regenerate seeded the streaming row). Same `mutated`
+            // short-circuit as patchToolStep: if no turn matches (e.g.
+            // tool_started arrives after the temp id was swapped to the
+            // persisted id on `done`), return `prev` so React's
+            // useState setter no-ops and we skip an unnecessary
+            // re-render.
+            setTurns((prev) => {
+              let mutated = false;
+              const next = prev.map((t) => {
                 if (t.msg_id !== tempAsstId) return t;
                 const steps = [...(t.toolSteps || [])];
                 steps.push({
@@ -197,9 +203,11 @@ export function useChatStream(chatId, { onTitleSuggested } = {}) {
                   partialResultCount: 0,
                   status: "running",
                 });
+                mutated = true;
                 return { ...t, toolSteps: steps };
-              }),
-            );
+              });
+              return mutated ? next : prev;
+            });
           } else if (event.type === "tool_progress") {
             setTurns((prev) =>
               patchToolStep(prev, tempAsstId, event.tool_use_id, {
@@ -217,7 +225,10 @@ export function useChatStream(chatId, { onTitleSuggested } = {}) {
             setTurns((prev) =>
               patchToolStep(prev, tempAsstId, event.tool_use_id, {
                 errorType: event.error_type,
-                partialResultCount: event.partial_result_count,
+                // Default to 0 if the server omits the field (older
+                // backend, defensive fallback) — keeps the chain-cap
+                // copy stable and matches the tool_started initializer.
+                partialResultCount: event.partial_result_count ?? 0,
                 status: "error",
               }),
             );
