@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Web search via Exa: `web_search` tool registered on the chassis behind
+  `STARTER_WEB_SEARCH_ENABLED` (default on in all envs; kill switch only,
+  not progressive rollout). The model writes replies with inline markdown
+  links (`[claim](url)`) as the citation channel — no SSE protocol change,
+  no new SPA renderer. Rate limit deferred for v1; the chassis chain-cap
+  (8 tools/chain) is the de-facto budget. (#182, epic #128)
 - Tool-use chassis: Strands `tools=[...]` wiring on `build_agent()`,
   three new hook handlers (`ModelVisibilityAddendumHook` for the
   in-prompt addendum, `ToolCallGuardHook` for chain-cap / wall-clock /
@@ -154,6 +160,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Meta
 
+- Web search design doc: `docs/superpowers/specs/2026-06-07-182-web-search-design.md`.
+- `strands-agents-tools` pinned in `pyproject.toml` for the native Exa wrapper.
 - Memory invariant lifted into the `_payload_from_messages` docstring +
   hardened via a recursive structural walker in tests: tool payloads
   (`toolUse` / `toolResult` blocks) never persist to AgentCore Memory
