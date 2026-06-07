@@ -47,6 +47,46 @@ GITHUB_REPO = "warlordofmars/channel"
 HOSTED_ZONE_NAME = "warlordofmars.net"
 
 
+def _build_csp_header(
+    *,
+    custom_domain: str,
+    attachments_bucket_name: str,
+    region: str,
+) -> str:
+    """Compose the CloudFront Content-Security-Policy header (#196).
+
+    The browser SPA needs ``connect-src`` to cover:
+      * its own API origin (``https://{custom_domain}``) so the fetch
+        wrappers in ``ui/src/api.js`` reach the management API
+      * the attachments S3 bucket's virtual-host URLs so presigned
+        PUT uploads succeed without CSP blocking
+
+    Both us-east-1 legacy (``{bucket}.s3.amazonaws.com``) and regional
+    (``{bucket}.s3.{region}.amazonaws.com``) variants are enumerated —
+    the SDK can hand back either form depending on the resolution path.
+    Replaces the prior ``https://channel.example.com`` placeholder
+    that was never substituted per-env.
+    """
+
+    api_origin = f"https://{custom_domain}"
+    bucket_legacy = f"https://{attachments_bucket_name}.s3.amazonaws.com"
+    bucket_regional = f"https://{attachments_bucket_name}.s3.{region}.amazonaws.com"
+
+    return (
+        "default-src 'self'; "
+        "script-src 'self' https://www.googletagmanager.com; "
+        "connect-src 'self' https://www.google-analytics.com "
+        f"{api_origin} {bucket_legacy} {bucket_regional}; "
+        "img-src 'self' data: https://www.google-analytics.com; "
+        "style-src 'self' 'unsafe-inline'; "
+        "frame-ancestors 'none'; "
+        "base-uri 'self'; "
+        "form-action 'self'; "
+        "report-uri /api/csp-report; "
+        "report-to default;"
+    )
+
+
 class ChannelStack(cdk.Stack):
     def __init__(
         self,
@@ -403,6 +443,28 @@ class ChannelStack(cdk.Stack):
         # (``tests/unit/test_channel_stack.py``) guards against leaks.
         if not is_prod:
             common_env["STARTER_ENABLE_DEBUG_ENDPOINTS"] = "1"
+            # #179 — Google-auth bypass for e2e suites. Gates two distinct
+            # short-circuits on /auth/login:
+            #   - ``?test_email=`` query → mint a JWT directly (only fires
+            #     when the query param is present; normal browser flows are
+            #     unaffected).
+            #   - ``desktop_callback=...`` query → only fires when this
+            #     stack ALSO sets ``STARTER_DESKTOP_DEV_EMAIL``, which it
+            #     deliberately does NOT (only ``inv desktop-dev`` sets it
+            #     locally). So real desktop sign-in on this stack routes
+            #     through Google like any other browser flow.
+            # Prod stacks MUST NOT set this; a sibling assertion in
+            # ``tests/unit/test_channel_stack.py`` guards against the same
+            # leak shape as the debug-endpoints flag.
+            common_env["STARTER_BYPASS_GOOGLE_AUTH"] = "1"
+
+        # #181 chassis — register ``current_time`` smoke-test tool only
+        # in non-prod envs (strategy spec policy P2: smoke-test, not a
+        # product feature). Prod gets the flag explicitly set to ``"0"``
+        # so a future code path that reads it can't accidentally see an
+        # unset variable as "on" if defaults shift. A sibling assertion
+        # in ``tests/unit/test_channel_stack.py`` enforces both shapes.
+        common_env["STARTER_CLOCK_TOOL_ENABLED"] = "0" if is_prod else "1"
 
         # ----------------------------------------------------------------
         # Attachments S3 bucket (#173) — file attachments + vision (epic #109)
@@ -639,18 +701,10 @@ class ChannelStack(cdk.Stack):
         # Violations POST to /api/csp-report on the same origin; the endpoint
         # is unauthenticated + per-IP rate-limited. `report-uri` is the legacy
         # directive; `report-to default` targets the modern Reporting API.
-        csp_report_only = (
-            "default-src 'self'; "
-            "script-src 'self' https://www.googletagmanager.com; "
-            "connect-src 'self' https://www.google-analytics.com "
-            "https://channel.example.com; "
-            "img-src 'self' data: https://www.google-analytics.com; "
-            "style-src 'self' 'unsafe-inline'; "
-            "frame-ancestors 'none'; "
-            "base-uri 'self'; "
-            "form-action 'self'; "
-            "report-uri /api/csp-report; "
-            "report-to default;"
+        csp_report_only = _build_csp_header(
+            custom_domain=custom_domain,
+            attachments_bucket_name=attachments_bucket.bucket_name,
+            region=self.region,
         )
         security_headers_policy = cloudfront.ResponseHeadersPolicy(
             self,

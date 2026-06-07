@@ -525,9 +525,23 @@ def dev(ctx, seed=False):
         # Prevents VectorStore instantiation from crashing on every request;
         # semantic search will still fail locally (no real S3 Vectors bucket).
         # No vector store in channel,
-        # Always enable auth bypass in local dev — the bypass only activates when
-        # ?test_email= is present, so normal browser flows are unaffected.
+        # Enable auth bypass paths for local dev. Two distinct shortcuts gate
+        # off this flag, each safe in its own way:
+        #   - `?test_email=` on /auth/login → e2e Playwright suites mint a
+        #     JWT directly (only fires when the query param is present;
+        #     normal browser flows that omit it are unaffected).
+        #   - `desktop_callback=...` on /auth/login → only fires when BOTH
+        #     this flag AND STARTER_DESKTOP_DEV_EMAIL below are set, so the
+        #     deployed dev env (which sets only this flag) routes real
+        #     desktop sign-in to Google.
         "STARTER_BYPASS_GOOGLE_AUTH": "1",
+        # Second gate for the desktop OAuth short-circuit: when both this
+        # and STARTER_BYPASS_GOOGLE_AUTH are set, the Electron loopback
+        # flow on /auth/login mints a synthetic JWT for this email instead
+        # of bouncing through Google. Local dev only — the deployed dev
+        # stack deliberately does NOT set this so real desktop sign-in on
+        # the dev environment goes through Google.
+        "STARTER_DESKTOP_DEV_EMAIL": "dev@channel.local",
         # Phase 7c: mount /api/_debug/* so the Playwright e2e can verify
         # AgentCore writes. Prod stacks do NOT set this — see
         # tests/unit/test_channel_stack.py for the guard.
@@ -691,9 +705,19 @@ def deploy(ctx, env="prod"):
 
     # Build the React UI so assets are included in the S3 deployment.
     # CI does this explicitly before cdk deploy; local deploys must do the same.
+    #
+    # VITE_RELEASE_CHANNEL drives the marketing Download page's release URLs
+    # per ADR-0010 — prod → ``latest`` (the GitHub /releases/latest/download/
+    # redirect), every other env → ``dev`` (the explicit-tag form pointing at
+    # the force-updated ``dev`` pre-release). Personal envs (e.g. ``jc``)
+    # use the ``dev`` channel because that's the only pre-release with
+    # actual assets attached today; the prod ``latest`` release does not
+    # exist until v0.1 ships.
+    release_channel = "latest" if env == "prod" else "dev"
+    build_env = {**os.environ, "VITE_RELEASE_CHANNEL": release_channel}
     with ctx.cd(UI):
         ctx.run("npm install --silent", hide=True)
-        ctx.run("npm run build", pty=True)
+        ctx.run("npm run build", pty=True, env=build_env)
 
     with ctx.cd(INFRA):
         ctx.run(

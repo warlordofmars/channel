@@ -72,10 +72,10 @@ jobs:
         run: npm install
 
       - name: pip-audit
-        # CVE-2026-3219 and CVE-2026-6357 affect the pip bundled with the venv
-        # itself, not anything in our pyproject.toml. pip is build-time only —
-        # the deployed Lambda runtime has no pip.
-        run: uv run pip-audit --skip-editable --ignore-vuln CVE-2026-3219 --ignore-vuln CVE-2026-6357
+        # CVE-2026-3219 / CVE-2026-6357 / PYSEC-2026-196 all affect the pip
+        # bundled with the venv itself, not anything in our pyproject.toml.
+        # pip is build-time only — the deployed Lambda runtime has no pip.
+        run: uv run pip-audit --skip-editable --ignore-vuln CVE-2026-3219 --ignore-vuln CVE-2026-6357 --ignore-vuln PYSEC-2026-196
 
       - name: npm audit
         working-directory: ui
@@ -707,15 +707,7 @@ jobs:
   publish-desktop-mac:
     name: Publish desktop (macOS)
     needs: [desktop]
-    # TEMPORARILY DISABLED — see backlog issue for context.
-    # Apple's notary is holding our brand-new Developer ID account's
-    # hardened-runtime submissions for ramp-up review (3 stuck submissions
-    # 15h+ old as of the disable). Continuing to push to development was
-    # firing more notarytool requests, which can compound the throttling.
-    # Re-enable by restoring the original condition once Apple clears a
-    # submission and processing returns to normal (< 15 min verdicts):
-    #   if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/development')
-    if: false
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/development')
     runs-on: macos-14
     # GitHub environment picks up the right AWS_*_DEPLOY_ROLE_ARN secret
     # per branch (development pushes use the development env's secret,
@@ -830,12 +822,63 @@ jobs:
             --config.productName="${{ steps.env.outputs.product_name }}" \
             --config.appId="${{ steps.env.outputs.app_id }}"
 
-      - name: Sync versioned auto-update bundles to S3 (tagged for lifecycle)
+      - name: Generate latest-mac.yml (electron-updater manifest)
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          aws s3 sync desktop/release/ s3://${{ steps.cdk.outputs.bucket }}/updates/${{ steps.env.outputs.channel }}/ \
-            --exclude '*' \
-            --include '*.zip' --include '*.blockmap' \
-            --tagging "channel-asset-type=versioned-zip"
+          # `electron-builder --publish=never` skips the entire publish
+          # phase, INCLUDING latest-mac.yml generation. We compute the
+          # manifest ourselves from the .zip electron-builder produced
+          # — same format `electron-updater` expects (version + file
+          # entry with base64 SHA-512 + size + releaseDate).
+          cd desktop/release
+          # Filename is deterministic from electron-builder.yml's mac.zip
+          # artifactName template: `Channel-${version}-${os}.${ext}`.
+          # Compute it from VERSION rather than globbing — globbing fails
+          # silently under `set -e` if no match (ls exits non-zero, step
+          # aborts before any error message we'd write).
+          ZIP="Channel-${VERSION}-mac.zip"
+          if [[ ! -f "$ZIP" ]]; then
+            echo "::error::expected $ZIP in desktop/release/ but found:"
+            ls -la
+            exit 1
+          fi
+          SHA=$(openssl dgst -sha512 -binary "$ZIP" | openssl base64 -A)
+          SIZE=$(stat -f %z "$ZIP" 2>/dev/null || stat -c %s "$ZIP")
+          RELEASE_DATE=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
+          cat > latest-mac.yml <<EOF
+          version: ${VERSION}
+          files:
+            - url: ${ZIP}
+              sha512: ${SHA}
+              size: ${SIZE}
+          path: ${ZIP}
+          sha512: ${SHA}
+          releaseDate: '${RELEASE_DATE}'
+          EOF
+          echo "Generated latest-mac.yml:"
+          cat latest-mac.yml
+
+      - name: Upload versioned auto-update bundles to S3 (tagged for lifecycle)
+        env:
+          BUCKET: ${{ steps.cdk.outputs.bucket }}
+          CHANNEL: ${{ steps.env.outputs.channel }}
+        run: |
+          # `aws s3 cp` (high-level wrapper) doesn't accept --tagging either
+          # — only `aws s3api put-object` does. PR #214 mistakenly assumed
+          # `cp` supported it; this corrects with a two-step pattern:
+          # upload via `cp`, then tag via `s3api put-object-tagging`. The
+          # lifecycle rule in infra/stacks/channel_stack.py expires objects
+          # tagged channel-asset-type=versioned-zip after 30 days.
+          shopt -s nullglob
+          for f in desktop/release/*.zip desktop/release/*.blockmap; do
+            KEY="updates/${CHANNEL}/$(basename "$f")"
+            aws s3 cp "$f" "s3://${BUCKET}/${KEY}"
+            aws s3api put-object-tagging \
+              --bucket "$BUCKET" \
+              --key "$KEY" \
+              --tagging 'TagSet=[{Key=channel-asset-type,Value=versioned-zip}]'
+          done
 
       - name: Sync stable artefacts (dmg + manifest) to S3 (untagged)
         run: |
@@ -947,6 +990,13 @@ jobs:
         working-directory: ui
         env:
           VITE_GA_MEASUREMENT_ID: ${{ secrets.VITE_GA_MEASUREMENT_ID }}
+          # Marketing Download page → /releases/download/dev/<asset> on
+          # the dev site (ADR-0010). ``inv deploy --env dev`` rebuilds
+          # the SPA and propagates the same value via tasks.py, but
+          # setting it here keeps the explicit build step's output
+          # consistent with the deployed bundle in case the deploy
+          # task ever drops the rebuild.
+          VITE_RELEASE_CHANNEL: dev
         run: npm install && npm run build
 
       - name: Build docs site
@@ -956,6 +1006,7 @@ jobs:
       - name: Deploy dev stack
         env:
           VITE_GA_MEASUREMENT_ID: ${{ secrets.VITE_GA_MEASUREMENT_ID }}
+          VITE_RELEASE_CHANNEL: dev
         run: uv run inv deploy --env dev
 
       - name: Export stack URLs
@@ -1208,6 +1259,12 @@ jobs:
         working-directory: ui
         env:
           VITE_GA_MEASUREMENT_ID: ${{ secrets.VITE_GA_MEASUREMENT_ID }}
+          # Marketing Download page → /releases/latest/download/<asset> on
+          # prod (ADR-0010 — the GitHub redirect that resolves to the most
+          # recent non-prerelease release at click time). ``latest`` is
+          # also the Download.jsx default when the var is unset, but
+          # making it explicit keeps the per-env split visible in CI.
+          VITE_RELEASE_CHANNEL: latest
         run: npm install && npm run build
 
       - name: Build docs site
@@ -1218,6 +1275,7 @@ jobs:
         env:
           APP_VERSION: ${{ needs.release.outputs.version }}
           VITE_GA_MEASUREMENT_ID: ${{ secrets.VITE_GA_MEASUREMENT_ID }}
+          VITE_RELEASE_CHANNEL: latest
         run: uv run inv deploy --env prod
 
       - name: Export stack URLs

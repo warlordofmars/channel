@@ -341,8 +341,45 @@ html.is-electron-mac .sb-top {
   font-size: 12.5px; color: var(--ink);
 }
 .chip .tile { width: 26px; height: 26px; border-radius: 5px; background: var(--accent-soft); color: var(--accent-ink); display: flex; align-items: center; justify-content: center; }
+.chip .nm { font-weight: 500; }
+.chip .sz { color: var(--ink-faint); font-variant-numeric: tabular-nums; }
 .chip .x { color: var(--ink-faint); cursor: pointer; display: flex; }
 .chip .x:hover { color: var(--ink); }
+
+/* attach-chip status states (#177) — pending shows a spinner, failed
+   gets a danger border + retry button, attached uses the default chip
+   styling untouched. */
+.attach-chip.status-attaching { opacity: 0.75; }
+.attach-chip.status-attaching .tile .spinner {
+  width: 14px; height: 14px; border-radius: 50%;
+  border: 2px solid var(--accent-soft);
+  border-top-color: var(--accent);
+  animation: attach-spin 0.7s linear infinite;
+  display: inline-block;
+}
+@keyframes attach-spin { to { transform: rotate(360deg); } }
+.attach-chip.status-failed { border-color: var(--danger, #c4564a); }
+.attach-chip.status-failed .tile { background: var(--danger-soft, rgba(196, 86, 74, 0.18)); color: var(--danger, #c4564a); }
+.attach-chip .retry {
+  appearance: none; background: transparent; border: 0;
+  padding: 2px 4px; cursor: pointer; color: var(--ink-faint);
+  display: flex; align-items: center;
+}
+.attach-chip .retry:hover { color: var(--ink); }
+.attach-error {
+  margin-top: 6px; padding: 6px 10px; border-radius: var(--r-sm);
+  background: var(--danger-soft, rgba(196, 86, 74, 0.12));
+  color: var(--danger, #c4564a); font-size: 12.5px;
+}
+.composer-wrap { position: relative; }
+.composer-wrap.drag-over .composer { outline: 2px dashed var(--accent); outline-offset: 4px; }
+.drop-overlay {
+  position: absolute; inset: 0; z-index: 10;
+  display: flex; align-items: center; justify-content: center;
+  background: color-mix(in oklch, var(--raised) 90%, transparent);
+  border-radius: var(--r-md); pointer-events: none;
+  color: var(--accent); font-weight: 600; letter-spacing: 0.5px;
+}
 
 /* ---------- popover ---------- */
 .pop {

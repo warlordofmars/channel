@@ -40,6 +40,14 @@ def _stub_get_prefs(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr("channel.api.chats.build_followups_agent", lambda: _NoopFollowupsAgent())
 
+    # Default the attachments cascade (#174) to a no-op so the existing
+    # delete_chat tests that don't care about the cascade keep passing.
+    # Tests that exercise cascade behaviour override this inline.
+    monkeypatch.setattr(
+        "channel.api.chats.storage.delete_chat_attachments",
+        lambda **_kwargs: (0, 0),
+    )
+
 
 @pytest.fixture
 def client() -> TestClient:
@@ -488,6 +496,57 @@ def test_post_message_falls_back_to_prefs_effort_when_payload_omits_it(
     )
     assert response.status_code == 200
     assert captured["build_agent_kwargs"]["effort"] == "High"
+
+
+def test_post_message_registers_clock_tool_when_flag_on(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``STARTER_CLOCK_TOOL_ENABLED=1`` → ``current_time`` registered.
+
+    Chassis policy P2 (#181 strategy spec): the smoke-test tool is
+    off by default in prod, on in dev/jc envs via the CDK env-var
+    diff in ``infra/stacks/channel_stack.py``.
+    """
+
+    _stub_storage_for_one_turn(monkeypatch)
+    monkeypatch.setenv("STARTER_CLOCK_TOOL_ENABLED", "1")
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        "channel.api.chats.build_agent",
+        _fake_streaming_agent_factory(captured),
+    )
+
+    response = client.post(
+        "/api/chats/c1/messages",
+        json={"message": "hi", "model": "claude-sonnet-4-6"},
+    )
+    assert response.status_code == 200
+    tools = captured["build_agent_kwargs"]["tools"]
+    assert len(tools) == 1
+    assert tools[0].tool_name == "current_time"
+
+
+def test_post_message_omits_clock_tool_when_flag_off(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Flag unset → ``tools`` is empty (prod default per spec P2)."""
+
+    _stub_storage_for_one_turn(monkeypatch)
+    monkeypatch.delenv("STARTER_CLOCK_TOOL_ENABLED", raising=False)
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        "channel.api.chats.build_agent",
+        _fake_streaming_agent_factory(captured),
+    )
+
+    response = client.post(
+        "/api/chats/c1/messages",
+        json={"message": "hi", "model": "claude-sonnet-4-6"},
+    )
+    assert response.status_code == 200
+    assert captured["build_agent_kwargs"]["tools"] == []
 
 
 def test_regenerate_forwards_payload_effort_to_build_agent(
@@ -2083,3 +2142,673 @@ def test_submit_feedback_requires_auth() -> None:
     finally:
         app.dependency_overrides.clear()
         app.dependency_overrides.update(saved_overrides)
+
+
+# ----------------------------------------------------------------
+# Attachment cascade on chat delete (#174)
+# ----------------------------------------------------------------
+
+
+def _stub_delete_handler_storage_and_agentcore(monkeypatch: pytest.MonkeyPatch, chat: Chat) -> None:
+    """Common stubs for the delete_chat handler: chat lookup, DDB delete,
+    and the AgentCore session wipe. Tests layer attachment-specific
+    stubs on top."""
+    from unittest.mock import MagicMock
+
+    monkeypatch.setattr("channel.api.chats.storage.get_chat_by_id", lambda _: chat)
+    monkeypatch.setattr("channel.api.chats.storage.delete_chat", lambda **_: None)
+    fake_ac = MagicMock()
+    fake_ac.list_events.return_value = {"events": []}
+    monkeypatch.setattr("channel.api.chats._agentcore_client", lambda: fake_ac)
+    monkeypatch.setattr("channel.api.chats._memory_id_for_env", lambda: "channel_test-FAKEMEMID")
+
+
+def test_delete_chat_invokes_attachment_cascade(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The delete_chat handler MUST call storage.delete_chat_attachments
+    with the chat id and the authenticated user's JWT sub."""
+
+    chat = Chat(
+        chat_id="c-cascade-1",
+        user_id="u-1",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="m",
+    )
+    _stub_delete_handler_storage_and_agentcore(monkeypatch, chat)
+
+    seen: list[dict[str, Any]] = []
+
+    def fake_cascade(**kwargs: Any) -> tuple[int, int]:
+        seen.append(kwargs)
+        return (3, 0)
+
+    monkeypatch.setattr("channel.api.chats.storage.delete_chat_attachments", fake_cascade)
+
+    resp = client.delete("/api/chats/c-cascade-1")
+    assert resp.status_code == 204
+    assert seen == [{"chat_id": "c-cascade-1", "user_id": "u-1"}]
+
+
+def test_delete_chat_emits_attachment_success_metric_when_cascade_clean(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cascade returns (N, 0) → success metric."""
+
+    from unittest.mock import AsyncMock
+
+    chat = Chat(
+        chat_id="c-cascade-2",
+        user_id="u-1",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="m",
+    )
+    _stub_delete_handler_storage_and_agentcore(monkeypatch, chat)
+    monkeypatch.setattr(
+        "channel.api.chats.storage.delete_chat_attachments",
+        lambda **_: (2, 0),
+    )
+    record = AsyncMock()
+    monkeypatch.setattr("channel.api.chats.record_chat_delete_attachment_wipe_outcome", record)
+
+    resp = client.delete("/api/chats/c-cascade-2")
+    assert resp.status_code == 204
+    record.assert_awaited_once_with(success=True)
+
+
+def test_delete_chat_emits_attachment_failure_metric_on_partial_failure(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cascade returns (N, M>0) → failure metric. Partial-success counts as
+    failure so alarming triggers on any attachment leftover."""
+
+    from unittest.mock import AsyncMock
+
+    chat = Chat(
+        chat_id="c-cascade-3",
+        user_id="u-1",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="m",
+    )
+    _stub_delete_handler_storage_and_agentcore(monkeypatch, chat)
+    monkeypatch.setattr(
+        "channel.api.chats.storage.delete_chat_attachments",
+        lambda **_: (1, 1),
+    )
+    record = AsyncMock()
+    monkeypatch.setattr("channel.api.chats.record_chat_delete_attachment_wipe_outcome", record)
+
+    resp = client.delete("/api/chats/c-cascade-3")
+    assert resp.status_code == 204
+    record.assert_awaited_once_with(success=False)
+
+
+def test_delete_chat_swallows_attachment_cascade_exception(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cascade raising must NOT prevent the 204 — DDB is source of truth
+    for chat existence; orphan attachments are an out-of-band cleanup
+    concern. Failure metric is recorded."""
+
+    from unittest.mock import AsyncMock
+
+    chat = Chat(
+        chat_id="c-cascade-4",
+        user_id="u-1",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="m",
+    )
+    _stub_delete_handler_storage_and_agentcore(monkeypatch, chat)
+
+    def fake_cascade(**_: Any) -> tuple[int, int]:
+        raise RuntimeError("ddb query blew up")
+
+    monkeypatch.setattr("channel.api.chats.storage.delete_chat_attachments", fake_cascade)
+    record = AsyncMock()
+    monkeypatch.setattr("channel.api.chats.record_chat_delete_attachment_wipe_outcome", record)
+
+    resp = client.delete("/api/chats/c-cascade-4")
+    assert resp.status_code == 204
+    record.assert_awaited_once_with(success=False)
+
+
+# ----------------------------------------------------------------
+# Attachment forwarding on send + regenerate (#176)
+# ----------------------------------------------------------------
+
+
+def test_sanitize_document_name_strips_period_and_other_punctuation() -> None:
+    """Bedrock's ``document.name`` rejects everything outside
+    ``[A-Za-z0-9 \\-()\\[\\]]``. Real filenames almost always include the
+    extension separator (``.pdf``) which silently 500s the
+    ConverseStream — the e2e suite (#179) caught this on jc. The
+    sanitiser must:
+
+    - replace forbidden bytes (periods, underscores, slashes, …) with
+      spaces so the resulting label still reads as the filename;
+    - collapse runs of whitespace introduced by adjacent strips so the
+      ``"name can't contain more than one consecutive whitespace"``
+      sub-rule of the same Bedrock error doesn't fire on
+      ``"weird__name.pdf"``;
+    - never return an empty string (Bedrock rejects empty names too).
+    """
+
+    from channel.api.chats import _sanitize_document_name
+
+    assert _sanitize_document_name("spec.pdf") == "spec pdf"
+    assert _sanitize_document_name("Q3 forecast (final).xlsx") == "Q3 forecast (final) xlsx"
+    assert _sanitize_document_name("weird__name.pdf") == "weird name pdf"
+    assert _sanitize_document_name("only-allowed [chars]") == "only-allowed [chars]"
+    # All-forbidden input collapses to the empty string; fall back to a
+    # sentinel so Bedrock still gets a non-empty name.
+    assert _sanitize_document_name("...") == "attachment"
+    assert _sanitize_document_name("") == "attachment"
+
+
+def _att_model(**overrides: Any) -> Any:
+    """Build an Attachment for the send-path stubs."""
+
+    from channel.models import Attachment
+
+    base = {
+        "id": "att-1",
+        "user_id": "u-1",
+        "name": "spec.pdf",
+        "mime": "application/pdf",
+        "size_bytes": 5_242_880,  # 5.0 MB
+        "s3_key": "attachments/user/u-1/att-1",
+        "s3_bucket": "channel-attachments-test",
+        "checksum_sha256": "sha",
+        "created_at": "2026-06-04T00:00:00Z",
+    }
+    base.update(overrides)
+    return Attachment(**base)
+
+
+def _stub_send_path_for_attachments(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    chat: Chat,
+    owned: dict[str, Any],
+    verify: dict[str, tuple[bool, str | None]] | None = None,
+) -> dict[str, list]:
+    """Common stubs for the send path with attachments.
+
+    Returns a capture dict where the agent's received prompt + the
+    persisted message attachments + the mark_attachment_referenced
+    call ids land for assertions.
+
+    The ``verify`` argument keeps its legacy ``(ok, reason)`` shape
+    even though the production path now calls ``get_attachment_bytes``
+    rather than ``verify_attachment_object`` (#201). The helper
+    translates ``(True, None)`` into a synthetic byte payload and
+    ``(False, reason)`` into ``(None, reason)`` so existing callers
+    don't have to invent fixture bytes.
+    """
+
+    capture: dict[str, list] = {
+        "agent_prompts": [],
+        "persisted": [],
+        "referenced": [],
+    }
+
+    monkeypatch.setattr("channel.api.chats.storage.get_chat_by_id", lambda _: chat)
+    monkeypatch.setattr("channel.api.chats.storage.list_messages", lambda *_a, **_kw: ([], None))
+    monkeypatch.setattr("channel.api.chats.storage.update_chat_index", lambda **_: None)
+
+    # Resolve attachments by id — return None for ids not in `owned`.
+    monkeypatch.setattr(
+        "channel.api.chats.storage.get_attachment",
+        lambda *, user_id, att_id: owned.get(att_id),
+    )
+
+    # Bytes-fetch outcomes — default to a synthetic payload for every
+    # attachment owned by the caller; failure tuples flip ok→None.
+    verify_map = verify or {a.id: (True, None) for a in owned.values()}
+    fetch_map: dict[str, tuple[bytes | None, str | None]] = {}
+    for att_id, (ok, reason) in verify_map.items():
+        fetch_map[att_id] = (f"bytes-for-{att_id}".encode(), None) if ok else (None, reason)
+    monkeypatch.setattr(
+        "channel.api.chats.storage.get_attachment_bytes",
+        lambda att: fetch_map[att.id],
+    )
+
+    monkeypatch.setattr(
+        "channel.api.chats.storage.mark_attachment_referenced",
+        lambda *, user_id, att_id: capture["referenced"].append(att_id),
+    )
+
+    def fake_put(**kwargs: Any) -> Message:
+        msg = Message(
+            chat_id=kwargs["chat_id"],
+            msg_id=f"m-{len(capture['persisted'])}",
+            role=kwargs["role"],
+            text=kwargs["text"],
+            attachments=kwargs.get("attachments"),
+            model=kwargs.get("model"),
+            input_tokens=kwargs.get("input_tokens"),
+            output_tokens=kwargs.get("output_tokens"),
+            created_at="t",
+        )
+        capture["persisted"].append(msg)
+        return msg
+
+    monkeypatch.setattr("channel.api.chats.storage.put_message", fake_put)
+
+    async def fake_stream(self, prompt):
+        capture["agent_prompts"].append(prompt)
+        yield {"event": {"contentBlockDelta": {"delta": {"text": "ok"}}}}
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+        yield {"event": {"metadata": {"usage": {"inputTokens": 1, "outputTokens": 1}}}}
+
+    class FakeAgent:
+        stream_async = fake_stream
+
+    monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
+    return capture
+
+
+def test_post_message_with_attachments_builds_labeled_content_blocks(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two attachments (PDF + PNG) produce a 5-element content-block list
+    in user-supplied order: header + document + header + image + text."""
+
+    chat = Chat(
+        chat_id="c-att-1",
+        user_id="u-1",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="claude-sonnet-4-6",
+    )
+    owned = {
+        "att-pdf": _att_model(
+            id="att-pdf",
+            name="spec.pdf",
+            mime="application/pdf",
+            size_bytes=5_242_880,
+            s3_key="attachments/user/u-1/att-pdf",
+        ),
+        "att-png": _att_model(
+            id="att-png",
+            name="screenshot.png",
+            mime="image/png",
+            size_bytes=204_800,
+            s3_key="attachments/user/u-1/att-png",
+        ),
+    }
+    cap = _stub_send_path_for_attachments(monkeypatch, chat=chat, owned=owned)
+
+    response = client.post(
+        "/api/chats/c-att-1/messages",
+        json={
+            "message": "Compare these",
+            "attachments": [{"id": "att-pdf"}, {"id": "att-png"}],
+        },
+    )
+    assert response.status_code == 200
+
+    # Agent saw a content-block list (not a bare string).
+    assert len(cap["agent_prompts"]) == 1
+    blocks = cap["agent_prompts"][0]
+    assert isinstance(blocks, list)
+    # Expected: label + document + label + image + user text
+    assert len(blocks) == 5
+    assert blocks[0] == {"text": "[attachment_1: spec.pdf, 5.0MB, PDF]"}
+    assert blocks[1]["document"]["format"] == "pdf"
+    # Sanitised — Bedrock's document.name rejects periods (#179).
+    assert blocks[1]["document"]["name"] == "spec pdf"
+    # Inline bytes shape: ``{"bytes": <fetched-payload>}`` — Claude Opus
+    # 4.6 rejects ``s3Location`` references with
+    # ``ValidationException: This model doesn't support the s3Uri
+    # field``, so the send path fetches each object server-side (#201).
+    assert blocks[1]["document"]["source"] == {"bytes": b"bytes-for-att-pdf"}
+    assert blocks[2] == {"text": "[attachment_2: screenshot.png, 0.2MB, image]"}
+    assert blocks[3]["image"]["format"] == "png"
+    assert blocks[3]["image"]["source"] == {"bytes": b"bytes-for-att-png"}
+    assert blocks[4] == {"text": "Compare these"}
+
+
+def test_post_message_attachments_snapshot_persists_on_message_row(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The user message row carries denormalised
+    [{id, name, mime, size_bytes}] — message rendering needs no join."""
+
+    chat = Chat(
+        chat_id="c-att-2",
+        user_id="u-1",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="claude-sonnet-4-6",
+    )
+    owned = {
+        "att-pdf": _att_model(id="att-pdf", name="x.pdf", mime="application/pdf", size_bytes=1),
+    }
+    cap = _stub_send_path_for_attachments(monkeypatch, chat=chat, owned=owned)
+
+    client.post(
+        "/api/chats/c-att-2/messages",
+        json={"message": "hi", "attachments": [{"id": "att-pdf"}]},
+    )
+    user_msg = cap["persisted"][0]
+    assert user_msg.attachments == [
+        {"id": "att-pdf", "name": "x.pdf", "mime": "application/pdf", "size_bytes": 1}
+    ]
+
+
+def test_post_message_marks_verified_attachments_referenced(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``mark_attachment_referenced`` fires once per successfully-verified
+    attachment so the lifecycle rule stops eyeing the S3 object for GC."""
+
+    chat = Chat(
+        chat_id="c-att-3",
+        user_id="u-1",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="claude-sonnet-4-6",
+    )
+    owned = {
+        "att-a": _att_model(id="att-a"),
+        "att-b": _att_model(id="att-b"),
+    }
+    cap = _stub_send_path_for_attachments(monkeypatch, chat=chat, owned=owned)
+
+    client.post(
+        "/api/chats/c-att-3/messages",
+        json={"message": "hi", "attachments": [{"id": "att-a"}, {"id": "att-b"}]},
+    )
+    assert sorted(cap["referenced"]) == ["att-a", "att-b"]
+
+
+def test_post_message_rejects_unowned_attachment_with_400(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An attachment id with no canonical row (or owned by a different
+    user) is a hard 400 — no partial persist."""
+
+    chat = Chat(
+        chat_id="c-att-4",
+        user_id="u-1",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="m",
+    )
+    cap = _stub_send_path_for_attachments(monkeypatch, chat=chat, owned={})
+
+    resp = client.post(
+        "/api/chats/c-att-4/messages",
+        json={"message": "hi", "attachments": [{"id": "ghost"}]},
+    )
+    assert resp.status_code == 400
+    # No user turn should have been persisted.
+    assert cap["persisted"] == []
+    assert cap["agent_prompts"] == []
+
+
+def test_post_message_failed_verify_emits_failure_marker_and_sse(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When verify_attachment_object returns (False, reason) for one
+    attachment, the others still go through. A failure-marker text
+    block replaces the would-be media block, and an attachment_error
+    SSE event lands in the stream so the SPA can prompt re-upload."""
+
+    chat = Chat(
+        chat_id="c-att-5",
+        user_id="u-1",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="claude-sonnet-4-6",
+    )
+    owned = {
+        "att-ok": _att_model(id="att-ok", name="ok.pdf", mime="application/pdf", size_bytes=1024),
+        "att-gone": _att_model(
+            id="att-gone", name="gone.pdf", mime="application/pdf", size_bytes=1024
+        ),
+    }
+    verify = {
+        "att-ok": (True, None),
+        "att-gone": (False, "S3 object not found"),
+    }
+    cap = _stub_send_path_for_attachments(monkeypatch, chat=chat, owned=owned, verify=verify)
+
+    resp = client.post(
+        "/api/chats/c-att-5/messages",
+        json={
+            "message": "two files",
+            "attachments": [{"id": "att-ok"}, {"id": "att-gone"}],
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.text
+    assert '"type": "attachment_error"' in body
+    assert '"attachment_id": "att-gone"' in body
+    assert "S3 object not found" in body
+
+    # Content blocks: ok → label + doc; gone → label-with-FAILED only.
+    blocks = cap["agent_prompts"][0]
+    assert any("[attachment_1: ok.pdf" in (b.get("text") or "") for b in blocks)
+    assert any(
+        "[attachment_2: gone.pdf — FAILED: S3 object not found]" in (b.get("text") or "")
+        for b in blocks
+    )
+    # The failed attachment must NOT have a media block.
+    failed_media = [b for b in blocks if "document" in b and b["document"]["name"] == "gone.pdf"]
+    assert failed_media == []
+    # Only the verified attachment is marked referenced.
+    assert cap["referenced"] == ["att-ok"]
+
+
+def test_post_message_with_empty_attachments_list_acts_like_none(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty `attachments: []` array should behave identically to no
+    attachments — agent receives a plain string, no extra DDB calls."""
+
+    chat = Chat(
+        chat_id="c-att-6",
+        user_id="u-1",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="m",
+    )
+    cap = _stub_send_path_for_attachments(monkeypatch, chat=chat, owned={})
+
+    resp = client.post(
+        "/api/chats/c-att-6/messages",
+        json={"message": "no files", "attachments": []},
+    )
+    assert resp.status_code == 200
+    # Agent receives the bare string, not a content-block list.
+    assert cap["agent_prompts"][0] == "no files"
+    assert cap["referenced"] == []
+
+
+def test_post_message_rejects_attachment_entry_missing_id_with_400(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An attachment entry that's not a dict, or a dict without an `id`
+    key, is a structurally invalid request — 400."""
+
+    chat = Chat(
+        chat_id="c-att-7",
+        user_id="u-1",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="claude-sonnet-4-6",
+    )
+    _stub_send_path_for_attachments(monkeypatch, chat=chat, owned={})
+
+    resp = client.post(
+        "/api/chats/c-att-7/messages",
+        json={"message": "hi", "attachments": [{}]},
+    )
+    assert resp.status_code == 400
+
+
+def test_post_message_unsupported_mime_falls_through_as_failure_marker(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A canonical row whose MIME isn't in either format map (defensive
+    against an upstream allowlist leak from #175) emits a labeled
+    FAILED block instead of a media block — the model can voice the
+    gap rather than silently dropping."""
+
+    chat = Chat(
+        chat_id="c-att-8",
+        user_id="u-1",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="claude-sonnet-4-6",
+    )
+    owned = {
+        "att-weird": _att_model(
+            id="att-weird",
+            name="strange.bin",
+            mime="application/x-weird",
+            size_bytes=1024,
+        ),
+    }
+    cap = _stub_send_path_for_attachments(monkeypatch, chat=chat, owned=owned)
+
+    resp = client.post(
+        "/api/chats/c-att-8/messages",
+        json={"message": "weird file", "attachments": [{"id": "att-weird"}]},
+    )
+    assert resp.status_code == 200
+    body = resp.text
+    assert '"type": "attachment_error"' in body
+    assert "unsupported mime application/x-weird" in body
+
+    blocks = cap["agent_prompts"][0]
+    # Failure marker text block + user text — no media block for the
+    # unsupported MIME.
+    assert any("FAILED: unsupported mime" in (b.get("text") or "") for b in blocks)
+    assert not any("document" in b or "image" in b for b in blocks)
+    # Not marked referenced since verify didn't pass for it.
+    assert cap["referenced"] == []
+
+
+def test_regenerate_emits_sse_attachment_error_on_failed_verify(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regenerate replays attachments via the same content-block path,
+    so a freshly-expired S3 object on the second-shot stream must
+    still emit ``sse_attachment_error`` to the SPA — the re-upload
+    prompt belongs on regenerate too, not just on the original send."""
+
+    chat = Chat(
+        chat_id="c-regen-fail",
+        user_id="u-1",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="claude-sonnet-4-6",
+    )
+    owned = {
+        "att-vanished": _att_model(
+            id="att-vanished",
+            name="vanished.pdf",
+            mime="application/pdf",
+            size_bytes=1,
+        ),
+    }
+    verify = {"att-vanished": (False, "S3 object not found")}
+    _stub_send_path_for_attachments(monkeypatch, chat=chat, owned=owned, verify=verify)
+
+    prior_user = Message(
+        chat_id="c-regen-fail",
+        msg_id="m-prev",
+        role=MessageRole.USER,
+        text="redo this",
+        attachments=[
+            {
+                "id": "att-vanished",
+                "name": "vanished.pdf",
+                "mime": "application/pdf",
+                "size_bytes": 1,
+            }
+        ],
+        created_at="t",
+    )
+    monkeypatch.setattr(
+        "channel.api.chats.storage.list_messages",
+        lambda *_a, **_kw: ([prior_user], None),
+    )
+    monkeypatch.setattr(
+        "channel.api.chats.storage.delete_last_assistant_message",
+        lambda *_a, **_kw: None,
+    )
+
+    resp = client.post("/api/chats/c-regen-fail/regenerate", json={})
+    assert resp.status_code == 200
+    body = resp.text
+    assert '"type": "attachment_error"' in body
+    assert "S3 object not found" in body
+
+
+def test_regenerate_replays_attachments_from_prior_user_turn(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regenerate must rebuild content blocks from the prior user
+    message's `attachments` snapshot — otherwise the model loses
+    multimodal context on the second-shot reply."""
+
+    chat = Chat(
+        chat_id="c-regen-1",
+        user_id="u-1",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="claude-sonnet-4-6",
+    )
+    owned = {
+        "att-r": _att_model(id="att-r", name="r.pdf", mime="application/pdf", size_bytes=1),
+    }
+    cap = _stub_send_path_for_attachments(monkeypatch, chat=chat, owned=owned)
+
+    # The "prior user turn" carries the denormalised snapshot.
+    prior_user = Message(
+        chat_id="c-regen-1",
+        msg_id="m-prev",
+        role=MessageRole.USER,
+        text="redo this",
+        attachments=[{"id": "att-r", "name": "r.pdf", "mime": "application/pdf", "size_bytes": 1}],
+        created_at="t",
+    )
+    monkeypatch.setattr(
+        "channel.api.chats.storage.list_messages",
+        lambda *_a, **_kw: ([prior_user], None),
+    )
+    monkeypatch.setattr(
+        "channel.api.chats.storage.delete_last_assistant_message", lambda *_a, **_kw: None
+    )
+
+    resp = client.post("/api/chats/c-regen-1/regenerate", json={})
+    assert resp.status_code == 200
+
+    # Strands received a content-block list — not a bare string.
+    blocks = cap["agent_prompts"][0]
+    assert isinstance(blocks, list)
+    assert any("[attachment_1: r.pdf" in (b.get("text") or "") for b in blocks)
+    # Sanitised — Bedrock's document.name rejects periods (#179).
+    assert any(b.get("document", {}).get("name") == "r pdf" for b in blocks)

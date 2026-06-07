@@ -1049,3 +1049,540 @@ def test_put_message_feedback_propagates_unexpected_client_errors(
             kind=FeedbackKind.UP,
             note=None,
         )
+
+
+# ----------------------------------------------------------------
+# Attachments (#174) — file attachments + vision (epic #109)
+# ----------------------------------------------------------------
+
+
+def _attachment(**overrides: Any) -> Any:
+    """Build an Attachment for storage tests.
+
+    ``s3_key`` derives from ``id`` (and ``user_id``) by default — the
+    production presign code follows the same shape, and tests that
+    construct multiple attachments need distinct keys.
+    """
+
+    from channel.models import Attachment
+
+    att_id = overrides.get("id", "att-1")
+    user_id = overrides.get("user_id", "u-1")
+    base = {
+        "id": att_id,
+        "user_id": user_id,
+        "name": "spec.pdf",
+        "mime": "application/pdf",
+        "size_bytes": 12345,
+        "s3_key": f"attachments/user/{user_id}/{att_id}",
+        "s3_bucket": "channel-attachments-dev",
+        "checksum_sha256": "abc123",
+        "created_at": "2026-06-03T00:00:00Z",
+    }
+    base.update(overrides)
+    return Attachment(**base)
+
+
+def test_put_attachment_writes_user_partitioned_row(table: FakeTable) -> None:
+    from channel import storage
+
+    att = _attachment()
+    storage.put_attachment(att)
+
+    stored = table.items[("USER#u-1", "ATTACHMENT#att-1")]
+    assert stored["PK"] == "USER#u-1"
+    assert stored["SK"] == "ATTACHMENT#att-1"
+    assert stored["id"] == "att-1"
+    assert stored["name"] == "spec.pdf"
+    assert stored["mime"] == "application/pdf"
+    assert stored["size_bytes"] == 12345
+    assert stored["s3_key"] == "attachments/user/u-1/att-1"
+    assert stored["s3_bucket"] == "channel-attachments-dev"
+    assert stored["checksum_sha256"] == "abc123"
+
+
+def test_put_attachment_omits_referenced_at_when_none(table: FakeTable) -> None:
+    """``referenced_at`` defaults to None — don't write a NULL attribute."""
+
+    from channel import storage
+
+    storage.put_attachment(_attachment())
+    stored = table.items[("USER#u-1", "ATTACHMENT#att-1")]
+    assert "referenced_at" not in stored
+
+
+def test_put_attachment_writes_referenced_at_when_set(table: FakeTable) -> None:
+    from channel import storage
+
+    storage.put_attachment(_attachment(referenced_at="2026-06-03T00:01:00Z"))
+    stored = table.items[("USER#u-1", "ATTACHMENT#att-1")]
+    assert stored["referenced_at"] == "2026-06-03T00:01:00Z"
+
+
+def test_get_attachment_returns_model_on_hit(table: FakeTable) -> None:
+    from channel import storage
+
+    storage.put_attachment(_attachment())
+    fetched = storage.get_attachment(user_id="u-1", att_id="att-1")
+    assert fetched is not None
+    assert fetched.id == "att-1"
+    assert fetched.s3_key == "attachments/user/u-1/att-1"
+
+
+def test_get_attachment_returns_none_on_miss(table: FakeTable) -> None:
+    from channel import storage
+
+    assert storage.get_attachment(user_id="u-1", att_id="nope") is None
+
+
+def test_delete_attachment_removes_row(table: FakeTable) -> None:
+    from channel import storage
+
+    storage.put_attachment(_attachment())
+    storage.delete_attachment(user_id="u-1", att_id="att-1")
+    assert ("USER#u-1", "ATTACHMENT#att-1") not in table.items
+
+
+def test_delete_attachment_is_idempotent(table: FakeTable) -> None:
+    """DDB DeleteItem is naturally idempotent — the second call is a no-op."""
+
+    from channel import storage
+
+    storage.delete_attachment(user_id="u-1", att_id="never-existed")  # no raise
+    storage.delete_attachment(user_id="u-1", att_id="never-existed")
+
+
+def test_mark_attachment_referenced_swallows_conditional_check_failure(
+    table: FakeTable, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the canonical row was deleted between get_attachment and the
+    update (concurrent chat-delete cascade race), DynamoDB raises
+    ConditionalCheckFailedException — swallow it instead of creating a
+    ghost item with just PK/SK/referenced_at."""
+
+    from channel import storage
+
+    def fake_update(**kwargs: Any) -> Any:
+        raise ClientError(
+            {"Error": {"Code": "ConditionalCheckFailedException", "Message": "no row"}},
+            "UpdateItem",
+        )
+
+    monkeypatch.setattr(table, "update_item", fake_update)
+    # Should NOT raise — race losses are harmless.
+    storage.mark_attachment_referenced(user_id="u-1", att_id="att-1")
+
+
+def test_mark_attachment_referenced_re_raises_other_client_errors(
+    table: FakeTable, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unrelated DDB errors (throttling, etc.) must still propagate so the
+    caller sees the real failure instead of a silent drop."""
+
+    from channel import storage
+
+    def fake_update(**kwargs: Any) -> Any:
+        raise ClientError(
+            {"Error": {"Code": "ProvisionedThroughputExceededException"}},
+            "UpdateItem",
+        )
+
+    monkeypatch.setattr(table, "update_item", fake_update)
+    with pytest.raises(ClientError):
+        storage.mark_attachment_referenced(user_id="u-1", att_id="att-1")
+
+
+def test_mark_attachment_referenced_stamps_iso_timestamp(table: FakeTable) -> None:
+    """#176 — when a message references an attachment, stamp
+    ``referenced_at`` so the lifecycle rule stops eyeing the S3
+    object for GC. Issued via UpdateItem so the existing row's other
+    attributes (name, mime, etc.) stay intact."""
+
+    from channel import storage
+
+    storage.put_attachment(_attachment())
+    storage.mark_attachment_referenced(user_id="u-1", att_id="att-1")
+
+    stored = table.items[("USER#u-1", "ATTACHMENT#att-1")]
+    assert "referenced_at" in stored
+    # ISO-8601 with microseconds — matches _now_iso()'s shape
+    assert stored["referenced_at"].endswith("+00:00") or stored["referenced_at"].endswith("Z")
+    # Other fields preserved
+    assert stored["name"] == "spec.pdf"
+
+
+# ---- S3 verify helper -------------------------------------------
+
+
+class _BytesBody:
+    """Stand-in for the StreamingBody returned by ``s3.get_object``.
+
+    boto3's real ``Body`` is a streaming response with a blocking
+    ``read()`` — the helper needs ``read()`` plus ``close()`` for the
+    finalizer path in :func:`channel.storage.get_attachment_bytes`.
+    A test can pin a ``read_error`` to simulate a mid-stream failure.
+    """
+
+    def __init__(self, data: bytes, read_error: Exception | None = None) -> None:
+        self._data = data
+        self._read_error = read_error
+        self.closed = False
+
+    def read(self) -> bytes:
+        if self._read_error is not None:
+            raise self._read_error
+        return self._data
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _FakeS3:
+    """Minimal stand-in for the boto3 S3 client used by storage helpers."""
+
+    def __init__(self) -> None:
+        self.objects: dict[tuple[str, str], dict[str, Any]] = {}
+        self.bodies: dict[tuple[str, str], bytes] = {}
+        self.deleted: list[tuple[str, str]] = []
+        # Lets a test pin a specific ClientError code on a key.
+        self.get_errors: dict[tuple[str, str], str] = {}
+        # Per-key mid-read failures: raised from the returned ``Body.read()``.
+        self.body_read_errors: dict[tuple[str, str], Exception] = {}
+        self.delete_errors: dict[tuple[str, str], str] = {}
+        # Track every body the fake handed out so a test can assert it was
+        # closed even on the failure path.
+        self.handed_out_bodies: list[_BytesBody] = []
+
+    def get_object(self, *, Bucket: str, Key: str) -> dict[str, Any]:
+        code = self.get_errors.get((Bucket, Key))
+        if code is not None:
+            raise ClientError(
+                {"Error": {"Code": code, "Message": code}},
+                "GetObject",
+            )
+        if (Bucket, Key) not in self.bodies:
+            raise ClientError(
+                {"Error": {"Code": "404", "Message": "Not Found"}},
+                "GetObject",
+            )
+        body = _BytesBody(
+            self.bodies[(Bucket, Key)],
+            read_error=self.body_read_errors.get((Bucket, Key)),
+        )
+        self.handed_out_bodies.append(body)
+        return {"Body": body}
+
+    def delete_object(self, *, Bucket: str, Key: str) -> dict[str, Any]:
+        code = self.delete_errors.get((Bucket, Key))
+        if code is not None:
+            raise ClientError(
+                {"Error": {"Code": code, "Message": code}},
+                "DeleteObject",
+            )
+        self.deleted.append((Bucket, Key))
+        self.objects.pop((Bucket, Key), None)
+        return {}
+
+
+@pytest.fixture
+def s3_client(monkeypatch: pytest.MonkeyPatch) -> _FakeS3:
+    fake = _FakeS3()
+    monkeypatch.setattr("channel.storage._get_s3_client", lambda: fake)
+    return fake
+
+
+def test_get_attachment_bytes_returns_payload_on_success(
+    s3_client: _FakeS3,
+) -> None:
+    from channel import storage
+
+    att = _attachment()
+    payload = b"%PDF-1.4 fake pdf bytes"
+    s3_client.bodies[(att.s3_bucket, att.s3_key)] = payload
+    data, reason = storage.get_attachment_bytes(att)
+    assert data == payload
+    assert reason is None
+
+
+def test_get_attachment_bytes_returns_not_found_on_404(
+    s3_client: _FakeS3,
+) -> None:
+    from channel import storage
+
+    data, reason = storage.get_attachment_bytes(_attachment())
+    assert data is None
+    assert reason == "S3 object not found"
+
+
+def test_get_attachment_bytes_surfaces_other_error_codes(
+    s3_client: _FakeS3,
+) -> None:
+    """Permissions and other failures must surface a non-empty reason so
+    the structured failure block in #176 can render a useful marker."""
+
+    from channel import storage
+
+    att = _attachment()
+    s3_client.get_errors[(att.s3_bucket, att.s3_key)] = "AccessDenied"
+    data, reason = storage.get_attachment_bytes(att)
+    assert data is None
+    assert reason is not None
+    assert "AccessDenied" in reason
+
+
+def test_get_attachment_bytes_converts_streaming_read_failure(
+    s3_client: _FakeS3,
+) -> None:
+    """A mid-read ``ReadTimeoutError`` (or any boto/OS-level failure) must
+    surface as the ``(None, reason)`` shape so the SSE generator can
+    render a labeled marker — otherwise the exception would crash the
+    in-flight stream."""
+
+    from botocore.exceptions import ReadTimeoutError
+
+    from channel import storage
+
+    att = _attachment()
+    s3_client.bodies[(att.s3_bucket, att.s3_key)] = b"would-be-payload"
+    s3_client.body_read_errors[(att.s3_bucket, att.s3_key)] = ReadTimeoutError(
+        endpoint_url="https://example.com"
+    )
+    data, reason = storage.get_attachment_bytes(att)
+    assert data is None
+    assert reason is not None
+    assert "ReadTimeoutError" in reason
+
+
+def test_get_attachment_bytes_closes_body_on_success(
+    s3_client: _FakeS3,
+) -> None:
+    """Hygiene: the StreamingBody is closed even on the happy path so
+    the underlying HTTP connection returns to the pool."""
+
+    from channel import storage
+
+    att = _attachment()
+    s3_client.bodies[(att.s3_bucket, att.s3_key)] = b"payload"
+    data, _ = storage.get_attachment_bytes(att)
+    assert data == b"payload"
+    assert all(body.closed for body in s3_client.handed_out_bodies)
+
+
+def test_get_attachment_bytes_closes_body_on_read_failure(
+    s3_client: _FakeS3,
+) -> None:
+    """Hygiene under failure: the body still closes after a mid-read
+    exception so a transient timeout doesn't leak a pooled connection."""
+
+    from botocore.exceptions import ReadTimeoutError
+
+    from channel import storage
+
+    att = _attachment()
+    s3_client.bodies[(att.s3_bucket, att.s3_key)] = b"would-be-payload"
+    s3_client.body_read_errors[(att.s3_bucket, att.s3_key)] = ReadTimeoutError(
+        endpoint_url="https://example.com"
+    )
+    storage.get_attachment_bytes(att)
+    assert all(body.closed for body in s3_client.handed_out_bodies)
+
+
+# ---- chat-delete cascade -----------------------------------------
+
+
+def _put_msg_with_attachments(
+    table: FakeTable, chat_id: str, msg_id: str, att_ids: list[str]
+) -> None:
+    """Write a message row with denormalised attachment snapshots."""
+
+    table.items[(f"CHAT#{chat_id}", f"MSG#2026-06-03T00:00:00Z#{msg_id}")] = {
+        "PK": f"CHAT#{chat_id}",
+        "SK": f"MSG#2026-06-03T00:00:00Z#{msg_id}",
+        "chat_id": chat_id,
+        "msg_id": msg_id,
+        "role": "user",
+        "text": "with attachments",
+        "attachments": [
+            {"id": a, "name": f"{a}.pdf", "mime": "application/pdf", "size_bytes": 1}
+            for a in att_ids
+        ],
+        "created_at": "2026-06-03T00:00:00Z",
+    }
+
+
+def test_delete_chat_attachments_returns_zero_when_no_attachments(
+    table: FakeTable, s3_client: _FakeS3
+) -> None:
+    from channel import storage
+
+    # Empty chat — no messages, nothing to do.
+    deleted, failed = storage.delete_chat_attachments(chat_id="c-1", user_id="u-1")
+    assert deleted == 0
+    assert failed == 0
+
+
+def test_delete_chat_attachments_deletes_referenced_rows_and_s3_objects(
+    table: FakeTable, s3_client: _FakeS3
+) -> None:
+    from channel import storage
+
+    storage.put_attachment(_attachment(id="att-1"))
+    storage.put_attachment(_attachment(id="att-2"))
+    s3_client.objects[("channel-attachments-dev", "attachments/user/u-1/att-1")] = {}
+    s3_client.objects[("channel-attachments-dev", "attachments/user/u-1/att-2")] = {}
+    _put_msg_with_attachments(table, "c-1", "m-1", ["att-1", "att-2"])
+
+    deleted, failed = storage.delete_chat_attachments(chat_id="c-1", user_id="u-1")
+
+    assert (deleted, failed) == (2, 0)
+    assert ("USER#u-1", "ATTACHMENT#att-1") not in table.items
+    assert ("USER#u-1", "ATTACHMENT#att-2") not in table.items
+    assert ("channel-attachments-dev", "attachments/user/u-1/att-1") in s3_client.deleted
+    assert ("channel-attachments-dev", "attachments/user/u-1/att-2") in s3_client.deleted
+
+
+def test_delete_chat_attachments_deduplicates_across_messages(
+    table: FakeTable, s3_client: _FakeS3
+) -> None:
+    """Two messages referencing the same attachment id ⇒ one delete, not two."""
+
+    from channel import storage
+
+    storage.put_attachment(_attachment(id="att-1"))
+    s3_client.objects[("channel-attachments-dev", "attachments/user/u-1/att-1")] = {}
+    _put_msg_with_attachments(table, "c-1", "m-1", ["att-1"])
+    _put_msg_with_attachments(table, "c-1", "m-2", ["att-1"])
+
+    deleted, failed = storage.delete_chat_attachments(chat_id="c-1", user_id="u-1")
+    assert (deleted, failed) == (1, 0)
+    # Idempotent S3 delete — only one entry recorded.
+    assert s3_client.deleted.count(("channel-attachments-dev", "attachments/user/u-1/att-1")) == 1
+
+
+def test_delete_chat_attachments_counts_s3_delete_failures(
+    table: FakeTable, s3_client: _FakeS3
+) -> None:
+    from channel import storage
+
+    storage.put_attachment(_attachment(id="att-1"))
+    storage.put_attachment(_attachment(id="att-2"))
+    s3_client.objects[("channel-attachments-dev", "attachments/user/u-1/att-1")] = {}
+    s3_client.delete_errors[("channel-attachments-dev", "attachments/user/u-1/att-2")] = (
+        "InternalError"
+    )
+    _put_msg_with_attachments(table, "c-1", "m-1", ["att-1", "att-2"])
+
+    deleted, failed = storage.delete_chat_attachments(chat_id="c-1", user_id="u-1")
+    # att-1 deleted cleanly; att-2 S3 delete failed so the cascade keeps the
+    # DDB row (orphan recovery later). One success, one failure.
+    assert (deleted, failed) == (1, 1)
+    assert ("USER#u-1", "ATTACHMENT#att-1") not in table.items
+    assert ("USER#u-1", "ATTACHMENT#att-2") in table.items
+
+
+def test_delete_chat_attachments_counts_missing_canonical_row_as_failure(
+    table: FakeTable, s3_client: _FakeS3
+) -> None:
+    """If the canonical ATTACHMENT row is gone, the helper can't know the
+    S3 key — count it as a failure rather than silently no-op'ing."""
+
+    from channel import storage
+
+    # No put_attachment call — canonical row missing.
+    _put_msg_with_attachments(table, "c-1", "m-1", ["ghost"])
+
+    deleted, failed = storage.delete_chat_attachments(chat_id="c-1", user_id="u-1")
+    assert (deleted, failed) == (0, 1)
+
+
+def test_delete_chat_attachments_paginates_message_query(
+    monkeypatch: pytest.MonkeyPatch, s3_client: _FakeS3
+) -> None:
+    """The cascade must follow LastEvaluatedKey across pages so a chat
+    with more attachments than fit in one DDB page is fully drained."""
+
+    from channel import storage
+
+    storage_table = FakeTable()
+    monkeypatch.setattr("channel.storage._get_table", lambda: storage_table)
+    storage.put_attachment(_attachment(id="att-1"))
+    storage.put_attachment(_attachment(id="att-2"))
+    s3_client.objects[("channel-attachments-dev", "attachments/user/u-1/att-1")] = {}
+    s3_client.objects[("channel-attachments-dev", "attachments/user/u-1/att-2")] = {}
+
+    # Hand-craft a two-page query response — the FakeTable's auto-pagination
+    # only triggers on Limit, but the cascade query doesn't set one.
+    pages = [
+        {
+            "Items": [{"attachments": [{"id": "att-1"}]}],
+            "LastEvaluatedKey": {"PK": "CHAT#c-1", "SK": "MSG#page-1"},
+        },
+        {
+            "Items": [{"attachments": [{"id": "att-2"}]}],
+        },
+    ]
+    seen_starts: list[Any] = []
+
+    def fake_query(**kwargs: Any) -> dict[str, Any]:
+        seen_starts.append(kwargs.get("ExclusiveStartKey"))
+        return pages.pop(0)
+
+    monkeypatch.setattr(storage_table, "query", fake_query)
+
+    deleted, failed = storage.delete_chat_attachments(chat_id="c-1", user_id="u-1")
+    assert (deleted, failed) == (2, 0)
+    # First call has no ExclusiveStartKey; second carries the page-1 cursor.
+    assert seen_starts == [None, {"PK": "CHAT#c-1", "SK": "MSG#page-1"}]
+
+
+def test_delete_chat_attachments_counts_ddb_delete_failures(
+    table: FakeTable, s3_client: _FakeS3, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S3 deletion succeeds but the DDB row delete fails — the helper
+    must catch the ClientError, count the cascade as failed, and keep
+    going."""
+
+    from channel import storage
+
+    storage.put_attachment(_attachment(id="att-1"))
+    storage.put_attachment(_attachment(id="att-2"))
+    s3_client.objects[("channel-attachments-dev", "attachments/user/u-1/att-1")] = {}
+    s3_client.objects[("channel-attachments-dev", "attachments/user/u-1/att-2")] = {}
+    _put_msg_with_attachments(table, "c-1", "m-1", ["att-1", "att-2"])
+
+    original_delete = table.delete_item
+
+    def flaky_delete(Key: dict[str, str]) -> dict[str, Any]:
+        if Key.get("SK") == "ATTACHMENT#att-2":
+            raise ClientError(
+                {"Error": {"Code": "ProvisionedThroughputExceededException"}},
+                "DeleteItem",
+            )
+        return original_delete(Key)
+
+    monkeypatch.setattr(table, "delete_item", flaky_delete)
+
+    deleted, failed = storage.delete_chat_attachments(chat_id="c-1", user_id="u-1")
+    assert (deleted, failed) == (1, 1)
+    # S3 side ran for both — the failure is on the DDB side.
+    assert ("channel-attachments-dev", "attachments/user/u-1/att-2") in s3_client.deleted
+
+
+# ----------------------------------------------------------------
+# S3 client signature config (#196)
+# ----------------------------------------------------------------
+
+
+def test_get_s3_client_uses_sigv4(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Boto3's default signature for ``s3.amazonaws.com`` is SigV2, and
+    S3 rejects SigV2-signed presigned PUTs against KMS-encrypted buckets
+    with ``InvalidArgument``. ``_get_s3_client`` must pin SigV4 so every
+    presigned URL the Lambda mints is acceptable to S3.
+
+    Regression for #196. See the issue body for the live-dev repro."""
+
+    from channel import storage
+
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
+    client = storage._get_s3_client()
+    assert client.meta.config.signature_version == "s3v4"

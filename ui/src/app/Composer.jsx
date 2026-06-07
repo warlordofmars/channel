@@ -1,9 +1,19 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
 import React, { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
+import {
+  finalizeAttachment,
+  presignAttachment,
+  sha256Hex,
+  uploadToPresigned,
+} from "../api.js";
 import Icon from "../components/Icon.jsx";
 import { useChannelPrefs } from "../hooks/useChannelPrefs.js";
-import AttachMenu from "./AttachMenu.jsx";
+import AttachMenu, { ALLOWED_MIMES } from "./AttachMenu.jsx";
 import ModelPicker from "./ModelPicker.jsx";
+
+const ALLOWED_MIME_SET = new Set(ALLOWED_MIMES);
+const MAX_SIZE_BYTES = 20 * 1024 * 1024;
+const MAX_FILES_PER_MESSAGE = 5;
 
 /**
  * Feature-detect the Web Speech API. Browsers that ship it expose
@@ -15,6 +25,52 @@ function getSpeechRecognition() {
   return window.SpeechRecognition ?? window.webkitSpeechRecognition ?? null;
 }
 
+let _tempIdCounter = 0;
+function nextTempId() {
+  _tempIdCounter += 1;
+  return `pending-${_tempIdCounter}`;
+}
+
+/**
+ * Map an attachment MIME to the matching ``Icon.jsx`` glyph name.
+ * Falls back to the generic ``"file"`` glyph for unknown types so a
+ * future MIME doesn't render as a blank tile.
+ */
+export function iconForMime(mime) {
+  if (mime === "application/pdf") return "file-pdf";
+  if (typeof mime === "string" && mime.startsWith("image/")) return "file-image";
+  if (
+    mime === "text/csv" ||
+    mime === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+  ) {
+    return "file-sheet";
+  }
+  if (mime === "text/plain" || mime === "text/markdown") return "file-text";
+  return "file";
+}
+
+/**
+ * Format ``bytes`` for chip display. Sub-MB stays in KB so single-page
+ * PDFs and PNGs read sensibly; ≥1MB switches to a one-decimal MB to
+ * match the 20MB cap the user sees in the AttachMenu hint.
+ */
+export function formatAttachmentSize(bytes) {
+  if (bytes < 1024 * 1024) {
+    return Math.max(1, Math.round(bytes / 1024)) + " KB";
+  }
+  return (bytes / 1024 / 1024).toFixed(1) + " MB";
+}
+
+/**
+ * Clip ``name`` to ``max`` chars with a trailing ellipsis so chips
+ * stay readable. The full filename is mirrored into ``title=`` on the
+ * chip so hover restores the original.
+ */
+export function truncateName(name, max = 20) {
+  if (name.length <= max) return name;
+  return name.slice(0, max - 1) + "…";
+}
+
 /**
  * Auto-growing textarea + attach + model picker + mic + send. Translated
  * from design-sources/app/chat.jsx `Composer` function.
@@ -24,6 +80,14 @@ function getSpeechRecognition() {
  *   - onSend(text, atts) — invoked on submit; clears the input afterward
  *   - placeholder — defaults to "How can I help you today?"
  *   - autofocus — focuses the textarea on mount when true
+ *
+ * Attachments (#177): files arrive from the AttachMenu picker or via
+ * drag-and-drop onto the composer wrap. Each accepted file enters
+ * ``atts`` as a pending chip ({status: "attaching"}) and runs the
+ * presign → upload → finalize pipeline; the chip then flips to
+ * ``attached`` (carrying the canonical Attachment id) or ``failed``
+ * (retryable). User-facing strings use "attach"/"attached" per
+ * Channel's 2026-06-03 UI copy convention — never "upload".
  *
  * Dictation (issue #147): when the browser ships the Web Speech API,
  * the mic button toggles a `SpeechRecognition` session. Results are
@@ -37,17 +101,21 @@ const Composer = forwardRef(function Composer(
 ) {
   const [text, setText] = useState("");
   const [atts, setAtts] = useState([]);
+  const [attachError, setAttachError] = useState(null);
+  const [dragOver, setDragOver] = useState(false);
   const [dictating, setDictating] = useState(false);
   const taRef = useRef(null);
   const recognitionRef = useRef(null);
   const dictationAnchorRef = useRef(null);
+  // Tracks dragenter/dragleave depth across nested elements so the
+  // overlay doesn't flicker as the cursor moves between children.
+  const dragCounterRef = useRef(0);
+  // Holds the underlying File for each pending chip so a failed-state
+  // retry can re-run the pipeline without forcing the user to re-pick.
+  const fileRefsRef = useRef(new Map());
   const { sendOnEnter } = useChannelPrefs();
   const [speechSupported] = useState(() => getSpeechRecognition() != null);
 
-  // Imperative handle for parent components that need to seed the
-  // textarea from outside (e.g. follow-up chip clicks). Exposes only
-  // ``setText`` + ``focus`` — the surface stays intentionally tiny so
-  // tests can't accidentally rely on internals.
   useImperativeHandle(ref, () => ({
     setText: (value) => {
       setText(value);
@@ -67,8 +135,6 @@ const Composer = forwardRef(function Composer(
     if (autofocus && taRef.current) taRef.current.focus();
   }, [autofocus]);
 
-  // Stop any active recognition on unmount so the user's mic isn't
-  // held open after navigating away.
   useEffect(function stopRecognitionOnUnmount() {
     return function cleanup() {
       if (recognitionRef.current) {
@@ -94,13 +160,7 @@ const Composer = forwardRef(function Composer(
   }
 
   function startDictation() {
-    // The button only renders when speechSupported is true, so
-    // getSpeechRecognition() is guaranteed to return a constructor here.
     const SpeechRecognition = getSpeechRecognition();
-    // Snapshot the caret position the user had when they tapped mic
-    // so the transcript splices in at that point rather than at the
-    // end of whatever text they (or another transcript) appended in
-    // the meantime.
     const ta = taRef.current;
     const caret = ta.selectionStart ?? ta.value.length;
     dictationAnchorRef.current = {
@@ -111,8 +171,6 @@ const Composer = forwardRef(function Composer(
     try {
       recognition = new SpeechRecognition();
     } catch {
-      // Some browsers throw on construction if permission is denied
-      // up-front — degrade silently.
       return;
     }
     recognition.continuous = false;
@@ -142,8 +200,6 @@ const Composer = forwardRef(function Composer(
       recognition.start();
       setDictating(true);
     } catch {
-      // start() throws if recognition is already running on this
-      // instance — collapse back to idle so the user can retry.
       recognitionRef.current = null;
       setDictating(false);
     }
@@ -157,12 +213,143 @@ const Composer = forwardRef(function Composer(
     }
   }
 
+  // ---- attachments: validate + pipeline + retry --------------------
+
+  function handleFiles(fileList) {
+    setAttachError(null);
+    if (!fileList) return;
+    const incoming = Array.from(fileList);
+    if (incoming.length === 0) return;
+    if (atts.length + incoming.length > MAX_FILES_PER_MESSAGE) {
+      setAttachError(
+        `Can't attach more than ${MAX_FILES_PER_MESSAGE} files per message.`,
+      );
+      return;
+    }
+    const accepted = [];
+    for (const file of incoming) {
+      if (!ALLOWED_MIME_SET.has(file.type)) {
+        setAttachError(`${file.name}: file type not supported.`);
+        continue;
+      }
+      if (file.size > MAX_SIZE_BYTES) {
+        setAttachError(`${file.name}: file too large (max 20 MB).`);
+        continue;
+      }
+      accepted.push(file);
+    }
+    if (accepted.length === 0) return;
+    const newChips = accepted.map((file) => {
+      const tempId = nextTempId();
+      fileRefsRef.current.set(tempId, file);
+      return {
+        tempId,
+        status: "attaching",
+        name: file.name,
+        mime: file.type,
+        size_bytes: file.size,
+      };
+    });
+    setAtts((prev) => [...prev, ...newChips]);
+    for (const chip of newChips) {
+      startAttach(chip.tempId);
+    }
+  }
+
+  async function startAttach(tempId) {
+    const file = fileRefsRef.current.get(tempId);
+    try {
+      const checksum_sha256 = await sha256Hex(file);
+      const presigned = await presignAttachment({
+        name: file.name,
+        mime: file.type,
+        size_bytes: file.size,
+      });
+      await uploadToPresigned(presigned.url, presigned.required_headers, file);
+      const att = await finalizeAttachment({
+        presign_token: presigned.presign_token,
+        checksum_sha256,
+      });
+      // Adopt the canonical Attachment id (the only field downstream
+      // actually needs); keep name/mime/size_bytes as the user's file
+      // pre-finalize so the chip label stays stable across the status
+      // flip. Production has these in sync — but unit tests stub the
+      // finalize response with a generic Attachment, so this guard
+      // also makes the test contract less brittle.
+      setAtts((prev) =>
+        prev.map((c) =>
+          c.tempId === tempId ? { ...c, status: "attached", id: att.id } : c,
+        ),
+      );
+    } catch (err) {
+      const reason = err instanceof Error && err.message ? err.message : "Failed to attach";
+      setAtts((prev) =>
+        prev.map((c) =>
+          c.tempId === tempId ? { ...c, status: "failed", error: reason } : c,
+        ),
+      );
+    }
+  }
+
+  function retryAtt(tempId) {
+    setAtts((prev) =>
+      prev.map((c) => (c.tempId === tempId ? { ...c, status: "attaching", error: null } : c)),
+    );
+    startAttach(tempId);
+  }
+
+  function removeAtt(tempId) {
+    fileRefsRef.current.delete(tempId);
+    setAtts((prev) => prev.filter((c) => c.tempId !== tempId));
+  }
+
+  // ---- drop zone --------------------------------------------------
+
+  function onDragEnter(e) {
+    if (![...(e.dataTransfer?.types ?? [])].includes("Files")) return;
+    e.preventDefault();
+    dragCounterRef.current += 1;
+    setDragOver(true);
+  }
+
+  function onDragOver(e) {
+    if (![...(e.dataTransfer?.types ?? [])].includes("Files")) return;
+    e.preventDefault();
+  }
+
+  function onDragLeave() {
+    dragCounterRef.current = Math.max(0, dragCounterRef.current - 1);
+    if (dragCounterRef.current === 0) setDragOver(false);
+  }
+
+  function onDrop(e) {
+    e.preventDefault();
+    dragCounterRef.current = 0;
+    setDragOver(false);
+    handleFiles(e.dataTransfer?.files);
+  }
+
+  // ---- submit -----------------------------------------------------
+
+  const anyAttaching = atts.some((a) => a.status === "attaching");
+  const attachedOnly = atts.filter((a) => a.status === "attached");
+  const canSend = !anyAttaching && (text.trim() !== "" || attachedOnly.length > 0);
+
   function submit() {
-    if (!text.trim() && atts.length === 0) return;
+    if (!canSend) return;
     stopDictation();
-    onSend(text.trim() || "Take a look at the attached files.", atts);
+    // canSend already guarantees text.trim() || attachedOnly.length > 0,
+    // so the OR fallback always lands on a non-empty body.
+    const body =
+      text.trim() || "Take a look at the attached files.";
+    onSend(
+      body,
+      attachedOnly.map((a) => ({ id: a.id })),
+    );
     setText("");
     setAtts([]);
+    setAttachError(null);
+    fileRefsRef.current.clear();
     requestAnimationFrame(grow);
   }
 
@@ -170,13 +357,10 @@ const Composer = forwardRef(function Composer(
     if (e.key !== "Enter") return;
     const cmdOrCtrl = e.metaKey || e.ctrlKey;
     if (sendOnEnter) {
-      // Enter submits; Shift+Enter inserts a newline.
       if (e.shiftKey) return;
       e.preventDefault();
       submit();
     } else if (cmdOrCtrl) {
-      // Cmd/Ctrl+Enter submits; plain Enter falls through to insert
-      // a newline in the textarea (default browser behavior).
       e.preventDefault();
       submit();
     }
@@ -187,28 +371,64 @@ const Composer = forwardRef(function Composer(
     grow();
   }
 
-  function onChipRemove(index) {
-    setAtts(atts.filter((_, j) => j !== index));
-  }
-
-  function onAttach(item) {
-    setAtts(function appendChip(prev) { return [...prev, item]; });
-  }
-
   return (
-    <div className="composer-wrap">
+    <div
+      className={"composer-wrap" + (dragOver ? " drag-over" : "")}
+      onDragEnter={onDragEnter}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
+    >
       <div className="composer">
         {atts.length > 0 && (
           <div className="attaches">
-            {atts.map((a, i) => (
-              <div className="chip" key={i}>
-                <span className="tile"><Icon name={a.ic} size={15} /></span>
-                <span>{a.name}</span>
-                <span className="x" onClick={() => onChipRemove(i)}>
+            {atts.map((a) => (
+              <div
+                className={"chip attach-chip status-" + a.status}
+                key={a.tempId}
+                data-status={a.status}
+                title={a.name}
+              >
+                <span className="tile">
+                  {a.status === "attaching" ? (
+                    <span className="spinner" aria-label="Attaching" />
+                  ) : (
+                    // MIME-typed glyph so a sidebar full of pending
+                    // chips scans at a glance. Status colour still comes
+                    // from the chip-border + tile-background CSS so the
+                    // attached / failed state is unambiguous on top of
+                    // the format hint.
+                    <Icon name={iconForMime(a.mime)} size={15} />
+                  )}
+                </span>
+                <span className="nm">{truncateName(a.name)}</span>
+                <span className="sz">{formatAttachmentSize(a.size_bytes)}</span>
+                {a.status === "failed" && (
+                  <button
+                    type="button"
+                    className="retry"
+                    title="Retry"
+                    aria-label={`Retry attaching ${a.name}`}
+                    onClick={() => retryAtt(a.tempId)}
+                  >
+                    <Icon name="refresh" size={13} />
+                  </button>
+                )}
+                <span
+                  className="x"
+                  role="button"
+                  aria-label={`Remove ${a.name}`}
+                  onClick={() => removeAtt(a.tempId)}
+                >
                   <Icon name="close" size={14} />
                 </span>
               </div>
             ))}
+          </div>
+        )}
+        {attachError && (
+          <div className="attach-error" role="alert">
+            {attachError}
           </div>
         )}
         <textarea
@@ -220,7 +440,7 @@ const Composer = forwardRef(function Composer(
           onKeyDown={onKeyDown}
         />
         <div className="composer-row">
-          <AttachMenu onAdd={onAttach} />
+          <AttachMenu onFiles={handleFiles} />
           <div className="spacer" />
           <ModelPicker model={model} effort={effort} onModel={setModel} onEffort={setEffort} />
           {speechSupported && (
@@ -238,14 +458,19 @@ const Composer = forwardRef(function Composer(
           <button
             type="button"
             className="send"
-            disabled={!text.trim() && atts.length === 0}
+            disabled={!canSend}
             onClick={submit}
-            title="Send"
+            title={anyAttaching ? "Waiting for attachments…" : "Send"}
           >
             <Icon name="arrow-up" size={18} stroke={2} />
           </button>
         </div>
       </div>
+      {dragOver && (
+        <div className="drop-overlay" role="status" aria-live="polite">
+          <span>Drop files to attach</span>
+        </div>
+      )}
     </div>
   );
 });

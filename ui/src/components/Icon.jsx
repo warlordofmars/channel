@@ -54,6 +54,11 @@ export default function Icon({ name, size = 18, stroke = 1.6, style = {} }) {
     case "check":        return <svg {...p}><path d="M5 12.5l4.5 4.5L19 6.5"/></svg>;
     case "file":         return <svg {...p}><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/></svg>;
     case "doc":          return <svg {...p}><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4M9 13h6M9 16.5h4"/></svg>;
+    case "file-pdf":     return <svg {...p}><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/><path d="M9 17.5v-5h2.2a1.3 1.3 0 0 1 0 2.6H9"/></svg>;
+    case "file-image":   return <svg {...p}><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/><circle cx="10.2" cy="13" r="0.9"/><path d="M8 18l2.4-2.4 3 2.4"/></svg>;
+    case "file-sheet":   return <svg {...p}><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/><path d="M8.5 13h7M8.5 16h7M12 11.5v6.5"/></svg>;
+    case "file-doc":     return <svg {...p}><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4M8.5 12h7M8.5 15h7M8.5 18h4"/></svg>;
+    case "file-text":    return <svg {...p}><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4M9 14h6M9 17h4"/></svg>;
     case "folder-x":     return <svg {...p}><path d="M3 7.5A1.5 1.5 0 0 1 4.5 6h4l2 2.2H19.5A1.5 1.5 0 0 1 21 9.7V17a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 13l6 4M15 13l-6 4"/></svg>;
     case "globe":        return <svg {...p}><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.7 2.5 15.3 0 18M12 3c-2.5 2.7-2.5 15.3 0 18"/></svg>;
     case "sparkle":      return <svg {...p}><path d="M12 3l1.8 6.2L20 11l-6.2 1.8L12 19l-1.8-6.2L4 11l6.2-1.8z"/></svg>;

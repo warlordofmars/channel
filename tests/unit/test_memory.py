@@ -40,11 +40,15 @@ def test_payload_from_messages_pairs_user_and_assistant_text():
     ]
 
 
-def test_payload_from_messages_concatenates_multi_block_content():
-    # Strands sometimes emits multiple text blocks within one message
-    # (e.g. when a tool result is interleaved). Concatenate text blocks;
-    # non-text blocks (toolUse, toolResult) are dropped — AgentCore's
-    # v1 payload spec only accepts text.
+def test_payload_from_messages_invariant_drops_tool_use_blocks():
+    """INVARIANT: Tool payloads (toolUse / toolResult blocks) never
+    persist to AgentCore Memory. The invariant is about block DICT KEYS
+    in the produced payload, not about free-text content — so a
+    recursive structural walk is used rather than a ``json.dumps``
+    substring check (which would false-positive on legitimate
+    conversational text that happens to mention 'toolUse' /
+    'toolResult'). The fixture emits both block types interleaved with
+    text and the walker asserts neither key leaks at any depth."""
     messages = [
         {
             "role": "assistant",
@@ -54,18 +58,39 @@ def test_payload_from_messages_concatenates_multi_block_content():
                 {"text": "The answer is 4."},
             ],
         },
+        {
+            "role": "user",
+            "content": [
+                {"toolResult": {"name": "calc", "output": {"y": 4}}},
+                {"text": "Thanks."},
+            ],
+        },
     ]
 
     payload = _payload_from_messages(messages)
 
-    assert payload == [
-        {
-            "conversational": {
-                "role": "ASSISTANT",
-                "content": {"text": "Let me check. The answer is 4."},
-            },
-        },
-    ]
+    # 1. Text concatenation still works
+    assert payload[0]["conversational"]["content"]["text"] == "Let me check. The answer is 4."
+    assert payload[1]["conversational"]["content"]["text"] == "Thanks."
+
+    # 2. Invariant: NO toolUse or toolResult key appears anywhere in payload
+    _assert_no_block_keys(payload)
+
+
+def _assert_no_block_keys(
+    node: Any, *, forbidden: tuple[str, ...] = ("toolUse", "toolResult")
+) -> None:
+    """Recursively assert that no dict key in ``node`` equals any of the
+    forbidden strings. Traverses dicts and lists; leaf values (strings,
+    ints, etc.) are not inspected — the invariant is about block keys
+    in the payload structure, not text content."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            assert key not in forbidden, f"forbidden key {key!r} present in payload"
+            _assert_no_block_keys(value, forbidden=forbidden)
+    elif isinstance(node, list):
+        for item in node:
+            _assert_no_block_keys(item, forbidden=forbidden)
 
 
 def test_payload_from_messages_raises_on_unknown_role():
@@ -395,3 +420,78 @@ async def test_hook_sanitizes_actor_id_passed_to_create_event():
 
     kwargs = fake_client.create_event.call_args.kwargs
     assert kwargs["actorId"] == "alice_example_com"
+
+
+@pytest.mark.asyncio
+async def test_write_meta_event_calls_create_event_with_meta_prefix():
+    """[meta] synthetic ASSISTANT messages flow through CreateEvent
+    via the existing boto3 client. The '[meta]' prefix tags the event
+    for the recall hook to render distinctly.
+
+    ``write_meta_event`` itself is a sync fire-and-forget entry point
+    (mirrors ``_on_after_invocation``); the boto3 call runs in a
+    thread via ``asyncio.to_thread`` so it doesn't block the event
+    loop during ``agent.stream_async``. Drain the pending task with
+    ``asyncio.sleep(0)`` before asserting.
+    """
+    import asyncio as _asyncio
+
+    captured: dict[str, Any] = {}
+
+    class FakeClient:
+        def create_event(self, **kwargs: Any) -> dict[str, Any]:
+            captured.update(kwargs)
+            return {}
+
+    hook = AgentCoreMemoryHook(
+        memory_id="mem-x",
+        actor_id="user-1",
+        session_id="chat-1",
+        client=FakeClient(),
+    )
+    hook.write_meta_event("used current_time to get current UTC time")
+
+    # Drain the create_task'd write — to_thread completes on a worker
+    # thread, so yield until the pending set drains.
+    while hook._pending_writes:
+        await _asyncio.sleep(0)
+
+    assert captured["memoryId"] == "mem-x"
+    assert captured["actorId"] == "user-1"
+    assert captured["sessionId"] == "chat-1"
+    # The synthetic ASSISTANT message text starts with [meta]
+    payload = captured["payload"]
+    assert payload[0]["conversational"]["role"] == "ASSISTANT"
+    assert payload[0]["conversational"]["content"]["text"].startswith("[meta] ")
+
+
+@pytest.mark.asyncio
+async def test_write_meta_event_swallows_client_exceptions():
+    """Fail-soft contract: write_meta_event must not raise even when the
+    boto3 client blows up. Tool result is already in the chain; failure
+    to record the META fact must not break the user-visible reply.
+
+    The sync entry point schedules an ``asyncio.create_task``; the
+    exception is raised inside the async coroutine and caught there,
+    so the sync call must return cleanly AND the task must complete
+    without leaking the exception back to the test runner."""
+    import asyncio as _asyncio
+
+    class BoomClient:
+        def create_event(self, **_: Any) -> dict[str, Any]:
+            raise RuntimeError("agentcore down")
+
+    hook = AgentCoreMemoryHook(
+        memory_id="m",
+        actor_id="a",
+        session_id="s",
+        client=BoomClient(),
+    )
+
+    # MUST NOT raise from the sync entry point.
+    hook.write_meta_event("used calc with x=2")
+
+    # Drain the pending task; the exception should be caught inside
+    # the async helper, not propagated here.
+    while hook._pending_writes:
+        await _asyncio.sleep(0)

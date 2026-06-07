@@ -92,6 +92,48 @@ def test_dev_stack_sets_debug_endpoints_env_var(dev_template):
     assert env_vars.get("STARTER_ENABLE_DEBUG_ENDPOINTS") == "1"
 
 
+def test_prod_stack_does_not_set_bypass_google_auth_env_var(prod_template):
+    """#179 — the Google-auth bypass MUST stay off in prod. It only
+    activates when a request carries ``?test_email=``, but a
+    misconfigured prod with the flag set still hands an admin JWT to
+    anyone who can guess that query param. Same risk shape as
+    ``STARTER_ENABLE_DEBUG_ENDPOINTS``."""
+
+    api_fn = _api_function(prod_template)
+    env_vars = api_fn["Properties"]["Environment"]["Variables"]
+    assert "STARTER_BYPASS_GOOGLE_AUTH" not in env_vars, (
+        "Prod stack must NOT enable the Google-auth bypass."
+    )
+
+
+def test_dev_stack_sets_bypass_google_auth_env_var(dev_template):
+    api_fn = _api_function(dev_template)
+    env_vars = api_fn["Properties"]["Environment"]["Variables"]
+    assert env_vars.get("STARTER_BYPASS_GOOGLE_AUTH") == "1"
+
+
+def test_prod_stack_disables_clock_tool_env_var(prod_template):
+    """#181 chassis policy P2 — the ``current_time`` smoke-test tool
+    must NOT register in prod. The chassis registers the tool only
+    when ``STARTER_CLOCK_TOOL_ENABLED=="1"``; prod sets it to ``"0"``
+    explicitly so a future default-shift can't flip it on by accident.
+    """
+
+    api_fn = _api_function(prod_template)
+    env_vars = api_fn["Properties"]["Environment"]["Variables"]
+    assert env_vars.get("STARTER_CLOCK_TOOL_ENABLED") == "0"
+
+
+def test_dev_stack_enables_clock_tool_env_var(dev_template):
+    """Non-prod envs (dev / jc / etc.) get the chassis smoke-test tool
+    so the end-to-end tool path stays exercised — see #181 strategy
+    spec policy P2."""
+
+    api_fn = _api_function(dev_template)
+    env_vars = api_fn["Properties"]["Environment"]["Variables"]
+    assert env_vars.get("STARTER_CLOCK_TOOL_ENABLED") == "1"
+
+
 def test_lambda_role_grants_agentcore_write_and_lookup_actions(dev_template):
     """The IAM policy attached to the API Lambda role must grant the
     AgentCore actions Phase 7c needs. We inspect every IAM::Policy
@@ -209,3 +251,108 @@ def test_lambda_env_has_attachments_bucket_var(dev_template):
     assert "STARTER_ATTACHMENTS_KMS_KEY_ARN" not in env_vars, (
         "AWS-managed key has no CMK ARN to plumb — see #173"
     )
+
+
+# ----------------------------------------------------------------
+# Content-Security-Policy header (#196)
+# ----------------------------------------------------------------
+
+
+def test_csp_header_includes_env_specific_custom_domain():
+    """The pre-#196 CSP literal hardcoded ``https://channel.example.com``
+    as a placeholder that was never substituted per-env. After #196 the
+    helper builds the header per-env from ``custom_domain``."""
+
+    from stacks.channel_stack import _build_csp_header  # noqa: E402
+
+    header = _build_csp_header(
+        custom_domain="channel-dev.warlordofmars.net",
+        attachments_bucket_name="bucket-xyz",
+        region="us-east-1",
+    )
+    assert "https://channel-dev.warlordofmars.net" in header
+    # The old placeholder must be gone — its presence was the bug.
+    assert "channel.example.com" not in header
+
+
+def test_csp_header_includes_attachments_bucket_origins():
+    """``connect-src`` must include the attachments bucket's S3 origins
+    so browser PUT uploads pass CSP. Both us-east-1 legacy and regional
+    virtual-host URL forms — the SDK can hand back either."""
+
+    from stacks.channel_stack import _build_csp_header  # noqa: E402
+
+    header = _build_csp_header(
+        custom_domain="channel-dev.warlordofmars.net",
+        attachments_bucket_name="bucket-xyz",
+        region="us-east-1",
+    )
+    assert "https://bucket-xyz.s3.amazonaws.com" in header
+    assert "https://bucket-xyz.s3.us-east-1.amazonaws.com" in header
+
+
+def test_csp_header_preserves_existing_directives():
+    """Regression — the refactor must not drop any directive (frame-ancestors,
+    base-uri, etc.) that the pre-#196 literal carried."""
+
+    from stacks.channel_stack import _build_csp_header  # noqa: E402
+
+    header = _build_csp_header(
+        custom_domain="channel-dev.warlordofmars.net",
+        attachments_bucket_name="bucket-xyz",
+        region="us-east-1",
+    )
+    for directive in (
+        "default-src 'self'",
+        "script-src 'self' https://www.googletagmanager.com",
+        "img-src 'self' data:",
+        "style-src 'self' 'unsafe-inline'",
+        "frame-ancestors 'none'",
+        "base-uri 'self'",
+        "form-action 'self'",
+        "report-uri /api/csp-report",
+        "report-to default",
+    ):
+        assert directive in header, f"missing CSP directive: {directive!r}"
+
+
+def _flatten_intrinsic(value):
+    """Collapse a CloudFormation intrinsic (Fn::Join or string) into a
+    single string by concatenating the literal parts. Tokens (``Ref`` /
+    ``Fn::GetAtt`` etc.) become placeholders so the assertion can still
+    grep for stable substrings around them."""
+
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict) and "Fn::Join" in value:
+        sep, parts = value["Fn::Join"]
+        return sep.join(_flatten_intrinsic(p) for p in parts)
+    if isinstance(value, dict):
+        # Ref / Fn::GetAtt / etc. — represent as an opaque token marker.
+        return "<TOKEN>"
+    return str(value)
+
+
+def test_synthed_dev_csp_resolves_dev_custom_domain(dev_template):
+    """End-to-end CDK assertion: the synthed CloudFront response-headers
+    policy carries a CSP that resolves the dev env's actual hostname."""
+
+    policies = dev_template.find_resources("AWS::CloudFront::ResponseHeadersPolicy")
+    assert len(policies) == 1
+    policy = next(iter(policies.values()))
+    custom_headers = policy["Properties"]["ResponseHeadersPolicyConfig"]["CustomHeadersConfig"][
+        "Items"
+    ]
+    csp_items = [
+        h for h in custom_headers if h["Header"].lower() == "content-security-policy-report-only"
+    ]
+    assert len(csp_items) == 1
+    # The CSP value is a Fn::Join because the attachments bucket name is
+    # a CDK token resolved at deploy time. Flatten the join to a string
+    # for substring assertions.
+    csp_value = _flatten_intrinsic(csp_items[0]["Value"])
+    assert "https://channel-dev.warlordofmars.net" in csp_value
+    assert "channel.example.com" not in csp_value
+    # And the attachments bucket origins are wired in (token + suffixes).
+    assert "<TOKEN>.s3.amazonaws.com" in csp_value
+    assert "<TOKEN>.s3.us-east-1.amazonaws.com" in csp_value

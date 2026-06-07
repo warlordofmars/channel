@@ -4,18 +4,61 @@ import { Link } from "react-router-dom";
 import SiteLayout from "../SiteLayout.jsx";
 
 /**
- * Marketing Download page. Download URLs point at the GitHub Releases
- * ``releases/latest/download/<asset>`` redirect so the link never goes
- * stale — GitHub resolves ``latest`` to the most recent non-prerelease,
- * non-draft release at click time, then 302s to the tagged asset.
+ * Marketing Download page. Download URLs resolve per environment using
+ * ``VITE_RELEASE_CHANNEL`` — ADR-0010 codifies the two-channel split
+ * (dev env → ``dev`` channel, prod env → ``latest``) and CI passes the
+ * matching value into the SPA build per branch.
  *
- * If no stable release has shipped yet, the redirect 404s — that's
- * acceptable per issue #119 acceptance criteria ("Link works whether
- * or not a release exists yet; the buttons themselves must render").
- * macOS builds are signed + notarised (sub-project B); Windows and
- * Linux are unsigned in this round.
+ * Two release pipelines feed two URL surfaces:
+ *
+ *   - ``publish-desktop-mac`` (sub-project B, signed + notarised): uploads
+ *     the macOS .dmg to S3 at ``/updates/<channel>/Channel-mac.dmg`` on
+ *     every push to main/development, AND to the GitHub release on push
+ *     to main. So the SIGNED macOS .dmg for ``latest`` lives at GH; the
+ *     SIGNED macOS .dmg for ``dev`` lives at S3.
+ *   - ``publish-dev-artifacts`` (older, unsigned matrix builds): uploads
+ *     all-platform unsigned artefacts to the GitHub ``dev`` pre-release
+ *     tag on every push to development. Win/Linux only this round (no
+ *     signing flow yet); the macOS .dmg here would be Gatekeeper-rejected
+ *     on Sequoia, so we deliberately do NOT link to it.
+ *
+ * URL routing per platform:
+ *   - macOS .dmg:
+ *     - ``latest`` channel → GH ``releases/latest/download/`` (signed)
+ *     - any other channel  → S3 ``channel-<channel>.warlordofmars.net``
+ *                            (signed)
+ *   - Windows .exe + Linux artefacts (unsigned, this round):
+ *     - ``latest`` channel → GH ``releases/latest/download/``
+ *     - any other channel  → GH ``releases/download/<tag>/``
+ *
+ * When ``VITE_RELEASE_CHANNEL`` is unset, the default is ``latest`` —
+ * preserves the prod behaviour without needing the env var set on the
+ * prod build.
  */
-const RELEASE_BASE = "https://github.com/warlordofmars/channel/releases/latest/download";
+// Use `||` (not `??`) so an empty-string ``VITE_RELEASE_CHANNEL=``
+// (a common CI foot-gun) falls back to ``"latest"`` rather than
+// producing ``/releases/download//<asset>`` (double-slash, 404) or
+// the ``channel-.warlordofmars.net`` dangling-hyphen NXDOMAIN form.
+const CHANNEL = import.meta.env.VITE_RELEASE_CHANNEL || "latest";
+
+// GitHub-release base for unsigned Win/Linux artefacts (and the SIGNED
+// macOS .dmg on ``latest`` only — see MAC_DMG_URL below).
+const GH_RELEASE_BASE =
+  CHANNEL === "latest"
+    ? "https://github.com/warlordofmars/channel/releases/latest/download"
+    : `https://github.com/warlordofmars/channel/releases/download/${CHANNEL}`;
+
+// macOS .dmg URL routes differently per channel because the SIGNED dmg
+// for non-prod channels lives on S3, not GitHub. The GitHub ``dev``
+// pre-release tag is populated by ``publish-dev-artifacts`` from the
+// UNSIGNED matrix builds — clicking that would give Sequoia testers a
+// Gatekeeper-rejected bundle. publish-desktop-mac uploads the signed,
+// notarised, stapled .dmg to ``/updates/<channel>/`` on the
+// channel-scoped CloudFront distribution.
+const MAC_DMG_URL =
+  CHANNEL === "latest"
+    ? `${GH_RELEASE_BASE}/Channel-mac.dmg`
+    : `https://channel-${CHANNEL}.warlordofmars.net/updates/${CHANNEL}/Channel-mac.dmg`;
 
 export default function Download() {
   return (
@@ -40,7 +83,7 @@ export default function Download() {
             </div>
             <h3>macOS</h3>
             <div className="dlv">Universal · macOS 14+</div>
-            <a className="btn btn-primary" href={`${RELEASE_BASE}/Channel-mac.dmg`} style={{ width: "100%" }}>
+            <a className="btn btn-primary" href={MAC_DMG_URL} style={{ width: "100%" }}>
               Download .dmg
             </a>
           </div>
@@ -53,7 +96,7 @@ export default function Download() {
             </div>
             <h3>Windows</h3>
             <div className="dlv">Windows 10 · 11</div>
-            <a className="btn btn-ghost" href={`${RELEASE_BASE}/Channel-Setup.exe`} style={{ width: "100%" }}>
+            <a className="btn btn-ghost" href={`${GH_RELEASE_BASE}/Channel-Setup.exe`} style={{ width: "100%" }}>
               Download .exe
             </a>
           </div>
@@ -76,13 +119,13 @@ export default function Download() {
             </div>
             <h3>Linux</h3>
             <div className="dlv">AppImage · .deb · .rpm</div>
-            <a className="btn btn-ghost" href={`${RELEASE_BASE}/Channel-linux.AppImage`} style={{ width: "100%" }}>
+            <a className="btn btn-ghost" href={`${GH_RELEASE_BASE}/Channel-linux.AppImage`} style={{ width: "100%" }}>
               Download AppImage
             </a>
             <div className="dl-alt">
-              <a href={`${RELEASE_BASE}/Channel-linux.deb`}>.deb</a>
+              <a href={`${GH_RELEASE_BASE}/Channel-linux.deb`}>.deb</a>
               {" · "}
-              <a href={`${RELEASE_BASE}/Channel-linux.rpm`}>.rpm</a>
+              <a href={`${GH_RELEASE_BASE}/Channel-linux.rpm`}>.rpm</a>
             </div>
           </div>
         </div>

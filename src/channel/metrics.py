@@ -100,3 +100,29 @@ async def record_followup_outcome(success: bool) -> None:
     """
     metric = "FollowupGenSuccesses" if success else "FollowupGenFailures"
     await emit_metric(metric)
+
+
+async def record_chat_delete_attachment_wipe_outcome(success: bool) -> None:
+    """Emit a CloudWatch counter for one chat-delete attachment-wipe cascade.
+
+    Counter-only — same cardinality-risk rationale as
+    :func:`record_memory_write_outcome`. ``success=False`` means at
+    least one S3 object or ATTACHMENT row deletion failed for the
+    cascade; partial-success cascades count as failures so the metric
+    can drive alarming. Per-actor / per-chat / per-attachment dimensions
+    are deliberately not accepted.
+    """
+    metric = "ChatDeleteAttachmentWipeSuccesses" if success else "ChatDeleteAttachmentWipeFailures"
+    await emit_metric(metric)
+
+
+async def record_tool_call_outcome(success: bool) -> None:
+    """Emit a CloudWatch counter for one tool-call attempt (epic #128).
+
+    Counter-only — same cardinality-risk rationale as
+    :func:`record_memory_write_outcome`. No per-tool or per-actor
+    dimensions. Per-tool failure breakdowns belong in structured logs,
+    which CloudWatch Logs Insights can query without dimension blowup.
+    """
+    metric = "ToolCallSuccesses" if success else "ToolCallFailures"
+    await emit_metric(metric)

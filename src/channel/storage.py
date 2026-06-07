@@ -15,6 +15,8 @@ production it returns the real boto3 ``Table`` resource.
 
 from __future__ import annotations
 
+import contextlib
+import logging
 import os
 import time
 import uuid
@@ -23,10 +25,21 @@ from typing import Any
 
 import boto3
 from boto3.dynamodb.conditions import Attr, Key
-from botocore.exceptions import ClientError
+from botocore.config import Config
+from botocore.exceptions import BotoCoreError, ClientError
 from pydantic import ValidationError
 
-from channel.models import Chat, Feedback, FeedbackKind, Message, MessageRole, Prefs
+from channel.models import (
+    Attachment,
+    Chat,
+    Feedback,
+    FeedbackKind,
+    Message,
+    MessageRole,
+    Prefs,
+)
+
+logger = logging.getLogger(__name__)
 
 _CHAT_INDEX_GSI = "ChatByIdIndex"
 _DEFAULT_TITLE = "New chat"
@@ -43,6 +56,25 @@ def _get_table() -> Any:  # pragma: no cover - tests replace this seam
     if endpoint:
         kwargs["endpoint_url"] = endpoint
     return boto3.resource("dynamodb", **kwargs).Table(table_name)
+
+
+def _get_s3_client() -> Any:
+    """Return a boto3 S3 client pinned to SigV4 (#196).
+
+    SSE-KMS PUTs ``REQUIRE`` SigV4 — S3 rejects SigV2-signed presigned URLs
+    with ``InvalidArgument: Requests specifying Server Side Encryption with
+    AWS KMS managed keys require AWS Signature Version 4``. The bucket
+    enforces SSE-KMS by default (per #173), so every presigned PUT we mint
+    must use SigV4. ``Config(signature_version="s3v4")`` applies that
+    pinning to every operation this client performs — presigned URLs,
+    HEAD checks, deletes, tagging.
+    """
+
+    return boto3.client(
+        "s3",
+        region_name=os.environ.get("AWS_DEFAULT_REGION", "us-east-1"),
+        config=Config(signature_version="s3v4"),
+    )
 
 
 def _chat_index_sk(created_at: str, chat_id: str) -> str:
@@ -581,3 +613,243 @@ def _message_from_item(item: dict[str, Any]) -> Message:
         created_at=item["created_at"],
         feedback=feedback,
     )
+
+
+# ----------------------------------------------------------------
+# Attachments (#174) — file attachments + vision (epic #109)
+# ----------------------------------------------------------------
+
+
+def _attachment_sk(att_id: str) -> str:
+    return f"ATTACHMENT#{att_id}"
+
+
+def _attachment_item(att: Attachment) -> dict[str, Any]:
+    """Serialise an Attachment to its DDB row shape.
+
+    ``referenced_at`` is dropped when None — keeps the item slim and
+    mirrors the put_message pattern of stripping null attrs.
+    """
+
+    item = {
+        "PK": f"USER#{att.user_id}",
+        "SK": _attachment_sk(att.id),
+        "id": att.id,
+        "user_id": att.user_id,
+        "name": att.name,
+        "mime": att.mime,
+        "size_bytes": att.size_bytes,
+        "s3_key": att.s3_key,
+        "s3_bucket": att.s3_bucket,
+        "checksum_sha256": att.checksum_sha256,
+        "created_at": att.created_at,
+        "referenced_at": att.referenced_at,
+    }
+    return {k: v for k, v in item.items() if v is not None}
+
+
+def _attachment_from_item(item: dict[str, Any]) -> Attachment:
+    return Attachment(
+        id=item["id"],
+        user_id=item["user_id"],
+        name=item["name"],
+        mime=item["mime"],
+        size_bytes=int(item["size_bytes"]),
+        s3_key=item["s3_key"],
+        s3_bucket=item["s3_bucket"],
+        checksum_sha256=item["checksum_sha256"],
+        created_at=item["created_at"],
+        referenced_at=item.get("referenced_at"),
+    )
+
+
+def put_attachment(att: Attachment) -> None:
+    """Persist the canonical ATTACHMENT row at PK=USER#{u}, SK=ATTACHMENT#{id}."""
+
+    _get_table().put_item(Item=_attachment_item(att))
+
+
+def get_attachment(*, user_id: str, att_id: str) -> Attachment | None:
+    """Look up an Attachment by (user_id, att_id). Returns None on miss."""
+
+    result = _get_table().get_item(Key={"PK": f"USER#{user_id}", "SK": _attachment_sk(att_id)})
+    item = result.get("Item")
+    if not item:
+        return None
+    return _attachment_from_item(item)
+
+
+def delete_attachment(*, user_id: str, att_id: str) -> None:
+    """Delete the ATTACHMENT row. Idempotent (no-op if already gone)."""
+
+    _get_table().delete_item(Key={"PK": f"USER#{user_id}", "SK": _attachment_sk(att_id)})
+
+
+def mark_attachment_referenced(*, user_id: str, att_id: str) -> None:
+    """Stamp ``referenced_at = now`` on the canonical ATTACHMENT row (#176).
+
+    Called from the send path AFTER ``get_attachment_bytes`` returns
+    success — the lifecycle rule on the attachments bucket targets
+    objects still tagged ``unreferenced=1``; this marker is the
+    DDB-side counterpart that ties an S3 object to at least one
+    message reference. Doesn't touch other attributes (name, mime,
+    etc.) — UpdateItem on a single attribute keeps the row's prior
+    state intact.
+
+    ``ConditionExpression="attribute_exists(PK)"`` guards the narrow
+    window where a concurrent chat-delete cascade could remove the
+    canonical row between the send-path ``get_attachment`` lookup and
+    this stamp — without the condition, DynamoDB silently creates a
+    ghost item with only ``PK``/``SK``/``referenced_at``. The race
+    loss is harmless (the attachment is gone), so we swallow the
+    conditional failure.
+    """
+
+    try:
+        _get_table().update_item(
+            Key={"PK": f"USER#{user_id}", "SK": _attachment_sk(att_id)},
+            UpdateExpression="SET referenced_at = :now",
+            ExpressionAttributeValues={":now": _now_iso()},
+            ConditionExpression="attribute_exists(PK)",
+        )
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            logger.warning(
+                "attachment.mark_referenced_lost_race user_id=%s att_id=%s",
+                user_id,
+                att_id,
+            )
+            return
+        raise
+
+
+def get_attachment_bytes(att: Attachment) -> tuple[bytes | None, str | None]:
+    """Fetch the raw S3 object bytes for ``att`` (#201).
+
+    Returns ``(bytes, None)`` on success and ``(None, "<reason>")`` on
+    any error. The dedicated ``"S3 object not found"`` reason for HTTP
+    404 lets the structured-failure-block builder in #176 surface a
+    user-actionable marker (re-upload) distinct from a generic
+    permissions / network failure.
+
+    Bedrock's Converse API supports ``s3Location`` references only for
+    select models — Claude Opus 4.6 rejects them with
+    ``ValidationException: This model doesn't support the s3Uri
+    field``. The send path therefore fetches each attachment's bytes
+    inline and passes ``{"bytes": ...}`` to Strands instead.
+
+    Memory footprint is bounded by the #173 hard caps
+    (5 × 20 MB = 100 MB max per turn), which fits inside the Lambda's
+    512 MB. A single ``GetObject`` per attachment also subsumes the
+    prior HEAD-verify roundtrip — 404 surfaces here just as it did from
+    HeadObject before.
+    """
+
+    try:
+        response = _get_s3_client().get_object(Bucket=att.s3_bucket, Key=att.s3_key)
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        if code in {"404", "NoSuchKey", "NotFound"}:
+            return None, "S3 object not found"
+        return None, f"S3 error: {code}" if code else "S3 error"
+
+    # StreamingBody wraps an HTTP connection. A mid-read ``ReadTimeoutError``
+    # / ``IncompleteReadError`` / socket failure must convert into the same
+    # ``(None, reason)`` failure shape so the SSE generator can render a
+    # labeled marker instead of 500-ing the stream. ``finally: close()``
+    # releases the pooled connection on both success and failure (a
+    # successful read leaves it benign-to-close anyway).
+    body = response["Body"]
+    try:
+        return body.read(), None
+    except (BotoCoreError, OSError) as exc:
+        return None, f"S3 read error: {type(exc).__name__}"
+    finally:
+        with contextlib.suppress(Exception):
+            body.close()
+
+
+def delete_chat_attachments(*, chat_id: str, user_id: str) -> tuple[int, int]:
+    """Cascade-delete the S3 objects + ATTACHMENT rows referenced by a chat.
+
+    Returns ``(deleted_count, failed_count)``. Per-attachment failures
+    are caught + logged so one bad attachment doesn't abort the rest
+    of the cascade. Total failure (e.g. DDB query for messages raises)
+    propagates to the caller — the chats API layer wraps the whole
+    cascade in try/except + emits a CloudWatch counter
+    (``ChatDeleteAttachmentWipeFailures``) per the chat-delete pattern.
+
+    Deduplicates: an attachment referenced by N messages in the chat
+    is deleted exactly once.
+
+    S3 deletion runs BEFORE the DDB row delete so a partial failure
+    leaves the canonical row in place — gives a future orphan-recovery
+    job something to work with.
+    """
+
+    table = _get_table()
+    s3 = _get_s3_client()
+    att_ids: set[str] = set()
+    last_evaluated_key: dict[str, Any] | None = None
+    while True:
+        kwargs: dict[str, Any] = {
+            "KeyConditionExpression": (
+                Key("PK").eq(f"CHAT#{chat_id}") & Key("SK").begins_with("MSG#")
+            ),
+            "ProjectionExpression": "attachments",
+        }
+        if last_evaluated_key:
+            kwargs["ExclusiveStartKey"] = last_evaluated_key
+        page = table.query(**kwargs)
+        for item in page.get("Items") or []:
+            for snap in item.get("attachments") or []:
+                if isinstance(snap, dict) and "id" in snap:
+                    att_ids.add(snap["id"])
+        last_evaluated_key = page.get("LastEvaluatedKey")
+        if not last_evaluated_key:
+            break
+
+    deleted = 0
+    failed = 0
+    for att_id in sorted(att_ids):
+        att = get_attachment(user_id=user_id, att_id=att_id)
+        if att is None:
+            logger.warning(
+                "attachment.cascade_missing_canonical chat_id=%s att_id=%s",
+                chat_id,
+                att_id,
+            )
+            failed += 1
+            continue
+        try:
+            s3.delete_object(Bucket=att.s3_bucket, Key=att.s3_key)
+        except ClientError as exc:
+            logger.warning(
+                "attachment.cascade_s3_delete_failed chat_id=%s att_id=%s",
+                chat_id,
+                att_id,
+                extra={
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                },
+                exc_info=True,
+            )
+            failed += 1
+            continue
+        try:
+            delete_attachment(user_id=user_id, att_id=att_id)
+        except ClientError as exc:
+            logger.warning(
+                "attachment.cascade_ddb_delete_failed chat_id=%s att_id=%s",
+                chat_id,
+                att_id,
+                extra={
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                },
+                exc_info=True,
+            )
+            failed += 1
+            continue
+        deleted += 1
+    return deleted, failed
