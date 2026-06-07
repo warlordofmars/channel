@@ -176,9 +176,7 @@ def test_sse_tool_started_shape():
 
 
 def test_sse_tool_started_truncates_args_preview_at_200():
-    raw = sse_tool_started(
-        tool_name="x", tool_use_id="t", args_preview="A" * 500
-    ).decode()
+    raw = sse_tool_started(tool_name="x", tool_use_id="t", args_preview="A" * 500).decode()
     payload = json.loads(raw.removeprefix("data: ").strip())
     assert len(payload["args_preview"]) == 200
     assert payload["args_preview"] == "A" * 200
@@ -223,4 +221,207 @@ def test_sse_tool_error_shape():
         "tool_use_id": "t1",
         "error_type": "chain_cap",
         "partial_result_count": 3,
+    }
+
+
+# ---------------------------------------------------------------------------
+# translate_event — Strands tool events
+# ---------------------------------------------------------------------------
+#
+# Strands' ``stream_async`` yields ``TypedEvent`` dict-subclasses (see
+# ``strands/types/_events.py`` in 1.41.0). Tool-related events appear at
+# the TOP LEVEL — not nested inside the ``event`` envelope that wraps
+# model stream chunks. The empirically-observed shapes are::
+#
+#   ToolUseStreamEvent  {"type": "tool_use_stream",
+#                        "delta": {"toolUse": {"input": "<chunk>"}},
+#                        "current_tool_use": {"toolUseId", "name", "input"}}
+#   ToolStreamEvent     {"type": "tool_stream",
+#                        "tool_stream_event": {"tool_use": {...},
+#                                              "data": <yield>}}
+#   ToolResultEvent     {"type": "tool_result",
+#                        "tool_result": {"toolUseId", "content": [...],
+#                                        "status": "success"|"error"}}
+#   ToolCancelEvent     {"tool_cancel_event": {"tool_use": {...},
+#                                              "message": "<why>"}}
+#   ToolInterruptEvent  {"tool_interrupt_event": {"tool_use": {...},
+#                                                 "interrupts": [...]}}
+
+
+def test_translate_tool_use_stream_returns_tool_started():
+    """The first ``tool_use_stream`` event for a given toolUseId carries
+    enough info (name + accumulating input) to surface ``tool_started``.
+    The dispatcher in chats.py dedupes per toolUseId."""
+
+    event = {
+        "type": "tool_use_stream",
+        "delta": {"toolUse": {"input": ""}},
+        "current_tool_use": {
+            "toolUseId": "tu-1",
+            "name": "current_time",
+            "input": {},
+        },
+    }
+    kind, payload = translate_event(event)
+    assert kind == "tool_started"
+    assert payload["tool_name"] == "current_time"
+    assert payload["tool_use_id"] == "tu-1"
+    # args_preview is a JSON-serialised view of current input (may be
+    # partial mid-stream — dispatcher handles dedup, so the last preview
+    # wins in practice).
+    assert payload["args_preview"] == "{}"
+
+
+def test_translate_tool_use_stream_serialises_input_dict():
+    event = {
+        "type": "tool_use_stream",
+        "delta": {"toolUse": {"input": '"UTC"'}},
+        "current_tool_use": {
+            "toolUseId": "tu-2",
+            "name": "current_time",
+            "input": {"timezone": "UTC"},
+        },
+    }
+    kind, payload = translate_event(event)
+    assert kind == "tool_started"
+    assert payload["args_preview"] == '{"timezone": "UTC"}'
+
+
+def test_translate_tool_use_stream_missing_current_tool_use_skips():
+    """Defensive: if Strands emits a malformed event with no
+    current_tool_use, fall through to ``skip`` rather than crash."""
+
+    event = {"type": "tool_use_stream", "delta": {"toolUse": {"input": "x"}}}
+    kind, payload = translate_event(event)
+    assert kind == "skip"
+    assert payload is None
+
+
+def test_translate_tool_stream_returns_tool_progress():
+    """``ToolStreamEvent`` carries arbitrary yields from inside a tool's
+    execution. Map non-empty string data to ``tool_progress``."""
+
+    event = {
+        "type": "tool_stream",
+        "tool_stream_event": {
+            "tool_use": {"toolUseId": "tu-3", "name": "search", "input": {}},
+            "data": "searching...",
+        },
+    }
+    kind, payload = translate_event(event)
+    assert kind == "tool_progress"
+    assert payload == {"tool_use_id": "tu-3", "status_text": "searching..."}
+
+
+def test_translate_tool_stream_non_string_data_skips():
+    """Tools can yield arbitrary objects (dicts, model events, etc.).
+    Only surface string yields as progress text to keep the SSE shape
+    bounded and predictable."""
+
+    event = {
+        "type": "tool_stream",
+        "tool_stream_event": {
+            "tool_use": {"toolUseId": "tu-3"},
+            "data": {"partial": 1},
+        },
+    }
+    kind, payload = translate_event(event)
+    assert kind == "skip"
+    assert payload is None
+
+
+def test_translate_tool_result_returns_tool_finished():
+    event = {
+        "type": "tool_result",
+        "tool_result": {
+            "toolUseId": "tu-4",
+            "status": "success",
+            "content": [{"text": "2026-06-07T12:00:00Z"}],
+        },
+    }
+    kind, payload = translate_event(event)
+    assert kind == "tool_finished"
+    assert payload["tool_use_id"] == "tu-4"
+    assert "2026-06-07" in payload["summary"]
+
+
+def test_translate_tool_result_concatenates_text_blocks():
+    event = {
+        "type": "tool_result",
+        "tool_result": {
+            "toolUseId": "tu-5",
+            "status": "success",
+            "content": [
+                {"text": "first "},
+                {"text": "second"},
+                {"json": {"ignored": True}},
+            ],
+        },
+    }
+    kind, payload = translate_event(event)
+    assert kind == "tool_finished"
+    assert payload["summary"] == "first second"
+
+
+def test_translate_tool_result_error_status_returns_tool_error():
+    """A ``ToolResultEvent`` with ``status=error`` is a tool-side failure;
+    surface it as ``tool_error`` so the SPA renders the failure UI."""
+
+    event = {
+        "type": "tool_result",
+        "tool_result": {
+            "toolUseId": "tu-6",
+            "status": "error",
+            "content": [{"text": "Boom"}],
+        },
+    }
+    kind, payload = translate_event(event)
+    assert kind == "tool_error"
+    assert payload == {
+        "tool_use_id": "tu-6",
+        "error_type": "tool_failed",
+        "partial_result_count": 0,
+    }
+
+
+def test_translate_tool_cancel_event_returns_tool_error():
+    event = {
+        "tool_cancel_event": {
+            "tool_use": {"toolUseId": "tu-7", "name": "current_time", "input": {}},
+            "message": "chain_cap",
+        }
+    }
+    kind, payload = translate_event(event)
+    assert kind == "tool_error"
+    assert payload == {
+        "tool_use_id": "tu-7",
+        "error_type": "chain_cap",
+        "partial_result_count": 0,
+    }
+
+
+def test_translate_tool_cancel_event_missing_message_defaults_cancelled():
+    event = {
+        "tool_cancel_event": {
+            "tool_use": {"toolUseId": "tu-8"},
+        }
+    }
+    kind, payload = translate_event(event)
+    assert kind == "tool_error"
+    assert payload["error_type"] == "cancelled"
+
+
+def test_translate_tool_interrupt_event_returns_tool_error():
+    event = {
+        "tool_interrupt_event": {
+            "tool_use": {"toolUseId": "tu-9"},
+            "interrupts": [object()],
+        }
+    }
+    kind, payload = translate_event(event)
+    assert kind == "tool_error"
+    assert payload == {
+        "tool_use_id": "tu-9",
+        "error_type": "interrupted",
+        "partial_result_count": 0,
     }

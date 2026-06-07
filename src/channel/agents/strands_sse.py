@@ -25,9 +25,102 @@ def translate_event(event: dict[str, Any]) -> tuple[str, Any]:
     * ``"stop"`` — turn boundary; ``payload`` is ``{"stop_reason": str}``.
     * ``"usage"`` — token-count metadata; ``payload`` is
       ``{"input_tokens": int, "output_tokens": int}``.
+    * ``"tool_started"`` — model has begun emitting a tool call; payload
+      is ``{"tool_name": str, "tool_use_id": str, "args_preview": str}``.
+      Sourced from Strands' ``ToolUseStreamEvent``. The dispatcher in
+      ``chats.py`` dedupes per ``tool_use_id`` because this event fires
+      once per input-token, not once per tool call.
+    * ``"tool_progress"`` — string yield from inside an executing tool;
+      payload is ``{"tool_use_id": str, "status_text": str}``. Sourced
+      from Strands' ``ToolStreamEvent`` when its ``data`` is a string.
+    * ``"tool_finished"`` — successful tool completion; payload is
+      ``{"tool_use_id": str, "summary": str}``. Sourced from Strands'
+      ``ToolResultEvent`` with ``status="success"``. The summary is the
+      concatenation of all ``text`` blocks in the tool result content.
+    * ``"tool_error"`` — tool failure / cancellation / interrupt; payload
+      is ``{"tool_use_id": str, "error_type": str,
+      "partial_result_count": int}``. Sourced from ``ToolResultEvent``
+      with ``status="error"``, ``ToolCancelEvent``, or
+      ``ToolInterruptEvent``.
     * ``"skip"`` — uninteresting event (content block start, telemetry,
       etc.); ``payload`` is ``None``.
     """
+
+    # Tool events are emitted at the TOP LEVEL of the TypedEvent dict
+    # (see ``strands/types/_events.py``) — not nested inside the
+    # ``event`` envelope. Dispatch on the ``type`` discriminator first,
+    # then the cancel/interrupt keys.
+    event_type = event.get("type")
+
+    if event_type == "tool_use_stream":
+        current = event.get("current_tool_use") or {}
+        tool_use_id = current.get("toolUseId")
+        if tool_use_id:
+            return (
+                "tool_started",
+                {
+                    "tool_name": current.get("name", ""),
+                    "tool_use_id": tool_use_id,
+                    "args_preview": json.dumps(current.get("input", {})),
+                },
+            )
+
+    if event_type == "tool_stream":
+        inner_stream = event.get("tool_stream_event") or {}
+        data = inner_stream.get("data")
+        tool_use = inner_stream.get("tool_use") or {}
+        if isinstance(data, str) and data:
+            return (
+                "tool_progress",
+                {
+                    "tool_use_id": tool_use.get("toolUseId", ""),
+                    "status_text": data,
+                },
+            )
+
+    if event_type == "tool_result":
+        result = event.get("tool_result") or {}
+        tool_use_id = result.get("toolUseId", "")
+        status = result.get("status", "success")
+        if status == "error":
+            return (
+                "tool_error",
+                {
+                    "tool_use_id": tool_use_id,
+                    "error_type": "tool_failed",
+                    "partial_result_count": 0,
+                },
+            )
+        summary = "".join(
+            block.get("text", "")
+            for block in result.get("content", [])
+            if isinstance(block, dict) and "text" in block
+        )
+        return ("tool_finished", {"tool_use_id": tool_use_id, "summary": summary})
+
+    if "tool_cancel_event" in event:
+        cancel = event["tool_cancel_event"]
+        tool_use = cancel.get("tool_use") or {}
+        return (
+            "tool_error",
+            {
+                "tool_use_id": tool_use.get("toolUseId", ""),
+                "error_type": cancel.get("message") or "cancelled",
+                "partial_result_count": 0,
+            },
+        )
+
+    if "tool_interrupt_event" in event:
+        interrupt = event["tool_interrupt_event"]
+        tool_use = interrupt.get("tool_use") or {}
+        return (
+            "tool_error",
+            {
+                "tool_use_id": tool_use.get("toolUseId", ""),
+                "error_type": "interrupted",
+                "partial_result_count": 0,
+            },
+        )
 
     # Strands emits each text chunk twice: once as a top-level ``data``
     # shorthand and once inside the canonical ``event.contentBlockDelta``
@@ -188,9 +281,7 @@ def sse_tool_finished(*, tool_use_id: str, summary: str) -> bytes:
     )
 
 
-def sse_tool_error(
-    *, tool_use_id: str, error_type: str, partial_result_count: int
-) -> bytes:
+def sse_tool_error(*, tool_use_id: str, error_type: str, partial_result_count: int) -> bytes:
     """Emit a ``tool_error`` SSE event (epic #128 / #181).
 
     ``error_type`` is a free-form short string the SPA can branch on:
