@@ -528,6 +528,12 @@ def dev(ctx, seed=False):
         # Always enable auth bypass in local dev — the bypass only activates when
         # ?test_email= is present, so normal browser flows are unaffected.
         "STARTER_BYPASS_GOOGLE_AUTH": "1",
+        # Desktop Electron OAuth short-circuit: lets `inv desktop-dev` skip
+        # Google entirely and mint a synthetic JWT for this email when a
+        # desktop_callback URL is supplied. Local dev only — the deployed
+        # dev stack deliberately does NOT set this (only STARTER_BYPASS_
+        # GOOGLE_AUTH), so real desktop sign-in on dev goes through Google.
+        "STARTER_DESKTOP_DEV_EMAIL": "dev@channel.local",
         # Phase 7c: mount /api/_debug/* so the Playwright e2e can verify
         # AgentCore writes. Prod stacks do NOT set this — see
         # tests/unit/test_channel_stack.py for the guard.
