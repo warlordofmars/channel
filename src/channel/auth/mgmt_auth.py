@@ -140,13 +140,21 @@ async def mgmt_login(request: Request) -> RedirectResponse:
         if validated is None or not caller_state or not _DESKTOP_STATE_RE.match(caller_state):
             raise HTTPException(status_code=400, detail="Invalid desktop_callback or state")
         # Desktop bypass — mint a synthetic JWT and redirect to the loopback
-        # without involving Google or DynamoDB. Only fires in non-prod (the
-        # bypass env var is off in production). Saves devs from configuring
-        # a separate Google OAuth client for local Electron iteration.
-        if _BYPASS:
+        # without involving Google or DynamoDB. Saves devs from configuring
+        # a separate Google OAuth flow for local Electron iteration.
+        #
+        # Requires BOTH _BYPASS (= STARTER_BYPASS_GOOGLE_AUTH=1) AND
+        # STARTER_DESKTOP_DEV_EMAIL explicitly set. Deployed dev sets only
+        # _BYPASS (for the ?test_email= e2e shortcut) and NOT dev_email, so
+        # real desktop sign-in on deployed dev still goes through Google.
+        # Only `inv desktop-dev` (which sets both) gets the short-circuit.
+        # Without the dev_email gate, every desktop sign-in on the deployed
+        # dev environment would silently auto-log-in as the placeholder
+        # account — the bug fixed here.
+        dev_email = os.environ.get("STARTER_DESKTOP_DEV_EMAIL")
+        if _BYPASS and dev_email:
             from urllib.parse import urlencode
 
-            dev_email = os.environ.get("STARTER_DESKTOP_DEV_EMAIL", "dev@channel.local")
             user = _make_user(dev_email, dev_email.split("@")[0])
             token = issue_mgmt_jwt(user)
             qs = urlencode({"token": token, "state": caller_state})
