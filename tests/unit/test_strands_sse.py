@@ -440,6 +440,28 @@ def test_translate_tool_result_error_falls_back_when_content_empty():
     assert payload["error_type"] == "tool_failed"
 
 
+def test_translate_tool_result_success_missing_tool_use_id_skips():
+    """tool_result success path without toolUseId yields skip — SPA can't
+    correlate a step-row update without the id."""
+
+    event = {
+        "type": "tool_result",
+        "tool_result": {"status": "success", "content": [{"text": "ok"}]},
+    }
+    assert translate_event(event) == ("skip", None)
+
+
+def test_translate_tool_result_error_missing_tool_use_id_skips():
+    """tool_result error path without toolUseId yields skip — same
+    correlation requirement as the success path."""
+
+    event = {
+        "type": "tool_result",
+        "tool_result": {"status": "error", "content": [{"text": "chain_cap"}]},
+    }
+    assert translate_event(event) == ("skip", None)
+
+
 def test_translate_tool_cancel_event_returns_tool_error():
     event = {
         "tool_cancel_event": {

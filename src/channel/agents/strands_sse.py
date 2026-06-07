@@ -85,6 +85,11 @@ def translate_event(event: dict[str, Any]) -> tuple[str, Any]:
     if event_type == "tool_result":
         result = event.get("tool_result") or {}
         tool_use_id = result.get("toolUseId", "")
+        # Same uncorrelatable-event guard as ``tool_progress`` / cancel /
+        # interrupt: without a ``tool_use_id`` the SPA can't attach the
+        # ``tool_finished`` / ``tool_error`` payload to any step row.
+        if not tool_use_id:
+            return ("skip", None)
         status = result.get("status", "success")
         # Concatenate all ``text`` blocks in the content list. Strands
         # wraps a tool's return into ``content`` for the success path and
