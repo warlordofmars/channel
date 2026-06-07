@@ -232,8 +232,11 @@ class AgentCoreMemoryHook:
 
         Called by ``ToolCallTelemetryHook`` after each tool call (epic
         #128 decision 6). One event per tool call, not per chain. The
-        recall hook (``recall.py``) tags ``[meta]``-prefixed events and
-        renders them differently in the system-prompt addendum.
+        ``[meta] `` prefix tags the event as a tool-use META fact — a
+        recognizable marker for future filtering or condensing in the
+        recall hook or other consumers. The current recall hook does
+        not special-case the prefix; it reads ``[meta]``-tagged events
+        as normal conversational text.
 
         **Non-blocking.** Mirrors ``_on_after_invocation`` — boto3's
         ``create_event`` is sync I/O; calling it directly from this

@@ -230,9 +230,13 @@ class ToolCallTelemetryHook:
     3. **Fire a synthetic ``[meta] used <tool>`` ASSISTANT message** via
        the injected ``memory_writer`` callable (Task 8 wires this to
        ``AgentCoreMemoryHook.write_meta_event``). The recall hook
-       (``recall.py``) reads these META events back into future system
-       prompts so the model can avoid re-trying a tool that just failed
-       — hence the ``used`` / ``tried`` verb split.
+       (``recall.py``) reads all prior events back into future system
+       prompts; it does not currently special-case the ``[meta]``
+       prefix, so META events surface as normal conversational text.
+       The ``used`` / ``tried`` verb split keeps the failure-vs-success
+       signal legible in that raw text — and leaves room for a future
+       recall-hook enhancement to filter or condense META events
+       separately.
 
     **Sync callback, async EMF.** Strands' ``AfterToolCallEvent``
     callback signature is sync (the ``HookEvent`` machinery doesn't
