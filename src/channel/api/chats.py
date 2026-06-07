@@ -34,9 +34,14 @@ from channel.agents.strands_sse import (
     sse_done,
     sse_follow_ups_suggested,
     sse_title_suggested,
+    sse_tool_error,
+    sse_tool_finished,
+    sse_tool_progress,
+    sse_tool_started,
     sse_user_persisted,
     translate_event,
 )
+from channel.agents.tool_hooks import clear_cancel_signal, set_cancel_signal
 from channel.agents.tools.clock import current_time
 from channel.api._auth import require_mgmt_user
 from channel.metrics import (
@@ -590,6 +595,10 @@ async def _stream_bedrock_reply(
     stop_reason = "end_turn"
     input_tokens = 0
     output_tokens = 0
+    # Dedup tool_started — Strands' ``ToolUseStreamEvent`` fires once
+    # per input-token while the model is still emitting the call. The
+    # SPA only wants a single step row per ``tool_use_id``.
+    emitted_tool_starts: set[str] = set()
 
     # When attachments are present, Strands gets the labeled content-block
     # list with the user's text appended; otherwise the bare string keeps
@@ -598,16 +607,40 @@ async def _stream_bedrock_reply(
         [*content_blocks, {"text": user_message}] if content_blocks else user_message
     )
 
-    async for event in agent.stream_async(user_payload):
-        kind, payload = translate_event(event)
-        if kind == "delta":
-            accumulated.append(payload)
-            yield sse_delta(payload)
-        elif kind == "stop":
-            stop_reason = payload["stop_reason"]
-        elif kind == "usage":
-            input_tokens = payload["input_tokens"]
-            output_tokens = payload["output_tokens"]
+    # Cancel-signal lifecycle (#181 PR-2): if the SSE client disconnects
+    # mid-stream FastAPI raises ``asyncio.CancelledError`` (or closes the
+    # generator with ``GeneratorExit``) inside this loop. We surface that
+    # by flipping the per-chat cancel signal; ``ToolCallGuardHook`` reads
+    # it on the next ``BeforeToolCallEvent`` and aborts the chain. The
+    # ``finally`` block always clears the signal so the next turn for the
+    # same chat doesn't see stale state.
+    try:
+        async for event in agent.stream_async(user_payload):
+            kind, payload = translate_event(event)
+            if kind == "delta":
+                accumulated.append(payload)
+                yield sse_delta(payload)
+            elif kind == "stop":
+                stop_reason = payload["stop_reason"]
+            elif kind == "usage":
+                input_tokens = payload["input_tokens"]
+                output_tokens = payload["output_tokens"]
+            elif kind == "tool_started":
+                tool_use_id = payload["tool_use_id"]
+                if tool_use_id and tool_use_id not in emitted_tool_starts:
+                    emitted_tool_starts.add(tool_use_id)
+                    yield sse_tool_started(**payload)
+            elif kind == "tool_progress":
+                yield sse_tool_progress(**payload)
+            elif kind == "tool_finished":
+                yield sse_tool_finished(**payload)
+            elif kind == "tool_error":
+                yield sse_tool_error(**payload)
+    except (asyncio.CancelledError, GeneratorExit):
+        set_cancel_signal(chat.chat_id)
+        raise
+    finally:
+        clear_cancel_signal(chat.chat_id)
 
     assistant_text = "".join(accumulated)
     state["assistant_text"] = assistant_text
