@@ -257,13 +257,13 @@ function ToolStepList({ steps }) {
           ))}
         </ol>
       ) : (
-        <ol className="tool-steps-compact">
+        <ul className="tool-steps-compact">
           {steps.map((s) => (
             <li key={s.toolUseId}>
               {s.toolName} — {s.status}
             </li>
           ))}
-        </ol>
+        </ul>
       )}
     </div>
   );
