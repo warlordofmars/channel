@@ -25,7 +25,6 @@ from typing import Any
 
 import httpx
 from strands import tool
-from strands_tools.exa import exa_search
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +40,22 @@ _NUM_RESULTS_MAX = 10
 # phases (index lookup, result assembly) are fast and don't need a
 # separate budget here.
 _EXA_TIMEOUT_SEC = 30
+
+
+@functools.lru_cache(maxsize=1)
+def _get_exa_search():  # type: ignore[no-untyped-def]
+    """Lazy-load ``strands_tools.exa.exa_search`` on first invocation.
+
+    The Exa SDK pulls in aiohttp, Rich, Console, Panel, etc. — a
+    substantial transitive dependency tree. With
+    ``STARTER_WEB_SEARCH_ENABLED=1`` in all envs (the env var is a
+    kill switch, not a feature flag), this module always loads at
+    cold start. Deferring the Exa import until the model actually
+    calls ``web_search`` keeps those deps off the cold-start path
+    for turns that don't trigger a search."""
+    from strands_tools.exa import exa_search  # noqa: PLC0415
+
+    return exa_search
 
 
 @functools.lru_cache(maxsize=1)
@@ -97,6 +112,7 @@ def web_search(
         logger.warning("web_search.config_error %r", exc)
         return {"status": "error", "error_type": "missing_key"}
     clamped = max(_NUM_RESULTS_MIN, min(num_results, _NUM_RESULTS_MAX))
+    exa_search = _get_exa_search()
     try:
         return exa_search(
             query=query,
@@ -109,7 +125,7 @@ def web_search(
             livecrawl_timeout=_EXA_TIMEOUT_SEC,
         )
     except httpx.ReadTimeout:
-        logger.warning("web_search.timeout query=%r", query[:80])
+        logger.warning("web_search.timeout query_len=%d", len(query))
         return {"status": "error", "error_type": "timeout"}
     except httpx.HTTPStatusError as exc:
         code = exc.response.status_code
@@ -119,5 +135,5 @@ def web_search(
             error_type = "upstream_5xx"
         else:
             error_type = "bad_request"
-        logger.warning("web_search.http_error status=%s query=%r", code, query[:80])
+        logger.warning("web_search.http_error status=%s query_len=%d", code, len(query))
         return {"status": "error", "error_type": error_type}
