@@ -267,8 +267,10 @@ def test_translate_tool_use_stream_returns_tool_started():
     assert payload["tool_name"] == "current_time"
     assert payload["tool_use_id"] == "tu-1"
     # args_preview is a JSON-serialised view of current input (may be
-    # partial mid-stream — dispatcher handles dedup, so the last preview
-    # wins in practice).
+    # partial mid-stream — dispatcher in chats.py dedupes by adding
+    # tool_use_id to ``emitted_tool_starts`` before emitting, so the
+    # FIRST preview wins; subsequent tool_use_stream events for the same
+    # toolUseId are dropped before they reach the SSE wire).
     assert payload["args_preview"] == "{}"
 
 
@@ -330,6 +332,23 @@ def test_translate_tool_stream_non_string_data_skips():
     assert payload is None
 
 
+def test_translate_tool_stream_missing_tool_use_id_skips():
+    """An uncorrelatable ``tool_progress`` payload (no ``toolUseId``)
+    can't be attached to any SPA step row. Drop the event rather than
+    emit a malformed payload."""
+
+    event = {
+        "type": "tool_stream",
+        "tool_stream_event": {
+            "tool_use": {},
+            "data": "searching...",
+        },
+    }
+    kind, payload = translate_event(event)
+    assert kind == "skip"
+    assert payload is None
+
+
 def test_translate_tool_result_returns_tool_finished():
     event = {
         "type": "tool_result",
@@ -365,7 +384,9 @@ def test_translate_tool_result_concatenates_text_blocks():
 
 def test_translate_tool_result_error_status_returns_tool_error():
     """A ``ToolResultEvent`` with ``status=error`` is a tool-side failure;
-    surface it as ``tool_error`` so the SPA renders the failure UI."""
+    surface it as ``tool_error`` so the SPA renders the failure UI. The
+    text content is propagated as ``error_type`` so reason codes set by
+    ``ToolCallGuardHook`` via ``event.cancel_tool`` reach the SPA."""
 
     event = {
         "type": "tool_result",
@@ -379,9 +400,44 @@ def test_translate_tool_result_error_status_returns_tool_error():
     assert kind == "tool_error"
     assert payload == {
         "tool_use_id": "tu-6",
-        "error_type": "tool_failed",
+        "error_type": "Boom",
         "partial_result_count": 0,
     }
+
+
+def test_translate_tool_result_error_preserves_reason_string():
+    """When ToolCallGuardHook sets event.cancel_tool = 'chain_cap',
+    Strands wraps the reason into ToolResult.content as text. The
+    translator MUST surface that string as error_type so the SPA can
+    render the cap-reached affordance distinctly (vs a generic
+    upstream_5xx). Locks the cross-PR contract with PR-1's hook."""
+
+    event = {
+        "type": "tool_result",
+        "tool_result": {
+            "toolUseId": "tu-1",
+            "status": "error",
+            "content": [{"text": "chain_cap"}],
+        },
+    }
+    kind, payload = translate_event(event)
+    assert kind == "tool_error"
+    assert payload["error_type"] == "chain_cap"
+    assert payload["tool_use_id"] == "tu-1"
+
+
+def test_translate_tool_result_error_falls_back_when_content_empty():
+    """If the tool result has status=error but no text content (rare —
+    e.g., a tool exception path that didn't yield a reason), surface
+    error_type='tool_failed' as a defensive default."""
+
+    event = {
+        "type": "tool_result",
+        "tool_result": {"toolUseId": "tu-1", "status": "error", "content": []},
+    }
+    kind, payload = translate_event(event)
+    assert kind == "tool_error"
+    assert payload["error_type"] == "tool_failed"
 
 
 def test_translate_tool_cancel_event_returns_tool_error():
@@ -411,6 +467,17 @@ def test_translate_tool_cancel_event_missing_message_defaults_cancelled():
     assert payload["error_type"] == "cancelled"
 
 
+def test_translate_tool_cancel_event_missing_tool_use_id_skips():
+    """Cancel events without a ``toolUseId`` produce an uncorrelatable
+    SSE payload — the SPA can't match it to a step row. Skip rather
+    than emit garbage."""
+
+    event = {"tool_cancel_event": {"tool_use": {}, "message": "chain_cap"}}
+    kind, payload = translate_event(event)
+    assert kind == "skip"
+    assert payload is None
+
+
 def test_translate_tool_interrupt_event_returns_tool_error():
     event = {
         "tool_interrupt_event": {
@@ -425,3 +492,12 @@ def test_translate_tool_interrupt_event_returns_tool_error():
         "error_type": "interrupted",
         "partial_result_count": 0,
     }
+
+
+def test_translate_tool_interrupt_event_missing_tool_use_id_skips():
+    """Same uncorrelatable-event guard for interrupts as for cancels."""
+
+    event = {"tool_interrupt_event": {"tool_use": {}, "interrupts": [object()]}}
+    kind, payload = translate_event(event)
+    assert kind == "skip"
+    assert payload is None

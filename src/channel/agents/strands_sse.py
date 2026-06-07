@@ -69,11 +69,15 @@ def translate_event(event: dict[str, Any]) -> tuple[str, Any]:
         inner_stream = event.get("tool_stream_event") or {}
         data = inner_stream.get("data")
         tool_use = inner_stream.get("tool_use") or {}
-        if isinstance(data, str) and data:
+        tool_use_id = tool_use.get("toolUseId", "")
+        # Skip uncorrelatable progress: the SPA keys step rows on
+        # ``tool_use_id``, so an empty id produces a payload it can't
+        # attach to any step.
+        if isinstance(data, str) and data and tool_use_id:
             return (
                 "tool_progress",
                 {
-                    "tool_use_id": tool_use.get("toolUseId", ""),
+                    "tool_use_id": tool_use_id,
                     "status_text": data,
                 },
             )
@@ -82,29 +86,45 @@ def translate_event(event: dict[str, Any]) -> tuple[str, Any]:
         result = event.get("tool_result") or {}
         tool_use_id = result.get("toolUseId", "")
         status = result.get("status", "success")
-        if status == "error":
-            return (
-                "tool_error",
-                {
-                    "tool_use_id": tool_use_id,
-                    "error_type": "tool_failed",
-                    "partial_result_count": 0,
-                },
-            )
+        # Concatenate all ``text`` blocks in the content list. Strands
+        # wraps a tool's return into ``content`` for the success path and
+        # the cancel-reason string from ``BeforeToolCallEvent.cancel_tool``
+        # into the same shape for the error path (see
+        # ``strands/tools/executors/_executor.py`` — the cancel branch
+        # builds ``{"content": [{"text": cancel_message}]}``). Surfacing
+        # that string as ``error_type`` is how ``ToolCallGuardHook``'s
+        # reason codes (``chain_cap`` / ``cancelled`` / ``wall_clock``)
+        # reach the SPA so it can render the right affordance.
         summary = "".join(
             block.get("text", "")
             for block in result.get("content", [])
             if isinstance(block, dict) and "text" in block
         )
+        if status == "error":
+            error_type = summary.strip() or "tool_failed"
+            return (
+                "tool_error",
+                {
+                    "tool_use_id": tool_use_id,
+                    "error_type": error_type[:_ARGS_PREVIEW_MAX],
+                    "partial_result_count": 0,
+                },
+            )
         return ("tool_finished", {"tool_use_id": tool_use_id, "summary": summary})
 
     if "tool_cancel_event" in event:
         cancel = event["tool_cancel_event"]
         tool_use = cancel.get("tool_use") or {}
+        tool_use_id = tool_use.get("toolUseId", "")
+        # Same uncorrelatable-event guard as ``tool_progress``: a cancel
+        # SSE payload without a ``tool_use_id`` can't be attached to any
+        # step row in the SPA.
+        if not tool_use_id:
+            return ("skip", None)
         return (
             "tool_error",
             {
-                "tool_use_id": tool_use.get("toolUseId", ""),
+                "tool_use_id": tool_use_id,
                 "error_type": cancel.get("message") or "cancelled",
                 "partial_result_count": 0,
             },
@@ -113,10 +133,13 @@ def translate_event(event: dict[str, Any]) -> tuple[str, Any]:
     if "tool_interrupt_event" in event:
         interrupt = event["tool_interrupt_event"]
         tool_use = interrupt.get("tool_use") or {}
+        tool_use_id = tool_use.get("toolUseId", "")
+        if not tool_use_id:
+            return ("skip", None)
         return (
             "tool_error",
             {
-                "tool_use_id": tool_use.get("toolUseId", ""),
+                "tool_use_id": tool_use_id,
                 "error_type": "interrupted",
                 "partial_result_count": 0,
             },
