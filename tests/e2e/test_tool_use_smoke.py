@@ -24,6 +24,7 @@ Run:
 
 from __future__ import annotations
 
+import contextlib
 import html as html_lib
 import json
 import os
@@ -86,6 +87,19 @@ def _create_chat(api_url: str, jwt: str, *, title: str) -> str:
     )
     resp.raise_for_status()
     return resp.json()["chat_id"]
+
+
+def _delete_chat(api_url: str, jwt: str, chat_id: str) -> None:
+    """Best-effort ``DELETE /api/chats/{chat_id}``. Swallows network /
+    HTTP errors so cleanup never masks a real test failure or leaves the
+    test hanging on a deployed-env hiccup. Mirrors the suppress-on-cleanup
+    pattern in ``test_memory_writes.py``."""
+    with contextlib.suppress(httpx.HTTPError):  # pragma: no cover — cleanup only
+        httpx.delete(
+            f"{api_url}/api/chats/{chat_id}",
+            headers={"Authorization": f"Bearer {jwt}"},
+            timeout=10.0,
+        )
 
 
 def _stream_messages(
@@ -155,47 +169,53 @@ def test_current_time_round_trip() -> None:
     jwt = _mint_jwt_via_bypass(api_url, email)
     chat_id = _create_chat(api_url, jwt, title=f"chassis-smoke-{tag}")
 
-    events = _stream_messages(api_url, jwt, chat_id, "what time is it?")
+    try:
+        events = _stream_messages(api_url, jwt, chat_id, "what time is it?")
 
-    started = [e for e in events if e.get("type") == "tool_started"]
-    finished = [e for e in events if e.get("type") == "tool_finished"]
-    deltas = [e for e in events if e.get("type") == "delta"]
+        started = [e for e in events if e.get("type") == "tool_started"]
+        finished = [e for e in events if e.get("type") == "tool_finished"]
+        deltas = [e for e in events if e.get("type") == "delta"]
 
-    # 1. A ``current_time`` tool was started.
-    current_time_starts = [e for e in started if e.get("tool_name") == "current_time"]
-    assert current_time_starts, (
-        f"Expected at least one tool_started for current_time; got tool_started"
-        f" tool_names={[e.get('tool_name') for e in started]!r};"
-        f" all event types={[e.get('type') for e in events]!r}"
-    )
+        # 1. A ``current_time`` tool was started.
+        current_time_starts = [e for e in started if e.get("tool_name") == "current_time"]
+        assert current_time_starts, (
+            f"Expected at least one tool_started for current_time; got tool_started"
+            f" tool_names={[e.get('tool_name') for e in started]!r};"
+            f" all event types={[e.get('type') for e in events]!r}"
+        )
 
-    # 2. The matching ``tool_finished`` event arrived with ``summary='completed'``.
-    started_ids = {e["tool_use_id"] for e in current_time_starts}
-    finished_ids = {e["tool_use_id"] for e in finished}
-    matched = started_ids & finished_ids
-    assert matched, (
-        f"current_time tool_use_id from started ({started_ids}) not found in "
-        f"finished events ({finished_ids})"
-    )
-    finished_for_clock = [e for e in finished if e["tool_use_id"] in matched]
-    assert finished_for_clock[0].get("summary") == "completed", (
-        "Expected summary='completed' (PR-2 narrowed contract); got "
-        f"{finished_for_clock[0].get('summary')!r}"
-    )
+        # 2. The matching ``tool_finished`` event arrived with ``summary='completed'``.
+        started_ids = {e["tool_use_id"] for e in current_time_starts}
+        finished_ids = {e["tool_use_id"] for e in finished}
+        matched = started_ids & finished_ids
+        assert matched, (
+            f"current_time tool_use_id from started ({started_ids}) not found in "
+            f"finished events ({finished_ids})"
+        )
+        finished_for_clock = [e for e in finished if e["tool_use_id"] in matched]
+        assert finished_for_clock[0].get("summary") == "completed", (
+            "Expected summary='completed' (PR-2 narrowed contract); got "
+            f"{finished_for_clock[0].get('summary')!r}"
+        )
 
-    # 3. The model's reply text contains a time reference — proof the
-    #    tool result reached the model. We accept any of: an ISO-8601
-    #    UTC timestamp (the tool returns this), a weekday name, or an
-    #    HH:MM clock string. Any one is sufficient sanity-check
-    #    evidence that the model incorporated the tool output.
-    reply_text = "".join(e.get("text", "") for e in deltas)
-    has_iso = re.search(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", reply_text)
-    has_weekday = re.search(
-        r"\b(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\b",
-        reply_text,
-        re.IGNORECASE,
-    )
-    has_clock = re.search(r"\b\d{1,2}:\d{2}\b", reply_text)
-    assert has_iso or has_weekday or has_clock, (
-        f"Expected a time reference in model reply; got: {reply_text[:300]!r}"
-    )
+        # 3. The model's reply text contains a time reference — proof the
+        #    tool result reached the model. We accept any of: an ISO-8601
+        #    UTC timestamp (the tool returns this), a weekday name, or an
+        #    HH:MM clock string. Any one is sufficient sanity-check
+        #    evidence that the model incorporated the tool output.
+        reply_text = "".join(e.get("text", "") for e in deltas)
+        has_iso = re.search(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", reply_text)
+        has_weekday = re.search(
+            r"\b(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\b",
+            reply_text,
+            re.IGNORECASE,
+        )
+        has_clock = re.search(r"\b\d{1,2}:\d{2}\b", reply_text)
+        assert has_iso or has_weekday or has_clock, (
+            f"Expected a time reference in model reply; got: {reply_text[:300]!r}"
+        )
+    finally:
+        # Best-effort cleanup so repeated dev-env runs don't accumulate
+        # chassis-smoke chats. Failure here is suppressed so it can't
+        # mask a real assertion failure above.
+        _delete_chat(api_url, jwt, chat_id)
