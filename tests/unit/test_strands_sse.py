@@ -8,6 +8,10 @@ import json
 from channel.agents.strands_sse import (
     sse_delta,
     sse_done,
+    sse_tool_error,
+    sse_tool_finished,
+    sse_tool_progress,
+    sse_tool_started,
     sse_user_persisted,
     translate_event,
 )
@@ -148,4 +152,75 @@ def test_sse_attachment_error_emits_id_filename_and_reason():
         "attachment_id": "att-1",
         "filename": "spec.pdf",
         "reason": "S3 object not found",
+    }
+
+
+def test_sse_tool_started_shape():
+    """Epic #128 / #181 — ``tool_started`` marks the start of one tool
+    call inside an assistant turn. The SPA appends a collapsible step
+    row to the active message."""
+
+    raw = sse_tool_started(
+        tool_name="current_time",
+        tool_use_id="tu-1",
+        args_preview="(no args)",
+    ).decode()
+    assert raw.startswith("data: ")
+    payload = json.loads(raw.removeprefix("data: ").strip())
+    assert payload == {
+        "type": "tool_started",
+        "tool_name": "current_time",
+        "tool_use_id": "tu-1",
+        "args_preview": "(no args)",
+    }
+
+
+def test_sse_tool_started_truncates_args_preview_at_200():
+    raw = sse_tool_started(
+        tool_name="x", tool_use_id="t", args_preview="A" * 500
+    ).decode()
+    payload = json.loads(raw.removeprefix("data: ").strip())
+    assert len(payload["args_preview"]) == 200
+    assert payload["args_preview"] == "A" * 200
+
+
+def test_sse_tool_progress_shape():
+    raw = sse_tool_progress(tool_use_id="t1", status_text="searching...").decode()
+    payload = json.loads(raw.removeprefix("data: ").strip())
+    assert payload == {
+        "type": "tool_progress",
+        "tool_use_id": "t1",
+        "status_text": "searching...",
+    }
+
+
+def test_sse_tool_finished_shape():
+    raw = sse_tool_finished(tool_use_id="t1", summary="3 results").decode()
+    payload = json.loads(raw.removeprefix("data: ").strip())
+    assert payload == {
+        "type": "tool_finished",
+        "tool_use_id": "t1",
+        "summary": "3 results",
+    }
+
+
+def test_sse_tool_finished_truncates_summary_at_500():
+    raw = sse_tool_finished(tool_use_id="t1", summary="X" * 1000).decode()
+    payload = json.loads(raw.removeprefix("data: ").strip())
+    assert len(payload["summary"]) == 500
+    assert payload["summary"] == "X" * 500
+
+
+def test_sse_tool_error_shape():
+    raw = sse_tool_error(
+        tool_use_id="t1",
+        error_type="chain_cap",
+        partial_result_count=3,
+    ).decode()
+    payload = json.loads(raw.removeprefix("data: ").strip())
+    assert payload == {
+        "type": "tool_error",
+        "tool_use_id": "t1",
+        "error_type": "chain_cap",
+        "partial_result_count": 3,
     }

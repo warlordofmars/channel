@@ -135,3 +135,76 @@ def sse_done(
             "stop_reason": stop_reason,
         }
     )
+
+
+_ARGS_PREVIEW_MAX = 200
+_SUMMARY_MAX = 500
+
+
+def sse_tool_started(*, tool_name: str, tool_use_id: str, args_preview: str) -> bytes:
+    """Emit a ``tool_started`` SSE event (epic #128 / #181).
+
+    Marks the start of one tool call inside an assistant turn. The SPA
+    appends a collapsible step row to the active message.
+    """
+    return _sse(
+        {
+            "type": "tool_started",
+            "tool_name": tool_name,
+            "tool_use_id": tool_use_id,
+            "args_preview": args_preview[:_ARGS_PREVIEW_MAX],
+        }
+    )
+
+
+def sse_tool_progress(*, tool_use_id: str, status_text: str) -> bytes:
+    """Emit a ``tool_progress`` SSE event (epic #128 / #181).
+
+    Model-driven status text for the in-flight tool call. Driven by
+    Strands' ``ToolStreamEvent`` yields.
+    """
+    return _sse(
+        {
+            "type": "tool_progress",
+            "tool_use_id": tool_use_id,
+            "status_text": status_text,
+        }
+    )
+
+
+def sse_tool_finished(*, tool_use_id: str, summary: str) -> bytes:
+    """Emit a ``tool_finished`` SSE event (epic #128 / #181).
+
+    Marks tool completion. ``summary`` is a short human-readable summary
+    of the result — never the raw payload. The payload stays out of
+    SSE; it goes through the model's regular reply path.
+    """
+    return _sse(
+        {
+            "type": "tool_finished",
+            "tool_use_id": tool_use_id,
+            "summary": summary[:_SUMMARY_MAX],
+        }
+    )
+
+
+def sse_tool_error(
+    *, tool_use_id: str, error_type: str, partial_result_count: int
+) -> bytes:
+    """Emit a ``tool_error`` SSE event (epic #128 / #181).
+
+    ``error_type`` is a free-form short string the SPA can branch on:
+    ``"timeout"``, ``"rate_limit"``, ``"upstream_5xx"``, ``"chain_cap"``,
+    ``"cancelled"``, ``"wall_clock"``. Partial > none: a chain that
+    fires 3 of 5 steps and fails on 4 still surfaces
+    ``partial_result_count=3`` so the SPA renders "I have 3 of 5
+    results; here's what I found" rather than a silent abort.
+    """
+    return _sse(
+        {
+            "type": "tool_error",
+            "tool_use_id": tool_use_id,
+            "error_type": error_type,
+            "partial_result_count": partial_result_count,
+        }
+    )
