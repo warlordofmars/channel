@@ -144,8 +144,11 @@ def test_cancel_signal_ttl_keeps_fresh_entries():
 
 def test_cancel_signal_ttl_clear_handles_missing_chat_id_after_prune():
     """Defensive: the clear path is idempotent even when the chat_id has
-    already been pruned. A late chats.py ``finally:`` clear for an
-    already-evicted entry must be a no-op rather than raising."""
+    already been pruned. The current lifecycle clears stale signals via
+    three mechanisms (entry-time clear in the next turn's
+    ``_stream_bedrock_reply``, guard one-shot consume on observe, and
+    TTL prune); any of them firing for an already-evicted entry must be
+    a no-op rather than raising."""
     stale_ts = time.monotonic() - (tool_hooks._CANCEL_SIGNAL_TTL_SEC + 10)
     tool_hooks._CANCEL_SIGNALS["expired-chat"] = stale_ts
 

@@ -22,16 +22,26 @@ phenomenology preamble and the rationale behind each.
   and emits ``ToolCallSuccesses`` / ``ToolCallFailures`` EMF counters.
 
 The cancel-signal registry is a module-level dict keyed by ``chat_id``,
-mapping to a ``time.monotonic()`` timestamp. PR-2 (Task 13) wires
-``chats.py``'s SSE generator to call ``set_cancel_signal(chat_id)`` in
-its ``finally:`` block when the client disconnects. The next
-``BeforeToolCallEvent`` reads it and assigns
-``event.cancel_tool = "cancelled"`` (one-shot consume). Entries also
-expire after ``_CANCEL_SIGNAL_TTL_SEC`` and are pruned opportunistically
-on each public op — bounds the registry against the
-disconnect-without-followup leak in a warm Lambda (a chat that
-disconnects mid-chain and never receives another turn would otherwise
-leave its signal in the registry forever).
+mapping to a ``time.monotonic()`` timestamp. ``chats.py``'s SSE
+generator calls ``set_cancel_signal(chat_id)`` from its disconnect
+exception handler (``except (asyncio.CancelledError, GeneratorExit)``)
+so in-flight tool calls can be cancelled. The signal is intentionally
+NOT cleared in a ``finally:`` block — it must persist past the dying
+generator to be observable by the next ``BeforeToolCallEvent``.
+
+Three clearing mechanisms keep the registry bounded (defense in depth):
+
+1. **Entry-time clear** — the next turn's ``_stream_bedrock_reply``
+   for this chat calls ``clear_cancel_signal`` at the top, wiping any
+   stale state from the previous disconnect.
+2. **Guard one-shot consume** — ``ToolCallGuardHook`` clears the
+   signal immediately after observing it and setting
+   ``event.cancel_tool = "cancelled"``.
+3. **TTL prune** — entries older than ``_CANCEL_SIGNAL_TTL_SEC`` are
+   pruned opportunistically on every public op, bounding the registry
+   against the disconnect-without-followup leak in a warm Lambda (a
+   chat that disconnects mid-chain and never receives another turn
+   would otherwise leave its signal in the registry forever).
 """
 
 from __future__ import annotations
@@ -84,23 +94,29 @@ class ChainState:
 
 
 # Module-level cancel-signal registry. Keyed by chat_id (UUID), value is
-# a ``time.monotonic()`` timestamp captured at signal-set time. PR-2
-# (Task 13) wires chats.py's SSE generator to set the signal in its
-# finally: block when the client disconnects; the next
-# BeforeToolCallEvent reads it and assigns
+# a ``time.monotonic()`` timestamp captured at signal-set time.
+# chats.py's SSE generator sets the signal from its disconnect
+# exception handler (``except (asyncio.CancelledError, GeneratorExit)``)
+# and intentionally does NOT clear it in ``finally:`` — the signal must
+# persist past the dying generator to be observable by the next
+# ``BeforeToolCallEvent``, which reads it and assigns
 # ``event.cancel_tool = "cancelled"``. Cold start clears all signals
 # (no persistence needed — a request that hasn't reached its first tool
 # call by the time the Lambda restarts is already dead).
 #
-# TTL prune: the guard's one-shot consume + chats.py's entry-time clear
-# normally remove the entry; but a client that disconnects after the
-# chain ends (no further BeforeToolCallEvent) AND never sends another
-# message on that chat (no entry-time clear) would otherwise leave the
-# entry in the registry forever in a warm Lambda. Opportunistic prune
-# on each public op bounds the dict at the cost of one O(n) walk per
-# call — amortized O(1) because n stays small. TTL is much longer than
-# any chain wall-clock budget so the signal stays observable for the
-# entire relevant window.
+# Three clearing mechanisms keep the dict bounded (defense in depth):
+# 1. **Entry-time clear** — the next turn's ``_stream_bedrock_reply``
+#    for this chat calls ``clear_cancel_signal`` at the top.
+# 2. **Guard one-shot consume** — ``ToolCallGuardHook`` clears the
+#    signal immediately after observing it.
+# 3. **TTL prune** — opportunistic prune on every public op bounds the
+#    dict against the disconnect-without-followup leak in a warm
+#    Lambda (a client that disconnects after the chain ends, and never
+#    sends another message on that chat, would otherwise leave the
+#    entry in the registry forever). One O(n) walk per call —
+#    amortized O(1) because n stays small. TTL is much longer than any
+#    chain wall-clock budget so the signal stays observable for the
+#    entire relevant window.
 _CANCEL_SIGNAL_TTL_SEC = 300  # 5 min — longer than any chain wall-clock budget
 _CANCEL_SIGNALS: dict[str, float] = {}
 
