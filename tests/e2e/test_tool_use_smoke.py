@@ -150,17 +150,25 @@ def _stream_messages(
 )
 def test_current_time_round_trip() -> None:
     """The chassis exit test: send "what time is it?" and assert the
-    SSE stream emits the new tool event types correlating to a
-    ``current_time`` call.
+    SSE stream emits ``tool_started`` + ``tool_finished`` (correlated by
+    ``tool_use_id``) for a ``current_time`` call, and that the model's
+    reply incorporates the result.
 
     Asserts:
 
-    1. At least one ``tool_started`` event for ``current_time``
+    1. At least one ``tool_started`` event for ``current_time``.
     2. A matching ``tool_finished`` event with ``summary == "completed"``
        (PR-2 narrowed the contract to this literal — round 5 review).
-    3. The model's reply text contains a parseable time reference
+    3. NO ``tool_error`` arrived for the matched ``tool_use_id`` — happy
+       path means a clean finished, not a cancelled/failed call that
+       still happened to emit deltas.
+    4. The model's reply text contains a parseable time reference
        (sanity check that the chassis returned the tool result to the
        model and the model used it).
+
+    ``tool_progress`` is not asserted: ``current_time`` doesn't yield
+    streaming progress events, and the SSE protocol covers it via unit
+    tests in ``test_strands_sse.py``.
     """
     api_url = os.environ.get("STARTER_API_URL", "http://localhost:8001")
 
@@ -174,6 +182,7 @@ def test_current_time_round_trip() -> None:
 
         started = [e for e in events if e.get("type") == "tool_started"]
         finished = [e for e in events if e.get("type") == "tool_finished"]
+        errors = [e for e in events if e.get("type") == "tool_error"]
         deltas = [e for e in events if e.get("type") == "delta"]
 
         # 1. A ``current_time`` tool was started.
@@ -198,7 +207,19 @@ def test_current_time_round_trip() -> None:
             f"{finished_for_clock[0].get('summary')!r}"
         )
 
-        # 3. The model's reply text contains a time reference — proof the
+        # 3. No ``tool_error`` arrived for the matched ``tool_use_id`` —
+        #    happy path means the call finished cleanly, not "errored
+        #    but also emitted some deltas". A regression that cancels
+        #    the call mid-chain (chain_cap / wall_clock / cancelled)
+        #    would show up here as a fast failure with the exact
+        #    ``error_type`` for diagnosis.
+        errors_for_clock = [e for e in errors if e.get("tool_use_id") in matched]
+        assert not errors_for_clock, (
+            "Expected NO tool_error for current_time's tool_use_id on the "
+            f"happy path; got {errors_for_clock!r}"
+        )
+
+        # 4. The model's reply text contains a time reference — proof the
         #    tool result reached the model. We accept any of: an ISO-8601
         #    UTC timestamp (the tool returns this), a weekday name, or an
         #    HH:MM clock string. Any one is sufficient sanity-check
