@@ -92,11 +92,13 @@ def _stream_messages(
 ) -> list[dict[str, Any]]:
     """``POST /api/chats/{chat_id}/messages`` and collect parsed SSE events.
 
-    The endpoint streams ``text/event-stream``; each frame is a single
-    ``data: <json>\\n\\n`` line. We slurp the body, split on the empty
-    line that separates frames, and JSON-parse each ``data:`` payload.
-    Unknown / malformed frames are skipped — the test only cares about
-    the typed events emitted by ``strands_sse.py``.
+    The endpoint streams ``text/event-stream``. We iterate the response
+    line-by-line via ``resp.iter_lines()``, JSON-parse the payload of
+    each line that starts with ``data: ``, and append it to ``events``.
+    Non-``data:`` lines (blank separators between frames, comments,
+    other SSE fields) and any line whose payload fails to JSON-parse
+    are skipped — the test only cares about the typed events emitted
+    by ``strands_sse.py``.
     """
     events: list[dict[str, Any]] = []
     with httpx.stream(

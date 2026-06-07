@@ -3,19 +3,24 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import * as api from "../api.js";
 import { makeSseDecoder } from "../lib/sseParser.js";
 
-// #181 PR-2: in-place patch of one toolStep on the in-flight assistant
-// turn. Returns the original array when no turn matches tempAsstId or
-// no step matches toolUseId (e.g. progress/finished/error arriving
-// without a preceding tool_started — no-op rather than crash).
+// #181 PR-3: in-place patch of one toolStep on the in-flight assistant
+// turn. Returns the ORIGINAL `turns` reference when no turn matches
+// tempAsstId or no step matches toolUseId (e.g. progress/finished/error
+// arriving without a preceding tool_started — no-op rather than crash).
+// Reference-equality short-circuit lets React's useState setter no-op
+// (skip re-render) for stale / unknown tool_use_id events.
 function patchToolStep(turns, tempAsstId, toolUseId, patch) {
-  return turns.map((t) => {
+  let mutated = false;
+  const next = turns.map((t) => {
     if (t.msg_id !== tempAsstId || !t.toolSteps) return t;
     const idx = t.toolSteps.findIndex((s) => s.toolUseId === toolUseId);
     if (idx === -1) return t;
     const nextSteps = [...t.toolSteps];
     nextSteps[idx] = { ...nextSteps[idx], ...patch };
+    mutated = true;
     return { ...t, toolSteps: nextSteps };
   });
+  return mutated ? next : turns;
 }
 
 /**

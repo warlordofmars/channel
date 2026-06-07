@@ -1,7 +1,7 @@
 # Tool-use chassis (epic #128 / #181) — design
 
 **Date:** 2026-06-07
-**Status:** Shipped (via PR-1 [#209], PR-2 [#219], PR-3 [this PR])
+**Status:** Shipped (via PR-1 [#209], PR-2 [#219], PR-3 this PR (#220))
 
 ## Phenomenology preamble: "like having hands"
 
@@ -369,7 +369,7 @@ OMITTED under the v1 stub; the #131 swap-in PR adds it.
 
 Epic #181 shipped as PR-1 (backend chassis, [#209]), PR-2 (SSE
 protocol, [#219]), PR-3 (SPA step list + smoke test + this doc +
-CHANGELOG, [this PR]). Each independently revertible:
+CHANGELOG, this PR (#220)). Each independently revertible:
 
 - PR-1 ships hooks + ChainState + `current_time` tool + EMF; no
   end-to-end stream yet, exercised by unit tests.
