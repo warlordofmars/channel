@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Tool-use chassis: Strands `tools=[...]` wiring on `build_agent()`,
+  three new hook handlers (`ModelVisibilityAddendumHook` for the
+  in-prompt addendum, `ToolCallGuardHook` for chain-cap / wall-clock /
+  mid-chain cancel enforcement, `ToolCallTelemetryHook` for EMF +
+  AgentCore Memory META-fact writes), four new SSE event types
+  (`sse_tool_started` / `sse_tool_progress` / `sse_tool_finished` /
+  `sse_tool_error`), a collapsible step list in the Conversation view
+  (default collapsed, expandable, distinct chain-cap affordance), the
+  `ToolResultBlock` seed component, and the `current_time` smoke-test
+  tool behind `STARTER_CLOCK_TOOL_ENABLED` (default on in jc/dev, off
+  in prod per strategy spec policy P2). EMF counters
+  `ToolCallSuccesses` / `ToolCallFailures` land alongside (#181, epic
+  #128).
 - Server-side user preferences. `/app/customize` now persists across
   devices via a new `PK=USER#{u}, SK=PREFS` DDB row exposed at
   `GET / PUT /api/me/prefs`. The `useChannelPrefs` hook hydrates from
@@ -138,6 +151,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   enablement, which is not a realistic prerequisite for a dev iteration
   loop. Opus 4.6 is the latest model available via the standard model-
   access self-serve UI in the Bedrock console.
+
+### Meta
+
+- Memory invariant lifted into the `_payload_from_messages` docstring +
+  hardened via a recursive structural walker in tests: tool payloads
+  (`toolUse` / `toolResult` blocks) never persist to AgentCore Memory
+  (#181, epic decision 7).
+- Strategy spec for epic #128 sequencing:
+  `docs/superpowers/specs/2026-06-06-epic-128-tool-use-sequencing.md`.
+- Chassis design doc:
+  `docs/superpowers/specs/2026-06-06-tool-use-chassis-design.md`.
+- MCP-server registry spike:
+  `docs/superpowers/specs/2026-06-06-mcp-server-registry-spike.md`
+  (resolved `Strands MCPClient vs fastmcp.Client` — `transport_callable`
+  is the seam; Channel owns OAuth + DCR + refresh, Strands gets a
+  pre-authenticated transport thunk).
 
 ### Added
 
