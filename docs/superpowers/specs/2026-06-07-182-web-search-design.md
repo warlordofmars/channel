@@ -95,7 +95,7 @@ Hidden from the model (set server-side, not surfaced as params):
 | Var | Default jc/dev | Default prod | Meaning |
 | --- | --- | --- | --- |
 | `STARTER_WEB_SEARCH_ENABLED` | `1` | `1` | Kill switch — `chats.py` skips tool registration if `0` |
-| `STARTER_EXA_API_KEY_PARAM` | `/channel/jc/exa-api-key` | `/channel/prod/exa-api-key` | SSM parameter **name** (path), injected by CDK at deploy time. `_resolve_exa_api_key()` fetches the value at Lambda cold-start via boto3. Mirrors `STARTER_JWT_SECRET_PARAM` in `src/channel/auth/tokens.py::_jwt_secret` |
+| `STARTER_EXA_API_KEY_PARAM` | `/channel/jc/exa-api-key` | `/channel/prod/exa-api-key` | SSM parameter **name** (path), injected by CDK at deploy time. `_resolve_exa_api_key()` fetches the value via boto3 on the first `web_search()` invocation and caches it via `@functools.lru_cache(maxsize=1)` for the lifetime of the Lambda warm pool. Mirrors `STARTER_JWT_SECRET_PARAM` in `src/channel/auth/tokens.py::_jwt_secret` |
 | `EXA_API_KEY` (optional, local dev) | unset (or set manually) | unset | If set, short-circuits the SSM fetch. Used by `inv dev`, which pulls the jc key from SSM into this env var at startup |
 
 `STARTER_WEB_SEARCH_ENABLED=1` in **all** environments for v1 — there's no progressive rollout plan; the flag exists for emergency kill, not staged enable. (Contrast with `STARTER_CLOCK_TOOL_ENABLED` which is intentionally off in prod because `current_time` is a smoke-test tool, not a product feature.)
@@ -109,7 +109,7 @@ Hidden from the model (set server-side, not surfaced as params):
 **CDK changes** (`infra/stacks/channel_stack.py`):
 
 - Grant the API Lambda role `ssm:GetParameter` on `/channel/{env}/exa-api-key` (per-env resource ARN, parameterized).
-- Inject the SSM value as the `EXA_API_KEY` Lambda environment variable. Existing patterns: check how `STARTER_JWT_SECRET` is wired — the plan should reuse that machinery rather than duplicating.
+- Inject the SSM parameter **path** as the `STARTER_EXA_API_KEY_PARAM` Lambda env var (NOT the value — the value resolves at runtime on first `web_search()` call via boto3 `ssm.get_parameter`, mirroring how `STARTER_JWT_SECRET_PARAM` flows in `src/channel/auth/tokens.py::_jwt_secret`).
 - Set `STARTER_WEB_SEARCH_ENABLED=1` in the env vars block alongside the chassis flags.
 
 **`chats.py` registration:**

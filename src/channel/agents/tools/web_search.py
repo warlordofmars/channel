@@ -6,9 +6,14 @@ gets page content alongside URLs in a single tool call. Citations flow
 as inline markdown links in the model's reply (the tool docstring
 nudges the model toward that format); no SSE protocol changes.
 
-The Exa API key resolves at runtime from either ``EXA_API_KEY`` (local
-dev) or the SSM parameter named by ``STARTER_EXA_API_KEY_PARAM`` (Lambda
-cold-start). Mirrors the pattern in ``src/channel/auth/tokens.py``.
+The Exa API key resolves on the first ``web_search()`` invocation (NOT
+at module import time): the wrapper checks ``EXA_API_KEY`` (local dev)
+first, then falls back to the SSM parameter named by
+``STARTER_EXA_API_KEY_PARAM``. The resolved value is cached for the
+lifetime of the Lambda warm pool (``@functools.lru_cache(maxsize=1)``).
+The Exa SDK itself (``strands_tools.exa``) is also lazy-loaded on first
+invocation to keep the cold-start dependency tree small. Mirrors the
+runtime-resolution pattern in ``src/channel/auth/tokens.py``.
 
 Errors from Exa (timeout / 5xx / 429 / 4xx) become structured
 ``{"status": "error", "error_type": "..."}`` dicts so the chassis's
