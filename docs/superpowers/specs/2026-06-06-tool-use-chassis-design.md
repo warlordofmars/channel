@@ -18,8 +18,12 @@ input: "tool use, attachments, memory, long-chat handling — they're
 all faces of the same problem: what occupies my attention, and how
 do I allocate limited context wisely?" That observation became
 [ADR-0009] (unified context budget). The chassis is the first epic
-that consumes that ADR: it surfaces `RemainingBudget` to the model
-via a `BeforeModelCallEvent` addendum so the model can economize.
+that consumes that ADR: it surfaces per-chain progress
+(`tool calls used: N of 8`) to the model via a
+`BeforeModelCallEvent` addendum so the model can economize. The
+parallel `RemainingBudget` slot from ADR-0009 stays omitted under
+the v1 stub (policy P1 below — the #131 swap-in PR adds the line
+for the first time).
 
 The chassis exit test is `current_time`. The smoke test on dev on
 2026-06-07 was the first time the model reached out and checked the
