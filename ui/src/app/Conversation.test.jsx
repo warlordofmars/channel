@@ -2,7 +2,7 @@
 import React from "react";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useNavigate } from "react-router-dom";
 import { __resetModelsCacheForTest, loadModels } from "./data.js";
 import { __resetChannelPrefsForTest } from "../hooks/useChannelPrefs.js";
 
@@ -1327,6 +1327,95 @@ describe("Conversation", () => {
       const toggleAfter = screen.getByRole("button", { name: /tool step/i });
       expect(toggleAfter.getAttribute("aria-expanded")).toBe("true");
       expect(screen.getByText("13:37 UTC")).toBeInTheDocument();
+    });
+
+    it("resets expanded state when chatId changes (chat navigation)", () => {
+      // Conversation stays mounted when the user navigates between
+      // chats — only the URL :id flips. Without an explicit reset the
+      // expanded-step Map would retain keys from every prior chat and
+      // grow unbounded. This test exercises chat A → chat B → chat A
+      // and asserts the previously-expanded step is now collapsed.
+      const stepA = {
+        toolUseId: "tu-chat-a",
+        toolName: "current_time",
+        status: "finished",
+        summary: "A's summary",
+      };
+      const stepB = {
+        toolUseId: "tu-chat-b",
+        toolName: "current_time",
+        status: "finished",
+        summary: "B's summary",
+      };
+      useChatStreamModule.useChatStream.mockImplementation((id) => ({
+        turns: [
+          {
+            msg_id: `msg-${id}`,
+            role: "assistant",
+            text: "hi",
+            streaming: false,
+            toolSteps: [id === "chat-b" ? stepB : stepA],
+          },
+        ],
+        send: vi.fn(),
+        regenerate: vi.fn(),
+        abort: vi.fn(),
+        status: "idle",
+        error: null,
+      }));
+
+      // Render against a single MemoryRouter so Conversation stays
+      // mounted across the navigation — the whole point of this test
+      // is that the :id flip reuses the same component instance and
+      // the useEffect resets the Map.
+      function Nav() {
+        const navigate = useNavigate();
+        return (
+          <>
+            <button
+              type="button"
+              data-testid="goto-chat-a"
+              onClick={() => navigate("/app/c/chat-a")}
+            >
+              chat A
+            </button>
+            <button
+              type="button"
+              data-testid="goto-chat-b"
+              onClick={() => navigate("/app/c/chat-b")}
+            >
+              chat B
+            </button>
+          </>
+        );
+      }
+      render(
+        <MemoryRouter initialEntries={["/app/c/chat-a"]}>
+          <Nav />
+          <Routes>
+            <Route path="/app/c/:id" element={<Conversation />} />
+          </Routes>
+        </MemoryRouter>,
+      );
+
+      // Expand chat A's step.
+      const toggleA = screen.getByRole("button", { name: /tool step/i });
+      expect(toggleA.getAttribute("aria-expanded")).toBe("false");
+      fireEvent.click(toggleA);
+      expect(screen.getByText("A's summary")).toBeInTheDocument();
+
+      // Navigate to chat B — its step starts collapsed.
+      fireEvent.click(screen.getByTestId("goto-chat-b"));
+      const toggleB = screen.getByRole("button", { name: /tool step/i });
+      expect(toggleB.getAttribute("aria-expanded")).toBe("false");
+      expect(screen.queryByText("B's summary")).not.toBeInTheDocument();
+
+      // Navigate back to chat A — its previously-expanded step is now
+      // collapsed because the Map reset on chatId change.
+      fireEvent.click(screen.getByTestId("goto-chat-a"));
+      const toggleAAgain = screen.getByRole("button", { name: /tool step/i });
+      expect(toggleAAgain.getAttribute("aria-expanded")).toBe("false");
+      expect(screen.queryByText("A's summary")).not.toBeInTheDocument();
     });
   });
 });

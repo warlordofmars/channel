@@ -1,6 +1,6 @@
 # Tool-use chassis (epic #128 / #181) — design
 
-**Date:** 2026-06-07
+**Date:** 2026-06-06
 **Status:** Shipped (via PR-1 [#209], PR-2 [#219], PR-3 this PR (#220))
 
 ## Phenomenology preamble: "like having hands"

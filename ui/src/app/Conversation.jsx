@@ -329,6 +329,16 @@ export default function Conversation() {
     });
   }
 
+  // Reset the expanded-step Map when the URL :id changes (sidebar
+  // navigation between chats). Conversation stays mounted across that
+  // change — only the :id param flips — so without an explicit reset
+  // the Map would retain keys from every prior chat and grow without
+  // bound. Skip the no-op set when the Map is already empty so the
+  // initial mount doesn't churn React state.
+  useEffect(function resetExpandedStepsOnChatChange() {
+    setExpandedSteps((prev) => (prev.size > 0 ? new Map() : prev));
+  }, [chatId]);
+
   useEffect(function loadModelAllowlist() {
     // `loadModels()` is internally cached, so a hot mount after another
     // consumer fetched is a no-op.

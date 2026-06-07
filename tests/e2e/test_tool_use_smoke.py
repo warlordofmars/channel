@@ -70,9 +70,10 @@ def _mint_jwt_via_bypass(api_url: str, email: str) -> str:
 def _create_chat(api_url: str, jwt: str, *, title: str) -> str:
     """``POST /api/chats`` → return ``chat_id``.
 
-    The body shape matches ``ChatCreate`` (``title`` + ``model_default``);
-    the response is the serialised chat row with ``chat_id`` at the top
-    level.
+    The body sends only ``{"title": ...}`` — ``ChatCreate`` also accepts
+    an optional ``model_default``, but this smoke test relies on the
+    server-side default so we don't pin a particular model id here. The
+    response is the serialised chat row with ``chat_id`` at the top level.
     """
     resp = httpx.post(
         f"{api_url}/api/chats",
