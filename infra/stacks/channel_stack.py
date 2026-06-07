@@ -443,12 +443,28 @@ class ChannelStack(cdk.Stack):
         # (``tests/unit/test_channel_stack.py``) guards against leaks.
         if not is_prod:
             common_env["STARTER_ENABLE_DEBUG_ENDPOINTS"] = "1"
-            # #179 — Google-auth bypass for e2e suites. Only activates
-            # when ``?test_email=`` is present, so normal browser flows
-            # are unaffected. Prod stacks MUST NOT set this; a sibling
-            # assertion in ``tests/unit/test_channel_stack.py`` guards
-            # against the same leak shape as the debug-endpoints flag.
+            # #179 — Google-auth bypass for e2e suites. Gates two distinct
+            # short-circuits on /auth/login:
+            #   - ``?test_email=`` query → mint a JWT directly (only fires
+            #     when the query param is present; normal browser flows are
+            #     unaffected).
+            #   - ``desktop_callback=...`` query → only fires when this
+            #     stack ALSO sets ``STARTER_DESKTOP_DEV_EMAIL``, which it
+            #     deliberately does NOT (only ``inv desktop-dev`` sets it
+            #     locally). So real desktop sign-in on this stack routes
+            #     through Google like any other browser flow.
+            # Prod stacks MUST NOT set this; a sibling assertion in
+            # ``tests/unit/test_channel_stack.py`` guards against the same
+            # leak shape as the debug-endpoints flag.
             common_env["STARTER_BYPASS_GOOGLE_AUTH"] = "1"
+
+        # #181 chassis — register ``current_time`` smoke-test tool only
+        # in non-prod envs (strategy spec policy P2: smoke-test, not a
+        # product feature). Prod gets the flag explicitly set to ``"0"``
+        # so a future code path that reads it can't accidentally see an
+        # unset variable as "on" if defaults shift. A sibling assertion
+        # in ``tests/unit/test_channel_stack.py`` enforces both shapes.
+        common_env["STARTER_CLOCK_TOOL_ENABLED"] = "0" if is_prod else "1"
 
         # ----------------------------------------------------------------
         # Attachments S3 bucket (#173) — file attachments + vision (epic #109)

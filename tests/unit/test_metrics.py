@@ -209,3 +209,36 @@ def test_record_chat_delete_attachment_wipe_outcome_signature_locks_out_dimensio
         "— per-actor/chat dimensions cause CloudWatch cardinality blowup"
     )
     assert list(sig.parameters.keys()) == ["success"]
+
+
+# ----------------------------------------------------------------
+# ToolCall counters (#181 / epic #128) — tool-use chassis
+# ----------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_record_tool_call_outcome_success_emits_success_counter():
+    from channel.metrics import record_tool_call_outcome
+
+    with patch("channel.metrics.emit_metric", new=AsyncMock()) as mock_emit:
+        await record_tool_call_outcome(success=True)
+    mock_emit.assert_awaited_once_with("ToolCallSuccesses")
+
+
+@pytest.mark.asyncio
+async def test_record_tool_call_outcome_failure_emits_failure_counter():
+    from channel.metrics import record_tool_call_outcome
+
+    with patch("channel.metrics.emit_metric", new=AsyncMock()) as mock_emit:
+        await record_tool_call_outcome(success=False)
+    mock_emit.assert_awaited_once_with("ToolCallFailures")
+
+
+def test_record_tool_call_outcome_signature_locks_out_dimensions():
+    """The signature must reject per-tool / per-actor dimensions to keep
+    CloudWatch metric cardinality bounded."""
+    from channel.metrics import record_tool_call_outcome
+
+    sig = inspect.signature(record_tool_call_outcome)
+    assert list(sig.parameters.keys()) == ["success"]
+    assert sig.parameters["success"].annotation == "bool"

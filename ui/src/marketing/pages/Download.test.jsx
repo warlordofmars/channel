@@ -101,18 +101,22 @@ describe("Download — releases/latest URLs (default channel)", () => {
   });
 });
 
-describe("Download — releases/<channel> URLs (VITE_RELEASE_CHANNEL=dev)", () => {
-  // The dev marketing site sets VITE_RELEASE_CHANNEL=dev at SPA build
-  // time (see deploy-dev in ci.yml). The Download page must then point
-  // at the explicit-tag release form so the buttons resolve to a real
-  // asset on the ``dev`` pre-release, not the not-yet-existing
-  // ``latest`` redirect target.
+describe("Download — VITE_RELEASE_CHANNEL=dev — per-platform routing", () => {
+  // On the dev marketing site (deploy-dev sets VITE_RELEASE_CHANNEL=dev),
+  // platforms split:
+  //   - macOS → S3 ``channel-dev.warlordofmars.net/updates/dev/`` where
+  //     publish-desktop-mac uploads the SIGNED + notarised .dmg. The GH
+  //     ``dev`` pre-release tag's macOS .dmg is the UNSIGNED matrix
+  //     build, which Sequoia rejects — we deliberately do NOT link to it.
+  //   - Windows + Linux → GH ``releases/download/dev/`` (unsigned matrix
+  //     builds; signing for those platforms is deferred to a future
+  //     sub-project).
   //
-  // CHANNEL + RELEASE_BASE are module-level constants in Download.jsx
-  // (evaluated at import time), so we ``stubEnv`` + ``resetModules`` +
-  // dynamic-import a fresh module instance to exercise the non-default
-  // branch.
-  const devBase = "https://github.com/warlordofmars/channel/releases/download/dev";
+  // CHANNEL + URL constants are module-level in Download.jsx (evaluated
+  // at import time), so we ``stubEnv`` + ``resetModules`` + dynamic-
+  // import a fresh module instance to exercise the non-default branch.
+  const ghDevBase = "https://github.com/warlordofmars/channel/releases/download/dev";
+  const s3MacUrl = "https://channel-dev.warlordofmars.net/updates/dev/Channel-mac.dmg";
 
   beforeEach(() => {
     vi.stubEnv("VITE_RELEASE_CHANNEL", "dev");
@@ -133,33 +137,45 @@ describe("Download — releases/<channel> URLs (VITE_RELEASE_CHANNEL=dev)", () =
     return render(<MemoryRouter><Component /></MemoryRouter>);
   }
 
+  it("macOS .dmg points at the S3 signed-build URL (not the GH dev tag)", async () => {
+    await renderPageWithChannel();
+    const link = screen.getByRole("link", { name: /Download \.dmg/i });
+    expect(link.getAttribute("href")).toBe(s3MacUrl);
+  });
+
+  it("macOS .dmg link does NOT point at the GH dev tag (would be unsigned, Sequoia-rejected)", async () => {
+    await renderPageWithChannel();
+    const link = screen.getByRole("link", { name: /Download \.dmg/i });
+    expect(link.getAttribute("href")).not.toContain("/releases/download/dev/");
+    expect(link.getAttribute("href")).not.toContain("github.com");
+  });
+
   it.each([
-    ["Download .dmg",      `${devBase}/Channel-mac.dmg`],
-    ["Download .exe",      `${devBase}/Channel-Setup.exe`],
-    ["Download AppImage",  `${devBase}/Channel-linux.AppImage`],
-  ])("primary button %s points at the dev pre-release asset %s", async (label, expectedHref) => {
+    ["Download .exe",      `${ghDevBase}/Channel-Setup.exe`],
+    ["Download AppImage",  `${ghDevBase}/Channel-linux.AppImage`],
+  ])("primary button %s still points at the GH dev pre-release (unsigned, this round)", async (label, expectedHref) => {
     await renderPageWithChannel();
     const link = screen.getByRole("link", { name: new RegExp(label, "i") });
     expect(link.getAttribute("href")).toBe(expectedHref);
   });
 
   it.each([
-    [".deb", `${devBase}/Channel-linux.deb`],
-    [".rpm", `${devBase}/Channel-linux.rpm`],
-  ])("secondary Linux link %s points at the dev pre-release asset %s", async (label, expectedHref) => {
+    [".deb", `${ghDevBase}/Channel-linux.deb`],
+    [".rpm", `${ghDevBase}/Channel-linux.rpm`],
+  ])("secondary Linux link %s points at the GH dev pre-release asset %s", async (label, expectedHref) => {
     await renderPageWithChannel();
     const link = screen.getByRole("link", { name: new RegExp(`^\\${label}$`, "i") });
     expect(link.getAttribute("href")).toBe(expectedHref);
   });
 
-  it("every download link uses the releases/download/dev/ tagged-asset form", async () => {
+  it("Win + Linux links use the GH releases/download/dev/ tagged-asset form (no mix-up with /releases/latest/)", async () => {
     await renderPageWithChannel();
-    const downloadLinks = screen
+    const ghLinks = screen
       .getAllByRole("link")
       .map((a) => a.getAttribute("href") ?? "")
-      .filter((href) => href.includes("/releases/"));
-    expect(downloadLinks.length).toBeGreaterThan(0);
-    for (const href of downloadLinks) {
+      .filter((href) => href.includes("github.com"));
+    expect(ghLinks.length).toBeGreaterThan(0);
+    for (const href of ghLinks) {
       expect(href).toContain("/releases/download/dev/");
       expect(href).not.toContain("/releases/latest/");
     }

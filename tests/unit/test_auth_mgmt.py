@@ -10,7 +10,7 @@ mirrors the production contract: ``put_state`` records the state and
 
 import os
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -478,10 +478,11 @@ def test_callback_rejects_tampered_desktop_callback(monkeypatch):
 
 
 def test_mgmt_login_desktop_bypass_mints_jwt_and_redirects_to_loopback(monkeypatch):
-    """When _BYPASS=1 and desktop_callback+state are present, /auth/login skips
+    """When _BYPASS=1 AND STARTER_DESKTOP_DEV_EMAIL is set, /auth/login skips
     Google entirely and redirects to the loopback URL with ?token=<jwt>&state=<S>.
     """
     monkeypatch.setenv("ALLOWED_EMAILS", "[]")
+    monkeypatch.setenv("STARTER_DESKTOP_DEV_EMAIL", "dev@channel.local")
     state = "F" * 43
     desktop_callback = "http://127.0.0.1:60123/callback"
     with patch("channel.auth.mgmt_auth._BYPASS", True):
@@ -497,7 +498,7 @@ def test_mgmt_login_desktop_bypass_mints_jwt_and_redirects_to_loopback(monkeypat
 
 
 def test_mgmt_login_desktop_bypass_honours_STARTER_DESKTOP_DEV_EMAIL(monkeypatch):
-    """STARTER_DESKTOP_DEV_EMAIL overrides the default dev@channel.local."""
+    """The minted JWT's email is the value of STARTER_DESKTOP_DEV_EMAIL."""
     monkeypatch.setenv("ALLOWED_EMAILS", "[]")
     monkeypatch.setenv("STARTER_DESKTOP_DEV_EMAIL", "custom@example.test")
     state = "G" * 43
@@ -516,3 +517,39 @@ def test_mgmt_login_desktop_bypass_honours_STARTER_DESKTOP_DEV_EMAIL(monkeypatch
         )
     assert resp.status_code == 302
     assert captured["email"] == "custom@example.test"
+
+
+def test_mgmt_login_desktop_bypass_skipped_when_STARTER_DESKTOP_DEV_EMAIL_unset(monkeypatch):
+    """When _BYPASS=1 but STARTER_DESKTOP_DEV_EMAIL is NOT set (deployed dev
+    environment shape), /auth/login does NOT silently auto-mint a synthetic
+    JWT — it falls through to the real Google OAuth flow.
+
+    Without this gating, every desktop sign-in on the deployed dev environment
+    would auto-log-in as a placeholder account regardless of who actually
+    clicked the button — the bug reported when the user's desktop app on the
+    dev domain was auto-logged-in as 'dev@channel.local'.
+    """
+    monkeypatch.setenv("ALLOWED_EMAILS", "[]")
+    monkeypatch.delenv("STARTER_DESKTOP_DEV_EMAIL", raising=False)
+    state = "H" * 43
+    desktop_callback = "http://127.0.0.1:60125/callback"
+
+    fake_put_state = MagicMock()
+    monkeypatch.setattr("channel.auth.state_store.put_state", fake_put_state)
+    monkeypatch.setattr(
+        "channel.auth.mgmt_auth.google_authorization_url",
+        lambda *args, **kwargs: "https://accounts.google.com/o/oauth2/v2/auth?...",
+    )
+
+    with patch("channel.auth.mgmt_auth._BYPASS", True):
+        resp = _client.get(
+            "/auth/login",
+            params={"desktop_callback": desktop_callback, "state": state},
+            follow_redirects=False,
+        )
+    assert resp.status_code == 302
+    # The bypass did NOT fire — we got redirected to Google, not the loopback.
+    assert resp.headers["location"].startswith("https://accounts.google.com/")
+    assert "127.0.0.1" not in resp.headers["location"]
+    # And the state was persisted for the real callback to consume.
+    assert fake_put_state.called
