@@ -686,7 +686,12 @@ def test_post_message_emits_tool_sse_events_and_dedupes_started(
     assert '"type": "tool_progress"' in body
     assert '"status_text": "fetching clock"' in body
     assert '"type": "tool_finished"' in body
-    assert "2026-06-07T12:00:00Z" in body
+    # Raw tool result text MUST NOT appear in the SSE body — the chassis
+    # emits a generic "completed" summary so tool output never leaks
+    # over SSE (Copilot review fix). Tool output reaches the user via
+    # the model's text reply, not the step row.
+    assert "2026-06-07T12:00:00Z" not in body
+    assert '"summary": "completed"' in body
     # No error in the happy path.
     assert '"type": "tool_error"' not in body
 

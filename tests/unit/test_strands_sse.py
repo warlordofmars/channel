@@ -357,6 +357,12 @@ def test_translate_tool_stream_missing_tool_use_id_skips():
 
 
 def test_translate_tool_result_returns_tool_finished():
+    """Successful tool result yields a ``tool_finished`` event with a
+    generic ``"completed"`` summary — the chassis NEVER leaks raw tool
+    output over SSE (Copilot review fix). Tool-specific structured
+    summaries land in #182 / #183 via an explicit ``ToolResult`` field;
+    the chassis does not infer summaries from raw content."""
+
     event = {
         "type": "tool_result",
         "tool_result": {
@@ -368,25 +374,33 @@ def test_translate_tool_result_returns_tool_finished():
     kind, payload = translate_event(event)
     assert kind == "tool_finished"
     assert payload["tool_use_id"] == "tu-4"
-    assert "2026-06-07" in payload["summary"]
+    assert payload["summary"] == "completed"
 
 
-def test_translate_tool_result_concatenates_text_blocks():
+def test_translate_tool_result_success_does_not_leak_raw_content():
+    """Locks the contract: even when the tool result has rich text
+    content, ``tool_finished.summary`` is ALWAYS ``"completed"`` and
+    the raw text never reaches the SSE payload. This is the load-
+    bearing invariant from ``sse_tool_finished``'s docstring."""
+
     event = {
         "type": "tool_result",
         "tool_result": {
             "toolUseId": "tu-5",
             "status": "success",
             "content": [
-                {"text": "first "},
-                {"text": "second"},
+                {"text": "sensitive-payload-do-not-leak"},
+                {"text": "another-secret-block"},
                 {"json": {"ignored": True}},
             ],
         },
     }
     kind, payload = translate_event(event)
     assert kind == "tool_finished"
-    assert payload["summary"] == "first second"
+    assert payload["summary"] == "completed"
+    # Defense in depth — explicitly confirm no raw text leaked.
+    assert "sensitive-payload-do-not-leak" not in payload["summary"]
+    assert "another-secret-block" not in payload["summary"]
 
 
 def test_translate_tool_result_error_status_returns_tool_error():

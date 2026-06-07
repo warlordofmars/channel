@@ -35,8 +35,16 @@ def translate_event(event: dict[str, Any]) -> tuple[str, Any]:
       from Strands' ``ToolStreamEvent`` when its ``data`` is a string.
     * ``"tool_finished"`` — successful tool completion; payload is
       ``{"tool_use_id": str, "summary": str}``. Sourced from Strands'
-      ``ToolResultEvent`` with ``status="success"``. The summary is the
-      concatenation of all ``text`` blocks in the tool result content.
+      ``ToolResultEvent`` with ``status="success"``. ``summary`` is a
+      bounded marker — today the chassis emits a literal
+      ``"completed"`` for every success and NEVER leaks the raw tool
+      result text over SSE. Tool-specific structured summaries
+      ("Found 3 results" for #182 Exa, "Ran 5 lines" for #183
+      code-exec) will arrive via an explicit ``ToolResult`` summary
+      field in those PRs; the chassis does not infer summaries from
+      raw content. The actual tool output reaches the user via the
+      model's text reply (Strands' event_loop feeds the result back
+      into the model, which writes a reply that incorporates the data).
     * ``"tool_error"`` — tool failure / cancellation / interrupt; payload
       is ``{"tool_use_id": str, "error_type": str,
       "partial_result_count": int}``. Sourced from ``ToolResultEvent``
@@ -91,22 +99,24 @@ def translate_event(event: dict[str, Any]) -> tuple[str, Any]:
         if not tool_use_id:
             return ("skip", None)
         status = result.get("status", "success")
-        # Concatenate all ``text`` blocks in the content list. Strands
-        # wraps a tool's return into ``content`` for the success path and
-        # the cancel-reason string from ``BeforeToolCallEvent.cancel_tool``
-        # into the same shape for the error path (see
-        # ``strands/tools/executors/_executor.py`` — the cancel branch
-        # builds ``{"content": [{"text": cancel_message}]}``). Surfacing
-        # that string as ``error_type`` is how ``ToolCallGuardHook``'s
-        # reason codes (``chain_cap`` / ``cancelled`` / ``wall_clock``)
-        # reach the SPA so it can render the right affordance.
-        summary = "".join(
-            block.get("text", "")
-            for block in result.get("content", [])
-            if isinstance(block, dict) and "text" in block
-        )
         if status == "error":
-            error_type = summary.strip() or "tool_failed"
+            # Error path concatenates ``text`` blocks because Strands
+            # wraps the cancel-reason string from
+            # ``BeforeToolCallEvent.cancel_tool`` into ``content`` as
+            # ``{"content": [{"text": cancel_message}]}`` (see
+            # ``strands/tools/executors/_executor.py``). Surfacing
+            # that string as ``error_type`` is how ``ToolCallGuardHook``'s
+            # reason codes (``chain_cap`` / ``cancelled`` /
+            # ``wall_clock``) reach the SPA so it can render the right
+            # affordance. This IS bounded telemetry — short, fixed
+            # reason strings — and ``sse_tool_error`` caps it at
+            # ``_ARGS_PREVIEW_MAX`` as defense in depth.
+            reason_text = "".join(
+                block.get("text", "")
+                for block in result.get("content", [])
+                if isinstance(block, dict) and "text" in block
+            )
+            error_type = reason_text.strip() or "tool_failed"
             return (
                 "tool_error",
                 {
@@ -115,7 +125,16 @@ def translate_event(event: dict[str, Any]) -> tuple[str, Any]:
                     "partial_result_count": 0,
                 },
             )
-        return ("tool_finished", {"tool_use_id": tool_use_id, "summary": summary})
+        # Success: emit a generic completion marker. The raw tool
+        # result text DOES NOT leak over SSE — that is the contract
+        # documented on ``sse_tool_finished``. Tools that want a
+        # richer SPA summary will provide one via a structured
+        # ``ToolResult`` summary field in #182 / #183; the chassis
+        # does NOT infer summaries from raw content. The actual tool
+        # output still feeds the model (Strands' event_loop), which
+        # incorporates it into the assistant's text reply — that is
+        # where users see the real data, not the SSE step row.
+        return ("tool_finished", {"tool_use_id": tool_use_id, "summary": "completed"})
 
     if "tool_cancel_event" in event:
         cancel = event["tool_cancel_event"]
@@ -296,9 +315,18 @@ def sse_tool_progress(*, tool_use_id: str, status_text: str) -> bytes:
 def sse_tool_finished(*, tool_use_id: str, summary: str) -> bytes:
     """Emit a ``tool_finished`` SSE event (epic #128 / #181).
 
-    Marks tool completion. ``summary`` is a short human-readable summary
-    of the result — never the raw payload. The payload stays out of
-    SSE; it goes through the model's regular reply path.
+    Marks tool completion. ``summary`` is a short, bounded marker — the
+    chassis never sends raw tool output over SSE. Today the chassis
+    emits a literal ``"completed"`` for every success; #182 (Exa) and
+    #183 (code-exec) will add tool-specific structured summaries
+    ("Found 3 results", "Ran 5 lines") via an explicit ``ToolResult``
+    summary field.
+
+    The actual tool output reaches the user via the model's text reply
+    (the assistant invokes the tool, Strands' event_loop feeds the
+    result back into the model, the model writes a reply that
+    incorporates the data). The SSE step row is telemetry, not the
+    delivery channel for tool data.
     """
     return _sse(
         {
