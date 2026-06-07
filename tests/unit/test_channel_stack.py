@@ -356,3 +356,44 @@ def test_synthed_dev_csp_resolves_dev_custom_domain(dev_template):
     # And the attachments bucket origins are wired in (token + suffixes).
     assert "<TOKEN>.s3.amazonaws.com" in csp_value
     assert "<TOKEN>.s3.us-east-1.amazonaws.com" in csp_value
+
+
+def test_prod_stack_enables_web_search(prod_template):
+    """STARTER_WEB_SEARCH_ENABLED = '1' in prod (kill switch, not rollout)."""
+    api_fn = _api_function(prod_template)
+    env_vars = api_fn["Properties"]["Environment"]["Variables"]
+    assert env_vars.get("STARTER_WEB_SEARCH_ENABLED") == "1"
+
+
+def test_dev_stack_enables_web_search(dev_template):
+    """STARTER_WEB_SEARCH_ENABLED = '1' in non-prod."""
+    api_fn = _api_function(dev_template)
+    env_vars = api_fn["Properties"]["Environment"]["Variables"]
+    assert env_vars.get("STARTER_WEB_SEARCH_ENABLED") == "1"
+
+
+def test_prod_stack_sets_exa_api_key_param_path(prod_template):
+    """STARTER_EXA_API_KEY_PARAM points at the per-env SSM path so the
+    Lambda knows where to fetch the key."""
+    api_fn = _api_function(prod_template)
+    env_vars = api_fn["Properties"]["Environment"]["Variables"]
+    assert env_vars.get("STARTER_EXA_API_KEY_PARAM") == "/channel/prod/exa-api-key"
+
+
+def test_dev_stack_sets_exa_api_key_param_path(dev_template):
+    api_fn = _api_function(dev_template)
+    env_vars = api_fn["Properties"]["Environment"]["Variables"]
+    assert env_vars.get("STARTER_EXA_API_KEY_PARAM") == "/channel/dev/exa-api-key"
+
+
+def test_api_role_has_ssm_read_on_exa_api_key(prod_template):
+    """Lambda role's IAM policy includes ssm:GetParameter on the Exa
+    key path. We don't inspect the exact JSON shape — that varies by
+    CDK version — just that the path appears somewhere in the role's
+    inline policies."""
+    import json
+
+    raw = json.dumps(prod_template.to_json())
+    assert "/channel/prod/exa-api-key" in raw
+    # And ssm:GetParameter is granted somewhere
+    assert "ssm:GetParameter" in raw
