@@ -21,11 +21,17 @@ phenomenology preamble and the rationale behind each.
   ASSISTANT message via ``AgentCoreMemoryHook``'s ``CreateEvent`` path,
   and emits ``ToolCallSuccesses`` / ``ToolCallFailures`` EMF counters.
 
-The cancel-signal registry is a module-level set keyed by ``chat_id``.
-PR-2 (Task 13) will call ``set_cancel_signal(chat_id)`` from the
-``finally:`` block of ``chats.py``'s SSE generator when the client
-disconnects. Until then the registry stays empty and the guard
-short-circuits past the cancel check.
+The cancel-signal registry is a module-level dict keyed by ``chat_id``,
+mapping to a ``time.monotonic()`` timestamp. PR-2 (Task 13) wires
+``chats.py``'s SSE generator to call ``set_cancel_signal(chat_id)`` in
+its ``finally:`` block when the client disconnects. The next
+``BeforeToolCallEvent`` reads it and assigns
+``event.cancel_tool = "cancelled"`` (one-shot consume). Entries also
+expire after ``_CANCEL_SIGNAL_TTL_SEC`` and are pruned opportunistically
+on each public op — bounds the registry against the
+disconnect-without-followup leak in a warm Lambda (a chat that
+disconnects mid-chain and never receives another turn would otherwise
+leave its signal in the registry forever).
 """
 
 from __future__ import annotations
@@ -77,25 +83,53 @@ class ChainState:
         return (time.monotonic() - self.started_at) >= self.wall_clock_budget_sec
 
 
-# Module-level cancel-signal registry. Keyed by chat_id (UUID). PR-2
-# (Task 13) will wire chats.py's SSE generator to set the signal in its
+# Module-level cancel-signal registry. Keyed by chat_id (UUID), value is
+# a ``time.monotonic()`` timestamp captured at signal-set time. PR-2
+# (Task 13) wires chats.py's SSE generator to set the signal in its
 # finally: block when the client disconnects; the next
-# BeforeToolCallEvent reads it and assigns ``event.cancel_tool =
-# "cancelled"``. Cold start clears all signals (no persistence needed —
-# a request that hasn't reached its first tool call by the time the
-# Lambda restarts is already dead).
-_CANCEL_SIGNALS: set[str] = set()
+# BeforeToolCallEvent reads it and assigns
+# ``event.cancel_tool = "cancelled"``. Cold start clears all signals
+# (no persistence needed — a request that hasn't reached its first tool
+# call by the time the Lambda restarts is already dead).
+#
+# TTL prune: the guard's one-shot consume + chats.py's entry-time clear
+# normally remove the entry; but a client that disconnects after the
+# chain ends (no further BeforeToolCallEvent) AND never sends another
+# message on that chat (no entry-time clear) would otherwise leave the
+# entry in the registry forever in a warm Lambda. Opportunistic prune
+# on each public op bounds the dict at the cost of one O(n) walk per
+# call — amortized O(1) because n stays small. TTL is much longer than
+# any chain wall-clock budget so the signal stays observable for the
+# entire relevant window.
+_CANCEL_SIGNAL_TTL_SEC = 300  # 5 min — longer than any chain wall-clock budget
+_CANCEL_SIGNALS: dict[str, float] = {}
+
+
+def _prune_expired_cancel_signals() -> None:
+    """Drop any signal entries older than ``_CANCEL_SIGNAL_TTL_SEC``.
+
+    Bounds the registry against the disconnect-without-followup leak in a
+    warm Lambda — a chat that disconnects mid-chain and never receives
+    another turn would otherwise leave its signal in the registry
+    forever. Run opportunistically from each public op."""
+    now = time.monotonic()
+    expired = [cid for cid, ts in _CANCEL_SIGNALS.items() if now - ts >= _CANCEL_SIGNAL_TTL_SEC]
+    for cid in expired:
+        del _CANCEL_SIGNALS[cid]
 
 
 def set_cancel_signal(chat_id: str) -> None:
-    _CANCEL_SIGNALS.add(chat_id)
+    _prune_expired_cancel_signals()
+    _CANCEL_SIGNALS[chat_id] = time.monotonic()
 
 
 def clear_cancel_signal(chat_id: str) -> None:
-    _CANCEL_SIGNALS.discard(chat_id)
+    _prune_expired_cancel_signals()
+    _CANCEL_SIGNALS.pop(chat_id, None)
 
 
 def is_cancel_requested(chat_id: str) -> bool:
+    _prune_expired_cancel_signals()
     return chat_id in _CANCEL_SIGNALS
 
 
