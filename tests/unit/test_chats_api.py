@@ -722,6 +722,126 @@ def test_post_message_emits_tool_error_on_failed_result(
     assert response.status_code == 200
     assert '"type": "tool_error"' in response.text
     assert '"tool_use_id": "tu-err"' in response.text
+    # No prior tool_finished → partial_result_count=0 (Copilot review #8).
+    assert '"partial_result_count": 0' in response.text
+
+
+def test_post_message_tool_error_partial_result_count_counts_prior_finished(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Copilot review #8 — ``partial_result_count`` on ``tool_error``
+    reflects the per-chain count of ``tool_finished`` events that
+    preceded the error, not the translator's hardcoded 0."""
+
+    _stub_storage_for_one_turn(monkeypatch)
+    monkeypatch.setenv("STARTER_FOLLOWUPS_ENABLED", "0")
+
+    async def fake_stream(self, prompt):
+        # Two successful tools complete before the third errors.
+        yield {
+            "type": "tool_result",
+            "tool_result": {
+                "toolUseId": "tu-1",
+                "status": "success",
+                "content": [{"text": "ok 1"}],
+            },
+        }
+        yield {
+            "type": "tool_result",
+            "tool_result": {
+                "toolUseId": "tu-2",
+                "status": "success",
+                "content": [{"text": "ok 2"}],
+            },
+        }
+        yield {
+            "type": "tool_result",
+            "tool_result": {
+                "toolUseId": "tu-3",
+                "status": "error",
+                "content": [{"text": "boom"}],
+            },
+        }
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+
+    class FakeAgent:
+        stream_async = fake_stream
+
+    monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
+
+    response = client.post(
+        "/api/chats/c1/messages",
+        json={"message": "hi", "model": "claude-sonnet-4-6"},
+    )
+    assert response.status_code == 200
+    body = response.text
+    assert '"type": "tool_error"' in body
+    # The error event surfaces 2 completed prior calls, not 0.
+    assert '"partial_result_count": 2' in body
+    assert '"partial_result_count": 0' not in body
+
+
+def test_post_message_tool_error_partial_result_count_increments_across_errors(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Copilot review #8 — the counter increments only on
+    ``tool_finished``, so a chain like
+    ``finished, error, finished, error`` surfaces
+    ``partial_result_count=1`` then ``=2``."""
+
+    _stub_storage_for_one_turn(monkeypatch)
+    monkeypatch.setenv("STARTER_FOLLOWUPS_ENABLED", "0")
+
+    async def fake_stream(self, prompt):
+        yield {
+            "type": "tool_result",
+            "tool_result": {
+                "toolUseId": "tu-1",
+                "status": "success",
+                "content": [{"text": "ok 1"}],
+            },
+        }
+        yield {
+            "type": "tool_result",
+            "tool_result": {
+                "toolUseId": "tu-2",
+                "status": "error",
+                "content": [{"text": "boom 1"}],
+            },
+        }
+        yield {
+            "type": "tool_result",
+            "tool_result": {
+                "toolUseId": "tu-3",
+                "status": "success",
+                "content": [{"text": "ok 2"}],
+            },
+        }
+        yield {
+            "type": "tool_result",
+            "tool_result": {
+                "toolUseId": "tu-4",
+                "status": "error",
+                "content": [{"text": "boom 2"}],
+            },
+        }
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+
+    class FakeAgent:
+        stream_async = fake_stream
+
+    monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
+
+    response = client.post(
+        "/api/chats/c1/messages",
+        json={"message": "hi", "model": "claude-sonnet-4-6"},
+    )
+    assert response.status_code == 200
+    body = response.text
+    # First error after one finished → partial_result_count=1.
+    assert '"partial_result_count": 1' in body
+    # Second error after two finished → partial_result_count=2.
+    assert '"partial_result_count": 2' in body
 
 
 def test_post_message_skips_tool_started_when_use_id_missing(

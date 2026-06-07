@@ -224,6 +224,13 @@ def test_sse_tool_error_shape():
     }
 
 
+def test_sse_tool_error_truncates_error_type_at_200():
+    raw = sse_tool_error(tool_use_id="t1", error_type="X" * 500, partial_result_count=0).decode()
+    payload = json.loads(raw.removeprefix("data: ").strip())
+    assert len(payload["error_type"]) == 200
+    assert payload["error_type"] == "X" * 200
+
+
 # ---------------------------------------------------------------------------
 # translate_event — Strands tool events
 # ---------------------------------------------------------------------------

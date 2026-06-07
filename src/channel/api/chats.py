@@ -599,6 +599,12 @@ async def _stream_bedrock_reply(
     # per input-token while the model is still emitting the call. The
     # SPA only wants a single step row per ``tool_use_id``.
     emitted_tool_starts: set[str] = set()
+    # Per-chain count of completed tool calls — used to populate
+    # ``partial_result_count`` on ``tool_error`` events per the
+    # ``sse_tool_error`` contract: "a chain that fires 3 of 5 steps
+    # and fails on 4 still surfaces partial_result_count=3". The
+    # translator can't track this — it's per-stream dispatcher state.
+    completed_tool_calls = 0
 
     # When attachments are present, Strands gets the labeled content-block
     # list with the user's text appended; otherwise the bare string keeps
@@ -633,8 +639,13 @@ async def _stream_bedrock_reply(
             elif kind == "tool_progress":
                 yield sse_tool_progress(**payload)
             elif kind == "tool_finished":
+                completed_tool_calls += 1
                 yield sse_tool_finished(**payload)
             elif kind == "tool_error":
+                # Override the translator's hardcoded 0 with the
+                # actual per-chain completed-call count. See the
+                # ``sse_tool_error`` docstring for the contract.
+                payload = {**payload, "partial_result_count": completed_tool_calls}
                 yield sse_tool_error(**payload)
     except (asyncio.CancelledError, GeneratorExit):
         set_cancel_signal(chat.chat_id)

@@ -314,8 +314,11 @@ def sse_tool_error(*, tool_use_id: str, error_type: str, partial_result_count: i
 
     ``error_type`` is a free-form short string the SPA can branch on:
     ``"timeout"``, ``"rate_limit"``, ``"upstream_5xx"``, ``"chain_cap"``,
-    ``"cancelled"``, ``"wall_clock"``. Partial > none: a chain that
-    fires 3 of 5 steps and fails on 4 still surfaces
+    ``"cancelled"``, ``"wall_clock"``. Capped at ``_ARGS_PREVIEW_MAX``
+    (200 chars) — defense in depth alongside ``translate_event``'s
+    truncation when extracting from ``tool_result.content``, since the
+    emitter is the bytes-on-the-wire boundary. Partial > none: a chain
+    that fires 3 of 5 steps and fails on 4 still surfaces
     ``partial_result_count=3`` so the SPA renders "I have 3 of 5
     results; here's what I found" rather than a silent abort.
     """
@@ -323,7 +326,7 @@ def sse_tool_error(*, tool_use_id: str, error_type: str, partial_result_count: i
         {
             "type": "tool_error",
             "tool_use_id": tool_use_id,
-            "error_type": error_type,
+            "error_type": error_type[:_ARGS_PREVIEW_MAX],
             "partial_result_count": partial_result_count,
         }
     )
