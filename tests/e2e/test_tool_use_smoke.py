@@ -35,7 +35,6 @@ from typing import Any
 import httpx
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Local helpers — kept in-file rather than added to conftest.py because the
 # rest of the e2e suite drives Playwright; these are the only HTTP-only
