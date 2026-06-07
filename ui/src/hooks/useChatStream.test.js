@@ -738,6 +738,321 @@ describe("useChatStream", () => {
     ]);
   });
 
+  // ──────────────────────────────────────────────────────────────────
+  // #181 PR-3: tool_started / tool_progress / tool_finished / tool_error
+  // ──────────────────────────────────────────────────────────────────
+
+  it("attaches a tool step to the active assistant turn on tool_started", async () => {
+    api.getChat.mockResolvedValue({
+      chat: { chat_id: "c1" },
+      messages: [],
+      next_cursor: null,
+    });
+    api.streamMessage.mockResolvedValue({
+      ok: true,
+      body: makeMockResponseBody([
+        { type: "user_persisted", msg_id: "u-t1", seq: 0 },
+        { type: "delta", text: "Let me check. " },
+        {
+          type: "tool_started",
+          tool_name: "current_time",
+          tool_use_id: "tu-1",
+          args_preview: "{}",
+        },
+        {
+          type: "done",
+          msg_id: "a-t1",
+          seq: 1,
+          model: "m",
+          input_tokens: 0,
+          output_tokens: 0,
+          stop_reason: "end_turn",
+        },
+      ]),
+    });
+
+    const { result } = renderHook(() => useChatStream("c1"));
+    await waitFor(() => expect(result.current.status).toBe("idle"));
+
+    await act(async () => {
+      await result.current.send({ message: "hi", model: "m", effort: "med" });
+    });
+
+    const asst = result.current.turns.find((t) => t.msg_id === "a-t1");
+    expect(asst.toolSteps).toHaveLength(1);
+    expect(asst.toolSteps[0]).toMatchObject({
+      toolUseId: "tu-1",
+      toolName: "current_time",
+      argsPreview: "{}",
+      statusText: null,
+      summary: null,
+      errorType: null,
+      partialResultCount: 0,
+      status: "running",
+    });
+  });
+
+  it("updates statusText on tool_progress without changing other fields", async () => {
+    api.getChat.mockResolvedValue({
+      chat: { chat_id: "c1" },
+      messages: [],
+      next_cursor: null,
+    });
+    api.streamMessage.mockResolvedValue({
+      ok: true,
+      body: makeMockResponseBody([
+        {
+          type: "tool_started",
+          tool_name: "web_search",
+          tool_use_id: "tu-2",
+          args_preview: '{"q":"x"}',
+        },
+        {
+          type: "tool_progress",
+          tool_use_id: "tu-2",
+          status_text: "searching...",
+        },
+        {
+          type: "done",
+          msg_id: "a-t2",
+          seq: 1,
+          model: "m",
+          input_tokens: 0,
+          output_tokens: 0,
+          stop_reason: "end_turn",
+        },
+      ]),
+    });
+
+    const { result } = renderHook(() => useChatStream("c1"));
+    await waitFor(() => expect(result.current.status).toBe("idle"));
+
+    await act(async () => {
+      await result.current.send({ message: "hi", model: "m", effort: "med" });
+    });
+
+    const asst = result.current.turns.find((t) => t.msg_id === "a-t2");
+    expect(asst.toolSteps).toHaveLength(1);
+    expect(asst.toolSteps[0]).toMatchObject({
+      toolUseId: "tu-2",
+      toolName: "web_search",
+      argsPreview: '{"q":"x"}',
+      statusText: "searching...",
+      status: "running",
+    });
+  });
+
+  it("marks the matching step as finished on tool_finished", async () => {
+    api.getChat.mockResolvedValue({
+      chat: { chat_id: "c1" },
+      messages: [],
+      next_cursor: null,
+    });
+    api.streamMessage.mockResolvedValue({
+      ok: true,
+      body: makeMockResponseBody([
+        {
+          type: "tool_started",
+          tool_name: "current_time",
+          tool_use_id: "tu-3",
+          args_preview: "{}",
+        },
+        {
+          type: "tool_finished",
+          tool_use_id: "tu-3",
+          summary: "completed",
+        },
+        {
+          type: "done",
+          msg_id: "a-t3",
+          seq: 1,
+          model: "m",
+          input_tokens: 0,
+          output_tokens: 0,
+          stop_reason: "end_turn",
+        },
+      ]),
+    });
+
+    const { result } = renderHook(() => useChatStream("c1"));
+    await waitFor(() => expect(result.current.status).toBe("idle"));
+
+    await act(async () => {
+      await result.current.send({ message: "hi", model: "m", effort: "med" });
+    });
+
+    const asst = result.current.turns.find((t) => t.msg_id === "a-t3");
+    expect(asst.toolSteps[0]).toMatchObject({
+      toolUseId: "tu-3",
+      summary: "completed",
+      status: "finished",
+    });
+  });
+
+  it("marks the matching step as error on tool_error", async () => {
+    api.getChat.mockResolvedValue({
+      chat: { chat_id: "c1" },
+      messages: [],
+      next_cursor: null,
+    });
+    api.streamMessage.mockResolvedValue({
+      ok: true,
+      body: makeMockResponseBody([
+        {
+          type: "tool_started",
+          tool_name: "web_search",
+          tool_use_id: "tu-4",
+          args_preview: "{}",
+        },
+        {
+          type: "tool_error",
+          tool_use_id: "tu-4",
+          error_type: "chain_cap",
+          partial_result_count: 2,
+        },
+        {
+          type: "done",
+          msg_id: "a-t4",
+          seq: 1,
+          model: "m",
+          input_tokens: 0,
+          output_tokens: 0,
+          stop_reason: "end_turn",
+        },
+      ]),
+    });
+
+    const { result } = renderHook(() => useChatStream("c1"));
+    await waitFor(() => expect(result.current.status).toBe("idle"));
+
+    await act(async () => {
+      await result.current.send({ message: "hi", model: "m", effort: "med" });
+    });
+
+    const asst = result.current.turns.find((t) => t.msg_id === "a-t4");
+    expect(asst.toolSteps[0]).toMatchObject({
+      toolUseId: "tu-4",
+      errorType: "chain_cap",
+      partialResultCount: 2,
+      status: "error",
+    });
+  });
+
+  it("is a no-op when tool_progress / tool_finished / tool_error reference an unknown tool_use_id", async () => {
+    api.getChat.mockResolvedValue({
+      chat: { chat_id: "c1" },
+      messages: [],
+      next_cursor: null,
+    });
+    api.streamMessage.mockResolvedValue({
+      ok: true,
+      body: makeMockResponseBody([
+        {
+          type: "tool_started",
+          tool_name: "current_time",
+          tool_use_id: "tu-known",
+          args_preview: "{}",
+        },
+        // tool_use_id doesn't match anything in toolSteps — no-op.
+        {
+          type: "tool_progress",
+          tool_use_id: "tu-unknown",
+          status_text: "ignored",
+        },
+        {
+          type: "tool_finished",
+          tool_use_id: "tu-unknown",
+          summary: "ignored",
+        },
+        {
+          type: "tool_error",
+          tool_use_id: "tu-unknown",
+          error_type: "ignored",
+          partial_result_count: 0,
+        },
+        {
+          type: "done",
+          msg_id: "a-t5",
+          seq: 1,
+          model: "m",
+          input_tokens: 0,
+          output_tokens: 0,
+          stop_reason: "end_turn",
+        },
+      ]),
+    });
+
+    const { result } = renderHook(() => useChatStream("c1"));
+    await waitFor(() => expect(result.current.status).toBe("idle"));
+
+    await act(async () => {
+      await result.current.send({ message: "hi", model: "m", effort: "med" });
+    });
+
+    const asst = result.current.turns.find((t) => t.msg_id === "a-t5");
+    expect(asst.toolSteps).toHaveLength(1);
+    // The known step stays in its initial "running" state — none of
+    // the unknown-id events patched it.
+    expect(asst.toolSteps[0]).toMatchObject({
+      toolUseId: "tu-known",
+      status: "running",
+      statusText: null,
+      summary: null,
+      errorType: null,
+    });
+  });
+
+  it("leaves unrelated history turns untouched when tool events arrive", async () => {
+    // Seed an existing history row so patchToolStep's first false-branch
+    // (t.msg_id !== tempAsstId) is exercised against a real turn.
+    api.getChat.mockResolvedValue({
+      chat: { chat_id: "c1" },
+      messages: [{ msg_id: "hist-1", role: "user", text: "earlier" }],
+      next_cursor: null,
+    });
+    api.streamMessage.mockResolvedValue({
+      ok: true,
+      body: makeMockResponseBody([
+        {
+          type: "tool_started",
+          tool_name: "current_time",
+          tool_use_id: "tu-6",
+          args_preview: "{}",
+        },
+        {
+          type: "tool_progress",
+          tool_use_id: "tu-6",
+          status_text: "ticking",
+        },
+        {
+          type: "done",
+          msg_id: "a-t6",
+          seq: 1,
+          model: "m",
+          input_tokens: 0,
+          output_tokens: 0,
+          stop_reason: "end_turn",
+        },
+      ]),
+    });
+
+    const { result } = renderHook(() => useChatStream("c1"));
+    await waitFor(() => expect(result.current.status).toBe("idle"));
+
+    await act(async () => {
+      await result.current.send({ message: "hi", model: "m", effort: "med" });
+    });
+
+    // History turn untouched (no toolSteps key sneaks onto it).
+    const hist = result.current.turns.find((t) => t.msg_id === "hist-1");
+    expect(hist).toMatchObject({ msg_id: "hist-1", role: "user" });
+    expect(hist.toolSteps).toBeUndefined();
+    // Active assistant turn picked up both events.
+    const asst = result.current.turns.find((t) => t.msg_id === "a-t6");
+    expect(asst.toolSteps).toHaveLength(1);
+    expect(asst.toolSteps[0].statusText).toBe("ticking");
+  });
+
   it("clears stale turns when switching chats (loadedChatIdRef branch)", async () => {
     // Covers the loadedChatIdRef.current !== chatId branch: switching
     // from one chat with turns to a different chat clears the old

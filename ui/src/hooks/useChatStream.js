@@ -3,6 +3,21 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import * as api from "../api.js";
 import { makeSseDecoder } from "../lib/sseParser.js";
 
+// #181 PR-2: in-place patch of one toolStep on the in-flight assistant
+// turn. Returns the original array when no turn matches tempAsstId or
+// no step matches toolUseId (e.g. progress/finished/error arriving
+// without a preceding tool_started — no-op rather than crash).
+function patchToolStep(turns, tempAsstId, toolUseId, patch) {
+  return turns.map((t) => {
+    if (t.msg_id !== tempAsstId || !t.toolSteps) return t;
+    const idx = t.toolSteps.findIndex((s) => s.toolUseId === toolUseId);
+    if (idx === -1) return t;
+    const nextSteps = [...t.toolSteps];
+    nextSteps[idx] = { ...nextSteps[idx], ...patch };
+    return { ...t, toolSteps: nextSteps };
+  });
+}
+
 /**
  * Real SSE-driven chat hook. Loads chat history on mount, optimistically
  * renders new turns on send, parses streamed deltas, and finalises turns
@@ -157,6 +172,49 @@ export function useChatStream(chatId, { onTitleSuggested } = {}) {
                   ? { ...t, followUps: event.suggestions }
                   : t,
               ),
+            );
+          } else if (event.type === "tool_started") {
+            // #181 PR-2: push a new running step onto the in-flight
+            // assistant turn's toolSteps array. The active assistant
+            // turn is the one matching tempAsstId (set when send /
+            // regenerate seeded the streaming row).
+            setTurns((prev) =>
+              prev.map((t) => {
+                if (t.msg_id !== tempAsstId) return t;
+                const steps = [...(t.toolSteps || [])];
+                steps.push({
+                  toolUseId: event.tool_use_id,
+                  toolName: event.tool_name,
+                  argsPreview: event.args_preview,
+                  statusText: null,
+                  summary: null,
+                  errorType: null,
+                  partialResultCount: 0,
+                  status: "running",
+                });
+                return { ...t, toolSteps: steps };
+              }),
+            );
+          } else if (event.type === "tool_progress") {
+            setTurns((prev) =>
+              patchToolStep(prev, tempAsstId, event.tool_use_id, {
+                statusText: event.status_text,
+              }),
+            );
+          } else if (event.type === "tool_finished") {
+            setTurns((prev) =>
+              patchToolStep(prev, tempAsstId, event.tool_use_id, {
+                summary: event.summary,
+                status: "finished",
+              }),
+            );
+          } else if (event.type === "tool_error") {
+            setTurns((prev) =>
+              patchToolStep(prev, tempAsstId, event.tool_use_id, {
+                errorType: event.error_type,
+                partialResultCount: event.partial_result_count,
+                status: "error",
+              }),
             );
           }
         }
