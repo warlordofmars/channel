@@ -135,3 +135,47 @@ def test_web_search_empty_results_is_success_not_error(monkeypatch):
 
     assert result == {"results": []}
     assert "error_type" not in result
+
+
+def test_web_search_clamps_num_results_high(monkeypatch):
+    """Model could ask for 100 results; wrapper clamps to 10."""
+    fake_exa = MagicMock(return_value={"results": []})
+    monkeypatch.setattr("channel.agents.tools.web_search.exa_search", fake_exa)
+    monkeypatch.setenv("EXA_API_KEY", "ek-test")
+
+    from channel.agents.tools.web_search import web_search
+
+    web_search(query="x", num_results=100)
+    assert fake_exa.call_args.kwargs["num_results"] == 10
+
+
+def test_web_search_clamps_num_results_low(monkeypatch):
+    """Model could ask for 0 results; wrapper clamps to 1."""
+    fake_exa = MagicMock(return_value={"results": []})
+    monkeypatch.setattr("channel.agents.tools.web_search.exa_search", fake_exa)
+    monkeypatch.setenv("EXA_API_KEY", "ek-test")
+
+    from channel.agents.tools.web_search import web_search
+
+    web_search(query="x", num_results=0)
+    assert fake_exa.call_args.kwargs["num_results"] == 1
+
+
+def test_web_search_is_a_strands_tool():
+    """Strands' @tool decorator wraps the function as DecoratedFunctionTool
+    and attaches tool_spec metadata. Same probe shape as current_time
+    in PR-1 Task 4."""
+    from channel.agents.tools.web_search import web_search
+
+    assert hasattr(web_search, "tool_spec")
+
+
+def test_resolve_exa_api_key_prefers_env_var(monkeypatch):
+    """Local dev path: EXA_API_KEY env var short-circuits the SSM call."""
+    monkeypatch.setenv("EXA_API_KEY", "ek-from-env")
+
+    from channel.agents.tools.web_search import _resolve_exa_api_key
+
+    _resolve_exa_api_key.cache_clear()
+
+    assert _resolve_exa_api_key() == "ek-from-env"
