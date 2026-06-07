@@ -822,12 +822,63 @@ jobs:
             --config.productName="${{ steps.env.outputs.product_name }}" \
             --config.appId="${{ steps.env.outputs.app_id }}"
 
-      - name: Sync versioned auto-update bundles to S3 (tagged for lifecycle)
+      - name: Generate latest-mac.yml (electron-updater manifest)
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          aws s3 sync desktop/release/ s3://${{ steps.cdk.outputs.bucket }}/updates/${{ steps.env.outputs.channel }}/ \
-            --exclude '*' \
-            --include '*.zip' --include '*.blockmap' \
-            --tagging "channel-asset-type=versioned-zip"
+          # `electron-builder --publish=never` skips the entire publish
+          # phase, INCLUDING latest-mac.yml generation. We compute the
+          # manifest ourselves from the .zip electron-builder produced
+          # — same format `electron-updater` expects (version + file
+          # entry with base64 SHA-512 + size + releaseDate).
+          cd desktop/release
+          # Filename is deterministic from electron-builder.yml's mac.zip
+          # artifactName template: `Channel-${version}-${os}.${ext}`.
+          # Compute it from VERSION rather than globbing — globbing fails
+          # silently under `set -e` if no match (ls exits non-zero, step
+          # aborts before any error message we'd write).
+          ZIP="Channel-${VERSION}-mac.zip"
+          if [[ ! -f "$ZIP" ]]; then
+            echo "::error::expected $ZIP in desktop/release/ but found:"
+            ls -la
+            exit 1
+          fi
+          SHA=$(openssl dgst -sha512 -binary "$ZIP" | openssl base64 -A)
+          SIZE=$(stat -f %z "$ZIP" 2>/dev/null || stat -c %s "$ZIP")
+          RELEASE_DATE=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
+          cat > latest-mac.yml <<EOF
+          version: ${VERSION}
+          files:
+            - url: ${ZIP}
+              sha512: ${SHA}
+              size: ${SIZE}
+          path: ${ZIP}
+          sha512: ${SHA}
+          releaseDate: '${RELEASE_DATE}'
+          EOF
+          echo "Generated latest-mac.yml:"
+          cat latest-mac.yml
+
+      - name: Upload versioned auto-update bundles to S3 (tagged for lifecycle)
+        env:
+          BUCKET: ${{ steps.cdk.outputs.bucket }}
+          CHANNEL: ${{ steps.env.outputs.channel }}
+        run: |
+          # `aws s3 cp` (high-level wrapper) doesn't accept --tagging either
+          # — only `aws s3api put-object` does. PR #214 mistakenly assumed
+          # `cp` supported it; this corrects with a two-step pattern:
+          # upload via `cp`, then tag via `s3api put-object-tagging`. The
+          # lifecycle rule in infra/stacks/channel_stack.py expires objects
+          # tagged channel-asset-type=versioned-zip after 30 days.
+          shopt -s nullglob
+          for f in desktop/release/*.zip desktop/release/*.blockmap; do
+            KEY="updates/${CHANNEL}/$(basename "$f")"
+            aws s3 cp "$f" "s3://${BUCKET}/${KEY}"
+            aws s3api put-object-tagging \
+              --bucket "$BUCKET" \
+              --key "$KEY" \
+              --tagging 'TagSet=[{Key=channel-asset-type,Value=versioned-zip}]'
+          done
 
       - name: Sync stable artefacts (dmg + manifest) to S3 (untagged)
         run: |
