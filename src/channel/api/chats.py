@@ -583,10 +583,12 @@ async def _stream_bedrock_reply(
     for err in errors_list:
         yield sse_attachment_error(**err)
 
-    # Tool registry — chassis only registers ``current_time`` behind
+    # Tool registry — chassis registers ``current_time`` behind
     # ``STARTER_CLOCK_TOOL_ENABLED`` (strategy spec policy P2: smoke-test,
-    # off by default in prod). #182 / #183 will append ``exa`` /
-    # ``code_exec`` here behind their own flags.
+    # off by default in prod) and ``web_search`` behind
+    # ``STARTER_WEB_SEARCH_ENABLED`` (#182, on by default — flag is a
+    # kill switch). #183 (code-exec sandbox) will append a similar
+    # branch later behind its own flag.
     tool_registry: list[Any] = []
     if os.environ.get("STARTER_CLOCK_TOOL_ENABLED") == "1":
         tool_registry.append(current_time)

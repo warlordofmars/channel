@@ -15,10 +15,16 @@ The Exa SDK itself (``strands_tools.exa``) is also lazy-loaded on first
 invocation to keep the cold-start dependency tree small. Mirrors the
 runtime-resolution pattern in ``src/channel/auth/tokens.py``.
 
-Errors from Exa (timeout / 5xx / 429 / 4xx) become structured
-``{"status": "error", "error_type": "..."}`` dicts so the chassis's
-``translate_event`` surfaces them as ``sse_tool_error`` with the reason
-preserved (see PR-2 round-1 fix).
+Errors from Exa (timeout / 5xx / 429 / 4xx) become Strands-ToolResult-
+shaped dicts (``{"status": "error", "content": [{"text": "<reason>"}]}``)
+so the chassis's ``translate_event`` extracts ``<reason>`` as the
+stable ``error_type`` token over SSE — the SPA can render distinct
+affordances for ``timeout`` vs ``rate_limit`` vs ``upstream_5xx``
+vs ``bad_request`` vs ``missing_key`` (see PR-2 round-1 fix in
+``strands_sse.translate_event``). Returning a plain dict with an
+``error_type`` key instead would be re-wrapped by Strands' ``@tool``
+decorator as a single JSON-stringified text block, defeating the
+``translate_event`` reason extraction.
 """
 
 from __future__ import annotations
@@ -46,6 +52,22 @@ _NUM_RESULTS_MAX = 10
 # phases (index lookup, result assembly) are fast and don't need a
 # separate budget here.
 _EXA_TIMEOUT_SEC = 30
+
+
+def _error_result(error_type: str) -> dict[str, Any]:
+    """Build a Strands-``ToolResult``-shaped error dict.
+
+    ``translate_event`` in ``strands_sse.py`` extracts ``error_type``
+    by concatenating ``text`` blocks from ``ToolResult.content`` — so
+    we MUST emit ``{"status": "error", "content": [{"text": "<reason>"}]}``,
+    not ``{"status": "error", "error_type": "<reason>"}``. A plain
+    error-keyed dict gets re-wrapped by Strands' ``@tool`` decorator as
+    a single JSON-stringified text block (``status`` becomes ``success``
+    and ``content`` becomes ``[{"text": "{...}"}]``), which both
+    breaks the error path AND leaks the dict's repr as the SSE reason.
+    The probe in ``tests/unit/test_tools_web_search.py`` covers both
+    halves of the contract; see the PR-2 round-1 fix discussion."""
+    return {"status": "error", "content": [{"text": error_type}]}
 
 
 @functools.lru_cache(maxsize=1)
@@ -116,7 +138,7 @@ def web_search(
         os.environ["EXA_API_KEY"] = _resolve_exa_api_key()
     except Exception as exc:
         logger.warning("web_search.config_error %r", exc)
-        return {"status": "error", "error_type": "missing_key"}
+        return _error_result("missing_key")
     clamped = max(_NUM_RESULTS_MIN, min(num_results, _NUM_RESULTS_MAX))
     exa_search = _get_exa_search()
     try:
@@ -132,7 +154,7 @@ def web_search(
         )
     except httpx.ReadTimeout:
         logger.warning("web_search.timeout query_len=%d", len(query))
-        return {"status": "error", "error_type": "timeout"}
+        return _error_result("timeout")
     except httpx.HTTPStatusError as exc:
         code = exc.response.status_code
         if code == 429:
@@ -142,4 +164,4 @@ def web_search(
         else:
             error_type = "bad_request"
         logger.warning("web_search.http_error status=%s query_len=%d", code, len(query))
-        return {"status": "error", "error_type": error_type}
+        return _error_result(error_type)

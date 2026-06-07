@@ -549,12 +549,12 @@ def test_post_message_registers_tool_when_flag_on(
 def test_post_message_omits_tools_when_all_flags_off(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """No flags set → ``tools`` is empty (prod default per spec P2).
+    """When every flag in ``_TOOL_FLAGS`` is cleared, ``tools`` is empty.
 
-    Covers the omit-half of both rows in ``_TOOL_FLAGS`` in a single
-    test: when every flag in the table is cleared, the agent builds
-    with no tools at all. Pre-parametrize, this was two tests
-    (``..._omits_clock_tool_when_flag_off`` +
+    This is NOT the prod default — prod has ``STARTER_WEB_SEARCH_ENABLED=1``
+    (and ``STARTER_CLOCK_TOOL_ENABLED=0``); the test just exercises the
+    no-tools-registered branch of ``chats.py`` directly. Pre-parametrize,
+    this was two tests (``..._omits_clock_tool_when_flag_off`` +
     ``..._omits_web_search_tool_when_flag_off``) doing the same
     assertion.
     """

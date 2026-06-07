@@ -103,7 +103,7 @@ def test_web_search_timeout_returns_error_status(monkeypatch):
 
     result = web_search(query="anything")
 
-    assert result == {"status": "error", "error_type": "timeout"}
+    assert result == {"status": "error", "content": [{"text": "timeout"}]}
 
 
 def test_web_search_upstream_5xx_returns_error_status(monkeypatch):
@@ -121,7 +121,7 @@ def test_web_search_upstream_5xx_returns_error_status(monkeypatch):
 
     result = web_search(query="anything")
 
-    assert result == {"status": "error", "error_type": "upstream_5xx"}
+    assert result == {"status": "error", "content": [{"text": "upstream_5xx"}]}
 
 
 def test_web_search_429_returns_rate_limit(monkeypatch):
@@ -139,7 +139,7 @@ def test_web_search_429_returns_rate_limit(monkeypatch):
 
     result = web_search(query="anything")
 
-    assert result == {"status": "error", "error_type": "rate_limit"}
+    assert result == {"status": "error", "content": [{"text": "rate_limit"}]}
 
 
 def test_web_search_4xx_returns_bad_request(monkeypatch):
@@ -157,7 +157,7 @@ def test_web_search_4xx_returns_bad_request(monkeypatch):
 
     result = web_search(query="anything")
 
-    assert result == {"status": "error", "error_type": "bad_request"}
+    assert result == {"status": "error", "content": [{"text": "bad_request"}]}
 
 
 def test_web_search_empty_results_is_success_not_error(monkeypatch):
@@ -175,7 +175,7 @@ def test_web_search_empty_results_is_success_not_error(monkeypatch):
     result = web_search(query="something obscure")
 
     assert result == {"results": []}
-    assert "error_type" not in result
+    assert "status" not in result
 
 
 def test_web_search_clamps_num_results_high(monkeypatch):
@@ -252,4 +252,44 @@ def test_web_search_returns_missing_key_when_resolve_fails(monkeypatch):
 
     result = web_search(query="anything")
 
-    assert result == {"status": "error", "error_type": "missing_key"}
+    assert result == {"status": "error", "content": [{"text": "missing_key"}]}
+
+
+def test_error_result_shape_round_trips_through_translate_event(monkeypatch):
+    """End-to-end contract test for the SSE error-type chain.
+
+    The wrapper returns a ``ToolResult``-shaped dict; Strands' ``@tool``
+    decorator preserves it (vs re-wrapping a plain ``error_type`` dict
+    as a JSON-stringified text block); ``translate_event`` extracts
+    the reason string from ``content[].text`` blocks. This test fails
+    if any link in that chain breaks — a defensive guard against
+    re-introducing the original bug where the wrapper returned
+    ``{"status": "error", "error_type": "timeout"}`` and the SPA saw
+    ``error_type="tool_failed"`` instead."""
+
+    def boom(**_):
+        raise httpx.ReadTimeout("slow")
+
+    monkeypatch.setattr(
+        "channel.agents.tools.web_search._get_exa_search",
+        lambda: boom,
+    )
+    monkeypatch.setenv("EXA_API_KEY", "ek-test")
+
+    from channel.agents.strands_sse import translate_event
+    from channel.agents.tools.web_search import web_search
+
+    tool_result = web_search(query="anything")
+    # Simulate the ToolResultEvent Strands emits for our tool's return
+    # value (toolUseId is required so translate_event doesn't skip).
+    sse_event = {
+        "type": "tool_result",
+        "tool_result": {
+            "toolUseId": "tu-abc",
+            "status": tool_result["status"],
+            "content": tool_result["content"],
+        },
+    }
+    kind, payload = translate_event(sse_event)
+    assert kind == "tool_error"
+    assert payload["error_type"] == "timeout"

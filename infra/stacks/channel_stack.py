@@ -474,7 +474,10 @@ class ChannelStack(cdk.Stack):
         # in ``tests/unit/test_channel_stack.py`` enforces both shapes.
         common_env["STARTER_CLOCK_TOOL_ENABLED"] = "0" if is_prod else "1"
 
-        # #182 web search — Exa API key path in SSM, read at Lambda cold-start
+        # #182 web search — Exa API key path in SSM, resolved lazily on
+        # the first ``web_search()`` invocation (NOT at Lambda cold-start)
+        # and cached for the warm pool's lifetime; see
+        # ``src/channel/agents/tools/web_search._resolve_exa_api_key``.
         common_env["STARTER_EXA_API_KEY_PARAM"] = f"/channel/{env_name}/exa-api-key"
         # Default enabled in every env; flag is a kill switch, not a rollout knob
         common_env["STARTER_WEB_SEARCH_ENABLED"] = "1"
