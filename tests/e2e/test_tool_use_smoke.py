@@ -16,6 +16,12 @@ the BACKEND-to-stream layer (PR-1 chassis + PR-2 SSE protocol + the
 wire format from ``chats.py``), not any SPA component. The Playwright-
 driven flows live in the other ``tests/e2e/*.py`` files.
 
+The four sync HTTP helpers (mint JWT, create / delete chat, stream
+messages) live in ``tests/e2e/_http_helpers.py`` so the duplicated
+bodies that used to ship in this file and ``test_web_search_smoke.py``
+(and to a lesser extent ``test_memory_writes.py``) collapse into one
+shared module.
+
 Run:
 
     STARTER_CLOCK_TOOL_ENABLED=1 \
@@ -24,124 +30,19 @@ Run:
 
 from __future__ import annotations
 
-import contextlib
-import html as html_lib
-import json
 import os
 import re
 import time
 import uuid
-from typing import Any
 
-import httpx
 import pytest
 
-# ---------------------------------------------------------------------------
-# Local helpers — kept in-file rather than promoted to conftest.py because
-# only this test uses them today. Mirrors the same pattern used by
-# ``test_memory_writes.py`` and ``test_chat_management.py``, which also
-# re-implement HTTP helpers locally rather than sharing via conftest. If a
-# third HTTP-driven e2e test arrives, promote these into conftest.py at that
-# point.
-# ---------------------------------------------------------------------------
-
-
-def _mint_jwt_via_bypass(api_url: str, email: str) -> str:
-    """Hit ``/auth/login?test_email=...`` and parse the JWT from the HTML.
-
-    Mirrors the pattern from ``test_memory_writes.py`` /
-    ``test_chat_management.py`` — extracts the token from the
-    ``localStorage.setItem`` snippet the bypass page renders.
-    """
-    resp = httpx.get(
-        f"{api_url}/auth/login",
-        params={"test_email": email},
-        follow_redirects=False,
-        timeout=15.0,
-    )
-    if resp.status_code in (301, 302, 307, 308):
-        pytest.skip("Google OAuth redirect — STARTER_BYPASS_GOOGLE_AUTH not enabled")
-    resp.raise_for_status()
-    m = re.search(
-        r"localStorage\.setItem\('starter_mgmt_token',\s*'([^']+)'\)",
-        resp.text,
-    )
-    if not m:
-        pytest.fail("Could not extract mgmt token from bypass login response")
-    return html_lib.unescape(m.group(1))
-
-
-def _create_chat(api_url: str, jwt: str, *, title: str) -> str:
-    """``POST /api/chats`` → return ``chat_id``.
-
-    The body sends only ``{"title": ...}`` — ``ChatCreate`` also accepts
-    an optional ``model_default``, but this smoke test relies on the
-    server-side default so we don't pin a particular model id here. The
-    response is the serialised chat row with ``chat_id`` at the top level.
-    """
-    resp = httpx.post(
-        f"{api_url}/api/chats",
-        json={"title": title},
-        headers={"Authorization": f"Bearer {jwt}"},
-        timeout=20.0,
-    )
-    resp.raise_for_status()
-    return resp.json()["chat_id"]
-
-
-def _delete_chat(api_url: str, jwt: str, chat_id: str) -> None:
-    """Best-effort ``DELETE /api/chats/{chat_id}``. Swallows network /
-    HTTP errors so cleanup never masks a real test failure or leaves the
-    test hanging on a deployed-env hiccup. Mirrors the suppress-on-cleanup
-    pattern in ``test_memory_writes.py``."""
-    with contextlib.suppress(httpx.HTTPError):  # pragma: no cover — cleanup only
-        httpx.delete(
-            f"{api_url}/api/chats/{chat_id}",
-            headers={"Authorization": f"Bearer {jwt}"},
-            timeout=10.0,
-        )
-
-
-def _stream_messages(
-    api_url: str,
-    jwt: str,
-    chat_id: str,
-    user_text: str,
-) -> list[dict[str, Any]]:
-    """``POST /api/chats/{chat_id}/messages`` and collect parsed SSE events.
-
-    The endpoint streams ``text/event-stream``. We iterate the response
-    line-by-line via ``resp.iter_lines()``, JSON-parse the payload of
-    each line that starts with ``data: ``, and append it to ``events``.
-    Non-``data:`` lines (blank separators between frames, comments,
-    other SSE fields) and any line whose payload fails to JSON-parse
-    are skipped — the test only cares about the typed events emitted
-    by ``strands_sse.py``.
-    """
-    events: list[dict[str, Any]] = []
-    with httpx.stream(
-        "POST",
-        f"{api_url}/api/chats/{chat_id}/messages",
-        json={"message": user_text},
-        headers={"Authorization": f"Bearer {jwt}"},
-        timeout=120.0,
-    ) as resp:
-        resp.raise_for_status()
-        for line in resp.iter_lines():
-            if not line or not line.startswith("data: "):
-                continue
-            payload = line.removeprefix("data: ").strip()
-            try:
-                events.append(json.loads(payload))
-            except json.JSONDecodeError:
-                # Non-JSON lines (e.g. heartbeats, comments) — ignore.
-                continue
-    return events
-
-
-# ---------------------------------------------------------------------------
-# Test
-# ---------------------------------------------------------------------------
+from tests.e2e._http_helpers import (
+    _create_chat,
+    _delete_chat,
+    _mint_jwt_via_bypass,
+    _stream_messages,
+)
 
 
 @pytest.mark.skipif(

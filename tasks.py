@@ -104,12 +104,15 @@ def _origin_verify_secret(ctx, env: str) -> str:
     then deploys with the same placeholder in the CloudFront origin header,
     which is fine until the operator overwrites the SSM value and re-deploys.
     """
-    return ctx.run(
-        f"aws ssm get-parameter --name /channel/{env}/origin-verify-secret"
-        " --query Parameter.Value --output text",
-        hide=True,
-        warn=True,
-    ).stdout.strip() or "CHANGE_ME_ON_FIRST_DEPLOY"
+    return (
+        ctx.run(
+            f"aws ssm get-parameter --name /channel/{env}/origin-verify-secret"
+            " --query Parameter.Value --output text",
+            hide=True,
+            warn=True,
+        ).stdout.strip()
+        or "CHANGE_ME_ON_FIRST_DEPLOY"
+    )
 
 
 def _hosted_zone_id(ctx, zone_name: str = "warlordofmars.net") -> str:
@@ -276,9 +279,7 @@ def _dynamodb_local_running() -> bool:
     (URLError without code, OSError, timeout) count as unavailable.
     """
     try:
-        with urllib.request.urlopen(
-            f"http://localhost:{DYNAMO_PORT}", timeout=1
-        ) as resp:
+        with urllib.request.urlopen(f"http://localhost:{DYNAMO_PORT}", timeout=1) as resp:
             resp.read()
         return True
     except urllib.error.HTTPError:
@@ -558,6 +559,25 @@ def dev(ctx, seed=False):
         "STARTER_RECALL_ENABLED": "1",
         "STARTER_AUTO_TITLE_ENABLED": "1",
     }
+    # #182 — pull Exa API key from SSM into the local Lambda env so the
+    # web_search tool can call Exa during `inv dev` smoke tests. Path
+    # derives from STARTER_ENV (default "jc") so dev clones pointing at
+    # `/channel/dev/exa-api-key` (or any other env) load the right key.
+    # Skip cleanly if the parameter isn't set — the tool only fires when
+    # STARTER_WEB_SEARCH_ENABLED=1 AND the user asks something that needs
+    # it, so missing key = clear runtime error when it's actually needed.
+    exa_param = f"/channel/{dev_env['STARTER_ENV']}/exa-api-key"
+    try:
+        import boto3
+
+        ssm = boto3.client("ssm", region_name=REGION)
+        resp = ssm.get_parameter(Name=exa_param, WithDecryption=True)
+        dev_env["EXA_API_KEY"] = resp["Parameter"]["Value"]
+    except Exception as exc:
+        print(
+            f"  warn: could not read {exa_param} from SSM ({exc}); "
+            "web_search will fail until you set EXA_API_KEY manually"
+        )
     ui_env = {
         **os.environ,
         "VITE_API_BASE": f"http://localhost:{API_PORT}",

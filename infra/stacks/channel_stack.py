@@ -362,6 +362,14 @@ class ChannelStack(cdk.Stack):
         # Soft-warn startup check needs to read the alarm-email parameter to
         # detect the CHANGE_ME_ON_FIRST_DEPLOY placeholder.
         alarm_email_param.grant_read(api_role)
+        # #182 — Exa API key is created externally (not by CDK); we only grant read.
+        exa_key_param = ssm.StringParameter.from_string_parameter_attributes(
+            self,
+            "ExaApiKeyParam",
+            parameter_name=f"/channel/{env_name}/exa-api-key",
+            simple_name=False,
+        )
+        exa_key_param.grant_read(api_role)
         api_role.add_to_policy(
             iam.PolicyStatement(
                 actions=["cloudwatch:GetMetricData", "cloudwatch:DescribeAlarms"],
@@ -465,6 +473,14 @@ class ChannelStack(cdk.Stack):
         # unset variable as "on" if defaults shift. A sibling assertion
         # in ``tests/unit/test_channel_stack.py`` enforces both shapes.
         common_env["STARTER_CLOCK_TOOL_ENABLED"] = "0" if is_prod else "1"
+
+        # #182 web search — Exa API key path in SSM, resolved lazily on
+        # the first ``web_search()`` invocation (NOT at Lambda cold-start)
+        # and cached for the warm pool's lifetime; see
+        # ``src/channel/agents/tools/web_search._resolve_exa_api_key``.
+        common_env["STARTER_EXA_API_KEY_PARAM"] = f"/channel/{env_name}/exa-api-key"
+        # Default enabled in every env; flag is a kill switch, not a rollout knob
+        common_env["STARTER_WEB_SEARCH_ENABLED"] = "1"
 
         # ----------------------------------------------------------------
         # Attachments S3 bucket (#173) — file attachments + vision (epic #109)

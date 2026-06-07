@@ -15,15 +15,15 @@ Drives the UI through:
 from __future__ import annotations
 
 import asyncio
-import html as html_lib
 import os
-import re
 import time
 import uuid
 
 import httpx
 import pytest
 from playwright.async_api import async_playwright
+
+from tests.e2e._http_helpers import _mint_jwt_via_bypass
 
 pytestmark = pytest.mark.asyncio
 
@@ -126,25 +126,6 @@ async def test_rename_and_delete_chat_from_sidebar() -> None:
 
 
 # Helpers — same shape as other Playwright tests in this directory.
-
-
-def _mint_jwt_via_bypass(api_url: str, email: str) -> str:
-    resp = httpx.get(
-        f"{api_url}/auth/login",
-        params={"test_email": email},
-        follow_redirects=False,
-        timeout=15.0,
-    )
-    if resp.status_code in (301, 302, 307, 308):
-        pytest.skip("Google OAuth redirect — STARTER_BYPASS_GOOGLE_AUTH not enabled")
-    resp.raise_for_status()
-    m = re.search(
-        r"localStorage\.setItem\('starter_mgmt_token',\s*'([^']+)'\)",
-        resp.text,
-    )
-    if not m:
-        pytest.fail("Could not extract mgmt token from bypass login response")
-    return html_lib.unescape(m.group(1))
 
 
 async def _send_one_message(page, text: str) -> None:

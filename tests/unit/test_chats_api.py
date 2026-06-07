@@ -498,18 +498,37 @@ def test_post_message_falls_back_to_prefs_effort_when_payload_omits_it(
     assert captured["build_agent_kwargs"]["effort"] == "High"
 
 
-def test_post_message_registers_clock_tool_when_flag_on(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """``STARTER_CLOCK_TOOL_ENABLED=1`` → ``current_time`` registered.
+# Tool flags currently mounted on the chassis. Each row is
+# ``(env_var, tool_name)``. The two parametrized tests below assert that
+# (a) flipping any one flag on registers exactly its matching tool and
+# (b) leaving all flags off keeps the tools list empty. Per-tool prod
+# policy (see ``infra/stacks/channel_stack.py``): ``current_time`` is
+# off in prod (smoke-test only, on in dev/jc); ``web_search`` is on in
+# all envs (the flag is an emergency kill switch, not a rollout knob).
+_TOOL_FLAGS: list[tuple[str, str]] = [
+    ("STARTER_CLOCK_TOOL_ENABLED", "current_time"),
+    ("STARTER_WEB_SEARCH_ENABLED", "web_search"),
+]
 
-    Chassis policy P2 (#181 strategy spec): the smoke-test tool is
-    off by default in prod, on in dev/jc envs via the CDK env-var
-    diff in ``infra/stacks/channel_stack.py``.
+
+@pytest.mark.parametrize(("env_var", "tool_name"), _TOOL_FLAGS)
+def test_post_message_registers_tool_when_flag_on(
+    env_var: str,
+    tool_name: str,
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``<flag>=1`` → matching tool registered; all other flags off.
+
+    Verifies isolation: flipping flag A on must not also pull in tool
+    B. The "all others off" precondition is enforced by clearing every
+    flag in ``_TOOL_FLAGS`` before enabling the one under test.
     """
 
     _stub_storage_for_one_turn(monkeypatch)
-    monkeypatch.setenv("STARTER_CLOCK_TOOL_ENABLED", "1")
+    for flag, _ in _TOOL_FLAGS:
+        monkeypatch.delenv(flag, raising=False)
+    monkeypatch.setenv(env_var, "1")
 
     captured: dict[str, Any] = {}
     monkeypatch.setattr(
@@ -524,16 +543,25 @@ def test_post_message_registers_clock_tool_when_flag_on(
     assert response.status_code == 200
     tools = captured["build_agent_kwargs"]["tools"]
     assert len(tools) == 1
-    assert tools[0].tool_name == "current_time"
+    assert tools[0].tool_name == tool_name
 
 
-def test_post_message_omits_clock_tool_when_flag_off(
+def test_post_message_omits_tools_when_all_flags_off(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Flag unset → ``tools`` is empty (prod default per spec P2)."""
+    """When every flag in ``_TOOL_FLAGS`` is cleared, ``tools`` is empty.
+
+    This is NOT the prod default — prod has ``STARTER_WEB_SEARCH_ENABLED=1``
+    (and ``STARTER_CLOCK_TOOL_ENABLED=0``); the test just exercises the
+    no-tools-registered branch of ``chats.py`` directly. Pre-parametrize,
+    this was two tests (``..._omits_clock_tool_when_flag_off`` +
+    ``..._omits_web_search_tool_when_flag_off``) doing the same
+    assertion.
+    """
 
     _stub_storage_for_one_turn(monkeypatch)
-    monkeypatch.delenv("STARTER_CLOCK_TOOL_ENABLED", raising=False)
+    for flag, _ in _TOOL_FLAGS:
+        monkeypatch.delenv(flag, raising=False)
 
     captured: dict[str, Any] = {}
     monkeypatch.setattr(

@@ -20,9 +20,7 @@ gone, which still proves the API side of the cascade.
 
 from __future__ import annotations
 
-import html as html_lib
 import os
-import re
 import time
 import uuid
 from pathlib import Path
@@ -30,6 +28,8 @@ from pathlib import Path
 import httpx
 import pytest
 from playwright.async_api import Page, async_playwright
+
+from tests.e2e._http_helpers import _mint_jwt_via_bypass
 
 pytestmark = pytest.mark.asyncio
 
@@ -52,28 +52,6 @@ def _skip_if_unconfigured() -> tuple[str, str]:
     if not ui_url:
         pytest.skip("STARTER_UI_URL not set — run via `inv e2e` or `inv e2e-local`")
     return ui_url, api_url
-
-
-def _mint_jwt_via_bypass(api_url: str, email: str) -> str:
-    """Hit ``/auth/login?test_email=`` and pull the JWT out of the
-    redirect-bait HTML page. Same shape as the chat-management suite."""
-
-    resp = httpx.get(
-        f"{api_url}/auth/login",
-        params={"test_email": email},
-        follow_redirects=False,
-        timeout=15.0,
-    )
-    if resp.status_code in (301, 302, 307, 308):
-        pytest.skip("Google OAuth redirect — STARTER_BYPASS_GOOGLE_AUTH not enabled")
-    resp.raise_for_status()
-    m = re.search(
-        r"localStorage\.setItem\('starter_mgmt_token',\s*'([^']+)'\)",
-        resp.text,
-    )
-    if not m:
-        pytest.fail("Could not extract mgmt token from bypass login response")
-    return html_lib.unescape(m.group(1))
 
 
 def _tag(slug: str) -> tuple[str, str]:

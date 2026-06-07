@@ -356,3 +356,66 @@ def test_synthed_dev_csp_resolves_dev_custom_domain(dev_template):
     # And the attachments bucket origins are wired in (token + suffixes).
     assert "<TOKEN>.s3.amazonaws.com" in csp_value
     assert "<TOKEN>.s3.us-east-1.amazonaws.com" in csp_value
+
+
+def test_prod_stack_enables_web_search(prod_template):
+    """STARTER_WEB_SEARCH_ENABLED = '1' in prod (kill switch, not rollout)."""
+    api_fn = _api_function(prod_template)
+    env_vars = api_fn["Properties"]["Environment"]["Variables"]
+    assert env_vars.get("STARTER_WEB_SEARCH_ENABLED") == "1"
+
+
+def test_dev_stack_enables_web_search(dev_template):
+    """STARTER_WEB_SEARCH_ENABLED = '1' in non-prod."""
+    api_fn = _api_function(dev_template)
+    env_vars = api_fn["Properties"]["Environment"]["Variables"]
+    assert env_vars.get("STARTER_WEB_SEARCH_ENABLED") == "1"
+
+
+def test_prod_stack_sets_exa_api_key_param_path(prod_template):
+    """STARTER_EXA_API_KEY_PARAM points at the per-env SSM path so the
+    Lambda knows where to fetch the key."""
+    api_fn = _api_function(prod_template)
+    env_vars = api_fn["Properties"]["Environment"]["Variables"]
+    assert env_vars.get("STARTER_EXA_API_KEY_PARAM") == "/channel/prod/exa-api-key"
+
+
+def test_dev_stack_sets_exa_api_key_param_path(dev_template):
+    api_fn = _api_function(dev_template)
+    env_vars = api_fn["Properties"]["Environment"]["Variables"]
+    assert env_vars.get("STARTER_EXA_API_KEY_PARAM") == "/channel/dev/exa-api-key"
+
+
+def test_api_role_has_ssm_read_on_exa_api_key(prod_template):
+    """Walk ``AWS::IAM::Policy`` statements and assert that *the same*
+    statement grants ``ssm:GetParameter`` on a Resource that includes
+    the Exa parameter path. This is stronger than substring scanning
+    the rendered template — the latter would pass even if the Exa
+    grant disappeared, as long as some other SSM read existed for a
+    different parameter."""
+
+    resources = prod_template.to_json().get("Resources", {})
+    policies = [r for r in resources.values() if r.get("Type") == "AWS::IAM::Policy"]
+    assert policies, "Expected at least one AWS::IAM::Policy in the template"
+
+    matched_statements = []
+    for policy in policies:
+        statements = policy["Properties"]["PolicyDocument"]["Statement"]
+        for stmt in statements:
+            actions = stmt.get("Action")
+            if isinstance(actions, str):
+                actions = [actions]
+            if "ssm:GetParameter" not in (actions or []):
+                continue
+            resource = stmt.get("Resource")
+            resources_list = resource if isinstance(resource, list) else [resource]
+            for res in resources_list:
+                flat = _flatten_intrinsic(res)
+                if "/channel/prod/exa-api-key" in flat:
+                    matched_statements.append(stmt)
+                    break
+
+    assert matched_statements, (
+        "Expected an IAM statement granting ssm:GetParameter on a resource "
+        "including '/channel/prod/exa-api-key'; found none."
+    )
