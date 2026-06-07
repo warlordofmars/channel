@@ -21,6 +21,7 @@ from __future__ import annotations
 import functools
 import logging
 import os
+from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -43,7 +44,7 @@ _EXA_TIMEOUT_SEC = 30
 
 
 @functools.lru_cache(maxsize=1)
-def _get_exa_search():  # type: ignore[no-untyped-def]
+def _get_exa_search() -> Callable[..., dict[str, Any]]:
     """Lazy-load ``strands_tools.exa.exa_search`` on first invocation.
 
     The Exa SDK pulls in aiohttp, Rich, Console, Panel, etc. — a

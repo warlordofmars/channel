@@ -387,13 +387,35 @@ def test_dev_stack_sets_exa_api_key_param_path(dev_template):
 
 
 def test_api_role_has_ssm_read_on_exa_api_key(prod_template):
-    """Lambda role's IAM policy includes ssm:GetParameter on the Exa
-    key path. We don't inspect the exact JSON shape — that varies by
-    CDK version — just that the path appears somewhere in the role's
-    inline policies."""
-    import json
+    """Walk ``AWS::IAM::Policy`` statements and assert that *the same*
+    statement grants ``ssm:GetParameter`` on a Resource that includes
+    the Exa parameter path. This is stronger than substring scanning
+    the rendered template — the latter would pass even if the Exa
+    grant disappeared, as long as some other SSM read existed for a
+    different parameter."""
 
-    raw = json.dumps(prod_template.to_json())
-    assert "/channel/prod/exa-api-key" in raw
-    # And ssm:GetParameter is granted somewhere
-    assert "ssm:GetParameter" in raw
+    resources = prod_template.to_json().get("Resources", {})
+    policies = [r for r in resources.values() if r.get("Type") == "AWS::IAM::Policy"]
+    assert policies, "Expected at least one AWS::IAM::Policy in the template"
+
+    matched_statements = []
+    for policy in policies:
+        statements = policy["Properties"]["PolicyDocument"]["Statement"]
+        for stmt in statements:
+            actions = stmt.get("Action")
+            if isinstance(actions, str):
+                actions = [actions]
+            if "ssm:GetParameter" not in (actions or []):
+                continue
+            resource = stmt.get("Resource")
+            resources_list = resource if isinstance(resource, list) else [resource]
+            for res in resources_list:
+                flat = _flatten_intrinsic(res)
+                if "/channel/prod/exa-api-key" in flat:
+                    matched_statements.append(stmt)
+                    break
+
+    assert matched_statements, (
+        "Expected an IAM statement granting ssm:GetParameter on a resource "
+        "including '/channel/prod/exa-api-key'; found none."
+    )
