@@ -9,18 +9,26 @@ import { makeSseDecoder } from "../lib/sseParser.js";
 // arriving without a preceding tool_started — no-op rather than crash).
 // Reference-equality short-circuit lets React's useState setter no-op
 // (skip re-render) for stale / unknown tool_use_id events.
+//
+// Implementation: locate the target turn + step via findIndex BEFORE
+// cloning anything. On no-op (no match) we return early without
+// allocating a throwaway array — tool events fire frequently during
+// streaming so the allocation matters.
 function patchToolStep(turns, tempAsstId, toolUseId, patch) {
-  let mutated = false;
-  const next = turns.map((t) => {
-    if (t.msg_id !== tempAsstId || !t.toolSteps) return t;
-    const idx = t.toolSteps.findIndex((s) => s.toolUseId === toolUseId);
-    if (idx === -1) return t;
-    const nextSteps = [...t.toolSteps];
-    nextSteps[idx] = { ...nextSteps[idx], ...patch };
-    mutated = true;
-    return { ...t, toolSteps: nextSteps };
-  });
-  return mutated ? next : turns;
+  const turnIdx = turns.findIndex(
+    (t) => t.msg_id === tempAsstId && t.toolSteps,
+  );
+  if (turnIdx === -1) return turns;
+  const target = turns[turnIdx];
+  const stepIdx = target.toolSteps.findIndex(
+    (s) => s.toolUseId === toolUseId,
+  );
+  if (stepIdx === -1) return turns;
+  const nextSteps = [...target.toolSteps];
+  nextSteps[stepIdx] = { ...nextSteps[stepIdx], ...patch };
+  const next = [...turns];
+  next[turnIdx] = { ...target, toolSteps: nextSteps };
+  return next;
 }
 
 /**

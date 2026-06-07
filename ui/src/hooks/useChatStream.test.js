@@ -897,6 +897,30 @@ describe("useChatStream", () => {
     });
   });
 
+  it("is a no-op when tool_progress / tool_finished / tool_error arrive before any tool_started", async () => {
+    // No tool_started ever fires, so the in-flight assistant turn never
+    // gets a toolSteps array. patchToolStep's findIndex predicate
+    // (`t.msg_id === tempAsstId && t.toolSteps`) returns -1 for the
+    // turn-not-found branch. The events must NOT crash or fabricate a
+    // toolSteps key on the turn.
+    const result = await runToolStream([
+      { type: "tool_progress", tool_use_id: "tu-orphan", status_text: "x" },
+      { type: "tool_finished", tool_use_id: "tu-orphan", summary: "completed" },
+      {
+        type: "tool_error",
+        tool_use_id: "tu-orphan",
+        error_type: "ignored",
+        partial_result_count: 0,
+      },
+      doneEvent("a-orphan"),
+    ]);
+
+    const asst = result.current.turns.find((t) => t.msg_id === "a-orphan");
+    // No toolSteps key materialised on the turn — patchToolStep's
+    // turn-not-found early return preserved it.
+    expect(asst.toolSteps).toBeUndefined();
+  });
+
   it("leaves unrelated history turns untouched when tool events arrive", async () => {
     // Seed an existing history row so patchToolStep's first false-branch
     // (t.msg_id !== tempAsstId) is exercised against a real turn.
