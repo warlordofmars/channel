@@ -36,9 +36,12 @@ import httpx
 import pytest
 
 # ---------------------------------------------------------------------------
-# Local helpers — kept in-file rather than added to conftest.py because the
-# rest of the e2e suite drives Playwright; these are the only HTTP-only
-# helpers and only one test uses them.
+# Local helpers — kept in-file rather than promoted to conftest.py because
+# only this test uses them today. Mirrors the same pattern used by
+# ``test_memory_writes.py`` and ``test_chat_management.py``, which also
+# re-implement HTTP helpers locally rather than sharing via conftest. If a
+# third HTTP-driven e2e test arrives, promote these into conftest.py at that
+# point.
 # ---------------------------------------------------------------------------
 
 
