@@ -24,6 +24,12 @@ from strands.types.content import Messages
 
 from channel.agents.memory import AgentCoreMemoryHook, get_or_create_memory
 from channel.agents.recall import AgentCoreRecallHook
+from channel.agents.tool_hooks import (
+    ChainState,
+    ModelVisibilityAddendumHook,
+    ToolCallGuardHook,
+    ToolCallTelemetryHook,
+)
 
 # Caller-supplied short ids (``claude-sonnet-4-6``) → Bedrock cross-region
 # inference-profile IDs.  Strands' BedrockModel calls ``converse_stream``,
@@ -146,6 +152,7 @@ def build_agent(
     system_prompt: str | None = None,
     max_tokens: int = DEFAULT_MAX_TOKENS,
     effort: str | None = None,
+    tools: list[Any] | None = None,
 ) -> Agent:
     """Construct a fresh Strands ``Agent`` for one chat turn.
 
@@ -164,6 +171,15 @@ def build_agent(
     / max). When supplied it overrides ``max_tokens`` via
     :func:`max_tokens_for_effort`. Unknown values silently fall back to
     the default budget — never error on a stale client.
+
+    ``tools`` is the Strands ``tools`` list registered on the Agent. The
+    chassis defaults to empty; callers register ``current_time`` behind
+    ``STARTER_CLOCK_TOOL_ENABLED`` and #182 / #183 will register ``exa``
+    and ``code_exec`` in future PRs. A fresh :class:`ChainState` is
+    attached to the Agent as ``agent.chain_state`` so the chassis hooks
+    (``ToolCallGuardHook`` / ``ToolCallTelemetryHook`` /
+    ``ModelVisibilityAddendumHook``) can read per-chain counters off the
+    event.
     """
 
     if effort is not None:
@@ -179,20 +195,37 @@ def build_agent(
         actor_id=user_id,
         session_id=chat_id,
     )
+    addendum_hook = ModelVisibilityAddendumHook()
+    guard_hook = ToolCallGuardHook()
+    # Telemetry hook records ``[meta] used <tool>`` synthetic ASSISTANT
+    # messages via memory_hook's CreateEvent path (epic #128 decision 6).
+    telemetry_hook = ToolCallTelemetryHook(memory_writer=memory_hook.write_meta_event)
     agent = Agent(
         model=bedrock,
         system_prompt=system_prompt or DEFAULT_SYSTEM_PROMPT,
-        # Recall (Before) first, write (After) second.
-        hooks=[recall_hook, memory_hook],
+        # Order matters: addendum first (mutates the system prompt
+        # before recall reads it), then recall (Before) + memory write
+        # (After), then the tool-use guard + telemetry hooks.
+        hooks=[
+            addendum_hook,
+            recall_hook,
+            memory_hook,
+            guard_hook,
+            telemetry_hook,
+        ],
         # Strands types ``messages`` as ``list[Message]`` (its TypedDict);
         # at runtime the shape is plain dicts. ``cast`` keeps mypy happy
         # without making consumers of build_agent import Strands types.
         messages=cast(Messages, prior_messages or []),
+        tools=tools or [],
     )
     # The recall hook reads chat_id off ``event.agent.chat_id`` (Strands'
     # BeforeInvocationEvent doesn't carry chat context natively; this is
-    # a Channel-specific attribute).
+    # a Channel-specific attribute). ChainState is attached for the same
+    # reason — the chassis hooks (guard / telemetry / addendum) read it
+    # off the agent.
     agent.chat_id = chat_id  # type: ignore[attr-defined]
+    agent.chain_state = ChainState()  # type: ignore[attr-defined]
     return agent
 
 

@@ -498,6 +498,57 @@ def test_post_message_falls_back_to_prefs_effort_when_payload_omits_it(
     assert captured["build_agent_kwargs"]["effort"] == "High"
 
 
+def test_post_message_registers_clock_tool_when_flag_on(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``STARTER_CLOCK_TOOL_ENABLED=1`` → ``current_time`` registered.
+
+    Chassis policy P2 (#181 strategy spec): the smoke-test tool is
+    off by default in prod, on in dev/jc envs via the CDK env-var
+    diff in ``infra/stacks/channel_stack.py``.
+    """
+
+    _stub_storage_for_one_turn(monkeypatch)
+    monkeypatch.setenv("STARTER_CLOCK_TOOL_ENABLED", "1")
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        "channel.api.chats.build_agent",
+        _fake_streaming_agent_factory(captured),
+    )
+
+    response = client.post(
+        "/api/chats/c1/messages",
+        json={"message": "hi", "model": "claude-sonnet-4-6"},
+    )
+    assert response.status_code == 200
+    tools = captured["build_agent_kwargs"]["tools"]
+    assert len(tools) == 1
+    assert tools[0].tool_name == "current_time"
+
+
+def test_post_message_omits_clock_tool_when_flag_off(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Flag unset → ``tools`` is empty (prod default per spec P2)."""
+
+    _stub_storage_for_one_turn(monkeypatch)
+    monkeypatch.delenv("STARTER_CLOCK_TOOL_ENABLED", raising=False)
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        "channel.api.chats.build_agent",
+        _fake_streaming_agent_factory(captured),
+    )
+
+    response = client.post(
+        "/api/chats/c1/messages",
+        json={"message": "hi", "model": "claude-sonnet-4-6"},
+    )
+    assert response.status_code == 200
+    assert captured["build_agent_kwargs"]["tools"] == []
+
+
 def test_regenerate_forwards_payload_effort_to_build_agent(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

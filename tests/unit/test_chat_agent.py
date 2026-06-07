@@ -84,7 +84,10 @@ def _patch_strands(monkeypatch, captured):
     monkeypatch.setattr("channel.agents.chat_agent.BedrockModel", FakeBedrockModel)
     monkeypatch.setattr("channel.agents.chat_agent.Agent", FakeAgent)
     monkeypatch.setattr("channel.agents.chat_agent.get_or_create_memory", lambda env: "mem-test")
-    monkeypatch.setattr("channel.agents.chat_agent.AgentCoreMemoryHook", lambda **kw: object())
+    monkeypatch.setattr(
+        "channel.agents.chat_agent.AgentCoreMemoryHook",
+        lambda **kw: MagicMock(write_meta_event=MagicMock()),
+    )
     monkeypatch.setattr("channel.agents.chat_agent.AgentCoreRecallHook", lambda **kw: object())
 
 
@@ -167,7 +170,10 @@ def test_build_agent_constructs_strands_agent_with_bedrock_model(monkeypatch):
     monkeypatch.setattr("channel.agents.chat_agent.BedrockModel", FakeBedrockModel)
     monkeypatch.setattr("channel.agents.chat_agent.Agent", FakeAgent)
     monkeypatch.setattr("channel.agents.chat_agent.get_or_create_memory", lambda env: "mem-test")
-    monkeypatch.setattr("channel.agents.chat_agent.AgentCoreMemoryHook", lambda **kw: object())
+    monkeypatch.setattr(
+        "channel.agents.chat_agent.AgentCoreMemoryHook",
+        lambda **kw: MagicMock(write_meta_event=MagicMock()),
+    )
     monkeypatch.setattr("channel.agents.chat_agent.AgentCoreRecallHook", lambda **kw: object())
 
     agent = build_agent(
@@ -193,7 +199,10 @@ def test_build_agent_uses_custom_system_prompt_when_provided(monkeypatch):
         ),
     )
     monkeypatch.setattr("channel.agents.chat_agent.get_or_create_memory", lambda env: "mem-test")
-    monkeypatch.setattr("channel.agents.chat_agent.AgentCoreMemoryHook", lambda **kw: object())
+    monkeypatch.setattr(
+        "channel.agents.chat_agent.AgentCoreMemoryHook",
+        lambda **kw: MagicMock(write_meta_event=MagicMock()),
+    )
     monkeypatch.setattr("channel.agents.chat_agent.AgentCoreRecallHook", lambda **kw: object())
 
     build_agent(
@@ -252,15 +261,24 @@ def test_build_agent_attaches_recall_hook_before_write_hook(monkeypatch):
         "actor_id": "user-abc",
         "session_id": "chat-xyz",
     }
-    # Order: recall before write.
-    assert captured["agent_kwargs"]["hooks"] == [fake_recall, fake_write]
+    # Order: recall before write. After Task 8 the hooks list also
+    # carries the three chassis hooks (addendum, guard, telemetry) — see
+    # ``test_build_agent_attaches_chassis_hooks_in_documented_order`` for
+    # the full ordering contract.
+    hooks = captured["agent_kwargs"]["hooks"]
+    recall_idx = hooks.index(fake_recall)
+    write_idx = hooks.index(fake_write)
+    assert recall_idx < write_idx
 
 
 def test_build_agent_attaches_chat_id_to_agent_instance(monkeypatch):
     """Recall hook reads chat_id off ``event.agent.chat_id``; set it at
     construction time."""
     monkeypatch.setattr("channel.agents.chat_agent.BedrockModel", lambda **_: object())
-    monkeypatch.setattr("channel.agents.chat_agent.AgentCoreMemoryHook", lambda **_: object())
+    monkeypatch.setattr(
+        "channel.agents.chat_agent.AgentCoreMemoryHook",
+        lambda **_: MagicMock(write_meta_event=MagicMock()),
+    )
     monkeypatch.setattr("channel.agents.chat_agent.AgentCoreRecallHook", lambda **_: object())
     monkeypatch.setattr(
         "channel.agents.chat_agent.get_or_create_memory",
@@ -362,3 +380,145 @@ def test_build_followups_agent_respects_starter_followups_model_override(monkeyp
 
     build_followups_agent()
     assert captured["model_kwargs"]["model_id"] == "us.anthropic.claude-sonnet-4-6"
+
+
+# ---------------------------------------------------------------------------
+# Task 8: tools=[...] + ChainState wiring (#181)
+# ---------------------------------------------------------------------------
+
+
+def test_build_agent_accepts_tools_and_attaches_chain_state(monkeypatch):
+    """The chassis registers tools via build_agent(tools=[...]) and
+    attaches a fresh ChainState to the Agent instance so the hooks can
+    read per-chain counters off ``event.agent.chain_state``."""
+    from channel.agents.tool_hooks import ChainState
+    from channel.agents.tools.clock import current_time
+
+    # Fake Agent mirrors Strands' surface for what this test inspects:
+    # the ``tools`` kwarg becomes a ``tool_names`` list of the registered
+    # tool callables' names. Real Strands does this via a TOOL_SPEC
+    # decorator on @tool — short-circuiting that here keeps the unit
+    # test free of boto3 region lookups.
+    class FakeAgent:
+        def __init__(self, *, tools, **_kw):
+            self.tool_names = [getattr(t, "__name__", None) or t.tool_name for t in tools]
+
+    captured: dict[str, object] = {}
+    _patch_strands(monkeypatch, captured)
+    monkeypatch.setattr("channel.agents.chat_agent.Agent", FakeAgent)
+
+    agent = build_agent(
+        model_id="claude-sonnet-4-6",
+        user_id="user-1",
+        chat_id="chat-1",
+        tools=[current_time],
+    )
+
+    assert isinstance(agent.chain_state, ChainState)
+    # Strands exposes registered tools via ``agent.tool_names`` (probed
+    # via inspect on Agent.__init__ — the kwarg is ``tools``, the
+    # public-attr surface is ``tool_names``).
+    assert "current_time" in agent.tool_names
+
+
+def test_build_agent_works_without_tools(monkeypatch):
+    """Default ``tools=None`` preserves the pre-chassis call shape.
+
+    ChainState still attaches — the hooks short-circuit on missing
+    state, but attaching it unconditionally keeps the control flow flat.
+    """
+    from channel.agents.tool_hooks import ChainState
+
+    class FakeAgent:
+        def __init__(self, *, tools, **_kw):
+            self.tool_names = [getattr(t, "__name__", None) or t.tool_name for t in tools]
+
+    captured: dict[str, object] = {}
+    _patch_strands(monkeypatch, captured)
+    monkeypatch.setattr("channel.agents.chat_agent.Agent", FakeAgent)
+
+    agent = build_agent(
+        model_id="claude-sonnet-4-6",
+        user_id="user-1",
+        chat_id="chat-1",
+    )
+    assert isinstance(agent.chain_state, ChainState)
+    assert agent.tool_names == []
+
+
+def test_build_agent_attaches_chassis_hooks_in_documented_order(monkeypatch):
+    """Hook order matters: addendum mutates the system prompt BEFORE the
+    recall hook reads it; the write + tool hooks come after.
+
+    Documented order: ``[addendum, recall, memory, guard, telemetry]``.
+    """
+    from channel.agents.tool_hooks import (
+        ModelVisibilityAddendumHook,
+        ToolCallGuardHook,
+        ToolCallTelemetryHook,
+    )
+
+    captured: dict[str, object] = {}
+    fake_recall = MagicMock(name="recall_hook")
+    fake_memory = MagicMock(name="memory_hook")
+    fake_memory.write_meta_event = MagicMock(name="write_meta_event")
+
+    class FakeAgent:
+        def __init__(self, **kwargs):
+            captured["agent_kwargs"] = kwargs
+
+    monkeypatch.setattr("channel.agents.chat_agent.BedrockModel", lambda **_: object())
+    monkeypatch.setattr("channel.agents.chat_agent.Agent", FakeAgent)
+    monkeypatch.setattr("channel.agents.chat_agent.AgentCoreRecallHook", lambda **_: fake_recall)
+    monkeypatch.setattr("channel.agents.chat_agent.AgentCoreMemoryHook", lambda **_: fake_memory)
+    monkeypatch.setattr(
+        "channel.agents.chat_agent.get_or_create_memory",
+        lambda env: "mem-test",
+    )
+
+    build_agent(
+        model_id="claude-sonnet-4-6",
+        user_id="u",
+        chat_id="c",
+    )
+
+    hooks = captured["agent_kwargs"]["hooks"]
+    assert isinstance(hooks[0], ModelVisibilityAddendumHook)
+    assert hooks[1] is fake_recall
+    assert hooks[2] is fake_memory
+    assert isinstance(hooks[3], ToolCallGuardHook)
+    assert isinstance(hooks[4], ToolCallTelemetryHook)
+    # The telemetry hook must be wired to the memory hook's
+    # write_meta_event so synthetic ``[meta] used <tool>`` events
+    # actually land in AgentCore.
+    assert hooks[4]._memory_writer is fake_memory.write_meta_event
+
+
+def test_build_agent_passes_tools_kwarg_to_strands_agent(monkeypatch):
+    """When tools=None, build_agent must still pass ``tools=[]`` to
+    Strands so the Agent doesn't try to load default tools."""
+    captured: dict[str, object] = {}
+
+    class FakeAgent:
+        def __init__(self, **kwargs):
+            captured["agent_kwargs"] = kwargs
+
+    monkeypatch.setattr("channel.agents.chat_agent.BedrockModel", lambda **_: object())
+    monkeypatch.setattr("channel.agents.chat_agent.Agent", FakeAgent)
+    monkeypatch.setattr("channel.agents.chat_agent.AgentCoreRecallHook", lambda **_: object())
+    fake_memory = MagicMock()
+    monkeypatch.setattr("channel.agents.chat_agent.AgentCoreMemoryHook", lambda **_: fake_memory)
+    monkeypatch.setattr("channel.agents.chat_agent.get_or_create_memory", lambda env: "m")
+
+    build_agent(model_id="claude-sonnet-4-6", user_id="u", chat_id="c")
+    assert captured["agent_kwargs"]["tools"] == []
+
+    captured.clear()
+    sentinel_tool = object()
+    build_agent(
+        model_id="claude-sonnet-4-6",
+        user_id="u",
+        chat_id="c",
+        tools=[sentinel_tool],
+    )
+    assert captured["agent_kwargs"]["tools"] == [sentinel_tool]

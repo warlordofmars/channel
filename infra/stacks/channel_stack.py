@@ -458,6 +458,14 @@ class ChannelStack(cdk.Stack):
             # leak shape as the debug-endpoints flag.
             common_env["STARTER_BYPASS_GOOGLE_AUTH"] = "1"
 
+        # #181 chassis — register ``current_time`` smoke-test tool only
+        # in non-prod envs (strategy spec policy P2: smoke-test, not a
+        # product feature). Prod gets the flag explicitly set to ``"0"``
+        # so a future code path that reads it can't accidentally see an
+        # unset variable as "on" if defaults shift. A sibling assertion
+        # in ``tests/unit/test_channel_stack.py`` enforces both shapes.
+        common_env["STARTER_CLOCK_TOOL_ENABLED"] = "0" if is_prod else "1"
+
         # ----------------------------------------------------------------
         # Attachments S3 bucket (#173) — file attachments + vision (epic #109)
         # ----------------------------------------------------------------
