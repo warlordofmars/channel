@@ -612,6 +612,480 @@ def test_regenerate_forwards_payload_effort_to_build_agent(
 
 
 # ---------------------------------------------------------------------------
+# Tool SSE dispatch + cancel-signal lifecycle (#181 PR-2 Task 13)
+# ---------------------------------------------------------------------------
+
+
+def test_post_message_emits_tool_sse_events_and_dedupes_started(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Tool events from Strands surface as SSE, ``tool_started`` deduped
+    per ``tool_use_id`` because ``ToolUseStreamEvent`` fires per token."""
+
+    _stub_storage_for_one_turn(monkeypatch)
+    # Suppress the follow-ups Haiku call so the stream stays focused on
+    # the tool events under test (default Prefs has suggest_followups=True).
+    monkeypatch.setenv("STARTER_FOLLOWUPS_ENABLED", "0")
+
+    async def fake_stream(self, prompt):
+        # Two ToolUseStreamEvents for the same tool_use_id — the
+        # dispatcher MUST coalesce them into a single tool_started SSE.
+        yield {
+            "type": "tool_use_stream",
+            "current_tool_use": {
+                "toolUseId": "tu-1",
+                "name": "current_time",
+                "input": {},
+            },
+        }
+        yield {
+            "type": "tool_use_stream",
+            "current_tool_use": {
+                "toolUseId": "tu-1",
+                "name": "current_time",
+                "input": {"tz": "UTC"},
+            },
+        }
+        # A ToolStreamEvent string yield → tool_progress.
+        yield {
+            "type": "tool_stream",
+            "tool_stream_event": {
+                "tool_use": {"toolUseId": "tu-1"},
+                "data": "fetching clock",
+            },
+        }
+        # Success result → tool_finished.
+        yield {
+            "type": "tool_result",
+            "tool_result": {
+                "toolUseId": "tu-1",
+                "status": "success",
+                "content": [{"text": "2026-06-07T12:00:00Z"}],
+            },
+        }
+        # Bracket the turn with a stop event so the helper exits cleanly.
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+
+    class FakeAgent:
+        stream_async = fake_stream
+
+    monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
+
+    response = client.post(
+        "/api/chats/c1/messages",
+        json={"message": "hi", "model": "claude-sonnet-4-6"},
+    )
+    assert response.status_code == 200
+    body = response.text
+
+    # tool_started appears exactly once for tu-1 (dedup proof).
+    assert body.count('"type": "tool_started"') == 1
+    assert '"tool_use_id": "tu-1"' in body
+    assert '"tool_name": "current_time"' in body
+    # tool_progress + tool_finished emitted.
+    assert '"type": "tool_progress"' in body
+    assert '"status_text": "fetching clock"' in body
+    assert '"type": "tool_finished"' in body
+    # Raw tool result text MUST NOT appear in the SSE body — the chassis
+    # emits a generic "completed" summary so tool output never leaks
+    # over SSE (Copilot review fix). Tool output reaches the user via
+    # the model's text reply, not the step row.
+    assert "2026-06-07T12:00:00Z" not in body
+    assert '"summary": "completed"' in body
+    # No error in the happy path.
+    assert '"type": "tool_error"' not in body
+
+
+def test_post_message_emits_tool_error_on_failed_result(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``tool_result`` with ``status="error"`` surfaces as ``tool_error``."""
+
+    _stub_storage_for_one_turn(monkeypatch)
+    monkeypatch.setenv("STARTER_FOLLOWUPS_ENABLED", "0")
+
+    async def fake_stream(self, prompt):
+        yield {
+            "type": "tool_result",
+            "tool_result": {
+                "toolUseId": "tu-err",
+                "status": "error",
+                "content": [{"text": "boom"}],
+            },
+        }
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+
+    class FakeAgent:
+        stream_async = fake_stream
+
+    monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
+
+    response = client.post(
+        "/api/chats/c1/messages",
+        json={"message": "hi", "model": "claude-sonnet-4-6"},
+    )
+    assert response.status_code == 200
+    assert '"type": "tool_error"' in response.text
+    assert '"tool_use_id": "tu-err"' in response.text
+    # No prior tool_finished → partial_result_count=0 (Copilot review #8).
+    assert '"partial_result_count": 0' in response.text
+
+
+def test_post_message_tool_error_partial_result_count_counts_prior_finished(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Copilot review #8 — ``partial_result_count`` on ``tool_error``
+    reflects the per-chain count of ``tool_finished`` events that
+    preceded the error, not the translator's hardcoded 0."""
+
+    _stub_storage_for_one_turn(monkeypatch)
+    monkeypatch.setenv("STARTER_FOLLOWUPS_ENABLED", "0")
+
+    async def fake_stream(self, prompt):
+        # Two successful tools complete before the third errors.
+        yield {
+            "type": "tool_result",
+            "tool_result": {
+                "toolUseId": "tu-1",
+                "status": "success",
+                "content": [{"text": "ok 1"}],
+            },
+        }
+        yield {
+            "type": "tool_result",
+            "tool_result": {
+                "toolUseId": "tu-2",
+                "status": "success",
+                "content": [{"text": "ok 2"}],
+            },
+        }
+        yield {
+            "type": "tool_result",
+            "tool_result": {
+                "toolUseId": "tu-3",
+                "status": "error",
+                "content": [{"text": "boom"}],
+            },
+        }
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+
+    class FakeAgent:
+        stream_async = fake_stream
+
+    monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
+
+    response = client.post(
+        "/api/chats/c1/messages",
+        json={"message": "hi", "model": "claude-sonnet-4-6"},
+    )
+    assert response.status_code == 200
+    body = response.text
+    assert '"type": "tool_error"' in body
+    # The error event surfaces 2 completed prior calls, not 0.
+    assert '"partial_result_count": 2' in body
+    assert '"partial_result_count": 0' not in body
+
+
+def test_post_message_tool_error_partial_result_count_increments_across_errors(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Copilot review #8 — the counter increments only on
+    ``tool_finished``, so a chain like
+    ``finished, error, finished, error`` surfaces
+    ``partial_result_count=1`` then ``=2``."""
+
+    _stub_storage_for_one_turn(monkeypatch)
+    monkeypatch.setenv("STARTER_FOLLOWUPS_ENABLED", "0")
+
+    async def fake_stream(self, prompt):
+        yield {
+            "type": "tool_result",
+            "tool_result": {
+                "toolUseId": "tu-1",
+                "status": "success",
+                "content": [{"text": "ok 1"}],
+            },
+        }
+        yield {
+            "type": "tool_result",
+            "tool_result": {
+                "toolUseId": "tu-2",
+                "status": "error",
+                "content": [{"text": "boom 1"}],
+            },
+        }
+        yield {
+            "type": "tool_result",
+            "tool_result": {
+                "toolUseId": "tu-3",
+                "status": "success",
+                "content": [{"text": "ok 2"}],
+            },
+        }
+        yield {
+            "type": "tool_result",
+            "tool_result": {
+                "toolUseId": "tu-4",
+                "status": "error",
+                "content": [{"text": "boom 2"}],
+            },
+        }
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+
+    class FakeAgent:
+        stream_async = fake_stream
+
+    monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
+
+    response = client.post(
+        "/api/chats/c1/messages",
+        json={"message": "hi", "model": "claude-sonnet-4-6"},
+    )
+    assert response.status_code == 200
+    body = response.text
+    # First error after one finished → partial_result_count=1.
+    assert '"partial_result_count": 1' in body
+    # Second error after two finished → partial_result_count=2.
+    assert '"partial_result_count": 2' in body
+
+
+def test_post_message_skips_tool_started_when_use_id_missing(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``translate_event`` returns ``("skip", None)``-shape when a
+    ``ToolUseStreamEvent`` lacks a ``toolUseId`` — the dispatcher must
+    swallow the resulting non-tool event without emitting SSE."""
+
+    _stub_storage_for_one_turn(monkeypatch)
+    monkeypatch.setenv("STARTER_FOLLOWUPS_ENABLED", "0")
+
+    async def fake_stream(self, prompt):
+        # Missing toolUseId — translate_event falls through and the
+        # event ends up classified as a no-op.
+        yield {
+            "type": "tool_use_stream",
+            "current_tool_use": {"name": "current_time", "input": {}},
+        }
+        yield {"event": {"contentBlockDelta": {"delta": {"text": "ok"}}}}
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+
+    class FakeAgent:
+        stream_async = fake_stream
+
+    monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
+
+    response = client.post(
+        "/api/chats/c1/messages",
+        json={"message": "hi", "model": "claude-sonnet-4-6"},
+    )
+    assert response.status_code == 200
+    assert '"type": "tool_started"' not in response.text
+
+
+def test_stream_clears_stale_cancel_signal_at_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The entry-time defensive clear must wipe a stale signal left
+    over from a previous turn on the same chat.
+
+    Previous design cleared in ``finally`` — but ``finally`` fires
+    synchronously when the generator dies, so the signal was never
+    observable by anyone else. Copilot round-3 moved the clear to
+    function entry so the signal can persist past disconnect (and be
+    observed during the dying chain's last tool call) while still
+    being prevented from polluting the NEXT turn.
+    """
+
+    import asyncio
+
+    from channel.agents import tool_hooks
+    from channel.api.chats import _stream_bedrock_reply
+
+    _stub_storage_for_one_turn(monkeypatch)
+    monkeypatch.setenv("STARTER_FOLLOWUPS_ENABLED", "0")
+
+    async def fake_stream(self, prompt):
+        yield {"event": {"contentBlockDelta": {"delta": {"text": "ok"}}}}
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+
+    class FakeAgent:
+        stream_async = fake_stream
+
+    monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
+
+    chat = Chat(
+        chat_id="cancel-stale",
+        user_id="u-1",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="claude-sonnet-4-6",
+        message_count=2,
+    )
+
+    # Pre-set the signal as if a previous turn ended via disconnect.
+    tool_hooks.set_cancel_signal(chat.chat_id)
+    assert tool_hooks.is_cancel_requested(chat.chat_id) is True
+
+    try:
+
+        async def _consume() -> None:
+            async for _ in _stream_bedrock_reply(
+                chat=chat,
+                user_message="hi",
+                model="claude-sonnet-4-6",
+                claims={"sub": "u-1", "role": "user"},
+            ):
+                # The entry-time clear runs before any yield — by the
+                # time the first event lands, the stale signal is gone.
+                assert not tool_hooks.is_cancel_requested(chat.chat_id)
+
+        asyncio.run(_consume())
+
+        # Happy-path stream leaves the registry empty (nothing set, and
+        # entry-time clear already wiped the stale signal).
+        assert not tool_hooks.is_cancel_requested(chat.chat_id)
+    finally:
+        # Defensive cleanup in case the assertion above flipped the
+        # registry into an unexpected state.
+        tool_hooks.clear_cancel_signal(chat.chat_id)
+
+
+def test_stream_sets_cancel_signal_on_client_disconnect_and_persists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``asyncio.CancelledError`` mid-stream → cancel signal set AND
+    persists past the dying generator so the guard's next
+    ``BeforeToolCallEvent`` can observe it.
+
+    The previous design cleared in ``finally`` which made the signal
+    unobservable. Copilot round-3 fix: the signal stays set after the
+    generator unwinds; the next turn's entry-time clear (or the
+    guard's one-shot consume) is responsible for tearing it down.
+    """
+
+    import asyncio
+
+    from channel.agents import tool_hooks
+    from channel.api.chats import _stream_bedrock_reply
+
+    _stub_storage_for_one_turn(monkeypatch)
+    monkeypatch.setenv("STARTER_FOLLOWUPS_ENABLED", "0")
+
+    async def fake_stream(self, prompt):
+        yield {"event": {"contentBlockDelta": {"delta": {"text": "partial"}}}}
+        raise asyncio.CancelledError
+
+    class FakeAgent:
+        stream_async = fake_stream
+
+    monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
+
+    chat = Chat(
+        chat_id="cancel-set",
+        user_id="u-1",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="claude-sonnet-4-6",
+        message_count=2,
+    )
+
+    # Confirm baseline empty registry.
+    assert tool_hooks.is_cancel_requested(chat.chat_id) is False
+
+    try:
+
+        async def _consume() -> None:
+            with pytest.raises(asyncio.CancelledError):
+                async for _ in _stream_bedrock_reply(
+                    chat=chat,
+                    user_message="hi",
+                    model="claude-sonnet-4-6",
+                    claims={"sub": "u-1", "role": "user"},
+                ):
+                    pass
+
+        asyncio.run(_consume())
+
+        # Signal PERSISTS past the dying generator — this is the whole
+        # point of the round-3 fix. The guard's next BeforeToolCallEvent
+        # (in a real chain still being unwound) reads it and aborts.
+        assert tool_hooks.is_cancel_requested(chat.chat_id) is True
+    finally:
+        # Test cleanup — in production the next turn's entry-time clear
+        # handles this. Here we tear down so we don't leak into other
+        # tests sharing the module-level registry.
+        tool_hooks.clear_cancel_signal(chat.chat_id)
+
+
+def test_stream_entry_clear_removes_stale_signal_from_previous_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end cross-turn defense: a stale signal from a previous
+    disconnect MUST NOT cause this turn's tool calls to be cancelled.
+
+    Pairs with the disconnect-persists test — proves the two halves of
+    the lifecycle (persist past disconnect; clear at next-turn entry)
+    interlock correctly.
+    """
+
+    import asyncio
+
+    from channel.agents import tool_hooks
+    from channel.api.chats import _stream_bedrock_reply
+
+    _stub_storage_for_one_turn(monkeypatch)
+    monkeypatch.setenv("STARTER_FOLLOWUPS_ENABLED", "0")
+
+    # Simulate the leftover state from a prior disconnected turn.
+    chat_id = "cancel-cross-turn"
+    tool_hooks.set_cancel_signal(chat_id)
+    assert tool_hooks.is_cancel_requested(chat_id) is True
+
+    async def fake_stream(self, prompt):
+        # If the entry-time clear ran, by the time the stream starts
+        # the signal must be False — otherwise the real guard would
+        # have aborted the first tool call.
+        assert tool_hooks.is_cancel_requested(chat_id) is False
+        yield {"event": {"contentBlockDelta": {"delta": {"text": "fresh"}}}}
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+
+    class FakeAgent:
+        stream_async = fake_stream
+
+    monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
+
+    chat = Chat(
+        chat_id=chat_id,
+        user_id="u-1",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="claude-sonnet-4-6",
+        message_count=2,
+    )
+
+    try:
+
+        async def _consume() -> None:
+            async for _ in _stream_bedrock_reply(
+                chat=chat,
+                user_message="hi",
+                model="claude-sonnet-4-6",
+                claims={"sub": "u-1", "role": "user"},
+            ):
+                pass
+
+        asyncio.run(_consume())
+
+        # Final state: registry is clean.
+        assert tool_hooks.is_cancel_requested(chat_id) is False
+    finally:
+        tool_hooks.clear_cancel_signal(chat_id)
+
+
+# ---------------------------------------------------------------------------
 # Phase 7d auto-title
 # ---------------------------------------------------------------------------
 

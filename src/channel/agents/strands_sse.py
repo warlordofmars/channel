@@ -25,9 +25,149 @@ def translate_event(event: dict[str, Any]) -> tuple[str, Any]:
     * ``"stop"`` — turn boundary; ``payload`` is ``{"stop_reason": str}``.
     * ``"usage"`` — token-count metadata; ``payload`` is
       ``{"input_tokens": int, "output_tokens": int}``.
+    * ``"tool_started"`` — model has begun emitting a tool call; payload
+      is ``{"tool_name": str, "tool_use_id": str, "args_preview": str}``.
+      Sourced from Strands' ``ToolUseStreamEvent``. The dispatcher in
+      ``chats.py`` dedupes per ``tool_use_id`` because this event fires
+      once per input-token, not once per tool call.
+    * ``"tool_progress"`` — string yield from inside an executing tool;
+      payload is ``{"tool_use_id": str, "status_text": str}``. Sourced
+      from Strands' ``ToolStreamEvent`` when its ``data`` is a string.
+    * ``"tool_finished"`` — successful tool completion; payload is
+      ``{"tool_use_id": str, "summary": str}``. Sourced from Strands'
+      ``ToolResultEvent`` with ``status="success"``. ``summary`` is a
+      bounded marker — today the chassis emits a literal
+      ``"completed"`` for every success and NEVER leaks the raw tool
+      result text over SSE. Tool-specific structured summaries
+      ("Found 3 results" for #182 Exa, "Ran 5 lines" for #183
+      code-exec) will arrive via an explicit ``ToolResult`` summary
+      field in those PRs; the chassis does not infer summaries from
+      raw content. The actual tool output reaches the user via the
+      model's text reply (Strands' event_loop feeds the result back
+      into the model, which writes a reply that incorporates the data).
+    * ``"tool_error"`` — tool failure / cancellation / interrupt; payload
+      is ``{"tool_use_id": str, "error_type": str,
+      "partial_result_count": int}``. Sourced from ``ToolResultEvent``
+      with ``status="error"``, ``ToolCancelEvent``, or
+      ``ToolInterruptEvent``.
     * ``"skip"`` — uninteresting event (content block start, telemetry,
       etc.); ``payload`` is ``None``.
     """
+
+    # Tool events are emitted at the TOP LEVEL of the TypedEvent dict
+    # (see ``strands/types/_events.py``) — not nested inside the
+    # ``event`` envelope. Dispatch on the ``type`` discriminator first,
+    # then the cancel/interrupt keys.
+    event_type = event.get("type")
+
+    if event_type == "tool_use_stream":
+        current = event.get("current_tool_use") or {}
+        tool_use_id = current.get("toolUseId")
+        if tool_use_id:
+            return (
+                "tool_started",
+                {
+                    "tool_name": current.get("name", ""),
+                    "tool_use_id": tool_use_id,
+                    "args_preview": json.dumps(current.get("input", {})),
+                },
+            )
+
+    if event_type == "tool_stream":
+        inner_stream = event.get("tool_stream_event") or {}
+        data = inner_stream.get("data")
+        tool_use = inner_stream.get("tool_use") or {}
+        tool_use_id = tool_use.get("toolUseId", "")
+        # Skip uncorrelatable progress: the SPA keys step rows on
+        # ``tool_use_id``, so an empty id produces a payload it can't
+        # attach to any step.
+        if isinstance(data, str) and data and tool_use_id:
+            return (
+                "tool_progress",
+                {
+                    "tool_use_id": tool_use_id,
+                    "status_text": data,
+                },
+            )
+
+    if event_type == "tool_result":
+        result = event.get("tool_result") or {}
+        tool_use_id = result.get("toolUseId", "")
+        # Same uncorrelatable-event guard as ``tool_progress`` / cancel /
+        # interrupt: without a ``tool_use_id`` the SPA can't attach the
+        # ``tool_finished`` / ``tool_error`` payload to any step row.
+        if not tool_use_id:
+            return ("skip", None)
+        status = result.get("status", "success")
+        if status == "error":
+            # Error path concatenates ``text`` blocks because Strands
+            # wraps the cancel-reason string from
+            # ``BeforeToolCallEvent.cancel_tool`` into ``content`` as
+            # ``{"content": [{"text": cancel_message}]}`` (see
+            # ``strands/tools/executors/_executor.py``). Surfacing
+            # that string as ``error_type`` is how ``ToolCallGuardHook``'s
+            # reason codes (``chain_cap`` / ``cancelled`` /
+            # ``wall_clock``) reach the SPA so it can render the right
+            # affordance. This IS bounded telemetry — short, fixed
+            # reason strings — and ``sse_tool_error`` caps it at
+            # ``_ARGS_PREVIEW_MAX`` as defense in depth.
+            reason_text = "".join(
+                block.get("text", "")
+                for block in result.get("content", [])
+                if isinstance(block, dict) and "text" in block
+            )
+            error_type = reason_text.strip() or "tool_failed"
+            return (
+                "tool_error",
+                {
+                    "tool_use_id": tool_use_id,
+                    "error_type": error_type[:_ARGS_PREVIEW_MAX],
+                    "partial_result_count": 0,
+                },
+            )
+        # Success: emit a generic completion marker. The raw tool
+        # result text DOES NOT leak over SSE — that is the contract
+        # documented on ``sse_tool_finished``. Tools that want a
+        # richer SPA summary will provide one via a structured
+        # ``ToolResult`` summary field in #182 / #183; the chassis
+        # does NOT infer summaries from raw content. The actual tool
+        # output still feeds the model (Strands' event_loop), which
+        # incorporates it into the assistant's text reply — that is
+        # where users see the real data, not the SSE step row.
+        return ("tool_finished", {"tool_use_id": tool_use_id, "summary": "completed"})
+
+    if "tool_cancel_event" in event:
+        cancel = event["tool_cancel_event"]
+        tool_use = cancel.get("tool_use") or {}
+        tool_use_id = tool_use.get("toolUseId", "")
+        # Same uncorrelatable-event guard as ``tool_progress``: a cancel
+        # SSE payload without a ``tool_use_id`` can't be attached to any
+        # step row in the SPA.
+        if not tool_use_id:
+            return ("skip", None)
+        return (
+            "tool_error",
+            {
+                "tool_use_id": tool_use_id,
+                "error_type": cancel.get("message") or "cancelled",
+                "partial_result_count": 0,
+            },
+        )
+
+    if "tool_interrupt_event" in event:
+        interrupt = event["tool_interrupt_event"]
+        tool_use = interrupt.get("tool_use") or {}
+        tool_use_id = tool_use.get("toolUseId", "")
+        if not tool_use_id:
+            return ("skip", None)
+        return (
+            "tool_error",
+            {
+                "tool_use_id": tool_use_id,
+                "error_type": "interrupted",
+                "partial_result_count": 0,
+            },
+        )
 
     # Strands emits each text chunk twice: once as a top-level ``data``
     # shorthand and once inside the canonical ``event.contentBlockDelta``
@@ -133,5 +273,88 @@ def sse_done(
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
             "stop_reason": stop_reason,
+        }
+    )
+
+
+_ARGS_PREVIEW_MAX = 200
+_SUMMARY_MAX = 500
+
+
+def sse_tool_started(*, tool_name: str, tool_use_id: str, args_preview: str) -> bytes:
+    """Emit a ``tool_started`` SSE event (epic #128 / #181).
+
+    Marks the start of one tool call inside an assistant turn. The SPA
+    appends a collapsible step row to the active message.
+    """
+    return _sse(
+        {
+            "type": "tool_started",
+            "tool_name": tool_name,
+            "tool_use_id": tool_use_id,
+            "args_preview": args_preview[:_ARGS_PREVIEW_MAX],
+        }
+    )
+
+
+def sse_tool_progress(*, tool_use_id: str, status_text: str) -> bytes:
+    """Emit a ``tool_progress`` SSE event (epic #128 / #181).
+
+    Model-driven status text for the in-flight tool call. Driven by
+    Strands' ``ToolStreamEvent`` yields.
+    """
+    return _sse(
+        {
+            "type": "tool_progress",
+            "tool_use_id": tool_use_id,
+            "status_text": status_text,
+        }
+    )
+
+
+def sse_tool_finished(*, tool_use_id: str, summary: str) -> bytes:
+    """Emit a ``tool_finished`` SSE event (epic #128 / #181).
+
+    Marks tool completion. ``summary`` is a short, bounded marker — the
+    chassis never sends raw tool output over SSE. Today the chassis
+    emits a literal ``"completed"`` for every success; #182 (Exa) and
+    #183 (code-exec) will add tool-specific structured summaries
+    ("Found 3 results", "Ran 5 lines") via an explicit ``ToolResult``
+    summary field.
+
+    The actual tool output reaches the user via the model's text reply
+    (the assistant invokes the tool, Strands' event_loop feeds the
+    result back into the model, the model writes a reply that
+    incorporates the data). The SSE step row is telemetry, not the
+    delivery channel for tool data.
+    """
+    return _sse(
+        {
+            "type": "tool_finished",
+            "tool_use_id": tool_use_id,
+            "summary": summary[:_SUMMARY_MAX],
+        }
+    )
+
+
+def sse_tool_error(*, tool_use_id: str, error_type: str, partial_result_count: int) -> bytes:
+    """Emit a ``tool_error`` SSE event (epic #128 / #181).
+
+    ``error_type`` is a free-form short string the SPA can branch on:
+    ``"timeout"``, ``"rate_limit"``, ``"upstream_5xx"``, ``"chain_cap"``,
+    ``"cancelled"``, ``"wall_clock"``. Capped at ``_ARGS_PREVIEW_MAX``
+    (200 chars) — defense in depth alongside ``translate_event``'s
+    truncation when extracting from ``tool_result.content``, since the
+    emitter is the bytes-on-the-wire boundary. Partial > none: a chain
+    that fires 3 of 5 steps and fails on 4 still surfaces
+    ``partial_result_count=3`` so the SPA renders "I have 3 of 5
+    results; here's what I found" rather than a silent abort.
+    """
+    return _sse(
+        {
+            "type": "tool_error",
+            "tool_use_id": tool_use_id,
+            "error_type": error_type[:_ARGS_PREVIEW_MAX],
+            "partial_result_count": partial_result_count,
         }
     )

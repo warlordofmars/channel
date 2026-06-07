@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from channel.agents import tool_hooks
 from channel.agents.tool_hooks import (
     ChainState,
     ModelVisibilityAddendumHook,
@@ -18,6 +19,17 @@ from channel.agents.tool_hooks import (
     is_cancel_requested,
     set_cancel_signal,
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_cancel_signals():
+    """Ensure no cancel-signal entries leak between tests. The registry is
+    module-level so a test that sets a signal without clearing it would
+    otherwise pollute downstream tests (especially the TTL tests, which
+    inspect dict contents directly)."""
+    tool_hooks._CANCEL_SIGNALS.clear()
+    yield
+    tool_hooks._CANCEL_SIGNALS.clear()
 
 
 def test_chain_state_defaults():
@@ -79,6 +91,71 @@ def test_cancel_signal_unknown_chat_is_false():
 
 def test_clear_cancel_signal_is_idempotent():
     clear_cancel_signal("never-set")  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# Cancel-signal TTL — bounds the module-level registry against the
+# disconnect-without-followup leak in a warm Lambda. A chat that
+# disconnects mid-chain (no further BeforeToolCallEvent to one-shot
+# consume) AND never receives another turn (no chats.py entry-time
+# clear) would otherwise leave its entry in the registry forever.
+# Opportunistic prune on every public op caps the dict size at the cost
+# of one O(n) walk per call — amortized O(1) because n stays small.
+# ---------------------------------------------------------------------------
+
+
+def test_cancel_signal_ttl_prunes_expired_on_set():
+    """A signal set long ago (timestamp older than the TTL) is pruned the
+    next time ``set_cancel_signal`` runs — even when the target chat_id
+    differs from the stale one. Bounds the registry under steady-state
+    churn: every new disconnect drops every leaked entry that exceeded
+    its 5-min observation window."""
+    stale_ts = time.monotonic() - (tool_hooks._CANCEL_SIGNAL_TTL_SEC + 10)
+    tool_hooks._CANCEL_SIGNALS["leaked-chat"] = stale_ts
+
+    set_cancel_signal("fresh-chat")
+
+    assert "leaked-chat" not in tool_hooks._CANCEL_SIGNALS
+    assert "fresh-chat" in tool_hooks._CANCEL_SIGNALS
+
+
+def test_cancel_signal_ttl_prunes_expired_on_is_cancel_requested():
+    """The read path also prunes. A guard call that queries for a
+    long-disconnected chat returns False AND removes the stale entry —
+    so even read-only inspections bound the registry."""
+    stale_ts = time.monotonic() - (tool_hooks._CANCEL_SIGNAL_TTL_SEC + 10)
+    tool_hooks._CANCEL_SIGNALS["stale-chat"] = stale_ts
+
+    assert is_cancel_requested("stale-chat") is False
+    assert "stale-chat" not in tool_hooks._CANCEL_SIGNALS
+
+
+def test_cancel_signal_ttl_keeps_fresh_entries():
+    """A signal set within the TTL window survives subsequent public ops.
+    Lower bound on the observation window — the guard must see the
+    cancel for the duration of any reasonable chain wall-clock budget."""
+    set_cancel_signal("fresh-1")
+    # Run multiple ops — none of them should evict the fresh entry.
+    set_cancel_signal("fresh-2")
+    assert is_cancel_requested("fresh-1") is True
+    clear_cancel_signal("unrelated")
+    assert is_cancel_requested("fresh-1") is True
+
+
+def test_cancel_signal_ttl_clear_handles_missing_chat_id_after_prune():
+    """Defensive: the clear path is idempotent even when the chat_id has
+    already been pruned. The current lifecycle clears stale signals via
+    three mechanisms (entry-time clear in the next turn's
+    ``_stream_bedrock_reply``, guard one-shot consume on observe, and
+    TTL prune); any of them firing for an already-evicted entry must be
+    a no-op rather than raising."""
+    stale_ts = time.monotonic() - (tool_hooks._CANCEL_SIGNAL_TTL_SEC + 10)
+    tool_hooks._CANCEL_SIGNALS["expired-chat"] = stale_ts
+
+    # Should not raise; the prune evicts the entry, then pop(..., None)
+    # is a no-op.
+    clear_cancel_signal("expired-chat")
+    assert "expired-chat" not in tool_hooks._CANCEL_SIGNALS
 
 
 def test_addendum_hook_appends_chain_progress_to_system_prompt():

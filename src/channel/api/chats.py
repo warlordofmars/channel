@@ -34,9 +34,14 @@ from channel.agents.strands_sse import (
     sse_done,
     sse_follow_ups_suggested,
     sse_title_suggested,
+    sse_tool_error,
+    sse_tool_finished,
+    sse_tool_progress,
+    sse_tool_started,
     sse_user_persisted,
     translate_event,
 )
+from channel.agents.tool_hooks import clear_cancel_signal, set_cancel_signal
 from channel.agents.tools.clock import current_time
 from channel.api._auth import require_mgmt_user
 from channel.metrics import (
@@ -515,6 +520,14 @@ async def _stream_bedrock_reply(
     state = state if state is not None else {}
     resolved_model = resolve_model_id(model)
     state["resolved_model"] = resolved_model
+    # Defensive entry-time clear of the per-chat cancel signal. If a previous
+    # turn on this chat ended via client disconnect, the except block below
+    # left the signal SET (intentionally — see #181 PR-2 Copilot round-3) so
+    # the guard could observe it during the dying chain. That stale value
+    # would cancel the first tool call of THIS turn if left untouched. The
+    # registry is module-level (`channel.agents.tool_hooks`), so even across
+    # Lambda invocations on the same warm container we must clear at entry.
+    clear_cancel_signal(chat.chat_id)
     # Capture "this was the first round-trip" BEFORE we persist anything.
     # Auto-title block below uses it to fire exactly once per chat
     # (Phase 7d idempotency).
@@ -590,6 +603,16 @@ async def _stream_bedrock_reply(
     stop_reason = "end_turn"
     input_tokens = 0
     output_tokens = 0
+    # Dedup tool_started — Strands' ``ToolUseStreamEvent`` fires once
+    # per input-token while the model is still emitting the call. The
+    # SPA only wants a single step row per ``tool_use_id``.
+    emitted_tool_starts: set[str] = set()
+    # Per-chain count of completed tool calls — used to populate
+    # ``partial_result_count`` on ``tool_error`` events per the
+    # ``sse_tool_error`` contract: "a chain that fires 3 of 5 steps
+    # and fails on 4 still surfaces partial_result_count=3". The
+    # translator can't track this — it's per-stream dispatcher state.
+    completed_tool_calls = 0
 
     # When attachments are present, Strands gets the labeled content-block
     # list with the user's text appended; otherwise the bare string keeps
@@ -598,16 +621,53 @@ async def _stream_bedrock_reply(
         [*content_blocks, {"text": user_message}] if content_blocks else user_message
     )
 
-    async for event in agent.stream_async(user_payload):
-        kind, payload = translate_event(event)
-        if kind == "delta":
-            accumulated.append(payload)
-            yield sse_delta(payload)
-        elif kind == "stop":
-            stop_reason = payload["stop_reason"]
-        elif kind == "usage":
-            input_tokens = payload["input_tokens"]
-            output_tokens = payload["output_tokens"]
+    # Cancel-signal lifecycle (#181 PR-2, revised in Copilot round-3):
+    # if the SSE client disconnects mid-stream FastAPI raises
+    # ``asyncio.CancelledError`` (or closes the generator with
+    # ``GeneratorExit``) inside this loop. We surface that by flipping
+    # the per-chat cancel signal; ``ToolCallGuardHook`` reads it on the
+    # next ``BeforeToolCallEvent`` and aborts the chain (and the guard
+    # one-shot-consumes the flag, see ``ToolCallGuardHook`` in
+    # ``channel.agents.tool_hooks``).
+    #
+    # The signal is deliberately NOT cleared in a ``finally`` here: a
+    # ``finally`` would fire synchronously when the generator unwinds,
+    # so by the time anything else looked at the registry the flag would
+    # always be False — the cancel would be unobservable. Instead the
+    # signal persists past this dying generator and is cleared by either
+    # (a) the guard's one-shot consume if the chain ran another tool
+    # call during the cancellation window, or (b) the entry-time clear
+    # at the top of this function on the NEXT turn for the same chat.
+    try:
+        async for event in agent.stream_async(user_payload):
+            kind, payload = translate_event(event)
+            if kind == "delta":
+                accumulated.append(payload)
+                yield sse_delta(payload)
+            elif kind == "stop":
+                stop_reason = payload["stop_reason"]
+            elif kind == "usage":
+                input_tokens = payload["input_tokens"]
+                output_tokens = payload["output_tokens"]
+            elif kind == "tool_started":
+                tool_use_id = payload["tool_use_id"]
+                if tool_use_id and tool_use_id not in emitted_tool_starts:
+                    emitted_tool_starts.add(tool_use_id)
+                    yield sse_tool_started(**payload)
+            elif kind == "tool_progress":
+                yield sse_tool_progress(**payload)
+            elif kind == "tool_finished":
+                completed_tool_calls += 1
+                yield sse_tool_finished(**payload)
+            elif kind == "tool_error":
+                # Override the translator's hardcoded 0 with the
+                # actual per-chain completed-call count. See the
+                # ``sse_tool_error`` docstring for the contract.
+                payload = {**payload, "partial_result_count": completed_tool_calls}
+                yield sse_tool_error(**payload)
+    except (asyncio.CancelledError, GeneratorExit):
+        set_cancel_signal(chat.chat_id)
+        raise
 
     assistant_text = "".join(accumulated)
     state["assistant_text"] = assistant_text
