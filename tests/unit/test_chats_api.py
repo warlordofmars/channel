@@ -549,6 +549,60 @@ def test_post_message_omits_clock_tool_when_flag_off(
     assert captured["build_agent_kwargs"]["tools"] == []
 
 
+def test_post_message_registers_web_search_tool_when_flag_on(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``STARTER_WEB_SEARCH_ENABLED=1`` → ``web_search`` registered.
+
+    Mirrors the clock-tool registration policy (#181 P2): off by
+    default in prod, on in dev/jc envs via the CDK env-var diff in
+    ``infra/stacks/channel_stack.py``. #182 adds Exa web search to
+    the chassis behind its own flag.
+    """
+
+    _stub_storage_for_one_turn(monkeypatch)
+    monkeypatch.setenv("STARTER_WEB_SEARCH_ENABLED", "1")
+    monkeypatch.delenv("STARTER_CLOCK_TOOL_ENABLED", raising=False)
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        "channel.api.chats.build_agent",
+        _fake_streaming_agent_factory(captured),
+    )
+
+    response = client.post(
+        "/api/chats/c1/messages",
+        json={"message": "hi", "model": "claude-sonnet-4-6"},
+    )
+    assert response.status_code == 200
+    tools = captured["build_agent_kwargs"]["tools"]
+    assert len(tools) == 1
+    assert tools[0].tool_name == "web_search"
+
+
+def test_post_message_omits_web_search_tool_when_flag_off(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Flag unset → ``web_search`` not in ``tools`` (prod default)."""
+
+    _stub_storage_for_one_turn(monkeypatch)
+    monkeypatch.delenv("STARTER_WEB_SEARCH_ENABLED", raising=False)
+    monkeypatch.delenv("STARTER_CLOCK_TOOL_ENABLED", raising=False)
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        "channel.api.chats.build_agent",
+        _fake_streaming_agent_factory(captured),
+    )
+
+    response = client.post(
+        "/api/chats/c1/messages",
+        json={"message": "hi", "model": "claude-sonnet-4-6"},
+    )
+    assert response.status_code == 200
+    assert captured["build_agent_kwargs"]["tools"] == []
+
+
 def test_regenerate_forwards_payload_effort_to_build_agent(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

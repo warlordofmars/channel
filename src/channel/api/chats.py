@@ -590,6 +590,13 @@ async def _stream_bedrock_reply(
     tool_registry: list[Any] = []
     if os.environ.get("STARTER_CLOCK_TOOL_ENABLED") == "1":
         tool_registry.append(current_time)
+    if os.environ.get("STARTER_WEB_SEARCH_ENABLED") == "1":
+        # Lazy import: ``strands_tools.exa`` pulls in aiohttp + console
+        # + Panel + Rich, so the chassis shouldn't pay the import cost
+        # when the flag is off (same rationale as ``current_time``).
+        from channel.agents.tools.web_search import web_search
+
+        tool_registry.append(web_search)
 
     agent = build_agent(
         model_id=model,
