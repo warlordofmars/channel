@@ -877,13 +877,18 @@ def test_post_message_skips_tool_started_when_use_id_missing(
     assert '"type": "tool_started"' not in response.text
 
 
-def test_stream_clears_cancel_signal_on_normal_completion(
+def test_stream_clears_stale_cancel_signal_at_entry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Happy-path stream must leave the cancel-signal registry empty.
+    """The entry-time defensive clear must wipe a stale signal left
+    over from a previous turn on the same chat.
 
-    Drives ``_stream_bedrock_reply`` directly so we can assert against
-    the module-level registry without juggling TestClient + disconnects.
+    Previous design cleared in ``finally`` — but ``finally`` fires
+    synchronously when the generator dies, so the signal was never
+    observable by anyone else. Copilot round-3 moved the clear to
+    function entry so the signal can persist past disconnect (and be
+    observed during the dying chain's last tool call) while still
+    being prevented from polluting the NEXT turn.
     """
 
     import asyncio
@@ -904,7 +909,7 @@ def test_stream_clears_cancel_signal_on_normal_completion(
     monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
 
     chat = Chat(
-        chat_id="cancel-clear",
+        chat_id="cancel-stale",
         user_id="u-1",
         title="t",
         created_at="t",
@@ -913,25 +918,46 @@ def test_stream_clears_cancel_signal_on_normal_completion(
         message_count=2,
     )
 
-    async def _consume() -> None:
-        async for _ in _stream_bedrock_reply(
-            chat=chat,
-            user_message="hi",
-            model="claude-sonnet-4-6",
-            claims={"sub": "u-1", "role": "user"},
-        ):
-            # Mid-stream the signal must NOT be set on the happy path.
-            assert not tool_hooks.is_cancel_requested(chat.chat_id)
+    # Pre-set the signal as if a previous turn ended via disconnect.
+    tool_hooks.set_cancel_signal(chat.chat_id)
+    assert tool_hooks.is_cancel_requested(chat.chat_id) is True
 
-    asyncio.run(_consume())
-    assert not tool_hooks.is_cancel_requested(chat.chat_id)
+    try:
+
+        async def _consume() -> None:
+            async for _ in _stream_bedrock_reply(
+                chat=chat,
+                user_message="hi",
+                model="claude-sonnet-4-6",
+                claims={"sub": "u-1", "role": "user"},
+            ):
+                # The entry-time clear runs before any yield — by the
+                # time the first event lands, the stale signal is gone.
+                assert not tool_hooks.is_cancel_requested(chat.chat_id)
+
+        asyncio.run(_consume())
+
+        # Happy-path stream leaves the registry empty (nothing set, and
+        # entry-time clear already wiped the stale signal).
+        assert not tool_hooks.is_cancel_requested(chat.chat_id)
+    finally:
+        # Defensive cleanup in case the assertion above flipped the
+        # registry into an unexpected state.
+        tool_hooks.clear_cancel_signal(chat.chat_id)
 
 
-def test_stream_sets_cancel_signal_on_client_disconnect(
+def test_stream_sets_cancel_signal_on_client_disconnect_and_persists(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``asyncio.CancelledError`` mid-stream → cancel signal set, then
-    cleared in finally so the next turn for the same chat is clean."""
+    """``asyncio.CancelledError`` mid-stream → cancel signal set AND
+    persists past the dying generator so the guard's next
+    ``BeforeToolCallEvent`` can observe it.
+
+    The previous design cleared in ``finally`` which made the signal
+    unobservable. Copilot round-3 fix: the signal stays set after the
+    generator unwinds; the next turn's entry-time clear (or the
+    guard's one-shot consume) is responsible for tearing it down.
+    """
 
     import asyncio
 
@@ -940,11 +966,6 @@ def test_stream_sets_cancel_signal_on_client_disconnect(
 
     _stub_storage_for_one_turn(monkeypatch)
     monkeypatch.setenv("STARTER_FOLLOWUPS_ENABLED", "0")
-
-    # An observer for the in-flight signal — we need to confirm the
-    # signal is set BEFORE finally clears it. The fake agent flips a
-    # flag from inside the except branch via a side-channel.
-    observed: dict[str, bool] = {"set_during_except": False}
 
     async def fake_stream(self, prompt):
         yield {"event": {"contentBlockDelta": {"delta": {"text": "partial"}}}}
@@ -965,18 +986,84 @@ def test_stream_sets_cancel_signal_on_client_disconnect(
         message_count=2,
     )
 
-    # Wrap clear_cancel_signal so we can peek at the registry state
-    # AFTER set_cancel_signal has fired but BEFORE finally clears it.
-    real_clear = tool_hooks.clear_cancel_signal
+    # Confirm baseline empty registry.
+    assert tool_hooks.is_cancel_requested(chat.chat_id) is False
 
-    def spy_clear(chat_id: str) -> None:
-        observed["set_during_except"] = tool_hooks.is_cancel_requested(chat_id)
-        real_clear(chat_id)
+    try:
 
-    monkeypatch.setattr("channel.api.chats.clear_cancel_signal", spy_clear)
+        async def _consume() -> None:
+            with pytest.raises(asyncio.CancelledError):
+                async for _ in _stream_bedrock_reply(
+                    chat=chat,
+                    user_message="hi",
+                    model="claude-sonnet-4-6",
+                    claims={"sub": "u-1", "role": "user"},
+                ):
+                    pass
 
-    async def _consume() -> None:
-        with pytest.raises(asyncio.CancelledError):
+        asyncio.run(_consume())
+
+        # Signal PERSISTS past the dying generator — this is the whole
+        # point of the round-3 fix. The guard's next BeforeToolCallEvent
+        # (in a real chain still being unwound) reads it and aborts.
+        assert tool_hooks.is_cancel_requested(chat.chat_id) is True
+    finally:
+        # Test cleanup — in production the next turn's entry-time clear
+        # handles this. Here we tear down so we don't leak into other
+        # tests sharing the module-level registry.
+        tool_hooks.clear_cancel_signal(chat.chat_id)
+
+
+def test_stream_entry_clear_removes_stale_signal_from_previous_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end cross-turn defense: a stale signal from a previous
+    disconnect MUST NOT cause this turn's tool calls to be cancelled.
+
+    Pairs with the disconnect-persists test — proves the two halves of
+    the lifecycle (persist past disconnect; clear at next-turn entry)
+    interlock correctly.
+    """
+
+    import asyncio
+
+    from channel.agents import tool_hooks
+    from channel.api.chats import _stream_bedrock_reply
+
+    _stub_storage_for_one_turn(monkeypatch)
+    monkeypatch.setenv("STARTER_FOLLOWUPS_ENABLED", "0")
+
+    # Simulate the leftover state from a prior disconnected turn.
+    chat_id = "cancel-cross-turn"
+    tool_hooks.set_cancel_signal(chat_id)
+    assert tool_hooks.is_cancel_requested(chat_id) is True
+
+    async def fake_stream(self, prompt):
+        # If the entry-time clear ran, by the time the stream starts
+        # the signal must be False — otherwise the real guard would
+        # have aborted the first tool call.
+        assert tool_hooks.is_cancel_requested(chat_id) is False
+        yield {"event": {"contentBlockDelta": {"delta": {"text": "fresh"}}}}
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+
+    class FakeAgent:
+        stream_async = fake_stream
+
+    monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
+
+    chat = Chat(
+        chat_id=chat_id,
+        user_id="u-1",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="claude-sonnet-4-6",
+        message_count=2,
+    )
+
+    try:
+
+        async def _consume() -> None:
             async for _ in _stream_bedrock_reply(
                 chat=chat,
                 user_message="hi",
@@ -985,11 +1072,12 @@ def test_stream_sets_cancel_signal_on_client_disconnect(
             ):
                 pass
 
-    asyncio.run(_consume())
-    # Signal was set inside the except branch...
-    assert observed["set_during_except"] is True
-    # ...and cleared by the finally so the next turn starts clean.
-    assert not tool_hooks.is_cancel_requested(chat.chat_id)
+        asyncio.run(_consume())
+
+        # Final state: registry is clean.
+        assert tool_hooks.is_cancel_requested(chat_id) is False
+    finally:
+        tool_hooks.clear_cancel_signal(chat_id)
 
 
 # ---------------------------------------------------------------------------

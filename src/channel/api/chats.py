@@ -520,6 +520,14 @@ async def _stream_bedrock_reply(
     state = state if state is not None else {}
     resolved_model = resolve_model_id(model)
     state["resolved_model"] = resolved_model
+    # Defensive entry-time clear of the per-chat cancel signal. If a previous
+    # turn on this chat ended via client disconnect, the except block below
+    # left the signal SET (intentionally — see #181 PR-2 Copilot round-3) so
+    # the guard could observe it during the dying chain. That stale value
+    # would cancel the first tool call of THIS turn if left untouched. The
+    # registry is module-level (`channel.agents.tool_hooks`), so even across
+    # Lambda invocations on the same warm container we must clear at entry.
+    clear_cancel_signal(chat.chat_id)
     # Capture "this was the first round-trip" BEFORE we persist anything.
     # Auto-title block below uses it to fire exactly once per chat
     # (Phase 7d idempotency).
@@ -613,13 +621,23 @@ async def _stream_bedrock_reply(
         [*content_blocks, {"text": user_message}] if content_blocks else user_message
     )
 
-    # Cancel-signal lifecycle (#181 PR-2): if the SSE client disconnects
-    # mid-stream FastAPI raises ``asyncio.CancelledError`` (or closes the
-    # generator with ``GeneratorExit``) inside this loop. We surface that
-    # by flipping the per-chat cancel signal; ``ToolCallGuardHook`` reads
-    # it on the next ``BeforeToolCallEvent`` and aborts the chain. The
-    # ``finally`` block always clears the signal so the next turn for the
-    # same chat doesn't see stale state.
+    # Cancel-signal lifecycle (#181 PR-2, revised in Copilot round-3):
+    # if the SSE client disconnects mid-stream FastAPI raises
+    # ``asyncio.CancelledError`` (or closes the generator with
+    # ``GeneratorExit``) inside this loop. We surface that by flipping
+    # the per-chat cancel signal; ``ToolCallGuardHook`` reads it on the
+    # next ``BeforeToolCallEvent`` and aborts the chain (and the guard
+    # one-shot-consumes the flag, see ``ToolCallGuardHook`` in
+    # ``channel.agents.tool_hooks``).
+    #
+    # The signal is deliberately NOT cleared in a ``finally`` here: a
+    # ``finally`` would fire synchronously when the generator unwinds,
+    # so by the time anything else looked at the registry the flag would
+    # always be False — the cancel would be unobservable. Instead the
+    # signal persists past this dying generator and is cleared by either
+    # (a) the guard's one-shot consume if the chain ran another tool
+    # call during the cancellation window, or (b) the entry-time clear
+    # at the top of this function on the NEXT turn for the same chat.
     try:
         async for event in agent.stream_async(user_payload):
             kind, payload = translate_event(event)
@@ -650,8 +668,6 @@ async def _stream_bedrock_reply(
     except (asyncio.CancelledError, GeneratorExit):
         set_cancel_signal(chat.chat_id)
         raise
-    finally:
-        clear_cancel_signal(chat.chat_id)
 
     assistant_text = "".join(accumulated)
     state["assistant_text"] = assistant_text
