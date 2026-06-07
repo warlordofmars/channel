@@ -1010,4 +1010,254 @@ describe("Conversation", () => {
     // The bottom-composer textarea is the only textbox in the tree.
     expect(screen.getByRole("textbox").value).toBe("What about X?");
   });
+
+  describe("tool-step list (#181 PR-3)", () => {
+    function assistantTurnWithSteps(steps) {
+      return [
+        {
+          msg_id: "a1",
+          role: "assistant",
+          text: "Here's the time.",
+          streaming: false,
+          toolSteps: steps,
+        },
+      ];
+    }
+
+    it("renders the collapsed toggle with tool name + status visible", () => {
+      mockStream({
+        turns: assistantTurnWithSteps([
+          {
+            toolUseId: "tu-1",
+            toolName: "current_time",
+            argsPreview: "{}",
+            status: "finished",
+            summary: "completed",
+          },
+        ]),
+      });
+      renderAt("/app/c/c1");
+      // The compact row shows the tool name + status without expansion.
+      expect(screen.getByText(/current_time/)).toBeInTheDocument();
+      expect(screen.getByText(/finished/)).toBeInTheDocument();
+      // The summary text is NOT yet visible — that's hidden behind expand.
+      expect(screen.queryByText("completed")).not.toBeInTheDocument();
+    });
+
+    it("expands the step list to reveal the summary on toggle click", () => {
+      mockStream({
+        turns: assistantTurnWithSteps([
+          {
+            toolUseId: "tu-1",
+            toolName: "current_time",
+            status: "finished",
+            summary: "2026-06-07T12:00:00Z",
+          },
+        ]),
+      });
+      renderAt("/app/c/c1");
+      const toggle = screen.getByRole("button", { name: /tool step/i });
+      expect(toggle.getAttribute("aria-expanded")).toBe("false");
+      fireEvent.click(toggle);
+      expect(toggle.getAttribute("aria-expanded")).toBe("true");
+      // Now the summary is visible inside the rendered ToolResultBlock.
+      expect(screen.getByText("2026-06-07T12:00:00Z")).toBeInTheDocument();
+    });
+
+    it("clicking the toggle a second time collapses the list again", () => {
+      mockStream({
+        turns: assistantTurnWithSteps([
+          {
+            toolUseId: "tu-1",
+            toolName: "current_time",
+            status: "finished",
+            summary: "the result",
+          },
+        ]),
+      });
+      renderAt("/app/c/c1");
+      const toggle = screen.getByRole("button", { name: /tool step/i });
+      fireEvent.click(toggle);
+      expect(screen.getByText("the result")).toBeInTheDocument();
+      fireEvent.click(toggle);
+      expect(screen.queryByText("the result")).not.toBeInTheDocument();
+      expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    });
+
+    it("pluralises the toggle label (1 step vs N steps)", () => {
+      mockStream({
+        turns: assistantTurnWithSteps([
+          {
+            toolUseId: "tu-1",
+            toolName: "current_time",
+            status: "finished",
+            summary: "ok",
+          },
+          {
+            toolUseId: "tu-2",
+            toolName: "current_time",
+            status: "finished",
+            summary: "ok",
+          },
+        ]),
+      });
+      renderAt("/app/c/c1");
+      expect(screen.getByRole("button", { name: /2 tool steps/i }))
+        .toBeInTheDocument();
+    });
+
+    it("singular toggle label when toolSteps has exactly one entry", () => {
+      mockStream({
+        turns: assistantTurnWithSteps([
+          {
+            toolUseId: "tu-1",
+            toolName: "current_time",
+            status: "finished",
+            summary: "ok",
+          },
+        ]),
+      });
+      renderAt("/app/c/c1");
+      expect(screen.getByRole("button", { name: /^1 tool step$/i }))
+        .toBeInTheDocument();
+    });
+
+    it("renders chain_cap error with distinct affordance, not generic error", () => {
+      mockStream({
+        turns: assistantTurnWithSteps([
+          {
+            toolUseId: "tu-1",
+            toolName: "current_time",
+            status: "error",
+            errorType: "chain_cap",
+            partialResultCount: 7,
+          },
+        ]),
+      });
+      renderAt("/app/c/c1");
+      fireEvent.click(screen.getByRole("button", { name: /tool step/i }));
+      expect(
+        screen.getByText(/reached the tool-use limit/i),
+      ).toBeInTheDocument();
+      // 7 partial steps — pluralised
+      expect(screen.getByText(/7 steps completed/i)).toBeInTheDocument();
+    });
+
+    it("renders chain_cap singular when partialResultCount === 1", () => {
+      mockStream({
+        turns: assistantTurnWithSteps([
+          {
+            toolUseId: "tu-1",
+            toolName: "current_time",
+            status: "error",
+            errorType: "chain_cap",
+            partialResultCount: 1,
+          },
+        ]),
+      });
+      renderAt("/app/c/c1");
+      fireEvent.click(screen.getByRole("button", { name: /tool step/i }));
+      expect(screen.getByText(/1 step completed/i)).toBeInTheDocument();
+    });
+
+    it("renders generic error for non-chain_cap error types", () => {
+      mockStream({
+        turns: assistantTurnWithSteps([
+          {
+            toolUseId: "tu-1",
+            toolName: "current_time",
+            status: "error",
+            errorType: "timeout",
+          },
+        ]),
+      });
+      renderAt("/app/c/c1");
+      fireEvent.click(screen.getByRole("button", { name: /tool step/i }));
+      expect(screen.getByText(/current_time failed \(timeout\)/i))
+        .toBeInTheDocument();
+      // The chain-cap copy must NOT appear for non-chain_cap errors.
+      expect(screen.queryByText(/reached the tool-use limit/i)).toBeNull();
+    });
+
+    it("renders the summary inside ToolResultBlock when the step has one", () => {
+      mockStream({
+        turns: assistantTurnWithSteps([
+          {
+            toolUseId: "tu-1",
+            toolName: "current_time",
+            status: "finished",
+            summary: "07:00 UTC",
+          },
+        ]),
+      });
+      const { container } = renderAt("/app/c/c1");
+      fireEvent.click(screen.getByRole("button", { name: /tool step/i }));
+      // ToolResultBlock renders a div.tool-result-block wrapper.
+      expect(container.querySelector(".tool-result-block")).toBeTruthy();
+      expect(screen.getByText("07:00 UTC")).toBeInTheDocument();
+    });
+
+    it("omits ToolResultBlock when the finished step has no summary", () => {
+      mockStream({
+        turns: assistantTurnWithSteps([
+          {
+            toolUseId: "tu-1",
+            toolName: "current_time",
+            status: "finished",
+          },
+        ]),
+      });
+      const { container } = renderAt("/app/c/c1");
+      fireEvent.click(screen.getByRole("button", { name: /tool step/i }));
+      expect(container.querySelector(".tool-result-block")).toBeNull();
+    });
+
+    it("does not render a step list when toolSteps is undefined", () => {
+      mockStream({
+        turns: [
+          {
+            msg_id: "a1",
+            role: "assistant",
+            text: "no tools used",
+            streaming: false,
+          },
+        ],
+      });
+      const { container } = renderAt("/app/c/c1");
+      expect(container.querySelector(".tool-steps")).toBeNull();
+    });
+
+    it("does not render a step list when toolSteps is an empty array", () => {
+      mockStream({
+        turns: assistantTurnWithSteps([]),
+      });
+      const { container } = renderAt("/app/c/c1");
+      expect(container.querySelector(".tool-steps")).toBeNull();
+    });
+
+    it("renders the step list on a streaming assistant turn too", () => {
+      // The step list is visible during streaming so the user can see
+      // "the hands moving" — per the strategy spec's UX brief.
+      mockStream({
+        turns: [
+          {
+            msg_id: "a1",
+            role: "assistant",
+            text: "",
+            streaming: true,
+            toolSteps: [
+              {
+                toolUseId: "tu-1",
+                toolName: "current_time",
+                status: "running",
+              },
+            ],
+          },
+        ],
+      });
+      renderAt("/app/c/c1");
+      expect(screen.getByText(/current_time/)).toBeInTheDocument();
+      expect(screen.getByText(/running/)).toBeInTheDocument();
+    });
+  });
 });

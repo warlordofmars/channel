@@ -5,6 +5,7 @@ import ChannelMark from "../components/ChannelMark.jsx";
 import ChatHeader from "./ChatHeader.jsx";
 import Composer from "./Composer.jsx";
 import Icon from "../components/Icon.jsx";
+import ToolResultBlock from "./ToolResultBlock.jsx";
 import { submitFeedback } from "../api.js";
 import { useChannelPrefs } from "../hooks/useChannelPrefs.js";
 import { useChats } from "../hooks/ChatsContext.jsx";
@@ -183,6 +184,92 @@ function FeedbackButtons({ chatId, msgId, initialKind }) {
 }
 
 /**
+ * Renders a single tool step row inside the expanded step list. The
+ * three branches are:
+ *
+ *   1. `chain_cap` error — distinct copy ("I reached the tool-use
+ *      limit"), per the strategy spec's "like having hands" UX brief:
+ *      partial progress is acknowledged, not surfaced as a generic
+ *      failure.
+ *   2. Other error — `<toolName> failed (<errorType>)`.
+ *   3. Finished / running — the tool name + status, plus the result
+ *      summary (when present) rendered via `ToolResultBlock`. Future
+ *      issues (#182, #183) extend `ToolResultBlock` to discriminate
+ *      on `kind`; today only the default text-summary branch fires.
+ */
+function ToolStepRow({ step }) {
+  if (step.status === "error" && step.errorType === "chain_cap") {
+    const n = step.partialResultCount;
+    return (
+      <li className="tool-step-row tool-step-row-chain-cap">
+        I reached the tool-use limit for this turn ({n} step{n === 1 ? "" : "s"}
+        {" "}completed).
+      </li>
+    );
+  }
+  if (step.status === "error") {
+    return (
+      <li className="tool-step-row tool-step-row-error">
+        {step.toolName} failed ({step.errorType})
+      </li>
+    );
+  }
+  return (
+    <li className="tool-step-row">
+      <div className="tool-step-row-head">
+        <strong>{step.toolName}</strong>
+        <span className="tool-step-status">{step.status}</span>
+      </div>
+      {step.summary && <ToolResultBlock kind={step.kind} summary={step.summary} />}
+    </li>
+  );
+}
+
+/**
+ * Collapsible tool-step list rendered under an assistant message that
+ * used tools. Default collapsed so the chat reads as conversation, not
+ * a developer trace. The compact (collapsed) view still surfaces the
+ * tool name + status so the user can see "the hands moved" without
+ * expanding. Click the toggle to reveal the full step list with
+ * `ToolResultBlock` per finished step.
+ */
+function ToolStepList({ steps }) {
+  const [expanded, setExpanded] = useState(false);
+  function toggleExpanded() {
+    setExpanded(function flip(prev) { return !prev; });
+  }
+  const noun = steps.length === 1 ? "step" : "steps";
+  return (
+    <div className="tool-steps">
+      <button
+        type="button"
+        className="tool-steps-toggle"
+        onClick={toggleExpanded}
+        aria-expanded={expanded}
+      >
+        <Icon name={expanded ? "chevron-down" : "chevron-right"} size={14} />
+        {steps.length} tool {noun}
+      </button>
+      {expanded ? (
+        <ol className="tool-steps-list">
+          {steps.map((s) => (
+            <ToolStepRow key={s.toolUseId} step={s} />
+          ))}
+        </ol>
+      ) : (
+        <ol className="tool-steps-compact">
+          {steps.map((s) => (
+            <li key={s.toolUseId}>
+              {s.toolName} — {s.status}
+            </li>
+          ))}
+        </ol>
+      )}
+    </div>
+  );
+}
+
+/**
  * Streaming conversation pane backed by the real SSE-driven
  * `useChatStream` hook. The URL `:id` is the canonical chat id; the hook
  * loads history on mount and exposes `{ turns, send, abort, status }`.
@@ -315,6 +402,9 @@ export default function Conversation() {
                   <span className="mdl">{modelLabelFromList(t.model, models)}</span>
                 </div>
                 <div className="msg">{renderMarkdown(t.text, t.streaming)}</div>
+                {t.toolSteps && t.toolSteps.length > 0 && (
+                  <ToolStepList steps={t.toolSteps} />
+                )}
                 {t.artifact && (
                   <div className="art-inline" onClick={noop}>
                     <div className="ah">

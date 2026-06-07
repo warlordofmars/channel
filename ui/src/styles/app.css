@@ -887,3 +887,65 @@ html.is-electron-mac .sb-top {
   opacity: 0.4;
   cursor: not-allowed;
 }
+
+/* ----- Tool-step list (#181 PR-3) --------------------------------- */
+/* Collapsible "like having hands" affordance under an assistant turn
+   that used tools. Default collapsed; click the toggle to reveal the
+   per-step ToolResultBlock(s). */
+.tool-steps {
+  margin: 4px 0 0;
+  border-left: 2px solid var(--border);
+  padding-left: 10px;
+}
+.tool-steps-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: none;
+  border: 0;
+  color: var(--ink-faint);
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  padding: 2px 0;
+}
+.tool-steps-toggle:hover { color: var(--ink); }
+.tool-steps-compact {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  color: var(--ink-faint);
+  font-size: 13px;
+  list-style: disc;
+}
+.tool-steps-list {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  list-style: decimal;
+}
+.tool-step-row { padding: 4px 0; }
+.tool-step-row-chain-cap {
+  color: var(--ink-faint);
+  font-style: italic;
+}
+.tool-step-row-error { color: var(--danger); }
+.tool-step-row-head {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+.tool-step-status {
+  color: var(--ink-faint);
+  font-size: 12.5px;
+}
+.tool-result-block { margin-top: 4px; }
+.tool-result-summary {
+  background: var(--raised);
+  border-radius: var(--r-sm);
+  padding: 8px 10px;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: auto;
+  margin: 0;
+}
