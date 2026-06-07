@@ -738,6 +738,259 @@ describe("useChatStream", () => {
     ]);
   });
 
+  // ──────────────────────────────────────────────────────────────────
+  // #181 PR-3: tool_started / tool_progress / tool_finished / tool_error
+  // ──────────────────────────────────────────────────────────────────
+
+  // Shared helpers for the tool-event suite.  Each test mocks history +
+  // a stream of SSE events, then renders the hook, waits for idle, and
+  // invokes `send()`.  Extracting the boilerplate keeps each test
+  // focused on the unique events / assertions it exercises.
+
+  const doneEvent = (msg_id) => ({
+    type: "done",
+    msg_id,
+    seq: 1,
+    model: "m",
+    input_tokens: 0,
+    output_tokens: 0,
+    stop_reason: "end_turn",
+  });
+
+  const toolStarted = ({ id, name = "current_time", args = "{}" }) => ({
+    type: "tool_started",
+    tool_name: name,
+    tool_use_id: id,
+    args_preview: args,
+  });
+
+  async function runToolStream(events, { history = [] } = {}) {
+    api.getChat.mockResolvedValue({
+      chat: { chat_id: "c1" },
+      messages: history,
+      next_cursor: null,
+    });
+    api.streamMessage.mockResolvedValue({
+      ok: true,
+      body: makeMockResponseBody(events),
+    });
+
+    const { result } = renderHook(() => useChatStream("c1"));
+    await waitFor(() => expect(result.current.status).toBe("idle"));
+
+    await act(async () => {
+      await result.current.send({ message: "hi", model: "m", effort: "med" });
+    });
+
+    return result;
+  }
+
+  it("attaches a tool step to the active assistant turn on tool_started", async () => {
+    const result = await runToolStream([
+      { type: "user_persisted", msg_id: "u-t1", seq: 0 },
+      { type: "delta", text: "Let me check. " },
+      toolStarted({ id: "tu-1" }),
+      doneEvent("a-t1"),
+    ]);
+
+    const asst = result.current.turns.find((t) => t.msg_id === "a-t1");
+    expect(asst.toolSteps).toHaveLength(1);
+    expect(asst.toolSteps[0]).toMatchObject({
+      toolUseId: "tu-1",
+      toolName: "current_time",
+      argsPreview: "{}",
+      statusText: null,
+      summary: null,
+      errorType: null,
+      partialResultCount: 0,
+      status: "running",
+    });
+  });
+
+  it("updates statusText on tool_progress without changing other fields", async () => {
+    const result = await runToolStream([
+      toolStarted({ id: "tu-2", name: "web_search", args: '{"q":"x"}' }),
+      {
+        type: "tool_progress",
+        tool_use_id: "tu-2",
+        status_text: "searching...",
+      },
+      doneEvent("a-t2"),
+    ]);
+
+    const asst = result.current.turns.find((t) => t.msg_id === "a-t2");
+    expect(asst.toolSteps).toHaveLength(1);
+    expect(asst.toolSteps[0]).toMatchObject({
+      toolUseId: "tu-2",
+      toolName: "web_search",
+      argsPreview: '{"q":"x"}',
+      statusText: "searching...",
+      status: "running",
+    });
+  });
+
+  it("marks the matching step as finished on tool_finished", async () => {
+    const result = await runToolStream([
+      toolStarted({ id: "tu-3" }),
+      { type: "tool_finished", tool_use_id: "tu-3", summary: "completed" },
+      doneEvent("a-t3"),
+    ]);
+
+    const asst = result.current.turns.find((t) => t.msg_id === "a-t3");
+    expect(asst.toolSteps[0]).toMatchObject({
+      toolUseId: "tu-3",
+      summary: "completed",
+      status: "finished",
+    });
+  });
+
+  it("marks the matching step as error on tool_error", async () => {
+    const result = await runToolStream([
+      toolStarted({ id: "tu-4", name: "web_search" }),
+      {
+        type: "tool_error",
+        tool_use_id: "tu-4",
+        error_type: "chain_cap",
+        partial_result_count: 2,
+      },
+      doneEvent("a-t4"),
+    ]);
+
+    const asst = result.current.turns.find((t) => t.msg_id === "a-t4");
+    expect(asst.toolSteps[0]).toMatchObject({
+      toolUseId: "tu-4",
+      errorType: "chain_cap",
+      partialResultCount: 2,
+      status: "error",
+    });
+  });
+
+  it("is a no-op when tool_progress / tool_finished / tool_error reference an unknown tool_use_id", async () => {
+    const result = await runToolStream([
+      toolStarted({ id: "tu-known" }),
+      // tool_use_id doesn't match anything in toolSteps — no-op.
+      {
+        type: "tool_progress",
+        tool_use_id: "tu-unknown",
+        status_text: "ignored",
+      },
+      { type: "tool_finished", tool_use_id: "tu-unknown", summary: "ignored" },
+      {
+        type: "tool_error",
+        tool_use_id: "tu-unknown",
+        error_type: "ignored",
+        partial_result_count: 0,
+      },
+      doneEvent("a-t5"),
+    ]);
+
+    const asst = result.current.turns.find((t) => t.msg_id === "a-t5");
+    expect(asst.toolSteps).toHaveLength(1);
+    // The known step stays in its initial "running" state — none of
+    // the unknown-id events patched it.
+    expect(asst.toolSteps[0]).toMatchObject({
+      toolUseId: "tu-known",
+      status: "running",
+      statusText: null,
+      summary: null,
+      errorType: null,
+    });
+  });
+
+  it("is a no-op when tool_progress / tool_finished / tool_error arrive before any tool_started", async () => {
+    // No tool_started ever fires, so the in-flight assistant turn never
+    // gets a toolSteps array. patchToolStep's findIndex predicate
+    // (`t.msg_id === tempAsstId && t.toolSteps`) returns -1 for the
+    // turn-not-found branch. The events must NOT crash or fabricate a
+    // toolSteps key on the turn.
+    const result = await runToolStream([
+      { type: "tool_progress", tool_use_id: "tu-orphan", status_text: "x" },
+      { type: "tool_finished", tool_use_id: "tu-orphan", summary: "completed" },
+      {
+        type: "tool_error",
+        tool_use_id: "tu-orphan",
+        error_type: "ignored",
+        partial_result_count: 0,
+      },
+      doneEvent("a-orphan"),
+    ]);
+
+    const asst = result.current.turns.find((t) => t.msg_id === "a-orphan");
+    // No toolSteps key materialised on the turn — patchToolStep's
+    // turn-not-found early return preserved it.
+    expect(asst.toolSteps).toBeUndefined();
+  });
+
+  it("leaves unrelated history turns untouched when tool events arrive", async () => {
+    // Seed an existing history row so patchToolStep's first false-branch
+    // (t.msg_id !== tempAsstId) is exercised against a real turn.
+    const result = await runToolStream(
+      [
+        toolStarted({ id: "tu-6" }),
+        { type: "tool_progress", tool_use_id: "tu-6", status_text: "ticking" },
+        doneEvent("a-t6"),
+      ],
+      { history: [{ msg_id: "hist-1", role: "user", text: "earlier" }] },
+    );
+
+    // History turn untouched (no toolSteps key sneaks onto it).
+    const hist = result.current.turns.find((t) => t.msg_id === "hist-1");
+    expect(hist).toMatchObject({ msg_id: "hist-1", role: "user" });
+    expect(hist.toolSteps).toBeUndefined();
+    // Active assistant turn picked up both events.
+    const asst = result.current.turns.find((t) => t.msg_id === "a-t6");
+    expect(asst.toolSteps).toHaveLength(1);
+    expect(asst.toolSteps[0].statusText).toBe("ticking");
+  });
+
+  it("is a no-op when tool_started arrives after the temp msg_id has been swapped (done already fired)", async () => {
+    // After `done`, the assistant turn's msg_id swaps from tempAsstId
+    // to the persisted server id. A late `tool_started` (or one whose
+    // tempAsstId can't be correlated) must NOT fabricate a fresh state
+    // update — Copilot iteration: skip the React setter no-op when no
+    // turn matches by returning `prev` unchanged. Hard to detect from
+    // outside other than via the run-without-throwing path here; the
+    // important contract is no toolStep appears on any non-matching
+    // turn and existing state is untouched.
+    const result = await runToolStream([
+      { type: "delta", text: "ok" },
+      doneEvent("a-late"),
+      // tool_started arrives AFTER done — the turn's msg_id is now the
+      // persisted id, no longer matches tempAsstId.
+      toolStarted({ id: "tu-late" }),
+    ]);
+
+    const asst = result.current.turns.find((t) => t.msg_id === "a-late");
+    // No toolSteps fabricated because no turn matched tempAsstId at the
+    // point the late tool_started arrived.
+    expect(asst.toolSteps).toBeUndefined();
+  });
+
+  it("defaults partialResultCount to 0 when tool_error omits partial_result_count", async () => {
+    // Older / partial backends may emit tool_error without
+    // partial_result_count. Copilot iteration: defensive `?? 0` keeps
+    // the chain-cap copy stable (`{N} steps completed`) rather than
+    // rendering `undefined` into the UI.
+    const result = await runToolStream([
+      toolStarted({ id: "tu-no-count" }),
+      {
+        type: "tool_error",
+        tool_use_id: "tu-no-count",
+        error_type: "chain_cap",
+        // partial_result_count intentionally omitted
+      },
+      doneEvent("a-t-no-count"),
+    ]);
+
+    const asst = result.current.turns.find((t) => t.msg_id === "a-t-no-count");
+    expect(asst.toolSteps[0]).toMatchObject({
+      toolUseId: "tu-no-count",
+      errorType: "chain_cap",
+      partialResultCount: 0,
+      status: "error",
+    });
+  });
+
   it("clears stale turns when switching chats (loadedChatIdRef branch)", async () => {
     // Covers the loadedChatIdRef.current !== chatId branch: switching
     // from one chat with turns to a different chat clears the old

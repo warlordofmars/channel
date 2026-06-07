@@ -3,6 +3,34 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import * as api from "../api.js";
 import { makeSseDecoder } from "../lib/sseParser.js";
 
+// #181 PR-3: in-place patch of one toolStep on the in-flight assistant
+// turn. Returns the ORIGINAL `turns` reference when no turn matches
+// tempAsstId or no step matches toolUseId (e.g. progress/finished/error
+// arriving without a preceding tool_started — no-op rather than crash).
+// Reference-equality short-circuit lets React's useState setter no-op
+// (skip re-render) for stale / unknown tool_use_id events.
+//
+// Implementation: locate the target turn + step via findIndex BEFORE
+// cloning anything. On no-op (no match) we return early without
+// allocating a throwaway array — tool events fire frequently during
+// streaming so the allocation matters.
+function patchToolStep(turns, tempAsstId, toolUseId, patch) {
+  const turnIdx = turns.findIndex(
+    (t) => t.msg_id === tempAsstId && t.toolSteps,
+  );
+  if (turnIdx === -1) return turns;
+  const target = turns[turnIdx];
+  const stepIdx = target.toolSteps.findIndex(
+    (s) => s.toolUseId === toolUseId,
+  );
+  if (stepIdx === -1) return turns;
+  const nextSteps = [...target.toolSteps];
+  nextSteps[stepIdx] = { ...nextSteps[stepIdx], ...patch };
+  const next = [...turns];
+  next[turnIdx] = { ...target, toolSteps: nextSteps };
+  return next;
+}
+
 /**
  * Real SSE-driven chat hook. Loads chat history on mount, optimistically
  * renders new turns on send, parses streamed deltas, and finalises turns
@@ -157,6 +185,60 @@ export function useChatStream(chatId, { onTitleSuggested } = {}) {
                   ? { ...t, followUps: event.suggestions }
                   : t,
               ),
+            );
+          } else if (event.type === "tool_started") {
+            // #181 PR-3: push a new running step onto the in-flight
+            // assistant turn's toolSteps array. The active assistant
+            // turn is the one matching tempAsstId (set when send /
+            // regenerate seeded the streaming row). Same `mutated`
+            // short-circuit as patchToolStep: if no turn matches (e.g.
+            // tool_started arrives after the temp id was swapped to the
+            // persisted id on `done`), return `prev` so React's
+            // useState setter no-ops and we skip an unnecessary
+            // re-render.
+            setTurns((prev) => {
+              let mutated = false;
+              const next = prev.map((t) => {
+                if (t.msg_id !== tempAsstId) return t;
+                const steps = [...(t.toolSteps || [])];
+                steps.push({
+                  toolUseId: event.tool_use_id,
+                  toolName: event.tool_name,
+                  argsPreview: event.args_preview,
+                  statusText: null,
+                  summary: null,
+                  errorType: null,
+                  partialResultCount: 0,
+                  status: "running",
+                });
+                mutated = true;
+                return { ...t, toolSteps: steps };
+              });
+              return mutated ? next : prev;
+            });
+          } else if (event.type === "tool_progress") {
+            setTurns((prev) =>
+              patchToolStep(prev, tempAsstId, event.tool_use_id, {
+                statusText: event.status_text,
+              }),
+            );
+          } else if (event.type === "tool_finished") {
+            setTurns((prev) =>
+              patchToolStep(prev, tempAsstId, event.tool_use_id, {
+                summary: event.summary,
+                status: "finished",
+              }),
+            );
+          } else if (event.type === "tool_error") {
+            setTurns((prev) =>
+              patchToolStep(prev, tempAsstId, event.tool_use_id, {
+                errorType: event.error_type,
+                // Default to 0 if the server omits the field (older
+                // backend, defensive fallback) — keeps the chain-cap
+                // copy stable and matches the tool_started initializer.
+                partialResultCount: event.partial_result_count ?? 0,
+                status: "error",
+              }),
             );
           }
         }

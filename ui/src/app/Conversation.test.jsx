@@ -2,7 +2,7 @@
 import React from "react";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useNavigate } from "react-router-dom";
 import { __resetModelsCacheForTest, loadModels } from "./data.js";
 import { __resetChannelPrefsForTest } from "../hooks/useChannelPrefs.js";
 
@@ -1009,5 +1009,413 @@ describe("Conversation", () => {
     fireEvent.click(screen.getByText("What about X?"));
     // The bottom-composer textarea is the only textbox in the tree.
     expect(screen.getByRole("textbox").value).toBe("What about X?");
+  });
+
+  describe("tool-step list (#181 PR-3)", () => {
+    function assistantTurnWithSteps(steps) {
+      return [
+        {
+          msg_id: "a1",
+          role: "assistant",
+          text: "Here's the time.",
+          streaming: false,
+          toolSteps: steps,
+        },
+      ];
+    }
+
+    it("renders the collapsed toggle with tool name + status visible", () => {
+      mockStream({
+        turns: assistantTurnWithSteps([
+          {
+            toolUseId: "tu-1",
+            toolName: "current_time",
+            argsPreview: "{}",
+            status: "finished",
+            summary: "completed",
+          },
+        ]),
+      });
+      renderAt("/app/c/c1");
+      // The compact row shows the tool name + status without expansion.
+      expect(screen.getByText(/current_time/)).toBeInTheDocument();
+      expect(screen.getByText(/finished/)).toBeInTheDocument();
+      // The summary text is NOT yet visible — that's hidden behind expand.
+      expect(screen.queryByText("completed")).not.toBeInTheDocument();
+    });
+
+    it("expands the step list to reveal the summary on toggle click", () => {
+      mockStream({
+        turns: assistantTurnWithSteps([
+          {
+            toolUseId: "tu-1",
+            toolName: "current_time",
+            status: "finished",
+            summary: "2026-06-07T12:00:00Z",
+          },
+        ]),
+      });
+      renderAt("/app/c/c1");
+      const toggle = screen.getByRole("button", { name: /tool step/i });
+      expect(toggle.getAttribute("aria-expanded")).toBe("false");
+      fireEvent.click(toggle);
+      expect(toggle.getAttribute("aria-expanded")).toBe("true");
+      // Now the summary is visible inside the rendered ToolResultBlock.
+      expect(screen.getByText("2026-06-07T12:00:00Z")).toBeInTheDocument();
+    });
+
+    it("clicking the toggle a second time collapses the list again", () => {
+      mockStream({
+        turns: assistantTurnWithSteps([
+          {
+            toolUseId: "tu-1",
+            toolName: "current_time",
+            status: "finished",
+            summary: "the result",
+          },
+        ]),
+      });
+      renderAt("/app/c/c1");
+      const toggle = screen.getByRole("button", { name: /tool step/i });
+      fireEvent.click(toggle);
+      expect(screen.getByText("the result")).toBeInTheDocument();
+      fireEvent.click(toggle);
+      expect(screen.queryByText("the result")).not.toBeInTheDocument();
+      expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    });
+
+    it("pluralises the toggle label (1 step vs N steps)", () => {
+      mockStream({
+        turns: assistantTurnWithSteps([
+          {
+            toolUseId: "tu-1",
+            toolName: "current_time",
+            status: "finished",
+            summary: "ok",
+          },
+          {
+            toolUseId: "tu-2",
+            toolName: "current_time",
+            status: "finished",
+            summary: "ok",
+          },
+        ]),
+      });
+      renderAt("/app/c/c1");
+      expect(screen.getByRole("button", { name: /2 tool steps/i }))
+        .toBeInTheDocument();
+    });
+
+    it("singular toggle label when toolSteps has exactly one entry", () => {
+      mockStream({
+        turns: assistantTurnWithSteps([
+          {
+            toolUseId: "tu-1",
+            toolName: "current_time",
+            status: "finished",
+            summary: "ok",
+          },
+        ]),
+      });
+      renderAt("/app/c/c1");
+      expect(screen.getByRole("button", { name: /^1 tool step$/i }))
+        .toBeInTheDocument();
+    });
+
+    it("renders chain_cap error with distinct affordance, not generic error", () => {
+      mockStream({
+        turns: assistantTurnWithSteps([
+          {
+            toolUseId: "tu-1",
+            toolName: "current_time",
+            status: "error",
+            errorType: "chain_cap",
+            partialResultCount: 7,
+          },
+        ]),
+      });
+      renderAt("/app/c/c1");
+      fireEvent.click(screen.getByRole("button", { name: /tool step/i }));
+      expect(
+        screen.getByText(/reached the tool-use limit/i),
+      ).toBeInTheDocument();
+      // 7 partial steps — pluralised
+      expect(screen.getByText(/7 steps completed/i)).toBeInTheDocument();
+    });
+
+    it("renders chain_cap singular when partialResultCount === 1", () => {
+      mockStream({
+        turns: assistantTurnWithSteps([
+          {
+            toolUseId: "tu-1",
+            toolName: "current_time",
+            status: "error",
+            errorType: "chain_cap",
+            partialResultCount: 1,
+          },
+        ]),
+      });
+      renderAt("/app/c/c1");
+      fireEvent.click(screen.getByRole("button", { name: /tool step/i }));
+      expect(screen.getByText(/1 step completed/i)).toBeInTheDocument();
+    });
+
+    it("renders generic error for non-chain_cap error types", () => {
+      mockStream({
+        turns: assistantTurnWithSteps([
+          {
+            toolUseId: "tu-1",
+            toolName: "current_time",
+            status: "error",
+            errorType: "timeout",
+          },
+        ]),
+      });
+      renderAt("/app/c/c1");
+      fireEvent.click(screen.getByRole("button", { name: /tool step/i }));
+      expect(screen.getByText(/current_time failed \(timeout\)/i))
+        .toBeInTheDocument();
+      // The chain-cap copy must NOT appear for non-chain_cap errors.
+      expect(screen.queryByText(/reached the tool-use limit/i)).toBeNull();
+    });
+
+    it("renders the summary inside ToolResultBlock when the step has one", () => {
+      mockStream({
+        turns: assistantTurnWithSteps([
+          {
+            toolUseId: "tu-1",
+            toolName: "current_time",
+            status: "finished",
+            summary: "07:00 UTC",
+          },
+        ]),
+      });
+      const { container } = renderAt("/app/c/c1");
+      fireEvent.click(screen.getByRole("button", { name: /tool step/i }));
+      // ToolResultBlock renders a div.tool-result-block wrapper.
+      expect(container.querySelector(".tool-result-block")).toBeTruthy();
+      expect(screen.getByText("07:00 UTC")).toBeInTheDocument();
+    });
+
+    it("omits ToolResultBlock when the finished step has no summary", () => {
+      mockStream({
+        turns: assistantTurnWithSteps([
+          {
+            toolUseId: "tu-1",
+            toolName: "current_time",
+            status: "finished",
+          },
+        ]),
+      });
+      const { container } = renderAt("/app/c/c1");
+      fireEvent.click(screen.getByRole("button", { name: /tool step/i }));
+      expect(container.querySelector(".tool-result-block")).toBeNull();
+    });
+
+    it("does not render a step list when toolSteps is undefined", () => {
+      mockStream({
+        turns: [
+          {
+            msg_id: "a1",
+            role: "assistant",
+            text: "no tools used",
+            streaming: false,
+          },
+        ],
+      });
+      const { container } = renderAt("/app/c/c1");
+      expect(container.querySelector(".tool-steps")).toBeNull();
+    });
+
+    it("does not render a step list when toolSteps is an empty array", () => {
+      mockStream({
+        turns: assistantTurnWithSteps([]),
+      });
+      const { container } = renderAt("/app/c/c1");
+      expect(container.querySelector(".tool-steps")).toBeNull();
+    });
+
+    it("renders the step list on a streaming assistant turn too", () => {
+      // The step list is visible during streaming so the user can see
+      // "the hands moving" — per the strategy spec's UX brief.
+      mockStream({
+        turns: [
+          {
+            msg_id: "a1",
+            role: "assistant",
+            text: "",
+            streaming: true,
+            toolSteps: [
+              {
+                toolUseId: "tu-1",
+                toolName: "current_time",
+                status: "running",
+              },
+            ],
+          },
+        ],
+      });
+      renderAt("/app/c/c1");
+      expect(screen.getByText(/current_time/)).toBeInTheDocument();
+      expect(screen.getByText(/running/)).toBeInTheDocument();
+    });
+
+    it("preserves expanded state when the assistant turn's msg_id swaps from temp to persisted", () => {
+      // Streaming-phase turn carries a temp msg_id while SSE deltas
+      // flow. The `done` event swaps it to the persisted server id —
+      // which remounts the per-turn row subtree (the row's React key is
+      // msg_id). The expanded/collapsed state for the ToolStepList
+      // would reset to `false` if it lived inside ToolStepList. The fix
+      // lifts the state into Conversation, keyed by the first step's
+      // toolUseId (stable across the swap because the backend assigns
+      // it once).
+      const step = {
+        toolUseId: "tu-stable-1",
+        toolName: "current_time",
+        status: "finished",
+        summary: "13:37 UTC",
+      };
+      mockStream({
+        turns: [
+          {
+            msg_id: "tmp-a-abc",
+            role: "assistant",
+            text: "the time",
+            streaming: false,
+            toolSteps: [step],
+          },
+        ],
+      });
+      const { rerender } = renderAt("/app/c/c-swap");
+
+      // Expand the list — the summary becomes visible.
+      const toggle = screen.getByRole("button", { name: /tool step/i });
+      expect(toggle.getAttribute("aria-expanded")).toBe("false");
+      fireEvent.click(toggle);
+      expect(toggle.getAttribute("aria-expanded")).toBe("true");
+      expect(screen.getByText("13:37 UTC")).toBeInTheDocument();
+
+      // Simulate the `done` SSE event: temp msg_id → persisted msg_id.
+      // The toolSteps array (and its first step's toolUseId) is
+      // unchanged — that's the stable key the parent uses for lookup.
+      useChatStreamModule.useChatStream.mockReturnValue({
+        turns: [
+          {
+            msg_id: "persisted-msg-xyz",
+            role: "assistant",
+            text: "the time",
+            streaming: false,
+            toolSteps: [step],
+          },
+        ],
+        send: vi.fn(),
+        regenerate: vi.fn(),
+        abort: vi.fn(),
+        status: "idle",
+        error: null,
+      });
+      rerender(
+        <MemoryRouter initialEntries={["/app/c/c-swap"]}>
+          <Routes>
+            <Route path="/app/c/:id" element={<Conversation />} />
+          </Routes>
+        </MemoryRouter>,
+      );
+
+      // Toggle still reads `aria-expanded="true"` and summary still
+      // visible — expanded state survived the msg_id swap.
+      const toggleAfter = screen.getByRole("button", { name: /tool step/i });
+      expect(toggleAfter.getAttribute("aria-expanded")).toBe("true");
+      expect(screen.getByText("13:37 UTC")).toBeInTheDocument();
+    });
+
+    it("resets expanded state when chatId changes (chat navigation)", () => {
+      // Conversation stays mounted when the user navigates between
+      // chats — only the URL :id flips. Without an explicit reset the
+      // expanded-step Map would retain keys from every prior chat and
+      // grow unbounded. This test exercises chat A → chat B → chat A
+      // and asserts the previously-expanded step is now collapsed.
+      const stepA = {
+        toolUseId: "tu-chat-a",
+        toolName: "current_time",
+        status: "finished",
+        summary: "A's summary",
+      };
+      const stepB = {
+        toolUseId: "tu-chat-b",
+        toolName: "current_time",
+        status: "finished",
+        summary: "B's summary",
+      };
+      useChatStreamModule.useChatStream.mockImplementation((id) => ({
+        turns: [
+          {
+            msg_id: `msg-${id}`,
+            role: "assistant",
+            text: "hi",
+            streaming: false,
+            toolSteps: [id === "chat-b" ? stepB : stepA],
+          },
+        ],
+        send: vi.fn(),
+        regenerate: vi.fn(),
+        abort: vi.fn(),
+        status: "idle",
+        error: null,
+      }));
+
+      // Render against a single MemoryRouter so Conversation stays
+      // mounted across the navigation — the whole point of this test
+      // is that the :id flip reuses the same component instance and
+      // the useEffect resets the Map.
+      function Nav() {
+        const navigate = useNavigate();
+        return (
+          <>
+            <button
+              type="button"
+              data-testid="goto-chat-a"
+              onClick={() => navigate("/app/c/chat-a")}
+            >
+              chat A
+            </button>
+            <button
+              type="button"
+              data-testid="goto-chat-b"
+              onClick={() => navigate("/app/c/chat-b")}
+            >
+              chat B
+            </button>
+          </>
+        );
+      }
+      render(
+        <MemoryRouter initialEntries={["/app/c/chat-a"]}>
+          <Nav />
+          <Routes>
+            <Route path="/app/c/:id" element={<Conversation />} />
+          </Routes>
+        </MemoryRouter>,
+      );
+
+      // Expand chat A's step.
+      const toggleA = screen.getByRole("button", { name: /tool step/i });
+      expect(toggleA.getAttribute("aria-expanded")).toBe("false");
+      fireEvent.click(toggleA);
+      expect(screen.getByText("A's summary")).toBeInTheDocument();
+
+      // Navigate to chat B — its step starts collapsed.
+      fireEvent.click(screen.getByTestId("goto-chat-b"));
+      const toggleB = screen.getByRole("button", { name: /tool step/i });
+      expect(toggleB.getAttribute("aria-expanded")).toBe("false");
+      expect(screen.queryByText("B's summary")).not.toBeInTheDocument();
+
+      // Navigate back to chat A — its previously-expanded step is now
+      // collapsed because the Map reset on chatId change.
+      fireEvent.click(screen.getByTestId("goto-chat-a"));
+      const toggleAAgain = screen.getByRole("button", { name: /tool step/i });
+      expect(toggleAAgain.getAttribute("aria-expanded")).toBe("false");
+      expect(screen.queryByText("A's summary")).not.toBeInTheDocument();
+    });
   });
 });

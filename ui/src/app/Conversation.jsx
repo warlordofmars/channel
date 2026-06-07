@@ -5,6 +5,7 @@ import ChannelMark from "../components/ChannelMark.jsx";
 import ChatHeader from "./ChatHeader.jsx";
 import Composer from "./Composer.jsx";
 import Icon from "../components/Icon.jsx";
+import ToolResultBlock from "./ToolResultBlock.jsx";
 import { submitFeedback } from "../api.js";
 import { useChannelPrefs } from "../hooks/useChannelPrefs.js";
 import { useChats } from "../hooks/ChatsContext.jsx";
@@ -183,6 +184,94 @@ function FeedbackButtons({ chatId, msgId, initialKind }) {
 }
 
 /**
+ * Renders a single tool step row inside the expanded step list. The
+ * three branches are:
+ *
+ *   1. `chain_cap` error — distinct copy ("I reached the tool-use
+ *      limit"), per the strategy spec's "like having hands" UX brief:
+ *      partial progress is acknowledged, not surfaced as a generic
+ *      failure.
+ *   2. Other error — `<toolName> failed (<errorType>)`.
+ *   3. Finished / running — the tool name + status, plus the result
+ *      summary (when present) rendered via `ToolResultBlock`. Future
+ *      issues (#182, #183) extend `ToolResultBlock` to discriminate
+ *      on `kind`; today only the default text-summary branch fires.
+ */
+function ToolStepRow({ step }) {
+  if (step.status === "error" && step.errorType === "chain_cap") {
+    const n = step.partialResultCount;
+    return (
+      <li className="tool-step-row tool-step-row-chain-cap">
+        I reached the tool-use limit for this turn ({n} step{n === 1 ? "" : "s"}
+        {" "}completed).
+      </li>
+    );
+  }
+  if (step.status === "error") {
+    return (
+      <li className="tool-step-row tool-step-row-error">
+        {step.toolName} failed ({step.errorType})
+      </li>
+    );
+  }
+  return (
+    <li className="tool-step-row">
+      <div className="tool-step-row-head">
+        <strong>{step.toolName}</strong>
+        <span className="tool-step-status">{step.status}</span>
+      </div>
+      {step.summary && <ToolResultBlock kind={step.kind} summary={step.summary} />}
+    </li>
+  );
+}
+
+/**
+ * Collapsible tool-step list rendered under an assistant message that
+ * used tools. Default collapsed so the chat reads as conversation, not
+ * a developer trace. The compact (collapsed) view still surfaces the
+ * tool name + status so the user can see "the hands moved" without
+ * expanding. Click the toggle to reveal the full step list with
+ * `ToolResultBlock` per finished step.
+ *
+ * `expanded` + `onToggle` are owned by the parent (`Conversation`) so
+ * the state survives the assistant turn's `msg_id` swap from the temp
+ * client id to the persisted server id on the `done` SSE event. If
+ * state lived here, that swap would remount this component and
+ * collapse the list right as the stream finalises.
+ */
+function ToolStepList({ steps, expanded, onToggle }) {
+  const noun = steps.length === 1 ? "step" : "steps";
+  return (
+    <div className="tool-steps">
+      <button
+        type="button"
+        className="tool-steps-toggle"
+        onClick={onToggle}
+        aria-expanded={expanded}
+      >
+        <Icon name={expanded ? "chevron-down" : "chevron-right"} size={14} />
+        {steps.length} tool {noun}
+      </button>
+      {expanded ? (
+        <ol className="tool-steps-list">
+          {steps.map((s) => (
+            <ToolStepRow key={s.toolUseId} step={s} />
+          ))}
+        </ol>
+      ) : (
+        <ul className="tool-steps-compact">
+          {steps.map((s) => (
+            <li key={s.toolUseId}>
+              {s.toolName} — {s.status}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+/**
  * Streaming conversation pane backed by the real SSE-driven
  * `useChatStream` hook. The URL `:id` is the canonical chat id; the hook
  * loads history on mount and exposes `{ turns, send, abort, status }`.
@@ -223,6 +312,32 @@ export default function Conversation() {
   // hardcoded fallback). Until it lands we wrap the prefs.model id in
   // local display meta so the Composer can still send.
   const [models, setModels] = useState(() => cachedModels());
+
+  // Tool-step expand/collapse state lives here (not in ToolStepList) so
+  // it survives the streaming-assistant-turn `msg_id` swap from the
+  // temp client id to the persisted server id on the `done` SSE event.
+  // Keyed by the first step's `toolUseId` — backend-supplied via
+  // `tool_started` and stable for the lifetime of the assistant turn.
+  // Conversation itself doesn't remount on the swap; only the per-turn
+  // row subtree does, so this Map persists across that remount.
+  const [expandedSteps, setExpandedSteps] = useState(() => new Map());
+  function toggleStepsExpanded(key) {
+    setExpandedSteps(function flipKey(prev) {
+      const next = new Map(prev);
+      next.set(key, !(prev.get(key) ?? false));
+      return next;
+    });
+  }
+
+  // Reset the expanded-step Map when the URL :id changes (sidebar
+  // navigation between chats). Conversation stays mounted across that
+  // change — only the :id param flips — so without an explicit reset
+  // the Map would retain keys from every prior chat and grow without
+  // bound. Skip the no-op set when the Map is already empty so the
+  // initial mount doesn't churn React state.
+  useEffect(function resetExpandedStepsOnChatChange() {
+    setExpandedSteps((prev) => (prev.size > 0 ? new Map() : prev));
+  }, [chatId]);
 
   useEffect(function loadModelAllowlist() {
     // `loadModels()` is internally cached, so a hot mount after another
@@ -315,6 +430,13 @@ export default function Conversation() {
                   <span className="mdl">{modelLabelFromList(t.model, models)}</span>
                 </div>
                 <div className="msg">{renderMarkdown(t.text, t.streaming)}</div>
+                {t.toolSteps && t.toolSteps.length > 0 && (
+                  <ToolStepList
+                    steps={t.toolSteps}
+                    expanded={expandedSteps.get(t.toolSteps[0].toolUseId) ?? false}
+                    onToggle={() => toggleStepsExpanded(t.toolSteps[0].toolUseId)}
+                  />
+                )}
                 {t.artifact && (
                   <div className="art-inline" onClick={noop}>
                     <div className="ah">
