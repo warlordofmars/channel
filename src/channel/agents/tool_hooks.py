@@ -59,7 +59,16 @@ class ChainState:
     started_at: float = field(default_factory=time.monotonic)
 
     def increment(self) -> None:
-        self.tool_calls_used += 1
+        # Clamp at ``tool_calls_max`` so the counter can't grow past the
+        # cap. ``ToolCallTelemetryHook`` increments on every
+        # ``AfterToolCallEvent`` — including calls cancelled by the
+        # guard via ``chain_cap`` — so an unclamped increment would
+        # render misleading addenda like "tool calls used: 9 of 8" and
+        # could grow unbounded if the model kept attempting tool calls
+        # after the cap. ``is_chain_cap_exhausted`` still works (the
+        # ``>= tool_calls_max`` predicate fires the moment the cap is
+        # reached, regardless of further attempts).
+        self.tool_calls_used = min(self.tool_calls_used + 1, self.tool_calls_max)
 
     def is_chain_cap_exhausted(self) -> bool:
         return self.tool_calls_used >= self.tool_calls_max

@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -43,9 +42,13 @@ def test_payload_from_messages_pairs_user_and_assistant_text():
 
 def test_payload_from_messages_invariant_drops_tool_use_blocks():
     """INVARIANT: Tool payloads (toolUse / toolResult blocks) never
-    persist to AgentCore Memory. Verified by a fixture that emits both
-    block types interleaved with text and asserting neither leaks into
-    the produced payload."""
+    persist to AgentCore Memory. The invariant is about block DICT KEYS
+    in the produced payload, not about free-text content — so a
+    recursive structural walk is used rather than a ``json.dumps``
+    substring check (which would false-positive on legitimate
+    conversational text that happens to mention 'toolUse' /
+    'toolResult'). The fixture emits both block types interleaved with
+    text and the walker asserts neither key leaks at any depth."""
     messages = [
         {
             "role": "assistant",
@@ -71,9 +74,23 @@ def test_payload_from_messages_invariant_drops_tool_use_blocks():
     assert payload[1]["conversational"]["content"]["text"] == "Thanks."
 
     # 2. Invariant: NO toolUse or toolResult key appears anywhere in payload
-    serialised = json.dumps(payload)
-    assert "toolUse" not in serialised
-    assert "toolResult" not in serialised
+    _assert_no_block_keys(payload)
+
+
+def _assert_no_block_keys(
+    node: Any, *, forbidden: tuple[str, ...] = ("toolUse", "toolResult")
+) -> None:
+    """Recursively assert that no dict key in ``node`` equals any of the
+    forbidden strings. Traverses dicts and lists; leaf values (strings,
+    ints, etc.) are not inspected — the invariant is about block keys
+    in the payload structure, not text content."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            assert key not in forbidden, f"forbidden key {key!r} present in payload"
+            _assert_no_block_keys(value, forbidden=forbidden)
+    elif isinstance(node, list):
+        for item in node:
+            _assert_no_block_keys(item, forbidden=forbidden)
 
 
 def test_payload_from_messages_raises_on_unknown_role():

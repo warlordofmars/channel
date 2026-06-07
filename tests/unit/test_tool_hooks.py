@@ -43,6 +43,21 @@ def test_chain_state_chain_cap_exhausted():
     assert state.is_chain_cap_exhausted()
 
 
+def test_chain_state_increment_clamps_at_max():
+    """Once the chain cap is reached, additional increments don't push
+    the counter past the max — keeps the addendum well-formed
+    ("tool calls used: 2 of 2" rather than "4 of 2") and prevents
+    unbounded growth if the model keeps attempting tool calls after the
+    guard cancels them."""
+    state = ChainState(tool_calls_max=2)
+    state.increment()
+    state.increment()  # used 2 of 2 — at cap
+    state.increment()  # attempted again — clamped
+    state.increment()
+    assert state.tool_calls_used == 2
+    assert state.is_chain_cap_exhausted()
+
+
 def test_chain_state_wall_clock_exhausted_uses_real_time():
     state = ChainState(wall_clock_budget_sec=10)
     assert not state.is_wall_clock_exhausted()
