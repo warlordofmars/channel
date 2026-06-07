@@ -161,10 +161,11 @@ Timeout = 30s. Long enough for `livecrawl="fallback"` to fetch a slow page if ne
 - `test_web_search_clamps_num_results_to_10` — call with `num_results=50`; assert wrapper passes `10` to `exa_search`.
 - `test_web_search_clamps_num_results_to_1` — call with `num_results=0`; assert wrapper passes `1`.
 - `test_web_search_always_passes_text_true_and_livecrawl_fallback` — caller can't override these; assert they're set server-side regardless.
-- `test_web_search_timeout_returns_error_status` — patch `exa_search` to raise `httpx.ReadTimeout`; assert `{"status": "error", "error_type": "timeout"}`.
-- `test_web_search_upstream_5xx_returns_error_status` — `httpx.HTTPStatusError(status_code=500)`; assert `error_type="upstream_5xx"`.
-- `test_web_search_429_returns_rate_limit` — assert `error_type="rate_limit"`.
-- `test_web_search_4xx_returns_bad_request` — assert `error_type="bad_request"`.
+- `test_web_search_timeout_returns_error_status` — patch `exa_search` to raise `httpx.ReadTimeout`; assert `{"status": "error", "content": [{"text": "timeout"}]}` (Strands-`ToolResult`-shaped so `translate_event` extracts `timeout` cleanly as the SSE `error_type`).
+- `test_web_search_upstream_5xx_returns_error_status` — `httpx.HTTPStatusError(status_code=500)`; assert content text `"upstream_5xx"`.
+- `test_web_search_429_returns_rate_limit` — assert content text `"rate_limit"`.
+- `test_web_search_4xx_returns_bad_request` — assert content text `"bad_request"`.
+- `test_web_search_returns_missing_key_when_resolve_fails` — `_resolve_exa_api_key()` raises (no env var + no SSM access); assert content text `"missing_key"`.
 - `test_web_search_empty_results_is_success_not_error` — Exa returns `{results: []}`; assert success status (no error).
 - `test_web_search_is_a_strands_tool` — `hasattr(web_search, "tool_spec")` per the same probe pattern as PR-1 Task 4.
 
