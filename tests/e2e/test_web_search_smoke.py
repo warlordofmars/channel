@@ -9,85 +9,30 @@ Sends a query likely to trigger a search, then asserts the SSE stream
 emits ``tool_started`` + ``tool_finished`` for ``web_search`` (no
 ``tool_error``), and the model's reply text contains at least one
 inline markdown link — proof the model wove a citation in.
+
+The sync HTTP helpers (mint JWT, create / delete chat, stream messages)
+live in ``tests/e2e/_http_helpers.py``.
 """
 
 from __future__ import annotations
 
-import contextlib
-import html as html_lib
-import json
 import os
 import re
 import time
 import uuid
-from typing import Any
 
-import httpx
 import pytest
 
+from tests.e2e._http_helpers import (
+    _create_chat,
+    _delete_chat,
+    _mint_jwt_via_bypass,
+    _stream_messages,
+)
 
-def _mint_jwt_via_bypass(api_url: str, email: str) -> str:
-    """Hit ``/auth/login?test_email=...`` and extract the JWT — mirrors
-    the helper in ``test_tool_use_smoke.py`` exactly."""
-    resp = httpx.get(
-        f"{api_url}/auth/login",
-        params={"test_email": email},
-        follow_redirects=False,
-        timeout=15.0,
-    )
-    if resp.status_code in (301, 302, 307, 308):
-        pytest.skip("Google OAuth redirect — STARTER_BYPASS_GOOGLE_AUTH not enabled")
-    resp.raise_for_status()
-    m = re.search(
-        r"localStorage\.setItem\('starter_mgmt_token',\s*'([^']+)'\)",
-        resp.text,
-    )
-    if not m:
-        pytest.fail("Could not extract mgmt token from bypass login response")
-    return html_lib.unescape(m.group(1))
-
-
-def _create_chat(api_url: str, jwt: str, *, title: str) -> str:
-    resp = httpx.post(
-        f"{api_url}/api/chats",
-        json={"title": title},
-        headers={"Authorization": f"Bearer {jwt}"},
-        timeout=20.0,
-    )
-    resp.raise_for_status()
-    return resp.json()["chat_id"]
-
-
-def _delete_chat(api_url: str, jwt: str, chat_id: str) -> None:
-    """Best-effort cleanup — mirrors test_tool_use_smoke.py."""
-    with contextlib.suppress(httpx.HTTPError):  # pragma: no cover — cleanup only
-        httpx.delete(
-            f"{api_url}/api/chats/{chat_id}",
-            headers={"Authorization": f"Bearer {jwt}"},
-            timeout=10.0,
-        )
-
-
-def _stream_messages(api_url: str, jwt: str, chat_id: str, user_text: str) -> list[dict[str, Any]]:
-    """Stream the SSE response and JSON-parse each ``data:`` line."""
-    events: list[dict[str, Any]] = []
-    with httpx.stream(
-        "POST",
-        f"{api_url}/api/chats/{chat_id}/messages",
-        json={"message": user_text},
-        headers={"Authorization": f"Bearer {jwt}"},
-        timeout=180.0,  # web search can be slower than current_time
-    ) as resp:
-        resp.raise_for_status()
-        for line in resp.iter_lines():
-            if not line or not line.startswith("data: "):
-                continue
-            payload = line.removeprefix("data: ").strip()
-            try:
-                events.append(json.loads(payload))
-            except json.JSONDecodeError:
-                continue
-    return events
+# Web search calls Exa + may take longer than ``current_time``. Bump the
+# stream timeout past the helper default (120 s) but keep it bounded.
+_WEB_SEARCH_TIMEOUT = 180.0
 
 
 @pytest.mark.skipif(
@@ -112,6 +57,7 @@ def test_web_search_round_trip() -> None:
             chat_id,
             "Search the web for the latest news on retrieval augmented generation. "
             "Cite sources with inline markdown links.",
+            timeout=_WEB_SEARCH_TIMEOUT,
         )
 
         started = [e for e in events if e.get("type") == "tool_started"]

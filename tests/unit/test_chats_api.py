@@ -498,18 +498,38 @@ def test_post_message_falls_back_to_prefs_effort_when_payload_omits_it(
     assert captured["build_agent_kwargs"]["effort"] == "High"
 
 
-def test_post_message_registers_clock_tool_when_flag_on(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """``STARTER_CLOCK_TOOL_ENABLED=1`` → ``current_time`` registered.
+# Tool flags currently mounted on the chassis. Each row is
+# ``(env_var, tool_name)``. The two parametrized tests below assert that
+# (a) flipping any one flag on registers exactly its matching tool and
+# (b) leaving all flags off keeps the tools list empty. Chassis policy
+# P2 (#181 strategy spec): each tool is off by default in prod, on in
+# dev/jc envs via the CDK env-var diff in
+# ``infra/stacks/channel_stack.py``. #182 added Exa ``web_search``
+# behind its own flag.
+_TOOL_FLAGS: list[tuple[str, str]] = [
+    ("STARTER_CLOCK_TOOL_ENABLED", "current_time"),
+    ("STARTER_WEB_SEARCH_ENABLED", "web_search"),
+]
 
-    Chassis policy P2 (#181 strategy spec): the smoke-test tool is
-    off by default in prod, on in dev/jc envs via the CDK env-var
-    diff in ``infra/stacks/channel_stack.py``.
+
+@pytest.mark.parametrize(("env_var", "tool_name"), _TOOL_FLAGS)
+def test_post_message_registers_tool_when_flag_on(
+    env_var: str,
+    tool_name: str,
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``<flag>=1`` → matching tool registered; all other flags off.
+
+    Verifies isolation: flipping flag A on must not also pull in tool
+    B. The "all others off" precondition is enforced by clearing every
+    flag in ``_TOOL_FLAGS`` before enabling the one under test.
     """
 
     _stub_storage_for_one_turn(monkeypatch)
-    monkeypatch.setenv("STARTER_CLOCK_TOOL_ENABLED", "1")
+    for flag, _ in _TOOL_FLAGS:
+        monkeypatch.delenv(flag, raising=False)
+    monkeypatch.setenv(env_var, "1")
 
     captured: dict[str, Any] = {}
     monkeypatch.setattr(
@@ -524,70 +544,25 @@ def test_post_message_registers_clock_tool_when_flag_on(
     assert response.status_code == 200
     tools = captured["build_agent_kwargs"]["tools"]
     assert len(tools) == 1
-    assert tools[0].tool_name == "current_time"
+    assert tools[0].tool_name == tool_name
 
 
-def test_post_message_omits_clock_tool_when_flag_off(
+def test_post_message_omits_tools_when_all_flags_off(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Flag unset → ``tools`` is empty (prod default per spec P2)."""
+    """No flags set → ``tools`` is empty (prod default per spec P2).
 
-    _stub_storage_for_one_turn(monkeypatch)
-    monkeypatch.delenv("STARTER_CLOCK_TOOL_ENABLED", raising=False)
-
-    captured: dict[str, Any] = {}
-    monkeypatch.setattr(
-        "channel.api.chats.build_agent",
-        _fake_streaming_agent_factory(captured),
-    )
-
-    response = client.post(
-        "/api/chats/c1/messages",
-        json={"message": "hi", "model": "claude-sonnet-4-6"},
-    )
-    assert response.status_code == 200
-    assert captured["build_agent_kwargs"]["tools"] == []
-
-
-def test_post_message_registers_web_search_tool_when_flag_on(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """``STARTER_WEB_SEARCH_ENABLED=1`` → ``web_search`` registered.
-
-    Mirrors the clock-tool registration policy (#181 P2): off by
-    default in prod, on in dev/jc envs via the CDK env-var diff in
-    ``infra/stacks/channel_stack.py``. #182 adds Exa web search to
-    the chassis behind its own flag.
+    Covers the omit-half of both rows in ``_TOOL_FLAGS`` in a single
+    test: when every flag in the table is cleared, the agent builds
+    with no tools at all. Pre-parametrize, this was two tests
+    (``..._omits_clock_tool_when_flag_off`` +
+    ``..._omits_web_search_tool_when_flag_off``) doing the same
+    assertion.
     """
 
     _stub_storage_for_one_turn(monkeypatch)
-    monkeypatch.setenv("STARTER_WEB_SEARCH_ENABLED", "1")
-    monkeypatch.delenv("STARTER_CLOCK_TOOL_ENABLED", raising=False)
-
-    captured: dict[str, Any] = {}
-    monkeypatch.setattr(
-        "channel.api.chats.build_agent",
-        _fake_streaming_agent_factory(captured),
-    )
-
-    response = client.post(
-        "/api/chats/c1/messages",
-        json={"message": "hi", "model": "claude-sonnet-4-6"},
-    )
-    assert response.status_code == 200
-    tools = captured["build_agent_kwargs"]["tools"]
-    assert len(tools) == 1
-    assert tools[0].tool_name == "web_search"
-
-
-def test_post_message_omits_web_search_tool_when_flag_off(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Flag unset → ``web_search`` not in ``tools`` (prod default)."""
-
-    _stub_storage_for_one_turn(monkeypatch)
-    monkeypatch.delenv("STARTER_WEB_SEARCH_ENABLED", raising=False)
-    monkeypatch.delenv("STARTER_CLOCK_TOOL_ENABLED", raising=False)
+    for flag, _ in _TOOL_FLAGS:
+        monkeypatch.delenv(flag, raising=False)
 
     captured: dict[str, Any] = {}
     monkeypatch.setattr(
