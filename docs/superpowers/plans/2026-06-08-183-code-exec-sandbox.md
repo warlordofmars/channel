@@ -1,5 +1,17 @@
 # Code execution via Lambda sandbox (#183) Implementation Plan
 
+> **Implementation drift note (post-deploy):** scipy was in the
+> original plan (Task 1 `requirements.txt`, tool docstring, several
+> inline mentions below) but CUT from v1 — the full sci-stack zip
+> exceeded Lambda's 250 MB unzipped cap. Shipped set: numpy / pandas /
+> matplotlib / requests / httpx / python-dateutil. Tracked as a
+> follow-up to move scipy to a Lambda layer if a real workflow hits
+> the gap. The CDK construct's "no VPC" comment also overpromised
+> "no internet egress" — default Lambda has outbound network from
+> AWS's managed runtime; hard isolation behind a no-egress VPC is a
+> follow-up too (see the shipped tool docstring for the honest
+> posture).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Ship `code_exec` as the second concrete tool on top of the #181 chassis. A model turn that calls `code_exec(code)` invokes a separate Lambda sandbox running the code in a Python subprocess, returns stdout / stderr / exit code / duration / saved-image PNGs from /tmp, and surfaces the result in the Conversation view via a new `ToolResultBlock kind="code-output"` branch.

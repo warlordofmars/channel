@@ -220,6 +220,45 @@ def test_handler_no_truncation_below_caps():
     assert result["truncated"] is False
 
 
+def test_cap_walks_back_to_utf8_boundary_on_multibyte_input():
+    """``_cap`` cuts at ``limit`` bytes then walks back to the nearest
+    UTF-8 start byte so we don't return a mid-rune-truncated string.
+
+    Each "你" is 3 bytes in UTF-8. We feed 10 of them (30 bytes) and
+    request a limit that lands mid-rune to exercise the continuation-
+    byte walk-back loop on line 70."""
+    from channel.sandbox.handler import _cap
+
+    # 100×3-byte runes = 300 encoded bytes. With limit=60 and a
+    # ~29-byte marker ("…[truncated, 240 more bytes]") we have ~31
+    # bytes for content — the byte-cut at 31 lands mid-rune
+    # (continuation byte) and the walk-back fires.
+    text = "你" * 100
+    capped, truncated = _cap(text, 60)
+
+    assert truncated is True
+    # No "REPLACEMENT CHARACTER" (�) in the prefix — that's what
+    # we'd see if the cut had split a rune mid-byte.
+    prefix = capped.split("…")[0]
+    assert "�" not in prefix
+    # Whole runes only in the prefix (each rune is 3 bytes).
+    assert len(prefix.encode("utf-8")) % 3 == 0
+
+
+def test_cap_returns_marker_only_on_pathological_tiny_limit():
+    """If ``limit`` is smaller than the marker (never observed in
+    production — caps are 5 KB / 20 KB) ``_cap`` returns just the
+    marker bytes truncated to fit. Covers the defensive ``available
+    <= 0`` branch."""
+    from channel.sandbox.handler import _cap
+
+    # Force overflow with a tiny limit that the marker can't fit in.
+    capped, truncated = _cap("x" * 1000, 5)
+
+    assert truncated is True
+    assert len(capped.encode("utf-8")) <= 5
+
+
 def test_handler_wipes_tmp_on_entry(monkeypatch, tmp_path):
     """Pre-seed a file in the sandbox's tmp dir → handler wipes it
     before running user code → user code can't read the prior content."""

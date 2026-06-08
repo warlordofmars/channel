@@ -45,22 +45,27 @@ def _cap(text: str, limit: int) -> tuple[str, bool]:
     """Truncate ``text`` to ``limit`` bytes (UTF-8 encoded length) and
     append a marker if the original was longer. Returns ``(capped, was_truncated)``.
 
-    The marker takes up real bytes from the budget — we reserve 40
-    bytes for it and trim ``text`` to ``limit - marker_len``. Trimming
-    at a character boundary is critical: slicing bytes mid-rune would
-    produce an invalid UTF-8 sequence."""
+    Single-pass O(n): encode once, slice once, decode with
+    ``errors="ignore"`` so any partial UTF-8 sequence at the cut
+    boundary is dropped cleanly (no replacement character left at the
+    end). Earlier implementations re-encoded the prefix per character
+    drop which made this O(n²) on long outputs (Copilot review of
+    PR #229)."""
     encoded = text.encode("utf-8")
     if len(encoded) <= limit:
         return (text, False)
     overflow = len(encoded) - limit
-    marker = f"…[truncated, {overflow} more bytes]"
-    marker_len = len(marker.encode("utf-8"))
-    # Trim by characters (not bytes) so we don't split a UTF-8 sequence.
-    # Walk from the end of the str until the encoded prefix fits.
-    head = text
-    while len(head.encode("utf-8")) + marker_len > limit:
-        head = head[:-1]
-    return (head + marker, True)
+    marker_bytes = f"…[truncated, {overflow} more bytes]".encode()
+    available = limit - len(marker_bytes)
+    if available <= 0:
+        # Pathological tiny limit — return just the marker, truncated
+        # to fit. Never observed in practice (limits are 5 KB and 20 KB)
+        # but the bound prevents a negative-index slice below.
+        return (marker_bytes[:limit].decode("utf-8", errors="replace"), True)
+    return (
+        encoded[:available].decode("utf-8", errors="ignore") + marker_bytes.decode("utf-8"),
+        True,
+    )
 
 
 def _wipe_tmp() -> None:

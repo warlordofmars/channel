@@ -600,11 +600,21 @@ class ChannelStack(cdk.Stack):
         )
 
         # ─── Code-exec sandbox (#183) ─────────────────────────────────
-        # Separate Lambda with its own IAM role. Pure compute — no DDB,
-        # no S3, no Bedrock, no Secrets / SSM. Even if user code
-        # escapes the subprocess (it shouldn't), the sandbox can't
-        # reach Channel data. SnapStart on published versions masks the
-        # cold-start cost of the sci-stack imports.
+        # Separate Lambda with its own IAM role. The IAM boundary is
+        # the load-bearing isolation: AWSLambdaBasicExecutionRole only
+        # (CloudWatch Logs writes) — no DynamoDB, S3, Bedrock, Secrets,
+        # or SSM grants. Even if user code escapes the subprocess
+        # (it shouldn't), the sandbox can't reach Channel data.
+        #
+        # Network: this Lambda is NOT in a VPC. The AWS Lambda default
+        # for non-VPC functions is outbound internet via AWS's managed
+        # runtime — so the sandbox CAN make external HTTP requests.
+        # That gap is documented in code_exec.py's docstring and the
+        # tool nudges the model away from gratuitous outbound calls.
+        # Hard no-egress isolation is a follow-up (place the Lambda in
+        # private subnets with no NAT route + security group with
+        # egress disabled). Tracked separately; not blocking v1.
+        # SnapStart on published versions masks the sci-stack imports.
         sandbox_role = iam.Role(
             self,
             "CodeExecLambdaRole",

@@ -78,7 +78,14 @@ def code_exec(code: str) -> dict[str, Any]:
     Just save the file and describe what it shows. Up to 3 images
     per call, 1 MB each. PNG and JPG only.
 
-    Network access: NONE (no VPC, no internet egress).
+    Network: outbound internet IS reachable from this sandbox (the
+    Lambda runs outside any VPC, so AWS's managed runtime grants
+    egress). What's NOT reachable is anything in Channel's IAM scope
+    — DynamoDB, S3, Bedrock, Secrets, SSM — all blocked at the role
+    level. Prefer to NOT call external APIs unless the user asked
+    you to; treat outbound network as an explicit user-consented
+    capability. Hard isolation behind a no-egress VPC is tracked as
+    a follow-up.
     Filesystem: writable ``/tmp`` only; wiped between calls.
     Timeout: 270 seconds.
     stdout cap: 20 KB; stderr cap: 5 KB.

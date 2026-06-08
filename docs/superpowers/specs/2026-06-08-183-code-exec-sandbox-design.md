@@ -106,11 +106,15 @@ def lambda_handler(event, _ctx):
 
 Baked into the Lambda zip via CDK `BundlingOptions`:
 
-- `numpy`, `pandas`, `matplotlib`, `scipy`
+- `numpy`, `pandas`, `matplotlib`
 - `requests`, `httpx`, `python-dateutil`
 - Plus the stdlib
 
-Total zip target ≈ 80 MB (well under Lambda's 250 MB unzipped limit).
+(`scipy` was in the original spec but cut from v1 — the full sci-stack
+zip exceeded Lambda's 250 MB unzipped cap. Tracked as a follow-up to
+move scipy to a Lambda layer if real workflows hit the gap.)
+
+Total zip target ~190 MB (under Lambda's 250 MB unzipped limit).
 Driven from `src/channel/sandbox/requirements.txt` so the package list
 is auditable in code review and Trivy can scan it.
 
@@ -178,7 +182,8 @@ def code_exec(code: str) -> dict[str, Any]:
 
     Use when you need to compute, transform data, analyze a CSV, plot
     something, or run a quick simulation. The environment has numpy,
-    pandas, matplotlib, scipy, requests, httpx, python-dateutil.
+    pandas, matplotlib, requests, httpx, python-dateutil. (scipy was
+    excluded from v1 — exceeded Lambda's 250 MB unzipped cap.)
 
     To return a plot, save it to `/tmp/<name>.png` — the user will see
     the image inline. Up to 3 images per call, ≤1 MB each.

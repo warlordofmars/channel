@@ -1,3 +1,24 @@
+# Sandbox Lambda dependencies (#183).
+#
+# This file is INTENTIONALLY plain pip-format requirements rather than
+# a uv-managed dep group, despite the project-wide "uv only" convention
+# (CLAUDE.md "Conventions"). Reasoning:
+#
+# - The sandbox Lambda is a SEPARATE deploy artifact from the API
+#   Lambda — different Python (3.13 vs 3.12), different runtime image,
+#   completely isolated package set. Folding these into the main
+#   pyproject.toml would imply they're part of Channel's runtime
+#   surface, which they aren't.
+# - The CDK bundling step (infra/stacks/channel_stack.py) runs
+#   `pip install -r .../requirements.txt -t /asset-output` inside the
+#   official AWS SAM build-python3.13 image. That image ships pip but
+#   not uv, so a uv-format dep would need a separate install step
+#   that doesn't save anything in practice.
+# - The list is short and pinned by hash-less semver — Trivy scans
+#   the file as part of the security pipeline.
+#
+# (Copilot reviewer flagged this as a possible convention drift on
+# PR #229. The deviation is intentional and documented here.)
 numpy==2.2.6
 pandas==2.2.3
 matplotlib==3.10.0
