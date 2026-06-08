@@ -30,6 +30,28 @@ _STDERR_CAP = 5 * 1024
 _SUBPROCESS_TIMEOUT_SEC = 270
 
 
+def _cap(text: str, limit: int) -> tuple[str, bool]:
+    """Truncate ``text`` to ``limit`` bytes (UTF-8 encoded length) and
+    append a marker if the original was longer. Returns ``(capped, was_truncated)``.
+
+    The marker takes up real bytes from the budget — we reserve 40
+    bytes for it and trim ``text`` to ``limit - marker_len``. Trimming
+    at a character boundary is critical: slicing bytes mid-rune would
+    produce an invalid UTF-8 sequence."""
+    encoded = text.encode("utf-8")
+    if len(encoded) <= limit:
+        return (text, False)
+    overflow = len(encoded) - limit
+    marker = f"…[truncated, {overflow} more bytes]"
+    marker_len = len(marker.encode("utf-8"))
+    # Trim by characters (not bytes) so we don't split a UTF-8 sequence.
+    # Walk from the end of the str until the encoded prefix fits.
+    head = text
+    while len(head.encode("utf-8")) + marker_len > limit:
+        head = head[:-1]
+    return (head + marker, True)
+
+
 def lambda_handler(event: dict, _ctx: object) -> dict[str, Any]:
     code = event.get("code", "")
     start = time.monotonic()
@@ -62,12 +84,14 @@ def lambda_handler(event: dict, _ctx: object) -> dict[str, Any]:
         exit_code = -1
         timed_out = True
     duration_ms = int((time.monotonic() - start) * 1000)
+    stdout, stdout_trunc = _cap(stdout, _STDOUT_CAP)
+    stderr, stderr_trunc = _cap(stderr, _STDERR_CAP)
     return {
         "stdout": stdout,
         "stderr": stderr,
         "exit_code": exit_code,
         "duration_ms": duration_ms,
-        "truncated": False,
+        "truncated": stdout_trunc or stderr_trunc,
         "timed_out": timed_out,
         "images": [],
     }

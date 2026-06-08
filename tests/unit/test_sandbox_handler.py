@@ -69,3 +69,40 @@ def test_handler_timeout_returns_timed_out_with_partial_output(monkeypatch):
     assert result["exit_code"] == -1
     assert "before sleep" in result["stdout"]
     assert "after sleep" not in result["stdout"]
+
+
+def test_handler_caps_stdout_at_20kb_with_truncation_marker():
+    """20 KB stdout cap with a ``…[truncated, N more bytes]`` marker."""
+    from channel.sandbox.handler import _STDOUT_CAP, lambda_handler
+
+    # Write 30 KB to stdout
+    code = "import sys; sys.stdout.write('x' * 30000)"
+    result = lambda_handler({"code": code}, None)
+
+    assert result["truncated"] is True
+    # The capped stdout is exactly _STDOUT_CAP bytes including the marker
+    assert len(result["stdout"]) <= _STDOUT_CAP
+    assert "…[truncated" in result["stdout"]
+    assert "more bytes]" in result["stdout"]
+
+
+def test_handler_caps_stderr_at_5kb_with_truncation_marker():
+    """5 KB stderr cap with a ``…[truncated, N more bytes]`` marker."""
+    from channel.sandbox.handler import _STDERR_CAP, lambda_handler
+
+    code = "import sys; sys.stderr.write('y' * 10000)"
+    result = lambda_handler({"code": code}, None)
+
+    assert result["truncated"] is True
+    assert len(result["stderr"]) <= _STDERR_CAP
+    assert "…[truncated" in result["stderr"]
+
+
+def test_handler_no_truncation_below_caps():
+    """Output below the caps round-trips verbatim, truncated=False."""
+    from channel.sandbox.handler import lambda_handler
+
+    result = lambda_handler({"code": "print('short')"}, None)
+
+    assert result["stdout"] == "short\n"
+    assert result["truncated"] is False
