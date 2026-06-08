@@ -65,8 +65,9 @@ def code_exec(code: str) -> dict[str, Any]:
 
     Use when you need to compute, transform data, analyze a CSV, plot
     something, or run a quick simulation. The environment has numpy,
-    pandas, matplotlib, scipy, requests, httpx, python-dateutil
-    pre-installed.
+    pandas, matplotlib, requests, httpx, python-dateutil pre-installed.
+    (scipy was excluded from v1 — the full sci-stack exceeded Lambda's
+    250 MB unzipped limit; can move to a Lambda layer if needed.)
 
     To return a plot or other image to the user, save it to
     ``/tmp/<name>.png`` (or .jpg) — the user will see the image

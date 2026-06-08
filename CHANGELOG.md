@@ -17,8 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reserved-concurrency 5, no VPC, 270s subprocess cap, 20 KB stdout / 5 KB
   stderr length caps, `/tmp` wiped at entry, and post-exec `/tmp/*.png|jpg`
   harvest (≤3 × 1 MB base64-encoded) with symlink-escape rejection.
-  Sci-stack pre-installed (numpy, pandas, matplotlib, scipy, requests,
-  httpx, python-dateutil). The chassis SSE protocol grew an optional
+  Sci-stack pre-installed (numpy, pandas, matplotlib, requests, httpx,
+  python-dateutil — scipy excluded from v1 because the full stack
+  exceeded Lambda's 250 MB unzipped limit; follow-up will move scipy
+  to a Lambda layer). The chassis SSE protocol grew an optional
   `kind="code-output"` + structured `payload` field on `tool_finished`
   events, and the SPA's `ToolResultBlock` gained the matching code-output
   branch (collapsible stdout pane >5 lines, `<details>`-wrapped stderr,
