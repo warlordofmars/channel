@@ -362,12 +362,22 @@ class ChannelStack(cdk.Stack):
         # Soft-warn startup check needs to read the alarm-email parameter to
         # detect the CHANGE_ME_ON_FIRST_DEPLOY placeholder.
         alarm_email_param.grant_read(api_role)
-        # #182 — Exa API key is created externally (not by CDK); we only grant read.
-        exa_key_param = ssm.StringParameter.from_string_parameter_attributes(
+        # #182 — Exa API key is created externally (not by CDK) as a
+        # SecureString; we only grant read. Use
+        # ``from_secure_string_parameter_attributes`` (NOT
+        # ``from_string_parameter_attributes``) because the underlying
+        # SSM parameter type is SecureString — CloudFormation refuses
+        # to dynamic-reference SecureString params (would leak the
+        # decrypted value into CFN logs, hence the deploy-time
+        # "Parameters have types not supported by CloudFormation"
+        # error from the round-1 attempt). The secure variant skips
+        # the CFN parameter dance and just grants IAM on the ARN;
+        # runtime boto3 ``ssm.get_parameter(WithDecryption=True)``
+        # fetches the value on the first ``web_search()`` invocation.
+        exa_key_param = ssm.StringParameter.from_secure_string_parameter_attributes(
             self,
             "ExaApiKeyParam",
             parameter_name=f"/channel/{env_name}/exa-api-key",
-            simple_name=False,
         )
         exa_key_param.grant_read(api_role)
         api_role.add_to_policy(
