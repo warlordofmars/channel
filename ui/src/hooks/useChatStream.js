@@ -205,9 +205,15 @@ export function useChatStream(chatId, { onTitleSuggested } = {}) {
             // turn). ``prev.map`` returns ``prev`` unchanged for every
             // non-matching turn, so the only allocation in the
             // common-case "no turn matches" path is one shallow array
-            // copy — cheap enough that we drop the explicit ``mutated``
-            // short-circuit. Same pattern as the ``done``/``delta``
-            // handlers above.
+            // copy — ~10 turns × microseconds × ~5 tool events per
+            // chat, negligible. We deliberately don't use the
+            // findIndex+early-return pattern (like ``patchToolStep``
+            // below) because the no-match branch is structurally
+            // unreachable here — ``client_msg_id`` is set at send()
+            // time and never overwritten, so for any tool_started
+            // event the matching turn exists unless a chatId change
+            // raced the stream (and the abort handler cancels reads
+            // before that point).
             setTurns((prev) =>
               prev.map((t) => {
                 if (t.client_msg_id !== tempAsstId) return t;

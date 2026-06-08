@@ -487,8 +487,11 @@ def _build_tool_registry() -> list[Any]:
 
     Each tool's registration is gated by its own ``STARTER_<NAME>_ENABLED``
     flag, defaulting to off so a stale dev env doesn't accidentally
-    expose a tool. Production CDK sets all three flags to ``"1"`` in
-    ``common_env``.
+    expose a tool. Production CDK in ``channel_stack.py`` ships
+    ``STARTER_WEB_SEARCH_ENABLED=1`` and ``STARTER_CODE_EXEC_ENABLED=1``;
+    ``STARTER_CLOCK_TOOL_ENABLED`` is "0" in prod and "1" in dev
+    (strategy spec policy P2: clock is a smoke-test tool, not a
+    user-visible capability).
 
     Order is not significant — Strands collects tools into a name-keyed
     spec for the model.

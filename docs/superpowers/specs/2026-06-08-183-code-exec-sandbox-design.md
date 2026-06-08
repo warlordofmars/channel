@@ -22,8 +22,14 @@ this merges + the `#128-spike` design doc lands, epic #128 closes.
 - **GPU / accelerator runtimes.** Lambda only.
 - **Persistent filesystem between calls.** Each invocation gets a wiped
   `/tmp`.
-- **Internet egress.** Sandbox runs without a VPC and without any
-  outbound network reachability.
+- **Hard internet-egress isolation.** Sandbox is NOT in a VPC, so it
+  inherits AWS's managed-runtime outbound network — meaning user code
+  CAN reach the public internet. The IAM boundary (no DDB / S3 /
+  Bedrock / Secrets / SSM grants) is the load-bearing isolation, not
+  the network boundary. Real no-egress containment (private subnets
+  with no NAT route + egress-disabled security group) is a follow-up;
+  for v1 the tool docstring nudges the model away from gratuitous
+  outbound calls.
 - **Sandbox-to-DDB / Bedrock / S3.** Sandbox IAM grants nothing beyond
   CloudWatch Logs writes.
 - **Per-user / per-chat rate-limiting.** The chassis's per-chain
