@@ -302,55 +302,66 @@ def test_handler_handles_no_images_in_tmp():
 def test_harvest_tmp_images_skips_stat_oserror(monkeypatch, tmp_path):
     """If os.stat raises OSError on a candidate file, harvest skips it
     and continues with the next. Covers the except OSError: continue
-    branch in the listdir loop."""
+    branch in the listdir loop.
+
+    Patches os.stat at the module-level os reference, but with a stub
+    that accepts arbitrary kwargs so pytest's own os.stat calls (which
+    pass follow_symlinks=) still work."""
     from channel.sandbox import handler as handler_module
 
     fake_tmp = tmp_path / "sandbox-tmp"
     fake_tmp.mkdir()
     monkeypatch.setattr(handler_module, "_TMP_DIR", str(fake_tmp))
+    monkeypatch.setattr(handler_module, "_wipe_tmp", lambda: None)
 
-    # Write a valid PNG and an invalid one.
     png_bytes = b"\x89PNG\r\n\x1a\n" + b"x" * 100
     (fake_tmp / "good.png").write_bytes(png_bytes)
     (fake_tmp / "bad.png").write_bytes(png_bytes)
 
-    # Force os.stat to raise OSError for "bad.png" only.
     real_stat = os.stat
-    def selective_stat(path):
+
+    def selective_stat(path, *args, **kwargs):
         if "bad.png" in str(path):
             raise OSError("simulated stat error")
-        return real_stat(path)
+        return real_stat(path, *args, **kwargs)
+
     monkeypatch.setattr(handler_module.os, "stat", selective_stat)
 
     result = handler_module.lambda_handler({"code": "pass"}, None)
 
-    # Only the good one should be harvested.
+    # bad.png is skipped via the except OSError branch; good.png is harvested.
     assert len(result["images"]) == 1
 
 
 def test_harvest_tmp_images_skips_open_oserror(monkeypatch, tmp_path):
     """If open(path, 'rb').read() raises OSError, harvest skips that
     image and continues. Covers the except OSError: continue branch
-    in the data-read loop."""
+    in the data-read loop.
+
+    Patches builtins.open with a stub that accepts arbitrary kwargs so
+    pytest's own open() calls (which use buffering=, encoding=, etc.)
+    still work."""
     from channel.sandbox import handler as handler_module
 
     fake_tmp = tmp_path / "sandbox-tmp"
     fake_tmp.mkdir()
     monkeypatch.setattr(handler_module, "_TMP_DIR", str(fake_tmp))
+    monkeypatch.setattr(handler_module, "_wipe_tmp", lambda: None)
 
     png_bytes = b"\x89PNG\r\n\x1a\n" + b"x" * 100
     (fake_tmp / "readable.png").write_bytes(png_bytes)
     (fake_tmp / "unreadable.png").write_bytes(png_bytes)
 
-    # Force open to raise OSError for "unreadable.png" only.
     real_open = open
+
     def selective_open(path, *args, **kwargs):
         if "unreadable.png" in str(path):
             raise OSError("simulated open error")
         return real_open(path, *args, **kwargs)
+
     monkeypatch.setattr("builtins.open", selective_open)
 
     result = handler_module.lambda_handler({"code": "pass"}, None)
 
-    # Only the readable one should be harvested.
+    # unreadable.png is skipped via the except OSError branch; readable.png is harvested.
     assert len(result["images"]) == 1
