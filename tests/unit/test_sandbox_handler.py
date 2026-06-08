@@ -98,14 +98,14 @@ def test_handler_subprocess_pythonpath_includes_lambda_task_root(monkeypatch):
         return real_run(*args, **kwargs)
 
     monkeypatch.setattr(handler_module.subprocess, "run", spy_run)
-    monkeypatch.setenv("LAMBDA_TASK_ROOT", "/tmp/fake-task-root")
+    monkeypatch.setenv("LAMBDA_TASK_ROOT", "/sentinel-task-root")
 
     handler_module.lambda_handler({"code": "print('x')"}, None)
 
     env = captured["env"]
     assert isinstance(env, dict)
     pythonpath = env.get("PYTHONPATH", "")
-    assert "/tmp/fake-task-root" in pythonpath
+    assert "/sentinel-task-root" in pythonpath
 
 
 def test_handler_subprocess_pythonpath_defaults_to_var_task(monkeypatch):
@@ -149,7 +149,7 @@ def test_handler_subprocess_pythonpath_preserves_existing(monkeypatch):
         return real_run(*args, **kwargs)
 
     monkeypatch.setattr(handler_module.subprocess, "run", spy_run)
-    monkeypatch.setenv("LAMBDA_TASK_ROOT", "/tmp/fake-task-root")
+    monkeypatch.setenv("LAMBDA_TASK_ROOT", "/sentinel-task-root")
     monkeypatch.setenv("PYTHONPATH", "/opt/python")
 
     handler_module.lambda_handler({"code": "print('x')"}, None)
@@ -158,7 +158,7 @@ def test_handler_subprocess_pythonpath_preserves_existing(monkeypatch):
     assert isinstance(env, dict)
     pythonpath = env.get("PYTHONPATH", "")
     # Task root prepended; original entry retained.
-    assert pythonpath == "/tmp/fake-task-root:/opt/python"
+    assert pythonpath == "/sentinel-task-root:/opt/python"
 
 
 def test_handler_timeout_returns_timed_out_with_partial_output(monkeypatch):
