@@ -1,0 +1,93 @@
+# Copyright (c) 2026 John Carter. All rights reserved.
+"""``code_exec`` — second concrete chassis tool (#128 / #183).
+
+Synchronously invokes the ``CodeExecLambda`` sandbox via boto3 and
+returns the sandbox's response dict (``{stdout, stderr, exit_code,
+duration_ms, truncated, timed_out, images}``).
+
+The sandbox Lambda's ARN is resolved from ``STARTER_CODE_EXEC_LAMBDA_ARN``
+on each call (cheap env lookup; no caching needed). The boto3 Lambda
+client is lazy-loaded via ``@functools.lru_cache(maxsize=1)`` — mirrors
+``web_search``'s ``_get_exa_search`` pattern so a cold start without
+code-exec usage doesn't pay the boto3 client construction cost.
+
+Errors from the boto3 invoke (throttling / network / sandbox init crash)
+become Strands-``ToolResult``-shaped dicts so ``translate_event`` extracts
+the reason string as the stable SSE ``error_type`` token. This mirrors
+PR #225's error-shape contract for ``web_search`` and is critical: a
+plain ``{"status": "error", "error_type": "..."}`` dict gets re-wrapped
+by Strands' ``@tool`` decorator as a single JSON-stringified text block,
+defeating reason extraction.
+
+Non-zero subprocess exit codes are NOT errors at the chassis layer —
+the sandbox returns them as part of a successful response and the
+model decides what to do."""
+
+from __future__ import annotations
+
+import functools
+import json
+import logging
+import os
+from typing import Any
+
+import botocore.exceptions
+from strands import tool
+
+logger = logging.getLogger(__name__)
+
+
+def _error_result(error_type: str) -> dict[str, Any]:
+    """Build a Strands-``ToolResult``-shaped error dict.
+
+    See ``src/channel/agents/tools/web_search.py:_error_result`` for the
+    full rationale on why this shape (not ``{"error_type": "..."}``) is
+    load-bearing for the SSE error contract."""
+    return {"status": "error", "content": [{"text": error_type}]}
+
+
+@functools.lru_cache(maxsize=1)
+def _get_lambda_client():  # type: ignore[no-untyped-def]
+    """Lazy-load the boto3 Lambda client.
+
+    Mirrors the ``web_search._get_exa_search`` shape — deferring the
+    boto3 import until the model actually calls ``code_exec`` keeps the
+    Lambda client construction off the cold-start path for turns that
+    don't trigger code execution."""
+    import boto3  # noqa: PLC0415
+
+    return boto3.client("lambda")
+
+
+@tool
+def code_exec(code: str) -> dict[str, Any]:
+    """Execute Python code in a sandboxed subprocess. Returns stdout, stderr, exit_code.
+
+    Use when you need to compute, transform data, analyze a CSV, plot
+    something, or run a quick simulation. The environment has numpy,
+    pandas, matplotlib, scipy, requests, httpx, python-dateutil
+    pre-installed.
+
+    To return a plot or other image to the user, save it to
+    ``/tmp/<name>.png`` (or .jpg) — the user will see the image
+    inline. Up to 3 images per call, 1 MB each. PNG and JPG only.
+
+    Network access: NONE (no VPC, no internet egress).
+    Filesystem: writable ``/tmp`` only; wiped between calls.
+    Timeout: 270 seconds.
+    stdout cap: 20 KB; stderr cap: 5 KB.
+
+    Args:
+        code: The Python source to execute.
+    """
+    arn = os.environ.get("STARTER_CODE_EXEC_LAMBDA_ARN")
+    if not arn:
+        return _error_result("not_configured")
+    client = _get_lambda_client()
+    resp = client.invoke(
+        FunctionName=arn,
+        InvocationType="RequestResponse",
+        Payload=json.dumps({"code": code}).encode(),
+    )
+    payload = json.loads(resp["Payload"].read())
+    return payload  # type: ignore[no-any-return]
