@@ -47,12 +47,18 @@ def lambda_handler(event: dict, _ctx: object) -> dict[str, Any]:
         stderr = proc.stderr
         exit_code = proc.returncode
     except subprocess.TimeoutExpired as exc:
-        stdout = exc.stdout or ""
-        stderr = exc.stderr or ""
+        # Even with text=True, TimeoutExpired captures partial output as bytes.
+        # Decode to str, or use "" if the subprocess produced no output.
+        stdout = exc.stdout
+        stderr = exc.stderr
         if isinstance(stdout, bytes):
             stdout = stdout.decode("utf-8", errors="replace")
+        else:
+            stdout = stdout or ""
         if isinstance(stderr, bytes):
             stderr = stderr.decode("utf-8", errors="replace")
+        else:
+            stderr = stderr or ""
         exit_code = -1
         timed_out = True
     duration_ms = int((time.monotonic() - start) * 1000)
