@@ -20,7 +20,34 @@ subprocess.
 
 from __future__ import annotations
 
+import subprocess
+import sys
+import time
+from typing import Any
 
-def lambda_handler(event: dict, _ctx: object) -> dict:
-    """Sandbox Lambda entrypoint. Body filled in by subsequent tasks."""
-    raise NotImplementedError
+_STDOUT_CAP = 20 * 1024
+_STDERR_CAP = 5 * 1024
+_SUBPROCESS_TIMEOUT_SEC = 270
+
+
+def lambda_handler(event: dict, _ctx: object) -> dict[str, Any]:
+    code = event.get("code", "")
+    start = time.monotonic()
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=_SUBPROCESS_TIMEOUT_SEC,
+        cwd="/tmp",
+        check=False,
+    )
+    duration_ms = int((time.monotonic() - start) * 1000)
+    return {
+        "stdout": proc.stdout,
+        "stderr": proc.stderr,
+        "exit_code": proc.returncode,
+        "duration_ms": duration_ms,
+        "truncated": False,
+        "timed_out": False,
+        "images": [],
+    }
