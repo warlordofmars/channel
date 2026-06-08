@@ -248,11 +248,13 @@ export function useChatStream(chatId, { onTitleSuggested } = {}) {
                 // #183: when the chassis SSE carries kind="code-output"
                 // + payload (sandbox stdout/stderr/images), route them
                 // onto step state so the Conversation view can render
-                // the code-output ToolResultBlock branch. Other tools
-                // leave kind/payload undefined — patchToolStep merges
-                // shallow so undefined keys are preserved harmlessly.
-                kind: event.kind,
-                payload: event.payload,
+                // the code-output ToolResultBlock branch. Only spread
+                // the keys that are actually on the SSE event —
+                // patchToolStep does a shallow merge, so passing
+                // ``kind: undefined`` would overwrite a previously-set
+                // value rather than preserving it.
+                ...(event.kind !== undefined && { kind: event.kind }),
+                ...(event.payload !== undefined && { payload: event.payload }),
                 status: "finished",
               }),
             );

@@ -502,12 +502,14 @@ def test_post_message_falls_back_to_prefs_effort_when_payload_omits_it(
 # Tool flags currently mounted on the chassis. Each row is
 # ``(env_var, tool_name)``. The two parametrized tests below assert that
 # (a) flipping any one flag on registers exactly its matching tool and
-# (b) leaving all flags off keeps the tools list empty. Per-tool prod
-# policy (see ``infra/stacks/channel_stack.py``): ``current_time`` is
-# off in prod (smoke-test only, on in dev/jc); ``web_search`` is on in
-# all envs (the flag is an emergency kill switch, not a rollout knob);
-# ``code_exec`` is off by default (sandbox, gated behind
-# ``STARTER_CODE_EXEC_ENABLED``).
+# (b) leaving all flags off keeps the tools list empty. The PARSING
+# rule is "anything other than '1' is disabled" — so unset env vars
+# in local dev / tests omit the tool, which is what these tests
+# exercise. Per-env DEFAULTS (see ``infra/stacks/channel_stack.py``):
+# ``current_time`` is "0" in prod / "1" in dev (smoke-test only,
+# strategy spec policy P2); ``web_search`` ships "1" in all deployed
+# envs (kill-switch on default-on); ``code_exec`` ships "1" in all
+# deployed envs (kill-switch on default-on).
 _TOOL_FLAGS: list[tuple[str, str]] = [
     ("STARTER_CLOCK_TOOL_ENABLED", "current_time"),
     ("STARTER_WEB_SEARCH_ENABLED", "web_search"),
