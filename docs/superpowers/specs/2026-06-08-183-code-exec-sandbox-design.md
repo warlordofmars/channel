@@ -143,18 +143,24 @@ is auditable in code review and Trivy can scan it.
   invocations (different users, same container).
 - **Set `cwd="/tmp"`** for the subprocess so relative paths in user code
   land in scratch.
-- **Scan post-exec** for `*.png` / `*.jpg` / `*.jpeg` / `*.svg`, first
-  3 by mtime, each capped at `_MAX_IMAGE_BYTES`, base64-encoded into
-  the response.
+- **Scan post-exec** for `*.png` / `*.jpg` / `*.jpeg`, first 3 by
+  mtime, each capped at `_MAX_IMAGE_BYTES`, base64-encoded into
+  the response. (SVG is excluded — inline SVG can carry executable
+  script tags and the sandbox→browser path is too short to safely
+  sanitize.)
 
 ### Containment posture
 
-- **No VPC** → no internet egress (Lambda outside a VPC cannot reach
-  the public internet from the sandbox's perspective, by AWS network
-  policy)
+- **IAM grants** — only `AWSLambdaBasicExecutionRole` (CloudWatch
+  Logs writes). Sandbox cannot read DDB, write S3, invoke Bedrock,
+  decrypt SSM. This is the load-bearing isolation boundary.
 - **No persistent filesystem** beyond `/tmp` (wiped per call)
-- **No IAM grants** beyond CloudWatch Logs writes — sandbox cannot
-  read DDB, write S3, invoke Bedrock, decrypt SSM
+- **Network: outbound internet IS reachable** — the sandbox runs
+  outside any VPC, so AWS's managed runtime grants egress. The tool
+  docstring nudges the model away from gratuitous outbound calls,
+  but no-egress containment is NOT enforced here. Hard isolation
+  behind private subnets + no-NAT route + egress-disabled security
+  group is a follow-up.
 - **`subprocess.run`** isolates user code from the handler's own
   Python interpreter; a SyntaxError or `sys.exit()` in user code
   doesn't kill the handler
@@ -192,9 +198,15 @@ def code_exec(code: str) -> dict[str, Any]:
     excluded from v1 — exceeded Lambda's 250 MB unzipped cap.)
 
     To return a plot, save it to `/tmp/<name>.png` — the user will see
-    the image inline. Up to 3 images per call, ≤1 MB each.
+    the image inline. Up to 3 images per call, ≤1 MB each. PNG and JPG
+    only (SVG is excluded due to inline-script XSS risk).
 
-    Network access: NONE (no VPC, no internet egress).
+    Network: outbound internet IS reachable from this sandbox (the
+    Lambda runs outside any VPC, so AWS's managed runtime grants
+    egress). The IAM boundary (no DDB / S3 / Bedrock / Secrets / SSM
+    grants on the sandbox role) is the load-bearing isolation, not
+    the network boundary. Hard no-egress containment behind a VPC
+    is tracked as a follow-up.
     Filesystem: writable /tmp only; wiped between calls.
     Timeout: 270 seconds.
     stdout cap: 20 KB; stderr cap: 5 KB.
