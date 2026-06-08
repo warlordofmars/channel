@@ -226,6 +226,14 @@ export function useChatStream(chatId, { onTitleSuggested } = {}) {
             setTurns((prev) =>
               patchToolStep(prev, tempAsstId, event.tool_use_id, {
                 summary: event.summary,
+                // #183: when the chassis SSE carries kind="code-output"
+                // + payload (sandbox stdout/stderr/images), route them
+                // onto step state so the Conversation view can render
+                // the code-output ToolResultBlock branch. Other tools
+                // leave kind/payload undefined — patchToolStep merges
+                // shallow so undefined keys are preserved harmlessly.
+                kind: event.kind,
+                payload: event.payload,
                 status: "finished",
               }),
             );

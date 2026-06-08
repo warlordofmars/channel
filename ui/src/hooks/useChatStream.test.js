@@ -844,6 +844,38 @@ describe("useChatStream", () => {
     });
   });
 
+  it("routes kind + payload from tool_finished onto the step", async () => {
+    const sandboxPayload = {
+      stdout: "42\n",
+      stderr: "",
+      exit_code: 0,
+      duration_ms: 12,
+      truncated: false,
+      timed_out: false,
+      images: [],
+    };
+    const result = await runToolStream([
+      toolStarted({ id: "tu-code", name: "code_exec", args: '{"code":"print(42)"}' }),
+      {
+        type: "tool_finished",
+        tool_use_id: "tu-code",
+        summary: "completed",
+        kind: "code-output",
+        payload: sandboxPayload,
+      },
+      doneEvent("a-code"),
+    ]);
+
+    const asst = result.current.turns.find((t) => t.msg_id === "a-code");
+    expect(asst.toolSteps[0]).toMatchObject({
+      toolUseId: "tu-code",
+      kind: "code-output",
+      payload: sandboxPayload,
+      summary: "completed",
+      status: "finished",
+    });
+  });
+
   it("marks the matching step as error on tool_error", async () => {
     const result = await runToolStream([
       toolStarted({ id: "tu-4", name: "web_search" }),
