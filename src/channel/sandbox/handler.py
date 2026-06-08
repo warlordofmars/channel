@@ -20,6 +20,7 @@ subprocess.
 
 from __future__ import annotations
 
+import base64
 import os
 import shutil
 import subprocess
@@ -31,6 +32,15 @@ _STDOUT_CAP = 20 * 1024
 _STDERR_CAP = 5 * 1024
 _SUBPROCESS_TIMEOUT_SEC = 270
 _TMP_DIR = "/tmp"  # noqa: S108 — Lambda's writable scratch dir; injected for tests
+_MAX_IMAGES = 3
+_MAX_IMAGE_BYTES = 1 * 1024 * 1024
+_IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".svg")
+_IMAGE_MIME = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".svg": "image/svg+xml",
+}
 
 
 def _cap(text: str, limit: int) -> tuple[str, bool]:
@@ -79,6 +89,48 @@ def _wipe_tmp() -> None:
             pass
 
 
+def _harvest_tmp_images() -> list[dict[str, str]]:
+    """Scan ``_TMP_DIR`` for image files and return up to ``_MAX_IMAGES``
+    base64-encoded.
+
+    Ordering: most-recent by mtime first. Per-image size cap
+    (``_MAX_IMAGE_BYTES``) skips anything over 1 MB. SVG round-trips
+    as base64 text — slightly wasteful but keeps the response shape
+    uniform with raster mimes.
+
+    The post-exec scan happens AFTER ``subprocess.run`` returns and
+    BEFORE the response is serialized. Empty /tmp returns ``[]``."""
+    if not os.path.isdir(_TMP_DIR):
+        return []
+    candidates: list[tuple[float, str]] = []
+    for name in os.listdir(_TMP_DIR):
+        if not name.lower().endswith(_IMAGE_EXTENSIONS):
+            continue
+        path = os.path.join(_TMP_DIR, name)
+        try:
+            stat = os.stat(path)
+        except OSError:
+            continue
+        candidates.append((stat.st_mtime, path))
+    candidates.sort(reverse=True)   # newest first
+    out: list[dict[str, str]] = []
+    for _mtime, path in candidates:
+        if len(out) >= _MAX_IMAGES:
+            break
+        try:
+            data = open(path, "rb").read()  # noqa: SIM115 — short-lived
+        except OSError:
+            continue
+        if len(data) > _MAX_IMAGE_BYTES:
+            continue
+        ext = os.path.splitext(path)[1].lower()
+        out.append({
+            "mime": _IMAGE_MIME.get(ext, "application/octet-stream"),
+            "b64": base64.b64encode(data).decode("ascii"),
+        })
+    return out
+
+
 def lambda_handler(event: dict, _ctx: object) -> dict[str, Any]:
     _wipe_tmp()
     code = event.get("code", "")
@@ -114,6 +166,7 @@ def lambda_handler(event: dict, _ctx: object) -> dict[str, Any]:
     duration_ms = int((time.monotonic() - start) * 1000)
     stdout, stdout_trunc = _cap(stdout, _STDOUT_CAP)
     stderr, stderr_trunc = _cap(stderr, _STDERR_CAP)
+    images = _harvest_tmp_images()
     return {
         "stdout": stdout,
         "stderr": stderr,
@@ -121,5 +174,5 @@ def lambda_handler(event: dict, _ctx: object) -> dict[str, Any]:
         "duration_ms": duration_ms,
         "truncated": stdout_trunc or stderr_trunc,
         "timed_out": timed_out,
-        "images": [],
+        "images": images,
     }

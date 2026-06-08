@@ -8,6 +8,8 @@ harvest. Tool-wrapper boto3 / SSE behavior lives in
 
 from __future__ import annotations
 
+import os
+
 
 def test_handler_happy_path_returns_stdout_and_exit_zero():
     """``print('hello')`` → stdout = 'hello\\n', exit_code = 0."""
@@ -210,3 +212,145 @@ def test_handler_timeout_with_bytes_stderr_decodes(monkeypatch):
     assert result["timed_out"] is True
     assert result["stdout"] == "partial out"
     assert result["stderr"] == "partial err"
+
+
+def test_handler_harvests_png_images_from_tmp(monkeypatch, tmp_path):
+    """Pre-seed a PNG in the sandbox tmp dir → handler base64-encodes
+    it post-exec and returns it in ``images``.
+
+    The test injects the PNG bytes directly via ``write_bytes`` rather
+    than via user code so we can hold ``_TMP_DIR`` constant across the
+    wipe + subprocess. _wipe_tmp is patched to no-op for this test so
+    the pre-seeded file survives handler entry."""
+    from channel.sandbox import handler as handler_module
+
+    fake_tmp = tmp_path / "sandbox-tmp"
+    fake_tmp.mkdir()
+    monkeypatch.setattr(handler_module, "_TMP_DIR", str(fake_tmp))
+    monkeypatch.setattr(handler_module, "_wipe_tmp", lambda: None)
+
+    # Minimal valid 1×1 transparent PNG (~70 bytes).
+    png_bytes = bytes.fromhex(
+        "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d"
+        "49444154789c63000000050001010d0a2db40000000049454e44ae426082"
+    )
+    (fake_tmp / "plot.png").write_bytes(png_bytes)
+
+    result = handler_module.lambda_handler({"code": "pass"}, None)
+
+    assert len(result["images"]) == 1
+    img = result["images"][0]
+    assert img["mime"] == "image/png"
+    assert isinstance(img["b64"], str)
+    assert len(img["b64"]) > 0
+
+
+def test_handler_caps_image_count_at_three(monkeypatch, tmp_path):
+    """5 PNGs in /tmp → only the 3 most recent (by mtime) are returned."""
+    import time as time_mod
+
+    from channel.sandbox import handler as handler_module
+
+    fake_tmp = tmp_path / "sandbox-tmp"
+    fake_tmp.mkdir()
+    monkeypatch.setattr(handler_module, "_TMP_DIR", str(fake_tmp))
+    monkeypatch.setattr(handler_module, "_wipe_tmp", lambda: None)
+
+    png_bytes = b"\x89PNG\r\n\x1a\n" + b"x" * 100   # not a valid PNG but the
+    # handler doesn't parse — it relies on extension
+    for i in range(5):
+        path = fake_tmp / f"plot_{i}.png"
+        path.write_bytes(png_bytes)
+        # Set staggered mtimes so the harvest can order deterministically
+        t = time_mod.time() + i
+        os.utime(path, (t, t))
+
+    result = handler_module.lambda_handler({"code": "pass"}, None)
+
+    assert len(result["images"]) == 3
+
+
+def test_handler_skips_images_over_size_cap(monkeypatch, tmp_path):
+    """A 2 MB PNG is skipped (over the 1 MB per-image cap)."""
+    from channel.sandbox import handler as handler_module
+
+    fake_tmp = tmp_path / "sandbox-tmp"
+    fake_tmp.mkdir()
+    monkeypatch.setattr(handler_module, "_TMP_DIR", str(fake_tmp))
+    monkeypatch.setattr(handler_module, "_wipe_tmp", lambda: None)
+
+    big = b"\x89PNG\r\n\x1a\n" + (b"x" * (2 * 1024 * 1024))
+    (fake_tmp / "big.png").write_bytes(big)
+    small = b"\x89PNG\r\n\x1a\n" + (b"y" * 100)
+    (fake_tmp / "small.png").write_bytes(small)
+
+    result = handler_module.lambda_handler({"code": "pass"}, None)
+
+    # Only the small one survives the per-image cap.
+    assert len(result["images"]) == 1
+
+
+def test_handler_handles_no_images_in_tmp():
+    """Empty /tmp → ``images`` is an empty list, no crash."""
+    from channel.sandbox.handler import lambda_handler
+
+    result = lambda_handler({"code": "print('no images')"}, None)
+
+    assert result["images"] == []
+
+
+def test_harvest_tmp_images_skips_stat_oserror(monkeypatch, tmp_path):
+    """If os.stat raises OSError on a candidate file, harvest skips it
+    and continues with the next. Covers the except OSError: continue
+    branch in the listdir loop."""
+    from channel.sandbox import handler as handler_module
+
+    fake_tmp = tmp_path / "sandbox-tmp"
+    fake_tmp.mkdir()
+    monkeypatch.setattr(handler_module, "_TMP_DIR", str(fake_tmp))
+
+    # Write a valid PNG and an invalid one.
+    png_bytes = b"\x89PNG\r\n\x1a\n" + b"x" * 100
+    (fake_tmp / "good.png").write_bytes(png_bytes)
+    (fake_tmp / "bad.png").write_bytes(png_bytes)
+
+    # Force os.stat to raise OSError for "bad.png" only.
+    real_stat = os.stat
+    def selective_stat(path):
+        if "bad.png" in str(path):
+            raise OSError("simulated stat error")
+        return real_stat(path)
+    monkeypatch.setattr(handler_module.os, "stat", selective_stat)
+
+    result = handler_module.lambda_handler({"code": "pass"}, None)
+
+    # Only the good one should be harvested.
+    assert len(result["images"]) == 1
+
+
+def test_harvest_tmp_images_skips_open_oserror(monkeypatch, tmp_path):
+    """If open(path, 'rb').read() raises OSError, harvest skips that
+    image and continues. Covers the except OSError: continue branch
+    in the data-read loop."""
+    from channel.sandbox import handler as handler_module
+
+    fake_tmp = tmp_path / "sandbox-tmp"
+    fake_tmp.mkdir()
+    monkeypatch.setattr(handler_module, "_TMP_DIR", str(fake_tmp))
+
+    png_bytes = b"\x89PNG\r\n\x1a\n" + b"x" * 100
+    (fake_tmp / "readable.png").write_bytes(png_bytes)
+    (fake_tmp / "unreadable.png").write_bytes(png_bytes)
+
+    # Force open to raise OSError for "unreadable.png" only.
+    real_open = open
+    def selective_open(path, *args, **kwargs):
+        if "unreadable.png" in str(path):
+            raise OSError("simulated open error")
+        return real_open(path, *args, **kwargs)
+    monkeypatch.setattr("builtins.open", selective_open)
+
+    result = handler_module.lambda_handler({"code": "pass"}, None)
+
+    # Only the readable one should be harvested.
+    assert len(result["images"]) == 1
