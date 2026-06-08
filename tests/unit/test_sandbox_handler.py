@@ -11,6 +11,33 @@ from __future__ import annotations
 import base64
 import os
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _isolate_tmp_dir(monkeypatch, tmp_path):
+    """Redirect every test's view of ``_TMP_DIR`` to a per-test scratch
+    directory so ``_wipe_tmp`` can't blow away pytest's own scaffolding
+    at ``/tmp/pytest-of-runner/...`` on Linux CI.
+
+    macOS local dev hides this risk because pytest stores its tmp under
+    ``/private/var/folders/.../pytest-current``, NOT under ``/tmp``
+    (which is itself a symlink to ``/private/tmp``). On Linux CI
+    pytest's tmp IS in ``/tmp``, so a test that runs
+    ``lambda_handler`` without monkeypatching ``_TMP_DIR`` would
+    silently wipe pytest's working directory on the very next test."""
+    from channel.sandbox import handler as handler_module
+
+    # NAME deliberately doesn't collide with the per-test "sandbox-tmp"
+    # subdirs that test_handler_wipes_tmp_on_entry et al. create — those
+    # tests setattr _TMP_DIR a SECOND time inside the test body to their
+    # own scratch dir. monkeypatch's stack-then-restore semantics handle
+    # the nested overrides cleanly.
+    safe_default_tmp = tmp_path / "default-sandbox-tmp"
+    safe_default_tmp.mkdir()
+    monkeypatch.setattr(handler_module, "_TMP_DIR", str(safe_default_tmp))
+    yield safe_default_tmp
+
 
 def test_handler_happy_path_returns_stdout_and_exit_zero():
     """``print('hello')`` → stdout = 'hello\\n', exit_code = 0."""
@@ -247,6 +274,27 @@ def test_wipe_tmp_swallows_oserror_on_unlink(monkeypatch, tmp_path):
     handler_module._wipe_tmp()  # must not raise
 
 
+def test_wipe_tmp_removes_subdirectories_recursively(monkeypatch, tmp_path):
+    """``_wipe_tmp`` recursively rmtree's subdirectories under
+    ``_TMP_DIR``. Pre-fix this branch only fired on Linux CI when tests
+    accidentally pointed at the real /tmp (which always has OS dirs in
+    it). Now we exercise it deliberately."""
+    from channel.sandbox import handler as handler_module
+
+    fake_tmp = tmp_path / "sandbox-tmp"
+    fake_tmp.mkdir()
+    nested = fake_tmp / "leftover-dir"
+    nested.mkdir()
+    (nested / "inside.txt").write_text("from a prior invocation")
+    monkeypatch.setattr(handler_module, "_TMP_DIR", str(fake_tmp))
+
+    handler_module._wipe_tmp()
+
+    assert not nested.exists(), (
+        "subdirectory under _TMP_DIR must be recursively removed"
+    )
+
+
 def test_handler_timeout_with_no_stdout_returns_empty_string(monkeypatch):
     """When the subprocess times out without producing any stdout (the
     code blocks before any output), ``exc.stdout`` is None. Handler
@@ -348,6 +396,26 @@ def test_handler_caps_image_count_at_three(monkeypatch, tmp_path):
     result = handler_module.lambda_handler({"code": "pass"}, None)
 
     assert len(result["images"]) == 3
+
+
+def test_harvest_tmp_images_skips_non_image_files(monkeypatch, tmp_path):
+    """``_harvest_tmp_images`` walks ``_TMP_DIR`` and silently skips any
+    file whose extension isn't in ``_IMAGE_EXTENSIONS``. Pre-fix this
+    branch only fired on Linux CI when tests accidentally pointed at
+    the real /tmp (which always has non-image files in it)."""
+    from channel.sandbox import handler as handler_module
+
+    fake_tmp = tmp_path / "sandbox-tmp"
+    fake_tmp.mkdir()
+    (fake_tmp / "notes.txt").write_text("not an image")
+    (fake_tmp / "data.json").write_text("{}")
+    monkeypatch.setattr(handler_module, "_TMP_DIR", str(fake_tmp))
+    monkeypatch.setattr(handler_module, "_wipe_tmp", lambda: None)
+
+    result = handler_module.lambda_handler({"code": "pass"}, None)
+
+    # Both non-image files skipped via the extension check.
+    assert result["images"] == []
 
 
 def test_handler_skips_images_over_size_cap(monkeypatch, tmp_path):

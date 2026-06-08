@@ -202,29 +202,33 @@ export function useChatStream(chatId, { onTitleSuggested } = {}) {
             // turn is identified by ``client_msg_id`` (#221 fix —
             // ``msg_id`` swaps to the persisted server id on ``done``;
             // ``client_msg_id`` stays put for the lifetime of the
-            // turn). Same `mutated` short-circuit as patchToolStep:
-            // if no turn matches, return `prev` so React's useState
-            // setter no-ops.
-            setTurns((prev) => {
-              let mutated = false;
-              const next = prev.map((t) => {
+            // turn). ``prev.map`` returns ``prev`` unchanged for every
+            // non-matching turn, so the only allocation in the
+            // common-case "no turn matches" path is one shallow array
+            // copy — cheap enough that we drop the explicit ``mutated``
+            // short-circuit. Same pattern as the ``done``/``delta``
+            // handlers above.
+            setTurns((prev) =>
+              prev.map((t) => {
                 if (t.client_msg_id !== tempAsstId) return t;
-                const steps = [...(t.toolSteps || [])];
-                steps.push({
-                  toolUseId: event.tool_use_id,
-                  toolName: event.tool_name,
-                  argsPreview: event.args_preview,
-                  statusText: null,
-                  summary: null,
-                  errorType: null,
-                  partialResultCount: 0,
-                  status: "running",
-                });
-                mutated = true;
-                return { ...t, toolSteps: steps };
-              });
-              return mutated ? next : prev;
-            });
+                return {
+                  ...t,
+                  toolSteps: [
+                    ...(t.toolSteps || []),
+                    {
+                      toolUseId: event.tool_use_id,
+                      toolName: event.tool_name,
+                      argsPreview: event.args_preview,
+                      statusText: null,
+                      summary: null,
+                      errorType: null,
+                      partialResultCount: 0,
+                      status: "running",
+                    },
+                  ],
+                };
+              }),
+            );
           } else if (event.type === "tool_progress") {
             setTurns((prev) =>
               patchToolStep(prev, tempAsstId, event.tool_use_id, {
