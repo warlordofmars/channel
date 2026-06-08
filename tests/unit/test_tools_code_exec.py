@@ -173,3 +173,42 @@ def test_code_exec_returns_sandbox_init_error_on_function_error(monkeypatch):
         "status": "error",
         "content": [{"text": "sandbox_init_error"}],
     }
+
+
+def test_code_exec_error_round_trips_through_translate_event(monkeypatch):
+    """End-to-end contract test for the SSE error_type chain (same shape
+    as ``test_web_search.py:test_error_result_shape_round_trips``).
+
+    Wrapper returns ``{"status": "error", "content": [{"text": "rate_limit"}]}``;
+    ``translate_event`` extracts ``rate_limit`` as ``error_type``. Fails
+    if any link in the chain breaks — defensive guard against the
+    PR #225 bug recurring."""
+    fake_client = MagicMock()
+
+    class _TooMany(Exception):
+        pass
+
+    fake_client.exceptions.TooManyRequestsException = _TooMany
+    fake_client.invoke.side_effect = _TooMany("throttled")
+    monkeypatch.setattr(
+        "channel.agents.tools.code_exec._get_lambda_client",
+        lambda: fake_client,
+    )
+    monkeypatch.setenv("STARTER_CODE_EXEC_LAMBDA_ARN", "arn:fake")
+
+    from channel.agents.strands_sse import translate_event
+    from channel.agents.tools.code_exec import code_exec
+
+    tool_result = code_exec(code="print(1)")
+
+    sse_event = {
+        "type": "tool_result",
+        "tool_result": {
+            "toolUseId": "tu-abc",
+            "status": tool_result["status"],
+            "content": tool_result["content"],
+        },
+    }
+    kind, payload = translate_event(sse_event)
+    assert kind == "tool_error"
+    assert payload["error_type"] == "rate_limit"
