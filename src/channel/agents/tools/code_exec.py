@@ -54,9 +54,9 @@ def _get_lambda_client():  # type: ignore[no-untyped-def]
     boto3 import until the model actually calls ``code_exec`` keeps the
     Lambda client construction off the cold-start path for turns that
     don't trigger code execution."""
-    import boto3  # noqa: PLC0415
+    import boto3  # noqa: PLC0415  # pragma: no cover
 
-    return boto3.client("lambda")
+    return boto3.client("lambda")  # pragma: no cover
 
 
 @tool
@@ -84,10 +84,20 @@ def code_exec(code: str) -> dict[str, Any]:
     if not arn:
         return _error_result("not_configured")
     client = _get_lambda_client()
-    resp = client.invoke(
-        FunctionName=arn,
-        InvocationType="RequestResponse",
-        Payload=json.dumps({"code": code}).encode(),
-    )
+    try:
+        resp = client.invoke(
+            FunctionName=arn,
+            InvocationType="RequestResponse",
+            Payload=json.dumps({"code": code}).encode(),
+        )
+    except client.exceptions.TooManyRequestsException:
+        logger.warning("code_exec.rate_limit code_len=%d", len(code))
+        return _error_result("rate_limit")
+    except botocore.exceptions.ClientError as exc:
+        logger.warning("code_exec.client_error %r code_len=%d", exc, len(code))
+        return _error_result("invoke_failed")
+    if "FunctionError" in resp:
+        logger.warning("code_exec.sandbox_init_error code_len=%d", len(code))
+        return _error_result("sandbox_init_error")
     payload = json.loads(resp["Payload"].read())
     return payload  # type: ignore[no-any-return]

@@ -88,3 +88,88 @@ def test_code_exec_is_a_strands_tool():
     from channel.agents.tools.code_exec import code_exec
 
     assert hasattr(code_exec, "tool_spec")
+
+
+def test_code_exec_returns_not_configured_when_arn_unset(monkeypatch):
+    """No ``STARTER_CODE_EXEC_LAMBDA_ARN`` → ``not_configured`` error."""
+    monkeypatch.delenv("STARTER_CODE_EXEC_LAMBDA_ARN", raising=False)
+
+    from channel.agents.tools.code_exec import code_exec
+
+    result = code_exec(code="print(1)")
+
+    assert result == {"status": "error", "content": [{"text": "not_configured"}]}
+
+
+def test_code_exec_returns_rate_limit_on_too_many_requests(monkeypatch):
+    """boto3 ``TooManyRequestsException`` → ``rate_limit`` error."""
+    fake_client = MagicMock()
+
+    class _TooMany(Exception):
+        pass
+
+    fake_client.exceptions.TooManyRequestsException = _TooMany
+    fake_client.invoke.side_effect = _TooMany("throttled")
+    monkeypatch.setattr(
+        "channel.agents.tools.code_exec._get_lambda_client",
+        lambda: fake_client,
+    )
+    monkeypatch.setenv("STARTER_CODE_EXEC_LAMBDA_ARN", "arn:fake")
+
+    from channel.agents.tools.code_exec import code_exec
+
+    result = code_exec(code="print(1)")
+
+    assert result == {"status": "error", "content": [{"text": "rate_limit"}]}
+
+
+def test_code_exec_returns_invoke_failed_on_generic_client_error(monkeypatch):
+    """Generic ``ClientError`` → ``invoke_failed`` error."""
+    import botocore.exceptions
+
+    fake_client = MagicMock()
+    fake_client.exceptions.TooManyRequestsException = type(
+        "X", (Exception,), {}
+    )
+    fake_client.invoke.side_effect = botocore.exceptions.ClientError(
+        error_response={"Error": {"Code": "AccessDenied", "Message": "denied"}},
+        operation_name="Invoke",
+    )
+    monkeypatch.setattr(
+        "channel.agents.tools.code_exec._get_lambda_client",
+        lambda: fake_client,
+    )
+    monkeypatch.setenv("STARTER_CODE_EXEC_LAMBDA_ARN", "arn:fake")
+
+    from channel.agents.tools.code_exec import code_exec
+
+    result = code_exec(code="print(1)")
+
+    assert result == {"status": "error", "content": [{"text": "invoke_failed"}]}
+
+
+def test_code_exec_returns_sandbox_init_error_on_function_error(monkeypatch):
+    """boto3 ``invoke`` response with ``FunctionError`` → ``sandbox_init_error``."""
+    fake_client = MagicMock()
+    fake_client.exceptions.TooManyRequestsException = type("X", (Exception,), {})
+    stream = MagicMock()
+    stream.read.return_value = b"{}"
+    fake_client.invoke.return_value = {
+        "StatusCode": 200,
+        "FunctionError": "Unhandled",
+        "Payload": stream,
+    }
+    monkeypatch.setattr(
+        "channel.agents.tools.code_exec._get_lambda_client",
+        lambda: fake_client,
+    )
+    monkeypatch.setenv("STARTER_CODE_EXEC_LAMBDA_ARN", "arn:fake")
+
+    from channel.agents.tools.code_exec import code_exec
+
+    result = code_exec(code="print(1)")
+
+    assert result == {
+        "status": "error",
+        "content": [{"text": "sandbox_init_error"}],
+    }
