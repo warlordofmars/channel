@@ -157,6 +157,18 @@ def lambda_handler(event: dict, _ctx: object) -> dict[str, Any]:
         return {"status": "error", "content": [{"text": "empty_code"}]}
     start = time.monotonic()
     timed_out = False
+    # Lambda doesn't set PYTHONPATH — it adds /var/task (the function
+    # code root) to the parent's sys.path at runtime startup. Child
+    # Python processes spawned via subprocess.run don't inherit that
+    # mutation; they start with a clean sys.path. Without explicitly
+    # propagating LAMBDA_TASK_ROOT, user code can't ``import numpy /
+    # pandas / matplotlib`` despite those packages being bundled into
+    # /var/task at deploy time. The 2026-06-08 dev smoke surfaced
+    # this: the model reported "matplotlib isn't actually available".
+    env = os.environ.copy()
+    task_root = os.environ.get("LAMBDA_TASK_ROOT", "/var/task")
+    existing = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = f"{task_root}:{existing}" if existing else task_root
     try:
         proc = subprocess.run(
             [sys.executable, "-c", code],
@@ -165,6 +177,7 @@ def lambda_handler(event: dict, _ctx: object) -> dict[str, Any]:
             timeout=_SUBPROCESS_TIMEOUT_SEC,
             cwd=_TMP_DIR,
             check=False,
+            env=env,
         )
         stdout = proc.stdout
         stderr = proc.stderr

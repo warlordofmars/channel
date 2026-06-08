@@ -52,6 +52,88 @@ def test_handler_traceback_in_stderr_propagates():
     assert "ZeroDivisionError" in result["stderr"]
 
 
+def test_handler_subprocess_pythonpath_includes_lambda_task_root(monkeypatch):
+    """Subprocess gets ``PYTHONPATH`` set to ``LAMBDA_TASK_ROOT`` so
+    bundled packages (numpy / pandas / matplotlib) are importable in
+    user code. Without this, the subprocess starts with a clean
+    sys.path and ``import matplotlib`` fails despite matplotlib being
+    bundled into /var/task at deploy time. Captured by the 2026-06-08
+    dev smoke."""
+    import subprocess as subprocess_mod
+
+    from channel.sandbox import handler as handler_module
+
+    captured: dict[str, object] = {}
+    real_run = subprocess_mod.run
+
+    def spy_run(*args, **kwargs):
+        captured["env"] = kwargs.get("env")
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(handler_module.subprocess, "run", spy_run)
+    monkeypatch.setenv("LAMBDA_TASK_ROOT", "/tmp/fake-task-root")
+
+    handler_module.lambda_handler({"code": "print('x')"}, None)
+
+    env = captured["env"]
+    assert isinstance(env, dict)
+    pythonpath = env.get("PYTHONPATH", "")
+    assert "/tmp/fake-task-root" in pythonpath
+
+
+def test_handler_subprocess_pythonpath_defaults_to_var_task(monkeypatch):
+    """When ``LAMBDA_TASK_ROOT`` is unset (local dev / unit test),
+    fall back to the documented Lambda task-root path ``/var/task``."""
+    import subprocess as subprocess_mod
+
+    from channel.sandbox import handler as handler_module
+
+    captured: dict[str, object] = {}
+    real_run = subprocess_mod.run
+
+    def spy_run(*args, **kwargs):
+        captured["env"] = kwargs.get("env")
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(handler_module.subprocess, "run", spy_run)
+    monkeypatch.delenv("LAMBDA_TASK_ROOT", raising=False)
+
+    handler_module.lambda_handler({"code": "print('x')"}, None)
+
+    env = captured["env"]
+    assert isinstance(env, dict)
+    pythonpath = env.get("PYTHONPATH", "")
+    assert "/var/task" in pythonpath
+
+
+def test_handler_subprocess_pythonpath_preserves_existing(monkeypatch):
+    """If ``PYTHONPATH`` is already set in the env (e.g. layer-mounted
+    extras), the task-root is PREPENDED so user code preserves access
+    to the original entries too."""
+    import subprocess as subprocess_mod
+
+    from channel.sandbox import handler as handler_module
+
+    captured: dict[str, object] = {}
+    real_run = subprocess_mod.run
+
+    def spy_run(*args, **kwargs):
+        captured["env"] = kwargs.get("env")
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(handler_module.subprocess, "run", spy_run)
+    monkeypatch.setenv("LAMBDA_TASK_ROOT", "/tmp/fake-task-root")
+    monkeypatch.setenv("PYTHONPATH", "/opt/python")
+
+    handler_module.lambda_handler({"code": "print('x')"}, None)
+
+    env = captured["env"]
+    assert isinstance(env, dict)
+    pythonpath = env.get("PYTHONPATH", "")
+    # Task root prepended; original entry retained.
+    assert pythonpath == "/tmp/fake-task-root:/opt/python"
+
+
 def test_handler_timeout_returns_timed_out_with_partial_output(monkeypatch):
     """A subprocess that exceeds the 270 s cap returns:
     ``timed_out=True``, ``exit_code=-1``, partial stdout/stderr if any."""
