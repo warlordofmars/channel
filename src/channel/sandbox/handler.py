@@ -97,10 +97,18 @@ def _harvest_tmp_images() -> list[dict[str, str]]:
     can carry executable script tags and the sandbox-to-browser path
     is too short to safely sanitize.
 
+    Symlink resolution: user code can ``os.symlink('/etc/passwd',
+    '/tmp/leak.png')`` to exfiltrate files outside ``_TMP_DIR``. Each
+    candidate is resolved via ``os.path.realpath`` and the result must
+    still sit under ``_TMP_DIR`` — otherwise the entry is skipped.
+    Resolution happens AFTER the extension check so we don't waste
+    syscalls on non-image files.
+
     The post-exec scan happens AFTER ``subprocess.run`` returns and
     BEFORE the response is serialized. Empty /tmp returns ``[]``."""
     if not os.path.isdir(_TMP_DIR):
         return []
+    real_tmp = os.path.realpath(_TMP_DIR)
     candidates: list[tuple[float, str]] = []
     for name in os.listdir(_TMP_DIR):
         if not name.lower().endswith(_IMAGE_EXTENSIONS):
@@ -117,7 +125,17 @@ def _harvest_tmp_images() -> list[dict[str, str]]:
         if len(out) >= _MAX_IMAGES:
             break
         try:
-            data = open(path, "rb").read()  # noqa: SIM115 — short-lived
+            real_path = os.path.realpath(path)
+        except OSError:
+            continue
+        # Reject symlinks that resolve outside _TMP_DIR — defense
+        # against ``os.symlink('/etc/passwd', '/tmp/leak.png')`` style
+        # exfiltration. ``os.sep`` guards against the "/tmp/xyz" vs
+        # "/tmp-something" prefix-match trap.
+        if not (real_path == real_tmp or real_path.startswith(real_tmp + os.sep)):
+            continue
+        try:
+            data = open(real_path, "rb").read()  # noqa: SIM115 — short-lived
         except OSError:
             continue
         if len(data) > _MAX_IMAGE_BYTES:

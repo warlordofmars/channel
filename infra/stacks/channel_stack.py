@@ -622,15 +622,27 @@ class ChannelStack(cdk.Stack):
             runtime=lambda_.Runtime.PYTHON_3_13,
             handler="channel.sandbox.handler.lambda_handler",
             code=lambda_.Code.from_asset(
-                "../src",
+                # Asset path mirrors the API Lambda's ``from_asset("..")``
+                # — the path is relative to ``infra/`` (the cdk.json
+                # context); ``..`` resolves to the worktree root which
+                # holds ``src/channel/sandbox/``. The bundling command
+                # pulls only what the sandbox needs (no FastAPI,
+                # uvicorn, or Strands tree).
+                "..",
                 bundling=cdk.BundlingOptions(
                     image=lambda_.Runtime.PYTHON_3_13.bundling_image,
                     command=[
                         "bash",
                         "-c",
                         (
-                            "pip install -r channel/sandbox/requirements.txt "
-                            "-t /asset-output && cp -r channel /asset-output/channel"
+                            "pip install -r src/channel/sandbox/requirements.txt "
+                            "-t /asset-output && "
+                            "mkdir -p /asset-output/channel/sandbox && "
+                            "touch /asset-output/channel/__init__.py && "
+                            "cp src/channel/sandbox/__init__.py "
+                            "/asset-output/channel/sandbox/__init__.py && "
+                            "cp src/channel/sandbox/handler.py "
+                            "/asset-output/channel/sandbox/handler.py"
                         ),
                     ],
                 ),

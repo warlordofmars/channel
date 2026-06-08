@@ -8,6 +8,7 @@ harvest. Tool-wrapper boto3 / SSE behavior lives in
 
 from __future__ import annotations
 
+import base64
 import os
 
 
@@ -377,6 +378,67 @@ def test_harvest_tmp_images_early_returns_when_dir_missing(monkeypatch):
     )
 
     assert handler_module._harvest_tmp_images() == []
+
+
+def test_harvest_tmp_images_skips_realpath_oserror(monkeypatch, tmp_path):
+    """If ``os.path.realpath`` raises OSError on a candidate file
+    (e.g. broken symlink that triggers an ELOOP), harvest skips it
+    and continues. Covers the ``except OSError: continue`` branch
+    on the realpath resolution."""
+    from channel.sandbox import handler as handler_module
+
+    fake_tmp = tmp_path / "sandbox-tmp"
+    fake_tmp.mkdir()
+    monkeypatch.setattr(handler_module, "_TMP_DIR", str(fake_tmp))
+    monkeypatch.setattr(handler_module, "_wipe_tmp", lambda: None)
+
+    png_bytes = b"\x89PNG\r\n\x1a\n" + b"x" * 100
+    (fake_tmp / "good.png").write_bytes(png_bytes)
+    (fake_tmp / "broken.png").write_bytes(png_bytes)
+
+    real_realpath = os.path.realpath
+
+    def selective_realpath(path, *args, **kwargs):
+        if "broken.png" in str(path):
+            raise OSError("simulated ELOOP")
+        return real_realpath(path, *args, **kwargs)
+
+    monkeypatch.setattr(handler_module.os.path, "realpath", selective_realpath)
+
+    result = handler_module.lambda_handler({"code": "pass"}, None)
+
+    # Only the unbroken file survives the realpath check.
+    assert len(result["images"]) == 1
+
+
+def test_harvest_tmp_images_rejects_symlink_escape(monkeypatch, tmp_path):
+    """User code can ``os.symlink('/etc/passwd', '/tmp/leak.png')`` to
+    exfiltrate files outside ``_TMP_DIR``. Symlinks whose real-path
+    resolves outside the tmp dir are skipped — they do NOT make it
+    into the response."""
+    from channel.sandbox import handler as handler_module
+
+    fake_tmp = tmp_path / "sandbox-tmp"
+    fake_tmp.mkdir()
+    outside = tmp_path / "outside-secret.dat"
+    outside.write_bytes(b"\x89PNG\r\n\x1a\n" + b"sensitive payload" * 4)
+
+    monkeypatch.setattr(handler_module, "_TMP_DIR", str(fake_tmp))
+    monkeypatch.setattr(handler_module, "_wipe_tmp", lambda: None)
+
+    # Symlink with an image extension pointing OUTSIDE _TMP_DIR.
+    os.symlink(str(outside), str(fake_tmp / "leak.png"))
+    # A real harvestable image so we know the harvest path runs at all.
+    png_bytes = b"\x89PNG\r\n\x1a\n" + b"x" * 100
+    (fake_tmp / "ok.png").write_bytes(png_bytes)
+
+    result = handler_module.lambda_handler({"code": "pass"}, None)
+
+    # Only the legitimate ok.png survives; the symlink is rejected.
+    assert len(result["images"]) == 1
+    # And the encoded payload is the legitimate one, not the secret.
+    img_bytes = base64.b64decode(result["images"][0]["b64"])
+    assert b"sensitive payload" not in img_bytes
 
 
 def test_handler_rejects_empty_code():
