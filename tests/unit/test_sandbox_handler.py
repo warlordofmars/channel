@@ -377,3 +377,39 @@ def test_harvest_tmp_images_early_returns_when_dir_missing(monkeypatch):
     )
 
     assert handler_module._harvest_tmp_images() == []
+
+
+def test_handler_rejects_empty_code():
+    """Empty string ``code`` → Strands-ToolResult-shaped error."""
+    from channel.sandbox.handler import lambda_handler
+
+    result = lambda_handler({"code": ""}, None)
+
+    assert result == {
+        "status": "error",
+        "content": [{"text": "empty_code"}],
+    }
+
+
+def test_handler_rejects_missing_code_key():
+    """No ``code`` in event → same error shape as empty string."""
+    from channel.sandbox.handler import lambda_handler
+
+    result = lambda_handler({}, None)
+
+    assert result == {
+        "status": "error",
+        "content": [{"text": "empty_code"}],
+    }
+
+
+def test_handler_rejects_non_string_code():
+    """``code`` is a list or dict → same error shape."""
+    from channel.sandbox.handler import lambda_handler
+
+    result = lambda_handler({"code": ["print('x')"]}, None)
+
+    assert result == {
+        "status": "error",
+        "content": [{"text": "empty_code"}],
+    }

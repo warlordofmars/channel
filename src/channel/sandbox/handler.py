@@ -133,6 +133,8 @@ def _harvest_tmp_images() -> list[dict[str, str]]:
 def lambda_handler(event: dict, _ctx: object) -> dict[str, Any]:
     _wipe_tmp()
     code = event.get("code", "")
+    if not isinstance(code, str) or not code:
+        return {"status": "error", "content": [{"text": "empty_code"}]}
     start = time.monotonic()
     timed_out = False
     try:
