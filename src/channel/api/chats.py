@@ -486,12 +486,19 @@ def _build_tool_registry() -> list[Any]:
     """Assemble the per-turn tool registry from env-var kill switches.
 
     Each tool's registration is gated by its own ``STARTER_<NAME>_ENABLED``
-    flag, defaulting to off so a stale dev env doesn't accidentally
-    expose a tool. Production CDK in ``channel_stack.py`` ships
-    ``STARTER_WEB_SEARCH_ENABLED=1`` and ``STARTER_CODE_EXEC_ENABLED=1``;
-    ``STARTER_CLOCK_TOOL_ENABLED`` is "0" in prod and "1" in dev
-    (strategy spec policy P2: clock is a smoke-test tool, not a
-    user-visible capability).
+    flag. The code treats anything other than ``"1"`` as disabled —
+    so an unset flag in a stale dev env (e.g. someone running tests
+    without the CDK env vars wired up) results in the tool being
+    silently omitted rather than crashing on import.
+
+    The deployed envs ship explicit values:
+      * ``STARTER_WEB_SEARCH_ENABLED`` — "1" everywhere (kill switch
+        only; default-on posture once deployed)
+      * ``STARTER_CODE_EXEC_ENABLED`` — "1" everywhere (kill switch
+        only; default-on posture once deployed)
+      * ``STARTER_CLOCK_TOOL_ENABLED`` — "1" in dev, "0" in prod
+        (strategy spec policy P2: clock is a smoke-test tool, not a
+        user-visible capability)
 
     Order is not significant — Strands collects tools into a name-keyed
     spec for the model.

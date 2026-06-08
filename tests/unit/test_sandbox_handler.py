@@ -540,7 +540,8 @@ def test_harvest_tmp_images_skips_non_image_files(monkeypatch, tmp_path):
 
 
 def test_handler_skips_images_over_size_cap(monkeypatch, tmp_path):
-    """A 2 MB PNG is skipped (over the 1 MB per-image cap)."""
+    """A 2 MB PNG is skipped at the pre-read st_size check — bytes
+    never enter memory."""
     from channel.sandbox import handler as handler_module
 
     fake_tmp = tmp_path / "sandbox-tmp"
@@ -557,6 +558,47 @@ def test_handler_skips_images_over_size_cap(monkeypatch, tmp_path):
 
     # Only the small one survives the per-image cap.
     assert len(result["images"]) == 1
+
+
+def test_harvest_post_read_cap_catches_toctou_race(monkeypatch, tmp_path):
+    """TOCTOU backstop: if ``os.stat`` reports a sub-cap size but
+    ``open(...).read()`` returns more bytes (e.g. the file got
+    replaced between stat and open), the post-read ``len(data)`` check
+    rejects the image. The pre-read st_size check is the common-case
+    optimization; this branch is the safety net."""
+    from channel.sandbox import handler as handler_module
+
+    fake_tmp = tmp_path / "sandbox-tmp"
+    fake_tmp.mkdir()
+    monkeypatch.setattr(handler_module, "_TMP_DIR", str(fake_tmp))
+    monkeypatch.setattr(handler_module, "_wipe_tmp", lambda: None)
+
+    # File on disk is BIG, but spy stat reports a small size — i.e.
+    # the file grew between stat and read. The pre-cap passes; the
+    # post-read len() check must reject it.
+    payload = b"\x89PNG\r\n\x1a\n" + b"x" * (2 * 1024 * 1024)
+    (fake_tmp / "racy.png").write_bytes(payload)
+
+    real_stat = os.stat
+
+    def lying_stat(p, *args, **kwargs):
+        s = real_stat(p, *args, **kwargs)
+        if "racy.png" in str(p):
+
+            class _S:
+                st_mtime = s.st_mtime
+                st_size = 100  # lie: claim it's tiny
+
+            return _S()
+        return s
+
+    monkeypatch.setattr(handler_module.os, "stat", lying_stat)
+
+    result = handler_module.lambda_handler({"code": "pass"}, None)
+
+    # Pre-cap accepted (size claimed 100 bytes); post-read len() check
+    # rejected (actual 2+ MB).
+    assert result["images"] == []
 
 
 def test_handler_handles_no_images_in_tmp():

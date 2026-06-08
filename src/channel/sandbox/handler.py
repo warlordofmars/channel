@@ -1,7 +1,15 @@
 # Copyright (c) 2026 John Carter. All rights reserved.
 """Lambda handler for the code-execution sandbox (#183).
 
-Runs user-supplied Python code under ``subprocess.run`` with:
+Runs user-supplied Python code under ``subprocess.Popen`` (with
+``start_new_session=True`` so the child gets its own process group)
+plus ``proc.communicate(timeout=...)`` for the wall-clock cap. The
+process group is killed via ``os.killpg`` on both the timeout-recovery
+path and a ``finally`` defense-in-depth so user code that spawns
+grandchildren (e.g. ``subprocess.Popen([...]); sys.exit(0)``) doesn't
+leak orphans into the Lambda warm container.
+
+Constraints:
 
 * a 270 s wall-clock cap (30 s short of the 5-min Lambda timeout so
   the handler can serialize a ``{timed_out: true}`` response)
@@ -10,11 +18,16 @@ Runs user-supplied Python code under ``subprocess.run`` with:
   invocations
 * ``/tmp`` scanned post-exec for ``*.png`` / ``*.jpg`` / ``*.jpeg``,
   first 3 by mtime returned base64-encoded (up to 1 MB each)
+* output capture uses ``encoding="utf-8", errors="replace"`` so user
+  code that writes non-UTF-8 bytes gets replacement chars rather
+  than crashing the handler with UnicodeDecodeError
 
 The handler runs in its own Lambda function with an IAM role granting
 nothing beyond ``AWSLambdaBasicExecutionRole`` (CloudWatch Logs only).
 Sandbox cannot reach Channel data even if user code escapes the
-subprocess.
+subprocess. Note: outbound internet IS reachable — see the tool
+docstring for the honest network-isolation posture; hard no-egress
+VPC containment is a follow-up.
 """
 
 from __future__ import annotations
@@ -128,7 +141,12 @@ def _harvest_tmp_images() -> list[dict[str, str]]:
     if not os.path.isdir(_TMP_DIR):
         return []
     real_tmp = os.path.realpath(_TMP_DIR)
-    candidates: list[tuple[float, str]] = []
+    # Stuff st_size alongside st_mtime so the harvest loop below can
+    # cheaply skip oversize candidates BEFORE reading them into memory.
+    # User code could write a multi-hundred-MB PNG to /tmp (up to the
+    # Lambda /tmp limit); reading it before the cap check would burn
+    # memory + CPU and could OOM the sandbox.
+    candidates: list[tuple[float, str, int]] = []
     for name in os.listdir(_TMP_DIR):
         if not name.lower().endswith(_IMAGE_EXTENSIONS):
             continue
@@ -137,12 +155,16 @@ def _harvest_tmp_images() -> list[dict[str, str]]:
             stat = os.stat(path)
         except OSError:
             continue
-        candidates.append((stat.st_mtime, path))
+        candidates.append((stat.st_mtime, path, stat.st_size))
     candidates.sort(reverse=True)  # newest first
     out: list[dict[str, str]] = []
-    for _mtime, path in candidates:
+    for _mtime, path, st_size in candidates:
         if len(out) >= _MAX_IMAGES:
             break
+        # Pre-read cap check: skip oversize files without ever
+        # touching their bytes.
+        if st_size > _MAX_IMAGE_BYTES:
+            continue
         try:
             real_path = os.path.realpath(path)
         except OSError:
@@ -157,6 +179,8 @@ def _harvest_tmp_images() -> list[dict[str, str]]:
             data = open(real_path, "rb").read()  # noqa: SIM115 — short-lived
         except OSError:
             continue
+        # Post-read cap check: TOCTOU backstop — the file could have
+        # been replaced between stat() and open() by a larger one.
         if len(data) > _MAX_IMAGE_BYTES:
             continue
         ext = os.path.splitext(path)[1].lower()
