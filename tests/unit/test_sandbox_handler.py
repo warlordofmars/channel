@@ -128,3 +128,85 @@ def test_handler_wipes_tmp_on_entry(monkeypatch, tmp_path):
     handler_module.lambda_handler({"code": "pass"}, None)
 
     assert not (fake_tmp / "leak.txt").exists()
+
+
+def test_wipe_tmp_early_returns_when_dir_missing(monkeypatch):
+    """If ``_TMP_DIR`` doesn't exist, ``_wipe_tmp`` returns immediately
+    without raising. Covers the defensive early-return guard."""
+    from channel.sandbox import handler as handler_module
+
+    monkeypatch.setattr(
+        handler_module, "_TMP_DIR", "/nonexistent-path-for-test-12345"
+    )
+
+    # Should return cleanly with no side effects.
+    handler_module._wipe_tmp()
+
+
+def test_wipe_tmp_swallows_oserror_on_unlink(monkeypatch, tmp_path):
+    """If ``os.unlink`` raises OSError on a file, ``_wipe_tmp`` swallows
+    the error so a permission issue on one file doesn't fail the whole
+    invocation. Covers the ``except OSError: pass`` branch."""
+    from channel.sandbox import handler as handler_module
+
+    fake_tmp = tmp_path / "sandbox-tmp"
+    fake_tmp.mkdir()
+    (fake_tmp / "stubborn.txt").write_text("can't delete me")
+    monkeypatch.setattr(handler_module, "_TMP_DIR", str(fake_tmp))
+
+    # Force os.unlink to raise OSError for every file. Test passes if
+    # the exception is swallowed and _wipe_tmp returns cleanly.
+    def boom(_path):
+        raise OSError("simulated permission denied")
+    monkeypatch.setattr(handler_module.os, "unlink", boom)
+
+    handler_module._wipe_tmp()  # must not raise
+
+
+def test_handler_timeout_with_no_stdout_returns_empty_string(monkeypatch):
+    """When the subprocess times out without producing any stdout (the
+    code blocks before any output), ``exc.stdout`` is None. Handler
+    converts None → empty string via the ``or ""`` fallback. Covers
+    the else branch when exc.stdout is not bytes."""
+    from channel.sandbox import handler as handler_module
+
+    monkeypatch.setattr(handler_module, "_SUBPROCESS_TIMEOUT_SEC", 0.5)
+    # Code that blocks immediately without printing — exc.stdout will
+    # be None (nothing was captured before the timeout fired).
+    result = handler_module.lambda_handler(
+        {"code": "import time; time.sleep(5)"}, None
+    )
+
+    assert result["timed_out"] is True
+    assert result["exit_code"] == -1
+    assert result["stdout"] == ""
+    assert result["stderr"] == ""
+
+
+def test_handler_timeout_with_bytes_stderr_decodes(monkeypatch):
+    """Verify the timeout-branch stderr bytes-decode path runs. Forces
+    exc.stderr to be bytes so the ``decode("utf-8", errors="replace")``
+    branch on line 109 executes. Covers that branch."""
+    import subprocess
+    from channel.sandbox import handler as handler_module
+
+    real_run = subprocess.run
+
+    def stub_run(*args, **kwargs):
+        # Raise TimeoutExpired with bytes for stderr (forces the
+        # bytes-decode branch to fire). exc.stdout is also bytes so
+        # the matching stdout branch fires, but the assertion focuses
+        # on stderr.
+        raise subprocess.TimeoutExpired(
+            cmd=args[0] if args else kwargs.get("args"),
+            timeout=1.0,
+            output=b"partial out",
+            stderr=b"partial err",
+        )
+    monkeypatch.setattr(handler_module.subprocess, "run", stub_run)
+
+    result = handler_module.lambda_handler({"code": "anything"}, None)
+
+    assert result["timed_out"] is True
+    assert result["stdout"] == "partial out"
+    assert result["stderr"] == "partial err"
