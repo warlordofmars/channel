@@ -138,9 +138,7 @@ def test_wipe_tmp_early_returns_when_dir_missing(monkeypatch):
     without raising. Covers the defensive early-return guard."""
     from channel.sandbox import handler as handler_module
 
-    monkeypatch.setattr(
-        handler_module, "_TMP_DIR", "/nonexistent-path-for-test-12345"
-    )
+    monkeypatch.setattr(handler_module, "_TMP_DIR", "/nonexistent-path-for-test-12345")
 
     # Should return cleanly with no side effects.
     handler_module._wipe_tmp()
@@ -161,6 +159,7 @@ def test_wipe_tmp_swallows_oserror_on_unlink(monkeypatch, tmp_path):
     # the exception is swallowed and _wipe_tmp returns cleanly.
     def boom(_path):
         raise OSError("simulated permission denied")
+
     monkeypatch.setattr(handler_module.os, "unlink", boom)
 
     handler_module._wipe_tmp()  # must not raise
@@ -176,9 +175,7 @@ def test_handler_timeout_with_no_stdout_returns_empty_string(monkeypatch):
     monkeypatch.setattr(handler_module, "_SUBPROCESS_TIMEOUT_SEC", 0.5)
     # Code that blocks immediately without printing — exc.stdout will
     # be None (nothing was captured before the timeout fired).
-    result = handler_module.lambda_handler(
-        {"code": "import time; time.sleep(5)"}, None
-    )
+    result = handler_module.lambda_handler({"code": "import time; time.sleep(5)"}, None)
 
     assert result["timed_out"] is True
     assert result["exit_code"] == -1
@@ -191,9 +188,8 @@ def test_handler_timeout_with_bytes_stderr_decodes(monkeypatch):
     exc.stderr to be bytes so the ``decode("utf-8", errors="replace")``
     branch on line 109 executes. Covers that branch."""
     import subprocess
-    from channel.sandbox import handler as handler_module
 
-    real_run = subprocess.run
+    from channel.sandbox import handler as handler_module
 
     def stub_run(*args, **kwargs):
         # Raise TimeoutExpired with bytes for stderr (forces the
@@ -206,6 +202,7 @@ def test_handler_timeout_with_bytes_stderr_decodes(monkeypatch):
             output=b"partial out",
             stderr=b"partial err",
         )
+
     monkeypatch.setattr(handler_module.subprocess, "run", stub_run)
 
     result = handler_module.lambda_handler({"code": "anything"}, None)
@@ -257,7 +254,7 @@ def test_handler_caps_image_count_at_three(monkeypatch, tmp_path):
     monkeypatch.setattr(handler_module, "_TMP_DIR", str(fake_tmp))
     monkeypatch.setattr(handler_module, "_wipe_tmp", lambda: None)
 
-    png_bytes = b"\x89PNG\r\n\x1a\n" + b"x" * 100   # not a valid PNG but the
+    png_bytes = b"\x89PNG\r\n\x1a\n" + b"x" * 100  # not a valid PNG but the
     # handler doesn't parse — it relies on extension
     for i in range(5):
         path = fake_tmp / f"plot_{i}.png"
@@ -373,9 +370,7 @@ def test_harvest_tmp_images_early_returns_when_dir_missing(monkeypatch):
     returns ``[]`` without raising. Covers the defensive early-return."""
     from channel.sandbox import handler as handler_module
 
-    monkeypatch.setattr(
-        handler_module, "_TMP_DIR", "/nonexistent-path-for-test-67890"
-    )
+    monkeypatch.setattr(handler_module, "_TMP_DIR", "/nonexistent-path-for-test-67890")
 
     assert handler_module._harvest_tmp_images() == []
 

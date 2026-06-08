@@ -36,9 +36,7 @@ from tests.e2e._http_helpers import (
 _CODE_EXEC_TIMEOUT = 180.0
 
 
-def _run_code_exec_chat(
-    prompt: str, timeout: float = _CODE_EXEC_TIMEOUT
-) -> list[dict[str, Any]]:
+def _run_code_exec_chat(prompt: str, timeout: float = _CODE_EXEC_TIMEOUT) -> list[dict[str, Any]]:
     """Setup → stream → cleanup boilerplate shared by the e2e tests.
 
     Mints a JWT, creates a chat, streams the user prompt, and returns
@@ -73,10 +71,7 @@ def test_code_exec_happy_path() -> None:
     test flaky. The chassis-level structured-payload assertion is the
     binding contract for this PR."""
     events = _run_code_exec_chat(
-        prompt=(
-            "Use the code_exec tool to compute 7 * 6. "
-            "Run the exact Python: print(7*6)"
-        )
+        prompt=("Use the code_exec tool to compute 7 * 6. Run the exact Python: print(7*6)")
     )
 
     started = [e for e in events if e.get("type") == "tool_started"]
@@ -93,9 +88,7 @@ def test_code_exec_happy_path() -> None:
     # 2. The matching tool_finished arrived with kind="code-output"
     #    and a structured payload.
     started_ids = {e["tool_use_id"] for e in code_exec_starts}
-    finished_for_code = [
-        e for e in finished if e.get("tool_use_id") in started_ids
-    ]
+    finished_for_code = [e for e in finished if e.get("tool_use_id") in started_ids]
     assert finished_for_code, (
         f"No tool_finished for code_exec tool_use_id. "
         f"started_ids={started_ids!r} finished_ids="
@@ -114,18 +107,13 @@ def test_code_exec_happy_path() -> None:
 
     # 3. The structured payload contains "42" in stdout.
     stdout = payload.get("stdout", "")
-    assert "42" in stdout, (
-        f"Expected '42' in code_exec stdout; got stdout={stdout!r}"
-    )
+    assert "42" in stdout, f"Expected '42' in code_exec stdout; got stdout={stdout!r}"
     assert payload.get("exit_code") == 0, (
-        f"Expected exit_code=0 for successful execution; got "
-        f"exit_code={payload.get('exit_code')!r}"
+        f"Expected exit_code=0 for successful execution; got exit_code={payload.get('exit_code')!r}"
     )
 
     # 4. No tool_error for the matched tool_use_id — happy path.
-    errors_for_code = [
-        e for e in errors if e.get("tool_use_id") in started_ids
-    ]
+    errors_for_code = [e for e in errors if e.get("tool_use_id") in started_ids]
     assert not errors_for_code, (
         "Expected NO tool_error for code_exec's tool_use_id on the "
         f"happy path; got {errors_for_code!r}"
@@ -154,20 +142,12 @@ def test_code_exec_containment_no_network() -> None:
     )
 
     finished = [
-        e for e in events
-        if e.get("type") == "tool_finished"
-        and e.get("kind") == "code-output"
+        e for e in events if e.get("type") == "tool_finished" and e.get("kind") == "code-output"
     ]
-    assert finished, (
-        f"Expected code-output tool_finished; got {[e.get('type') for e in events]!r}"
-    )
+    assert finished, f"Expected code-output tool_finished; got {[e.get('type') for e in events]!r}"
     payload = finished[0]["payload"]
-    assert payload["exit_code"] != 0, (
-        f"Expected non-zero exit for blocked egress; got {payload!r}"
-    )
-    assert payload["stderr"], (
-        f"Expected stderr describing the failure; got {payload!r}"
-    )
+    assert payload["exit_code"] != 0, f"Expected non-zero exit for blocked egress; got {payload!r}"
+    assert payload["stderr"], f"Expected stderr describing the failure; got {payload!r}"
 
 
 @pytest.mark.skipif(
@@ -190,22 +170,14 @@ def test_code_exec_caps_huge_stdout() -> None:
     )
 
     finished = [
-        e for e in events
-        if e.get("type") == "tool_finished"
-        and e.get("kind") == "code-output"
+        e for e in events if e.get("type") == "tool_finished" and e.get("kind") == "code-output"
     ]
-    assert finished, (
-        f"Expected code-output tool_finished; got {[e.get('type') for e in events]!r}"
-    )
+    assert finished, f"Expected code-output tool_finished; got {[e.get('type') for e in events]!r}"
     payload = finished[0]["payload"]
-    assert payload["truncated"] is True, (
-        f"Expected truncated=true; got payload={payload!r}"
-    )
+    assert payload["truncated"] is True, f"Expected truncated=true; got payload={payload!r}"
     # 20 KB cap including a marker; allow some slack for marker bytes.
     stdout_len = len(payload["stdout"])
-    assert 19_500 < stdout_len <= 20_480, (
-        f"stdout length out of cap range: {stdout_len} bytes"
-    )
+    assert 19_500 < stdout_len <= 20_480, f"stdout length out of cap range: {stdout_len} bytes"
 
 
 @pytest.mark.skipif(
@@ -230,21 +202,13 @@ def test_code_exec_returns_matplotlib_image() -> None:
     )
 
     finished = [
-        e for e in events
-        if e.get("type") == "tool_finished"
-        and e.get("kind") == "code-output"
+        e for e in events if e.get("type") == "tool_finished" and e.get("kind") == "code-output"
     ]
-    assert finished, (
-        f"Expected code-output tool_finished; got {[e.get('type') for e in events]!r}"
-    )
+    assert finished, f"Expected code-output tool_finished; got {[e.get('type') for e in events]!r}"
     payload = finished[0]["payload"]
     assert len(payload["images"]) >= 1, (
         f"Expected at least one harvested image; got payload={payload!r}"
     )
     img = payload["images"][0]
-    assert img["mime"] == "image/png", (
-        f"Expected mime=image/png; got {img!r}"
-    )
-    assert len(img["b64"]) > 100, (
-        f"Expected non-trivial base64 payload; got len={len(img['b64'])}"
-    )
+    assert img["mime"] == "image/png", f"Expected mime=image/png; got {img!r}"
+    assert len(img["b64"]) > 100, f"Expected non-trivial base64 payload; got len={len(img['b64'])}"

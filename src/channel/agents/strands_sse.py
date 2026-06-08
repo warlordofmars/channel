@@ -149,11 +149,7 @@ def translate_event(event: dict[str, Any]) -> tuple[str, Any]:
                 parsed = json.loads(joined_text)
             except (ValueError, TypeError):
                 parsed = None
-            if (
-                isinstance(parsed, dict)
-                and "exit_code" in parsed
-                and "stdout" in parsed
-            ):
+            if isinstance(parsed, dict) and "exit_code" in parsed and "stdout" in parsed:
                 success_payload["kind"] = "code-output"
                 success_payload["payload"] = parsed
         return ("tool_finished", success_payload)

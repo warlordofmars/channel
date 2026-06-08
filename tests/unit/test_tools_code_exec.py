@@ -62,10 +62,17 @@ def test_code_exec_returns_sandbox_payload_unchanged(monkeypatch):
 def test_code_exec_invokes_request_response_with_json_payload(monkeypatch):
     """Wrapper invokes ``RequestResponse`` with ``{"code": ...}`` as the JSON body."""
     fake_client = MagicMock()
-    fake_client.invoke.return_value = _fake_invoke_response({
-        "stdout": "", "stderr": "", "exit_code": 0,
-        "duration_ms": 1, "truncated": False, "timed_out": False, "images": [],
-    })
+    fake_client.invoke.return_value = _fake_invoke_response(
+        {
+            "stdout": "",
+            "stderr": "",
+            "exit_code": 0,
+            "duration_ms": 1,
+            "truncated": False,
+            "timed_out": False,
+            "images": [],
+        }
+    )
     monkeypatch.setattr(
         "channel.agents.tools.code_exec._get_lambda_client",
         lambda: fake_client,
@@ -128,9 +135,7 @@ def test_code_exec_returns_invoke_failed_on_generic_client_error(monkeypatch):
     import botocore.exceptions
 
     fake_client = MagicMock()
-    fake_client.exceptions.TooManyRequestsException = type(
-        "X", (Exception,), {}
-    )
+    fake_client.exceptions.TooManyRequestsException = type("X", (Exception,), {})
     fake_client.invoke.side_effect = botocore.exceptions.ClientError(
         error_response={"Error": {"Code": "AccessDenied", "Message": "denied"}},
         operation_name="Invoke",

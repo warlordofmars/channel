@@ -431,7 +431,8 @@ def test_sandbox_lambda_exists_with_snapstart_and_python_3_13(dev_template):
     published versions + reserved-concurrency 5 + 5-min timeout."""
     template = dev_template.to_json()
     sandbox = [
-        r for r in template["Resources"].values()
+        r
+        for r in template["Resources"].values()
         if r["Type"] == "AWS::Lambda::Function"
         and r["Properties"].get("Runtime") == "python3.13"
         and "code-exec" in str(r["Properties"].get("FunctionName", ""))
@@ -481,8 +482,7 @@ def test_sandbox_lambda_role_has_no_data_access(dev_template):
         roles = resource["Properties"].get("Roles", [])
         # Check if this policy references the sandbox role by Ref.
         refs_sandbox = any(
-            isinstance(r, dict) and r.get("Ref") == sandbox_role_logical_id
-            for r in roles
+            isinstance(r, dict) and r.get("Ref") == sandbox_role_logical_id for r in roles
         )
         if not refs_sandbox:
             continue
@@ -494,8 +494,7 @@ def test_sandbox_lambda_role_has_no_data_access(dev_template):
                 action_str = str(action).lower()
                 for prefix in forbidden_prefixes:
                     assert not action_str.startswith(prefix), (
-                        f"sandbox role must not grant {action_str} "
-                        f"(forbidden prefix {prefix})"
+                        f"sandbox role must not grant {action_str} (forbidden prefix {prefix})"
                     )
 
 

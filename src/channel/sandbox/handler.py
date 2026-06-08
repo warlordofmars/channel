@@ -119,7 +119,7 @@ def _harvest_tmp_images() -> list[dict[str, str]]:
         except OSError:
             continue
         candidates.append((stat.st_mtime, path))
-    candidates.sort(reverse=True)   # newest first
+    candidates.sort(reverse=True)  # newest first
     out: list[dict[str, str]] = []
     for _mtime, path in candidates:
         if len(out) >= _MAX_IMAGES:
@@ -141,10 +141,12 @@ def _harvest_tmp_images() -> list[dict[str, str]]:
         if len(data) > _MAX_IMAGE_BYTES:
             continue
         ext = os.path.splitext(path)[1].lower()
-        out.append({
-            "mime": _IMAGE_MIME.get(ext, "application/octet-stream"),
-            "b64": base64.b64encode(data).decode("ascii"),
-        })
+        out.append(
+            {
+                "mime": _IMAGE_MIME.get(ext, "application/octet-stream"),
+                "b64": base64.b64encode(data).decode("ascii"),
+            }
+        )
     return out
 
 
@@ -168,18 +170,21 @@ def lambda_handler(event: dict, _ctx: object) -> dict[str, Any]:
         stderr = proc.stderr
         exit_code = proc.returncode
     except subprocess.TimeoutExpired as exc:
-        # Even with text=True, TimeoutExpired captures partial output as bytes.
-        # Decode to str, or use "" if the subprocess produced no output.
-        stdout = exc.stdout
-        stderr = exc.stderr
-        if isinstance(stdout, bytes):
-            stdout = stdout.decode("utf-8", errors="replace")
+        # Even with text=True, TimeoutExpired captures partial output as
+        # bytes-or-None on the exception (subprocess returns the raw
+        # buffer it had captured at the moment the timer fired, before
+        # it gets a chance to decode through the text-mode pipeline).
+        # Normalize to str via decode/fallback.
+        raw_stdout: bytes | str | None = exc.stdout
+        raw_stderr: bytes | str | None = exc.stderr
+        if isinstance(raw_stdout, bytes):
+            stdout = raw_stdout.decode("utf-8", errors="replace")
         else:
-            stdout = stdout or ""
-        if isinstance(stderr, bytes):
-            stderr = stderr.decode("utf-8", errors="replace")
+            stdout = raw_stdout or ""
+        if isinstance(raw_stderr, bytes):
+            stderr = raw_stderr.decode("utf-8", errors="replace")
         else:
-            stderr = stderr or ""
+            stderr = raw_stderr or ""
         exit_code = -1
         timed_out = True
     duration_ms = int((time.monotonic() - start) * 1000)
