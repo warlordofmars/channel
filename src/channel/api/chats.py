@@ -482,6 +482,36 @@ async def delete_chat(
     return Response(status_code=204)
 
 
+def _build_tool_registry() -> list[Any]:
+    """Assemble the per-turn tool registry from env-var kill switches.
+
+    Each tool's registration is gated by its own ``STARTER_<NAME>_ENABLED``
+    flag, defaulting to off so a stale dev env doesn't accidentally
+    expose a tool. Production CDK sets all three flags to ``"1"`` in
+    ``common_env``.
+
+    Order is not significant — Strands collects tools into a name-keyed
+    spec for the model.
+
+    Extracted into a helper in #183 so the unit tests can exercise the
+    flag matrix without spinning up the streaming coroutine. The
+    ``web_search`` and ``code_exec`` imports stay lazy (per-call inside
+    the helper) so a stale dev env without ``strands-agents-tools`` /
+    ``boto3`` installed still loads ``chats`` for a smoke test."""
+    registry: list[Any] = []
+    if os.environ.get("STARTER_CLOCK_TOOL_ENABLED") == "1":
+        registry.append(current_time)
+    if os.environ.get("STARTER_WEB_SEARCH_ENABLED") == "1":
+        from channel.agents.tools.web_search import web_search  # noqa: PLC0415
+
+        registry.append(web_search)
+    if os.environ.get("STARTER_CODE_EXEC_ENABLED") == "1":
+        from channel.agents.tools.code_exec import code_exec  # noqa: PLC0415
+
+        registry.append(code_exec)
+    return registry
+
+
 async def _stream_bedrock_reply(
     *,
     chat: Chat,
@@ -583,22 +613,7 @@ async def _stream_bedrock_reply(
     for err in errors_list:
         yield sse_attachment_error(**err)
 
-    # Tool registry — chassis registers ``current_time`` behind
-    # ``STARTER_CLOCK_TOOL_ENABLED`` (strategy spec policy P2: smoke-test,
-    # off by default in prod) and ``web_search`` behind
-    # ``STARTER_WEB_SEARCH_ENABLED`` (#182, on by default — flag is a
-    # kill switch). #183 (code-exec sandbox) will append a similar
-    # branch later behind its own flag.
-    tool_registry: list[Any] = []
-    if os.environ.get("STARTER_CLOCK_TOOL_ENABLED") == "1":
-        tool_registry.append(current_time)
-    if os.environ.get("STARTER_WEB_SEARCH_ENABLED") == "1":
-        # Lazy import: ``strands_tools.exa`` pulls in aiohttp + console
-        # + Panel + Rich, so the chassis shouldn't pay the import cost
-        # when the flag is off (same rationale as ``current_time``).
-        from channel.agents.tools.web_search import web_search
-
-        tool_registry.append(web_search)
+    tool_registry = _build_tool_registry()
 
     agent = build_agent(
         model_id=model,
