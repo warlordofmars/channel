@@ -32,7 +32,7 @@ from __future__ import annotations
 import functools
 import logging
 import os
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
@@ -71,7 +71,7 @@ def _error_result(error_type: str) -> dict[str, Any]:
 
 
 @functools.lru_cache(maxsize=1)
-def _get_exa_search() -> Callable[..., dict[str, Any]]:
+def _get_exa_search() -> Callable[..., Awaitable[dict[str, Any]]]:
     """Lazy-load ``strands_tools.exa.exa_search`` on first invocation.
 
     The Exa SDK pulls in aiohttp, Rich, Console, Panel, etc. — a
@@ -101,7 +101,7 @@ def _resolve_exa_api_key() -> str:
 
 
 @tool
-def web_search(
+async def web_search(
     query: str,
     num_results: int = 5,
     category: str | None = None,
@@ -126,6 +126,17 @@ def web_search(
         include_domains: Optional list of domains to restrict to.
         exclude_domains: Optional list of domains to exclude.
     """
+    # ``async def`` is mandatory: ``strands_tools.exa.exa_search`` is an
+    # ``async def`` function (the module uses aiohttp + asyncio under
+    # the hood). Calling it without ``await`` returns a coroutine
+    # object that the chassis ships through SSE as if it were the
+    # tool result — the model then sees ``<coroutine object ...>``
+    # repr instead of search results. Verified via the dev-environment
+    # smoke test on 2026-06-07. Strands' ``DecoratedFunctionTool.stream``
+    # dispatches ``inspect.iscoroutinefunction`` tools through ``await``
+    # (see ``strands/tools/decorator.py``), so making this ``async def``
+    # is the canonical fix.
+    #
     # Make the key available to strands_tools.exa, which reads it from
     # the environment at call time. ``_resolve_exa_api_key`` can raise
     # for multiple reasons (``KeyError`` when ``STARTER_EXA_API_KEY_PARAM``
@@ -142,7 +153,7 @@ def web_search(
     clamped = max(_NUM_RESULTS_MIN, min(num_results, _NUM_RESULTS_MAX))
     exa_search = _get_exa_search()
     try:
-        return exa_search(
+        return await exa_search(
             query=query,
             num_results=clamped,
             category=category,
