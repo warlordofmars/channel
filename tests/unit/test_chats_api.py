@@ -8,6 +8,7 @@ claims dict.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -757,6 +758,102 @@ def test_post_message_emits_tool_sse_events_and_dedupes_started(
     assert '"summary": "completed"' in body
     # No error in the happy path.
     assert '"type": "tool_error"' not in body
+
+
+def test_post_message_emits_tool_finished_from_tool_result_message_event(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ToolResultMessageEvent is the LIVE production shape (Strands 1.41)
+    — it bundles all completed tool results from one event-loop cycle
+    into a single ``{"message": {"content": [{"toolResult": ...}, ...]}}``
+    event. The chassis MUST translate this into per-result
+    ``tool_finished`` SSE frames; otherwise the SPA's step row stays
+    stuck on ``"running"`` forever (the 2026-06-08 dev-smoke bug for
+    code_exec). Mixed success/error results are split per-frame."""
+
+    _stub_storage_for_one_turn(monkeypatch)
+    monkeypatch.setenv("STARTER_FOLLOWUPS_ENABLED", "0")
+
+    async def fake_stream(self, prompt):
+        # Two tool calls in one cycle: one succeeds (code_exec shape), one errors.
+        yield {
+            "type": "tool_use_stream",
+            "current_tool_use": {
+                "toolUseId": "tu-ok",
+                "name": "code_exec",
+                "input": {},
+            },
+        }
+        yield {
+            "type": "tool_use_stream",
+            "current_tool_use": {
+                "toolUseId": "tu-bad",
+                "name": "web_search",
+                "input": {},
+            },
+        }
+        yield {
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "toolResult": {
+                            "toolUseId": "tu-ok",
+                            "status": "success",
+                            "content": [
+                                {
+                                    "text": json.dumps(
+                                        {
+                                            "stdout": "42\n",
+                                            "stderr": "",
+                                            "exit_code": 0,
+                                            "duration_ms": 12,
+                                            "truncated": False,
+                                            "timed_out": False,
+                                            "images": [],
+                                        }
+                                    )
+                                }
+                            ],
+                        },
+                    },
+                    {
+                        "toolResult": {
+                            "toolUseId": "tu-bad",
+                            "status": "error",
+                            "content": [{"text": "rate_limit"}],
+                        },
+                    },
+                ],
+            },
+        }
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+
+    class FakeAgent:
+        stream_async = fake_stream
+
+    monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
+
+    response = client.post(
+        "/api/chats/c1/messages",
+        json={"message": "hi", "model": "claude-sonnet-4-6"},
+    )
+    assert response.status_code == 200
+    body = response.text
+
+    # Both tool_finished events emitted from the single message event.
+    assert body.count('"type": "tool_finished"') == 1
+    assert '"tool_use_id": "tu-ok"' in body
+    assert '"kind": "code-output"' in body
+    assert '"exit_code": 0' in body
+    # The errored result emits a tool_error.
+    assert '"type": "tool_error"' in body
+    assert '"tool_use_id": "tu-bad"' in body
+    assert '"error_type": "rate_limit"' in body
+    # partial_result_count counts prior tool_finished events on this cycle.
+    # tu-ok finished first (completed_tool_calls=1), tu-bad errored after,
+    # so its partial_result_count is 1.
+    assert '"partial_result_count": 1' in body
 
 
 def test_post_message_emits_tool_error_on_failed_result(

@@ -16,6 +16,75 @@ import json
 from typing import Any
 
 
+def _translate_single_tool_result(result: dict[str, Any]) -> tuple[str, Any]:
+    """Translate one ``ToolResult`` dict into a single SSE-emit tuple.
+
+    Shared by the legacy ``"type": "tool_result"`` branch (unit-tested,
+    unreachable in production) and the live ``ToolResultMessageEvent``
+    branch — that event bundles multiple tool results into one message,
+    and ``translate_event`` iterates this helper per result.
+
+    Returns ``("skip", None)`` if the result is uncorrelatable
+    (missing ``toolUseId``)."""
+    tool_use_id = result.get("toolUseId", "")
+    # Uncorrelatable-event guard: without a ``tool_use_id`` the SPA
+    # can't attach the ``tool_finished`` / ``tool_error`` payload to
+    # any step row.
+    if not tool_use_id:
+        return ("skip", None)
+    status = result.get("status", "success")
+    if status == "error":
+        # Error path concatenates ``text`` blocks because Strands
+        # wraps the cancel-reason string from
+        # ``BeforeToolCallEvent.cancel_tool`` into ``content`` as
+        # ``{"content": [{"text": cancel_message}]}`` (see
+        # ``strands/tools/executors/_executor.py``). Surfacing that
+        # string as ``error_type`` is how ``ToolCallGuardHook``'s
+        # reason codes (``chain_cap`` / ``cancelled`` / ``wall_clock``)
+        # reach the SPA so it can render the right affordance.
+        reason_text = "".join(
+            block.get("text", "")
+            for block in result.get("content", [])
+            if isinstance(block, dict) and "text" in block
+        )
+        error_type = reason_text.strip() or "tool_failed"
+        return (
+            "tool_error",
+            {
+                "tool_use_id": tool_use_id,
+                "error_type": error_type[:_ARGS_PREVIEW_MAX],
+                "partial_result_count": 0,
+            },
+        )
+    # Success: emit a generic completion marker. The raw tool result
+    # text DOES NOT leak over SSE by default — that is the contract
+    # documented on ``sse_tool_finished``. The ONE exception is the
+    # code-exec sandbox (#183), whose entire purpose is to surface
+    # stdout/stderr/images to the user via a structured renderer in
+    # the SPA. We detect the code-exec shape by structure (parsed
+    # JSON with ``exit_code`` + ``stdout`` keys) rather than plumbing
+    # tool_name through — tool_name lives on the preceding
+    # ``ToolUseStreamEvent``, not on the result.
+    success_payload: dict[str, Any] = {
+        "tool_use_id": tool_use_id,
+        "summary": "completed",
+    }
+    joined_text = "".join(
+        block.get("text", "")
+        for block in result.get("content", [])
+        if isinstance(block, dict) and "text" in block
+    )
+    if joined_text:
+        try:
+            parsed = json.loads(joined_text)
+        except (ValueError, TypeError):
+            parsed = None
+        if isinstance(parsed, dict) and "exit_code" in parsed and "stdout" in parsed:
+            success_payload["kind"] = "code-output"
+            success_payload["payload"] = parsed
+    return ("tool_finished", success_payload)
+
+
 def translate_event(event: dict[str, Any]) -> tuple[str, Any]:
     """Classify one Strands stream event.
 
@@ -91,68 +160,44 @@ def translate_event(event: dict[str, Any]) -> tuple[str, Any]:
             )
 
     if event_type == "tool_result":
+        # Legacy single-result event shape (kept for unit-test coverage and
+        # any future Strands version that flips ToolResultEvent's
+        # is_callback_event to True). In Strands 1.41.0 this branch is
+        # unreachable in production: ToolResultEvent.is_callback_event
+        # returns False so stream_async filters it out before our loop
+        # ever sees it. The live path is ``ToolResultMessageEvent``
+        # (the ``"message" in event`` branch below).
         result = event.get("tool_result") or {}
-        tool_use_id = result.get("toolUseId", "")
-        # Same uncorrelatable-event guard as ``tool_progress`` / cancel /
-        # interrupt: without a ``tool_use_id`` the SPA can't attach the
-        # ``tool_finished`` / ``tool_error`` payload to any step row.
-        if not tool_use_id:
-            return ("skip", None)
-        status = result.get("status", "success")
-        if status == "error":
-            # Error path concatenates ``text`` blocks because Strands
-            # wraps the cancel-reason string from
-            # ``BeforeToolCallEvent.cancel_tool`` into ``content`` as
-            # ``{"content": [{"text": cancel_message}]}`` (see
-            # ``strands/tools/executors/_executor.py``). Surfacing
-            # that string as ``error_type`` is how ``ToolCallGuardHook``'s
-            # reason codes (``chain_cap`` / ``cancelled`` /
-            # ``wall_clock``) reach the SPA so it can render the right
-            # affordance. This IS bounded telemetry — short, fixed
-            # reason strings — and ``sse_tool_error`` caps it at
-            # ``_ARGS_PREVIEW_MAX`` as defense in depth.
-            reason_text = "".join(
-                block.get("text", "")
-                for block in result.get("content", [])
-                if isinstance(block, dict) and "text" in block
-            )
-            error_type = reason_text.strip() or "tool_failed"
-            return (
-                "tool_error",
-                {
-                    "tool_use_id": tool_use_id,
-                    "error_type": error_type[:_ARGS_PREVIEW_MAX],
-                    "partial_result_count": 0,
-                },
-            )
-        # Success: emit a generic completion marker. The raw tool
-        # result text DOES NOT leak over SSE by default — that is the
-        # contract documented on ``sse_tool_finished``. The ONE
-        # exception is the code-exec sandbox (#183), whose entire
-        # purpose is to surface stdout/stderr/images to the user via
-        # a structured renderer in the SPA. We detect the code-exec
-        # shape by structure (parsed JSON with ``exit_code`` +
-        # ``stdout`` keys) rather than plumbing tool_name through —
-        # tool_name lives on the preceding ``ToolUseStreamEvent``
-        # not on the result, and translate_event is stateless.
-        success_payload: dict[str, Any] = {
-            "tool_use_id": tool_use_id,
-            "summary": "completed",
-        }
-        joined_text = "".join(
-            block.get("text", "")
-            for block in result.get("content", [])
-            if isinstance(block, dict) and "text" in block
-        )
-        if joined_text:
-            try:
-                parsed = json.loads(joined_text)
-            except (ValueError, TypeError):
-                parsed = None
-            if isinstance(parsed, dict) and "exit_code" in parsed and "stdout" in parsed:
-                success_payload["kind"] = "code-output"
-                success_payload["payload"] = parsed
-        return ("tool_finished", success_payload)
+        return _translate_single_tool_result(result)
+
+    # ``ToolResultMessageEvent`` shape (#183 post-deploy fix): Strands
+    # bundles all completed tool results from a single event-loop cycle
+    # into a ``user`` message with ``[{"toolResult": ...}, ...]`` content
+    # blocks. This event IS callback-eligible (unlike ToolResultEvent)
+    # so it reaches our SSE loop. We translate it to a ``tool_results``
+    # batch — chats.py iterates and emits one SSE frame per result.
+    #
+    # Captured by the 2026-06-08 dev smoke of code_exec: tool_started
+    # fired but no tool_finished ever followed because the chassis's
+    # single-result ``"tool_result"`` branch above never matched in
+    # production. The stuck-running step (#221) was a symptom of this
+    # — the SSE event was never sent, so no SPA fix could surface it.
+    message = event.get("message")
+    if isinstance(message, dict) and isinstance(message.get("content"), list):
+        translated: list[tuple[str, dict[str, Any]]] = []
+        for block in message["content"]:
+            if not isinstance(block, dict):
+                continue
+            tool_result = block.get("toolResult")
+            if not isinstance(tool_result, dict):
+                continue
+            kind, payload = _translate_single_tool_result(tool_result)
+            if kind == "skip":
+                continue
+            translated.append((kind, payload))
+        if translated:
+            return ("tool_results", translated)
+        return ("skip", None)
 
     if "tool_cancel_event" in event:
         cancel = event["tool_cancel_event"]

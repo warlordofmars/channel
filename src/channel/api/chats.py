@@ -689,6 +689,22 @@ async def _stream_bedrock_reply(
                 # ``sse_tool_error`` docstring for the contract.
                 payload = {**payload, "partial_result_count": completed_tool_calls}
                 yield sse_tool_error(**payload)
+            elif kind == "tool_results":
+                # #183 post-deploy fix: Strands' ``ToolResultMessageEvent``
+                # bundles all completed tool results from one cycle into a
+                # single message. translate_event splits this into a list
+                # of (kind, payload) tuples — one per result. Iterate and
+                # emit per the existing tool_finished / tool_error rules.
+                for sub_kind, sub_payload in payload:
+                    if sub_kind == "tool_finished":
+                        completed_tool_calls += 1
+                        yield sse_tool_finished(**sub_payload)
+                    elif sub_kind == "tool_error":
+                        sub_payload = {
+                            **sub_payload,
+                            "partial_result_count": completed_tool_calls,
+                        }
+                        yield sse_tool_error(**sub_payload)
     except (asyncio.CancelledError, GeneratorExit):
         set_cancel_signal(chat.chat_id)
         raise

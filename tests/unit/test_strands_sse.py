@@ -616,6 +616,143 @@ def test_translate_event_falls_back_when_content_is_not_valid_json():
     assert payload == {"tool_use_id": "tu-xyz", "summary": "completed"}
 
 
+def test_translate_event_handles_tool_result_message_event():
+    """Strands' ``ToolResultMessageEvent`` is the LIVE tool-result event
+    in production (1.41.0). Its dict shape is ``{"message": {...}}`` with
+    no ``type`` field — content carries ``[{"toolResult": result}, ...]``
+    blocks. translate_event must split that into a ``("tool_results",
+    list)`` batch with one (kind, payload) tuple per result.
+
+    Regression guard for the 2026-06-08 dev-smoke bug where ``tool_started``
+    fired but no ``tool_finished`` ever followed — the legacy
+    ``"type": "tool_result"`` branch is dead code because
+    ``ToolResultEvent.is_callback_event`` returns False in Strands 1.41."""
+    from channel.agents.strands_sse import translate_event
+
+    code_exec_payload = {
+        "stdout": "42\n",
+        "stderr": "",
+        "exit_code": 0,
+        "duration_ms": 12,
+        "truncated": False,
+        "timed_out": False,
+        "images": [],
+    }
+    event = {
+        "message": {
+            "role": "user",
+            "content": [
+                {
+                    "toolResult": {
+                        "toolUseId": "tu-a",
+                        "status": "success",
+                        "content": [{"text": json.dumps(code_exec_payload)}],
+                    },
+                },
+            ],
+        },
+    }
+    kind, payload = translate_event(event)
+    assert kind == "tool_results"
+    assert len(payload) == 1
+    sub_kind, sub_payload = payload[0]
+    assert sub_kind == "tool_finished"
+    assert sub_payload["tool_use_id"] == "tu-a"
+    assert sub_payload["kind"] == "code-output"
+    assert sub_payload["payload"] == code_exec_payload
+
+
+def test_translate_event_tool_result_message_splits_mixed_success_and_error():
+    """One ToolResultMessageEvent can carry multiple toolResult blocks
+    (Strands batches all results from one event-loop cycle). Each must
+    be translated independently — success → tool_finished, error →
+    tool_error, with toolUseId-less blocks dropped."""
+    from channel.agents.strands_sse import translate_event
+
+    event = {
+        "message": {
+            "role": "user",
+            "content": [
+                {
+                    "toolResult": {
+                        "toolUseId": "tu-ok",
+                        "status": "success",
+                        "content": [{"text": "result-1"}],
+                    },
+                },
+                {
+                    "toolResult": {
+                        "toolUseId": "tu-bad",
+                        "status": "error",
+                        "content": [{"text": "rate_limit"}],
+                    },
+                },
+                # Uncorrelatable block (no toolUseId) — dropped.
+                {
+                    "toolResult": {
+                        "status": "success",
+                        "content": [{"text": "orphan"}],
+                    },
+                },
+            ],
+        },
+    }
+    kind, payload = translate_event(event)
+    assert kind == "tool_results"
+    assert len(payload) == 2
+    assert payload[0] == ("tool_finished", {"tool_use_id": "tu-ok", "summary": "completed"})
+    assert payload[1][0] == "tool_error"
+    assert payload[1][1]["tool_use_id"] == "tu-bad"
+    assert payload[1][1]["error_type"] == "rate_limit"
+
+
+def test_translate_event_tool_result_message_skips_non_dict_blocks():
+    """Defensive guard: content blocks that aren't dicts (malformed event,
+    forward-compat with future block types) are silently skipped — the
+    surrounding well-formed blocks still translate."""
+    from channel.agents.strands_sse import translate_event
+
+    event = {
+        "message": {
+            "role": "user",
+            "content": [
+                "not a dict",  # garbage block — must not crash
+                {
+                    "toolResult": {
+                        "toolUseId": "tu-ok",
+                        "status": "success",
+                        "content": [{"text": "result"}],
+                    },
+                },
+            ],
+        },
+    }
+    kind, payload = translate_event(event)
+    assert kind == "tool_results"
+    assert len(payload) == 1
+    assert payload[0][1]["tool_use_id"] == "tu-ok"
+
+
+def test_translate_event_tool_result_message_with_no_valid_results_returns_skip():
+    """A message event whose content has NO toolResult blocks (or only
+    uncorrelatable ones) translates to ``("skip", None)`` — chats.py
+    ignores skip kinds, so nothing flows over the wire."""
+    from channel.agents.strands_sse import translate_event
+
+    event = {
+        "message": {
+            "role": "user",
+            "content": [
+                {"text": "just text, no toolResult"},
+                {"toolResult": {"content": [{"text": "no toolUseId"}]}},
+            ],
+        },
+    }
+    kind, payload = translate_event(event)
+    assert kind == "skip"
+    assert payload is None
+
+
 def test_sse_tool_finished_includes_kind_and_payload_when_provided():
     """``kind`` + ``payload`` ride along on the SSE wire."""
     from channel.agents.strands_sse import sse_tool_finished
