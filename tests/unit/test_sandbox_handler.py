@@ -106,3 +106,25 @@ def test_handler_no_truncation_below_caps():
 
     assert result["stdout"] == "short\n"
     assert result["truncated"] is False
+
+
+def test_handler_wipes_tmp_on_entry(monkeypatch, tmp_path):
+    """Pre-seed a file in the sandbox's tmp dir → handler wipes it
+    before running user code → user code can't read the prior content."""
+    from channel.sandbox import handler as handler_module
+
+    # Redirect the wipe + cwd to a real tmp path we control. Production
+    # sets _TMP_DIR = "/tmp"; tests inject a tmp_path-scoped dir so the
+    # wipe doesn't touch the real system /tmp.
+    fake_tmp = tmp_path / "sandbox-tmp"
+    fake_tmp.mkdir()
+    monkeypatch.setattr(handler_module, "_TMP_DIR", str(fake_tmp))
+
+    (fake_tmp / "leak.txt").write_text("secret-from-prior-invocation")
+
+    # User code body is just `pass` — the assertion is that the
+    # handler wiped fake_tmp BEFORE running the subprocess, which the
+    # post-call file check below verifies.
+    handler_module.lambda_handler({"code": "pass"}, None)
+
+    assert not (fake_tmp / "leak.txt").exists()

@@ -20,6 +20,8 @@ subprocess.
 
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
 import sys
 import time
@@ -28,6 +30,7 @@ from typing import Any
 _STDOUT_CAP = 20 * 1024
 _STDERR_CAP = 5 * 1024
 _SUBPROCESS_TIMEOUT_SEC = 270
+_TMP_DIR = "/tmp"  # noqa: S108 — Lambda's writable scratch dir; injected for tests
 
 
 def _cap(text: str, limit: int) -> tuple[str, bool]:
@@ -52,7 +55,32 @@ def _cap(text: str, limit: int) -> tuple[str, bool]:
     return (head + marker, True)
 
 
+def _wipe_tmp() -> None:
+    """Remove all files and directories under ``_TMP_DIR``.
+
+    Closes warm-container leakage: a previous invocation in the same
+    Lambda container may have written sensitive intermediate files to
+    /tmp. We clear them at the START of each invocation, not the end —
+    wiping at the end doesn't protect THIS invocation from prior state.
+
+    Walks shallowly (no recursion into deleted dirs) using
+    ``shutil.rmtree`` per child. Errors are swallowed: a permission
+    issue on a single file shouldn't fail the whole invocation."""
+    if not os.path.isdir(_TMP_DIR):
+        return
+    for name in os.listdir(_TMP_DIR):
+        path = os.path.join(_TMP_DIR, name)
+        try:
+            if os.path.isdir(path) and not os.path.islink(path):
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                os.unlink(path)
+        except OSError:
+            pass
+
+
 def lambda_handler(event: dict, _ctx: object) -> dict[str, Any]:
+    _wipe_tmp()
     code = event.get("code", "")
     start = time.monotonic()
     timed_out = False
@@ -62,7 +90,7 @@ def lambda_handler(event: dict, _ctx: object) -> dict[str, Any]:
             capture_output=True,
             text=True,
             timeout=_SUBPROCESS_TIMEOUT_SEC,
-            cwd="/tmp",
+            cwd=_TMP_DIR,
             check=False,
         )
         stdout = proc.stdout
