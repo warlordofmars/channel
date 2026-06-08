@@ -47,3 +47,25 @@ def test_handler_traceback_in_stderr_propagates():
 
     assert result["exit_code"] != 0
     assert "ZeroDivisionError" in result["stderr"]
+
+
+def test_handler_timeout_returns_timed_out_with_partial_output(monkeypatch):
+    """A subprocess that exceeds the 270 s cap returns:
+    ``timed_out=True``, ``exit_code=-1``, partial stdout/stderr if any."""
+    from channel.sandbox import handler as handler_module
+
+    # Shorten the cap so the test runs in <1s.
+    monkeypatch.setattr(handler_module, "_SUBPROCESS_TIMEOUT_SEC", 0.5)
+
+    code = (
+        "import time, sys\n"
+        "print('before sleep'); sys.stdout.flush()\n"
+        "time.sleep(5)\n"
+        "print('after sleep')\n"
+    )
+    result = handler_module.lambda_handler({"code": code}, None)
+
+    assert result["timed_out"] is True
+    assert result["exit_code"] == -1
+    assert "before sleep" in result["stdout"]
+    assert "after sleep" not in result["stdout"]

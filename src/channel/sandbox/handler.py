@@ -33,21 +33,35 @@ _SUBPROCESS_TIMEOUT_SEC = 270
 def lambda_handler(event: dict, _ctx: object) -> dict[str, Any]:
     code = event.get("code", "")
     start = time.monotonic()
-    proc = subprocess.run(
-        [sys.executable, "-c", code],
-        capture_output=True,
-        text=True,
-        timeout=_SUBPROCESS_TIMEOUT_SEC,
-        cwd="/tmp",
-        check=False,
-    )
+    timed_out = False
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=_SUBPROCESS_TIMEOUT_SEC,
+            cwd="/tmp",
+            check=False,
+        )
+        stdout = proc.stdout
+        stderr = proc.stderr
+        exit_code = proc.returncode
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout or ""
+        stderr = exc.stderr or ""
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode("utf-8", errors="replace")
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode("utf-8", errors="replace")
+        exit_code = -1
+        timed_out = True
     duration_ms = int((time.monotonic() - start) * 1000)
     return {
-        "stdout": proc.stdout,
-        "stderr": proc.stderr,
-        "exit_code": proc.returncode,
+        "stdout": stdout,
+        "stderr": stderr,
+        "exit_code": exit_code,
         "duration_ms": duration_ms,
         "truncated": False,
-        "timed_out": False,
+        "timed_out": timed_out,
         "images": [],
     }
