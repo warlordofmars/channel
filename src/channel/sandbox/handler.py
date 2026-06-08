@@ -8,9 +8,8 @@ Runs user-supplied Python code under ``subprocess.run`` with:
 * a 20 KB stdout cap and 5 KB stderr cap with truncation markers
 * ``/tmp`` wiped at entry to close warm-container leakage between
   invocations
-* ``/tmp`` scanned post-exec for ``*.png`` / ``*.jpg`` / ``*.jpeg`` /
-  ``*.svg``, first 3 by mtime returned base64-encoded (up to 1 MB
-  each)
+* ``/tmp`` scanned post-exec for ``*.png`` / ``*.jpg`` / ``*.jpeg``,
+  first 3 by mtime returned base64-encoded (up to 1 MB each)
 
 The handler runs in its own Lambda function with an IAM role granting
 nothing beyond ``AWSLambdaBasicExecutionRole`` (CloudWatch Logs only).
@@ -34,12 +33,11 @@ _SUBPROCESS_TIMEOUT_SEC = 270
 _TMP_DIR = "/tmp"  # noqa: S108 — Lambda's writable scratch dir; injected for tests
 _MAX_IMAGES = 3
 _MAX_IMAGE_BYTES = 1 * 1024 * 1024
-_IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".svg")
+_IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg")
 _IMAGE_MIME = {
     ".png": "image/png",
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
-    ".svg": "image/svg+xml",
 }
 
 
@@ -94,9 +92,10 @@ def _harvest_tmp_images() -> list[dict[str, str]]:
     base64-encoded.
 
     Ordering: most-recent by mtime first. Per-image size cap
-    (``_MAX_IMAGE_BYTES``) skips anything over 1 MB. SVG round-trips
-    as base64 text — slightly wasteful but keeps the response shape
-    uniform with raster mimes.
+    (``_MAX_IMAGE_BYTES``) skips anything over 1 MB. Raster formats
+    only (.png / .jpg / .jpeg) — SVG is excluded because inline SVG
+    can carry executable script tags and the sandbox-to-browser path
+    is too short to safely sanitize.
 
     The post-exec scan happens AFTER ``subprocess.run`` returns and
     BEFORE the response is serialized. Empty /tmp returns ``[]``."""

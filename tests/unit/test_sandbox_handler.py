@@ -365,3 +365,15 @@ def test_harvest_tmp_images_skips_open_oserror(monkeypatch, tmp_path):
 
     # unreadable.png is skipped via the except OSError branch; readable.png is harvested.
     assert len(result["images"]) == 1
+
+
+def test_harvest_tmp_images_early_returns_when_dir_missing(monkeypatch):
+    """If ``_TMP_DIR`` doesn't exist as a directory, ``_harvest_tmp_images``
+    returns ``[]`` without raising. Covers the defensive early-return."""
+    from channel.sandbox import handler as handler_module
+
+    monkeypatch.setattr(
+        handler_module, "_TMP_DIR", "/nonexistent-path-for-test-67890"
+    )
+
+    assert handler_module._harvest_tmp_images() == []
