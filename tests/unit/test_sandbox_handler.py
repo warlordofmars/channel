@@ -290,9 +290,7 @@ def test_wipe_tmp_removes_subdirectories_recursively(monkeypatch, tmp_path):
 
     handler_module._wipe_tmp()
 
-    assert not nested.exists(), (
-        "subdirectory under _TMP_DIR must be recursively removed"
-    )
+    assert not nested.exists(), "subdirectory under _TMP_DIR must be recursively removed"
 
 
 def test_handler_timeout_with_no_stdout_returns_empty_string(monkeypatch):
