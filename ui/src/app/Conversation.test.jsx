@@ -1417,5 +1417,25 @@ describe("Conversation", () => {
       expect(toggleAAgain.getAttribute("aria-expanded")).toBe("false");
       expect(screen.queryByText("A's summary")).not.toBeInTheDocument();
     });
+
+    it("renders code-output payload via ToolResultBlock for a finished code_exec step", () => {
+      mockStream({
+        turns: assistantTurnWithSteps([
+          {
+            toolUseId: "tu-code",
+            toolName: "code_exec",
+            status: "finished",
+            kind: "code-output",
+            summary: "completed",
+            payload: { stdout: "42\n", stderr: "", exit_code: 0, images: [], duration_ms: 120 },
+          },
+        ]),
+      });
+      const { container } = renderAt("/app/c/c1");
+      fireEvent.click(screen.getByRole("button", { name: /tool step/i }));
+      // ToolResultBlock renders the code-output branch: output "42" must appear.
+      expect(container.querySelector(".tool-result-block")).toBeTruthy();
+      expect(screen.getByText("42")).toBeInTheDocument();
+    });
   });
 });
