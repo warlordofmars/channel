@@ -19,6 +19,7 @@ import os
 from typing import Any, cast
 
 from strands import Agent
+from strands.agent.conversation_manager import SummarizingConversationManager
 from strands.models import BedrockModel
 from strands.types.content import Messages
 
@@ -187,6 +188,13 @@ def build_agent(
     bedrock = BedrockModel(
         model_id=resolve_model_id(model_id),
         max_tokens=max_tokens,
+        # #131 quick win: use the native Bedrock CountTokens API instead
+        # of Strands' character-count estimate. Accurate counts drive
+        # the conversation manager's proactive-compression threshold
+        # below — without this the compression heuristic fires on
+        # rough estimates and either trims too early (wasting context)
+        # or too late (the long-chat degradation we hit on 2026-06-07).
+        use_native_token_count=True,
     )
     memory_id = get_or_create_memory(os.environ["STARTER_ENV"])
     recall_hook = AgentCoreRecallHook(memory_id=memory_id, actor_id=user_id)
@@ -200,9 +208,24 @@ def build_agent(
     # Telemetry hook records ``[meta] used <tool>`` synthetic ASSISTANT
     # messages via memory_hook's CreateEvent path (epic #128 decision 6).
     telemetry_hook = ToolCallTelemetryHook(memory_writer=memory_hook.write_meta_event)
+    # #131 quick win: Strands 1.40+ ships built-in proactive context
+    # compression via ``SummarizingConversationManager``. When the
+    # running token count crosses ``compression_threshold`` (default
+    # 0.7 of the context window), older messages get summarized into
+    # a single condensed message and the last ``preserve_recent_messages``
+    # stay verbatim. This fixes the long-chat silent-degradation we
+    # hit on 2026-06-07 — without it, history accumulates linearly
+    # until the model's effective working memory falls off the front
+    # of the context window. The durable budget-envelope work
+    # (RemainingBudget primitive, addendum line) still lives under
+    # #131; this turn-it-on is the minimal-diff relief.
+    conversation_manager = SummarizingConversationManager(
+        proactive_compression=True,
+    )
     agent = Agent(
         model=bedrock,
         system_prompt=system_prompt or DEFAULT_SYSTEM_PROMPT,
+        conversation_manager=conversation_manager,
         # Order matters: addendum first (mutates the system prompt
         # before recall reads it), then recall (Before) + memory write
         # (After), then the tool-use guard + telemetry hooks.
