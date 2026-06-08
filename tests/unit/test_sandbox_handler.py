@@ -79,6 +79,27 @@ def test_handler_traceback_in_stderr_propagates():
     assert "ZeroDivisionError" in result["stderr"]
 
 
+def _spy_popen(monkeypatch, handler_module):
+    """Wrap ``subprocess.Popen`` with a spy that captures the ``env``
+    + ``start_new_session`` kwargs while still running the subprocess
+    for real (so the rest of the handler — communicate, harvest,
+    cap — exercises against actual output)."""
+    import subprocess as subprocess_mod
+
+    captured: dict[str, object] = {}
+    real_popen = subprocess_mod.Popen
+
+    def spy_popen(*args, **kwargs):
+        captured["env"] = kwargs.get("env")
+        captured["start_new_session"] = kwargs.get("start_new_session")
+        captured["encoding"] = kwargs.get("encoding")
+        captured["errors"] = kwargs.get("errors")
+        return real_popen(*args, **kwargs)
+
+    monkeypatch.setattr(handler_module.subprocess, "Popen", spy_popen)
+    return captured
+
+
 def test_handler_subprocess_pythonpath_includes_lambda_task_root(monkeypatch):
     """Subprocess gets ``PYTHONPATH`` set to ``LAMBDA_TASK_ROOT`` so
     bundled packages (numpy / pandas / matplotlib) are importable in
@@ -86,18 +107,9 @@ def test_handler_subprocess_pythonpath_includes_lambda_task_root(monkeypatch):
     sys.path and ``import matplotlib`` fails despite matplotlib being
     bundled into /var/task at deploy time. Captured by the 2026-06-08
     dev smoke."""
-    import subprocess as subprocess_mod
-
     from channel.sandbox import handler as handler_module
 
-    captured: dict[str, object] = {}
-    real_run = subprocess_mod.run
-
-    def spy_run(*args, **kwargs):
-        captured["env"] = kwargs.get("env")
-        return real_run(*args, **kwargs)
-
-    monkeypatch.setattr(handler_module.subprocess, "run", spy_run)
+    captured = _spy_popen(monkeypatch, handler_module)
     monkeypatch.setenv("LAMBDA_TASK_ROOT", "/sentinel-task-root")
 
     handler_module.lambda_handler({"code": "print('x')"}, None)
@@ -111,18 +123,9 @@ def test_handler_subprocess_pythonpath_includes_lambda_task_root(monkeypatch):
 def test_handler_subprocess_pythonpath_defaults_to_var_task(monkeypatch):
     """When ``LAMBDA_TASK_ROOT`` is unset (local dev / unit test),
     fall back to the documented Lambda task-root path ``/var/task``."""
-    import subprocess as subprocess_mod
-
     from channel.sandbox import handler as handler_module
 
-    captured: dict[str, object] = {}
-    real_run = subprocess_mod.run
-
-    def spy_run(*args, **kwargs):
-        captured["env"] = kwargs.get("env")
-        return real_run(*args, **kwargs)
-
-    monkeypatch.setattr(handler_module.subprocess, "run", spy_run)
+    captured = _spy_popen(monkeypatch, handler_module)
     monkeypatch.delenv("LAMBDA_TASK_ROOT", raising=False)
 
     handler_module.lambda_handler({"code": "print('x')"}, None)
@@ -137,18 +140,9 @@ def test_handler_subprocess_pythonpath_preserves_existing(monkeypatch):
     """If ``PYTHONPATH`` is already set in the env (e.g. layer-mounted
     extras), the task-root is PREPENDED so user code preserves access
     to the original entries too."""
-    import subprocess as subprocess_mod
-
     from channel.sandbox import handler as handler_module
 
-    captured: dict[str, object] = {}
-    real_run = subprocess_mod.run
-
-    def spy_run(*args, **kwargs):
-        captured["env"] = kwargs.get("env")
-        return real_run(*args, **kwargs)
-
-    monkeypatch.setattr(handler_module.subprocess, "run", spy_run)
+    captured = _spy_popen(monkeypatch, handler_module)
     monkeypatch.setenv("LAMBDA_TASK_ROOT", "/sentinel-task-root")
     monkeypatch.setenv("PYTHONPATH", "/opt/python")
 
@@ -159,6 +153,71 @@ def test_handler_subprocess_pythonpath_preserves_existing(monkeypatch):
     pythonpath = env.get("PYTHONPATH", "")
     # Task root prepended; original entry retained.
     assert pythonpath == "/sentinel-task-root:/opt/python"
+
+
+def test_handler_subprocess_uses_explicit_utf8_replace(monkeypatch):
+    """Output capture is explicitly ``encoding="utf-8", errors="replace"``
+    so user code that writes non-UTF-8 bytes
+    (``sys.stdout.buffer.write(b'\\xff\\xfe')``) gets replacement chars
+    rather than crashing the handler with UnicodeDecodeError."""
+    from channel.sandbox import handler as handler_module
+
+    captured = _spy_popen(monkeypatch, handler_module)
+
+    handler_module.lambda_handler({"code": "print('x')"}, None)
+
+    assert captured["encoding"] == "utf-8"
+    assert captured["errors"] == "replace"
+
+
+def test_handler_subprocess_starts_new_session(monkeypatch):
+    """``start_new_session=True`` puts the child Python in its own
+    process group so orphan grandchildren can be killed in
+    ``finally`` via ``os.killpg``."""
+    from channel.sandbox import handler as handler_module
+
+    captured = _spy_popen(monkeypatch, handler_module)
+
+    handler_module.lambda_handler({"code": "print('x')"}, None)
+
+    assert captured["start_new_session"] is True
+
+
+def test_handler_kills_process_group_on_normal_exit(monkeypatch):
+    """Even on the happy path, ``_killpg_quiet`` fires in ``finally`` to
+    collapse any orphan children. The Python ``-c`` parent has already
+    exited so ``os.killpg`` raises ``ProcessLookupError``; the helper
+    swallows it."""
+    from channel.sandbox import handler as handler_module
+
+    killpg_calls = []
+
+    def spy_killpg(pgid, sig):
+        killpg_calls.append((pgid, sig))
+        raise ProcessLookupError(3, "No such process")
+
+    monkeypatch.setattr(handler_module.os, "killpg", spy_killpg)
+
+    result = handler_module.lambda_handler({"code": "print('x')"}, None)
+
+    # Happy path completed; one killpg call from the finally block.
+    assert result["exit_code"] == 0
+    assert len(killpg_calls) == 1
+    assert killpg_calls[0][1] == handler_module.signal.SIGKILL
+
+
+def test_killpg_quiet_swallows_permission_error(monkeypatch):
+    """``_killpg_quiet`` also catches ``PermissionError`` (race where
+    init has reparented some children). Defensive — the test is direct
+    on the helper since this branch is hard to provoke via the
+    Popen path."""
+    from channel.sandbox import handler as handler_module
+
+    def boom(_pgid, _sig):
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(handler_module.os, "killpg", boom)
+    handler_module._killpg_quiet(12345)  # must not raise
 
 
 def test_handler_timeout_returns_timed_out_with_partial_output(monkeypatch):
@@ -334,9 +393,9 @@ def test_wipe_tmp_removes_subdirectories_recursively(monkeypatch, tmp_path):
 
 def test_handler_timeout_with_no_stdout_returns_empty_string(monkeypatch):
     """When the subprocess times out without producing any stdout (the
-    code blocks before any output), ``exc.stdout`` is None. Handler
-    converts None → empty string via the ``or ""`` fallback. Covers
-    the else branch when exc.stdout is not bytes."""
+    code blocks before any output), the post-kill drain ``communicate()``
+    returns empty strings (with text-mode encoding + errors=replace,
+    never None or bytes)."""
     from channel.sandbox import handler as handler_module
 
     monkeypatch.setattr(handler_module, "_SUBPROCESS_TIMEOUT_SEC", 0.5)
@@ -350,33 +409,58 @@ def test_handler_timeout_with_no_stdout_returns_empty_string(monkeypatch):
     assert result["stderr"] == ""
 
 
-def test_handler_timeout_with_bytes_stderr_decodes(monkeypatch):
-    """Verify the timeout-branch stderr bytes-decode path runs. Forces
-    exc.stderr to be bytes so the ``decode("utf-8", errors="replace")``
-    branch on line 109 executes. Covers that branch."""
+def test_handler_timeout_kills_process_group_then_drains_output(monkeypatch):
+    """On timeout the handler kills the whole process group BEFORE the
+    second communicate() — otherwise children blocked on a pipe could
+    keep stdout/stderr open and stall the read. Verifies the
+    ``_killpg_quiet`` call lands between the timeout exception and the
+    second communicate(), and that ``stdout`` / ``stderr`` come from
+    the post-kill drain rather than the (bytes-or-str-or-None) exception
+    payload."""
     import subprocess
 
     from channel.sandbox import handler as handler_module
 
-    def stub_run(*args, **kwargs):
-        # Raise TimeoutExpired with bytes for stderr (forces the
-        # bytes-decode branch to fire). exc.stdout is also bytes so
-        # the matching stdout branch fires, but the assertion focuses
-        # on stderr.
-        raise subprocess.TimeoutExpired(
-            cmd=args[0] if args else kwargs.get("args"),
-            timeout=1.0,
-            output=b"partial out",
-            stderr=b"partial err",
-        )
+    killpg_called_at: list[str] = []
 
-    monkeypatch.setattr(handler_module.subprocess, "run", stub_run)
+    class FakeProc:
+        def __init__(self):
+            self.pid = 99999
+            self.returncode = -9
+            self._call = 0
+
+        def communicate(self, timeout=None):
+            self._call += 1
+            if self._call == 1:
+                # First call: simulate the timeout.
+                raise subprocess.TimeoutExpired(cmd="x", timeout=timeout)
+            # Second call: returns post-kill drained output.
+            killpg_called_at.append("before_second_communicate")
+            return ("drained out", "drained err")
+
+    def spy_killpg(_pgid, _sig):
+        killpg_called_at.append("killpg")
+
+    def fake_popen(*_args, **_kwargs):
+        return FakeProc()
+
+    monkeypatch.setattr(handler_module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(handler_module.os, "killpg", spy_killpg)
 
     result = handler_module.lambda_handler({"code": "anything"}, None)
 
     assert result["timed_out"] is True
-    assert result["stdout"] == "partial out"
-    assert result["stderr"] == "partial err"
+    assert result["exit_code"] == -1
+    # post-kill drain reaches the response.
+    assert result["stdout"] == "drained out"
+    assert result["stderr"] == "drained err"
+    # killpg fired before the second communicate (the timeout-recover
+    # path), then again in finally (idempotent / swallows ProcessLookup).
+    assert killpg_called_at == [
+        "killpg",
+        "before_second_communicate",
+        "killpg",
+    ]
 
 
 def test_handler_harvests_png_images_from_tmp(monkeypatch, tmp_path):

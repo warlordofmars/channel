@@ -20,8 +20,10 @@ subprocess.
 from __future__ import annotations
 
 import base64
+import contextlib
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -39,6 +41,18 @@ _IMAGE_MIME = {
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
 }
+
+
+def _killpg_quiet(pgid: int) -> None:
+    """Send SIGKILL to the process group identified by ``pgid``.
+
+    Idempotent: ``ProcessLookupError`` (group already gone — the
+    normal-exit path) and ``PermissionError`` (race where init has
+    reparented some children) are swallowed. The whole point is to
+    close the orphan-child containment hole; if the group is already
+    cleaned up, that's the desired end state."""
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(pgid, signal.SIGKILL)
 
 
 def _cap(text: str, limit: int) -> tuple[str, bool]:
@@ -174,37 +188,48 @@ def lambda_handler(event: dict, _ctx: object) -> dict[str, Any]:
     task_root = os.environ.get("LAMBDA_TASK_ROOT", "/var/task")
     existing = env.get("PYTHONPATH")
     env["PYTHONPATH"] = f"{task_root}:{existing}" if existing else task_root
+    # Popen + ``start_new_session=True`` puts the child Python in its
+    # own process group (pgid == pid). User code that does
+    # ``subprocess.Popen([...]); sys.exit(0)`` would orphan grandchild
+    # processes that survive into the Lambda warm pool — consuming
+    # CPU and racing the post-exec /tmp harvest (TOCTOU). Killing the
+    # whole process group in ``finally`` collapses that surface.
+    #
+    # Explicit ``encoding`` + ``errors="replace"`` makes stdout/stderr
+    # capture robust to non-UTF-8 bytes the subprocess might write
+    # (e.g. ``sys.stdout.buffer.write(b'\xff\xfe')``) — without
+    # this, Python's ``text=True`` decoder raises UnicodeDecodeError
+    # and the handler would crash on otherwise-valid runs.
+    proc = subprocess.Popen(  # noqa: S603
+        [sys.executable, "-c", code],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=_TMP_DIR,
+        env=env,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        start_new_session=True,
+    )
+    pgid = proc.pid
     try:
-        proc = subprocess.run(
-            [sys.executable, "-c", code],
-            capture_output=True,
-            text=True,
-            timeout=_SUBPROCESS_TIMEOUT_SEC,
-            cwd=_TMP_DIR,
-            check=False,
-            env=env,
-        )
-        stdout = proc.stdout
-        stderr = proc.stderr
-        exit_code = proc.returncode
-    except subprocess.TimeoutExpired as exc:
-        # Even with text=True, TimeoutExpired captures partial output as
-        # bytes-or-None on the exception (subprocess returns the raw
-        # buffer it had captured at the moment the timer fired, before
-        # it gets a chance to decode through the text-mode pipeline).
-        # Normalize to str via decode/fallback.
-        raw_stdout: bytes | str | None = exc.stdout
-        raw_stderr: bytes | str | None = exc.stderr
-        if isinstance(raw_stdout, bytes):
-            stdout = raw_stdout.decode("utf-8", errors="replace")
-        else:
-            stdout = raw_stdout or ""
-        if isinstance(raw_stderr, bytes):
-            stderr = raw_stderr.decode("utf-8", errors="replace")
-        else:
-            stderr = raw_stderr or ""
-        exit_code = -1
-        timed_out = True
+        try:
+            stdout, stderr = proc.communicate(timeout=_SUBPROCESS_TIMEOUT_SEC)
+            exit_code = proc.returncode
+        except subprocess.TimeoutExpired:
+            # Kill the whole group BEFORE the second communicate() so
+            # children blocked on a pipe don't keep stdout/stderr open
+            # and stall the read.
+            _killpg_quiet(pgid)
+            stdout, stderr = proc.communicate()
+            exit_code = -1
+            timed_out = True
+    finally:
+        # Defense in depth: even on the happy path the Python -c parent
+        # may have exited after spawning a long-running orphan. Killing
+        # the group here is idempotent — ProcessLookupError on the
+        # normal-exit path is expected and swallowed by ``_killpg_quiet``.
+        _killpg_quiet(pgid)
     duration_ms = int((time.monotonic() - start) * 1000)
     stdout, stdout_trunc = _cap(stdout, _STDOUT_CAP)
     stderr, stderr_trunc = _cap(stderr, _STDERR_CAP)
