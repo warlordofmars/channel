@@ -80,6 +80,7 @@ def _patch_strands(monkeypatch, captured):
     class FakeAgent:
         def __init__(self, model, system_prompt=None, **kwargs):
             captured["agent_model"] = model
+            captured["agent_kwargs"] = kwargs
 
     monkeypatch.setattr("channel.agents.chat_agent.BedrockModel", FakeBedrockModel)
     monkeypatch.setattr("channel.agents.chat_agent.Agent", FakeAgent)
@@ -522,3 +523,52 @@ def test_build_agent_passes_tools_kwarg_to_strands_agent(monkeypatch):
         tools=[sentinel_tool],
     )
     assert captured["agent_kwargs"]["tools"] == [sentinel_tool]
+
+
+def test_build_agent_enables_use_native_token_count(monkeypatch):
+    """#131 quick win: BedrockModel must be constructed with
+    ``use_native_token_count=True`` so token counts driving the
+    proactive-compression threshold are ground-truth, not estimates.
+    Without this, the conversation manager's compression heuristic
+    fires on rough character-count estimates and either trims too
+    early (wasting context) or too late (the long-chat degradation
+    surfaced on 2026-06-07)."""
+    captured: dict[str, object] = {}
+    _patch_strands(monkeypatch, captured)
+
+    build_agent(model_id="claude-sonnet-4-6", user_id="u", chat_id="c")
+
+    assert captured["bedrock_kwargs"]["use_native_token_count"] is True
+
+
+def test_build_agent_attaches_summarizing_conversation_manager(monkeypatch):
+    """#131 quick win: every chat turn must run through Strands'
+    ``SummarizingConversationManager`` with ``proactive_compression``
+    enabled. This is the load-bearing fix for long-chat silent
+    degradation. The exact threshold (``ProactiveCompressionConfig.
+    compression_threshold``, default 0.7) is Strands' default; we
+    don't override unless real usage shows the 0.7 mark fires at the
+    wrong time."""
+    from strands.agent.conversation_manager import SummarizingConversationManager
+
+    captured: dict[str, object] = {}
+    _patch_strands(monkeypatch, captured)
+
+    build_agent(model_id="claude-sonnet-4-6", user_id="u", chat_id="c")
+
+    cm = captured["agent_kwargs"]["conversation_manager"]
+    assert isinstance(cm, SummarizingConversationManager)
+    # Strands stores ``proactive_compression=True`` internally as
+    # ``_compression_threshold=0.7`` (the default), and leaves it
+    # ``None`` when the flag is off — verified by probing Strands
+    # 1.41.0 directly. So testing for ``_compression_threshold is not
+    # None`` is the canonical contract assertion. If a future Strands
+    # release renames this attr, this test fails fast (which is the
+    # behavior we want — silent regression on compression activation
+    # is exactly the long-chat degradation #131 tracks).
+    assert cm._compression_threshold is not None, (
+        "SummarizingConversationManager must be configured with "
+        "proactive_compression enabled (Strands stores this as a "
+        "non-None _compression_threshold internally); got "
+        f"{cm._compression_threshold!r}"
+    )
