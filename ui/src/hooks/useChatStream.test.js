@@ -844,6 +844,27 @@ describe("useChatStream", () => {
     });
   });
 
+  it("flips status to finished even when tool_finished arrives AFTER done (#221)", async () => {
+    // #221 regression guard: the chassis sometimes flushes
+    // tool_finished alongside or after the final ``done`` frame.
+    // Without the client_msg_id stable lookup, the msg_id swap on
+    // ``done`` makes patchToolStep's findIndex return -1 and the
+    // step stays on ``"running"`` forever.
+    const result = await runToolStream([
+      toolStarted({ id: "tu-late" }),
+      doneEvent("a-late"),
+      // tool_finished arrives AFTER the done event that swapped msg_id:
+      { type: "tool_finished", tool_use_id: "tu-late", summary: "completed" },
+    ]);
+
+    const asst = result.current.turns.find((t) => t.msg_id === "a-late");
+    expect(asst.toolSteps[0]).toMatchObject({
+      toolUseId: "tu-late",
+      summary: "completed",
+      status: "finished",
+    });
+  });
+
   it("routes kind + payload from tool_finished onto the step", async () => {
     const sandboxPayload = {
       stdout: "42\n",
@@ -975,27 +996,28 @@ describe("useChatStream", () => {
     expect(asst.toolSteps[0].statusText).toBe("ticking");
   });
 
-  it("is a no-op when tool_started arrives after the temp msg_id has been swapped (done already fired)", async () => {
-    // After `done`, the assistant turn's msg_id swaps from tempAsstId
-    // to the persisted server id. A late `tool_started` (or one whose
-    // tempAsstId can't be correlated) must NOT fabricate a fresh state
-    // update — Copilot iteration: skip the React setter no-op when no
-    // turn matches by returning `prev` unchanged. Hard to detect from
-    // outside other than via the run-without-throwing path here; the
-    // important contract is no toolStep appears on any non-matching
-    // turn and existing state is untouched.
+  it("still attaches the step when tool_started arrives after done (#221)", async () => {
+    // #221 fix: the assistant turn now carries a stable
+    // ``client_msg_id`` that does NOT swap on ``done`` (msg_id swaps
+    // to the persisted server id; client_msg_id stays put). A late
+    // ``tool_started`` whose tempAsstId matches client_msg_id should
+    // still create a step on the persisted row — without this fix
+    // the chassis's occasional post-``done`` tool flushes would
+    // disappear silently.
     const result = await runToolStream([
       { type: "delta", text: "ok" },
       doneEvent("a-late"),
-      // tool_started arrives AFTER done — the turn's msg_id is now the
-      // persisted id, no longer matches tempAsstId.
+      // tool_started arrives AFTER done — msg_id is now the persisted
+      // id; client_msg_id is still tempAsstId, so the lookup finds it.
       toolStarted({ id: "tu-late" }),
     ]);
 
     const asst = result.current.turns.find((t) => t.msg_id === "a-late");
-    // No toolSteps fabricated because no turn matched tempAsstId at the
-    // point the late tool_started arrived.
-    expect(asst.toolSteps).toBeUndefined();
+    expect(asst.toolSteps).toHaveLength(1);
+    expect(asst.toolSteps[0]).toMatchObject({
+      toolUseId: "tu-late",
+      status: "running",
+    });
   });
 
   it("defaults partialResultCount to 0 when tool_error omits partial_result_count", async () => {

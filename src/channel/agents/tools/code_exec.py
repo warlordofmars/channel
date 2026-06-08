@@ -69,9 +69,14 @@ def code_exec(code: str) -> dict[str, Any]:
     (scipy was excluded from v1 — the full sci-stack exceeded Lambda's
     250 MB unzipped limit; can move to a Lambda layer if needed.)
 
-    To return a plot or other image to the user, save it to
-    ``/tmp/<name>.png`` (or .jpg) — the user will see the image
-    inline. Up to 3 images per call, 1 MB each. PNG and JPG only.
+    To show a plot or other image to the user, save it to
+    ``/tmp/<name>.png`` (or .jpg). The Channel UI automatically
+    detects files saved there and renders them inline below your
+    reply. DO NOT embed the file path as a markdown image
+    (``![alt](/tmp/plot.png)``) in your reply text — that path
+    doesn't resolve in the browser and renders as a broken link.
+    Just save the file and describe what it shows. Up to 3 images
+    per call, 1 MB each. PNG and JPG only.
 
     Network access: NONE (no VPC, no internet egress).
     Filesystem: writable ``/tmp`` only; wiped between calls.
