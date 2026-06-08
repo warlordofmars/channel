@@ -419,3 +419,106 @@ def test_api_role_has_ssm_read_on_exa_api_key(prod_template):
         "Expected an IAM statement granting ssm:GetParameter on a resource "
         "including '/channel/prod/exa-api-key'; found none."
     )
+
+
+# ----------------------------------------------------------------
+# Code-exec sandbox Lambda (#183)
+# ----------------------------------------------------------------
+
+
+def test_sandbox_lambda_exists_with_snapstart_and_python_3_13(dev_template):
+    """``CodeExecLambda`` is created with Python 3.13 + SnapStart on
+    published versions + reserved-concurrency 5 + 5-min timeout."""
+    template = dev_template.to_json()
+    sandbox = [
+        r for r in template["Resources"].values()
+        if r["Type"] == "AWS::Lambda::Function"
+        and r["Properties"].get("Runtime") == "python3.13"
+        and "code-exec" in str(r["Properties"].get("FunctionName", ""))
+    ]
+    assert len(sandbox) == 1, "expected exactly one CodeExecLambda"
+    props = sandbox[0]["Properties"]
+    assert props["Timeout"] == 300
+    assert props["ReservedConcurrentExecutions"] == 5
+    snap = props.get("SnapStart") or {}
+    assert snap.get("ApplyOn") == "PublishedVersions"
+
+
+def test_sandbox_lambda_role_has_no_data_access(dev_template):
+    """Sandbox IAM role grants only ``AWSLambdaBasicExecutionRole`` —
+    no DDB, S3, Bedrock, Secrets Manager, or SSM in any statement
+    that targets the sandbox role."""
+    template = dev_template.to_json()
+
+    # Find the sandbox role by logical ID — CDK will name it
+    # "CodeExecLambdaRole<hash>" so key.startswith("CodeExecLambdaRole")
+    # uniquely identifies it.
+    sandbox_role_entries = [
+        (k, v)
+        for k, v in template["Resources"].items()
+        if v["Type"] == "AWS::IAM::Role" and k.startswith("CodeExecLambdaRole")
+    ]
+    assert len(sandbox_role_entries) == 1, (
+        f"expected one CodeExecLambdaRole, found {len(sandbox_role_entries)}"
+    )
+    sandbox_role_logical_id, sandbox_role = sandbox_role_entries[0]
+
+    # Verify the role has only the basic-execution managed policy.
+    managed = sandbox_role["Properties"].get("ManagedPolicyArns", [])
+    assert len(managed) == 1, (
+        f"sandbox role must have exactly 1 managed policy, found {len(managed)}"
+    )
+    assert "AWSLambdaBasicExecutionRole" in _flatten_intrinsic(managed[0]), (
+        "sandbox role's managed policy must be AWSLambdaBasicExecutionRole"
+    )
+
+    # Check no inline policies on the role grant data-access actions.
+    # CDK attaches inline policies to the role via AWS::IAM::Policy resources.
+    forbidden_prefixes = ("dynamodb:", "s3:", "bedrock:", "secretsmanager:", "ssm:")
+    for resource in template["Resources"].values():
+        if resource["Type"] != "AWS::IAM::Policy":
+            continue
+        roles = resource["Properties"].get("Roles", [])
+        # Check if this policy references the sandbox role by Ref.
+        refs_sandbox = any(
+            isinstance(r, dict) and r.get("Ref") == sandbox_role_logical_id
+            for r in roles
+        )
+        if not refs_sandbox:
+            continue
+        for stmt in resource["Properties"]["PolicyDocument"]["Statement"]:
+            actions = stmt.get("Action", [])
+            if isinstance(actions, str):
+                actions = [actions]
+            for action in actions:
+                action_str = str(action).lower()
+                for prefix in forbidden_prefixes:
+                    assert not action_str.startswith(prefix), (
+                        f"sandbox role must not grant {action_str} "
+                        f"(forbidden prefix {prefix})"
+                    )
+
+
+def test_api_lambda_can_invoke_sandbox(dev_template):
+    """At least one IAM policy grants ``lambda:InvokeFunction``."""
+    template = dev_template.to_json()
+    invoke_grants = []
+    for resource in template["Resources"].values():
+        if resource["Type"] != "AWS::IAM::Policy":
+            continue
+        for stmt in resource["Properties"]["PolicyDocument"]["Statement"]:
+            actions = stmt.get("Action", [])
+            if isinstance(actions, str):
+                actions = [actions]
+            if any("lambda:InvokeFunction" in str(a) for a in actions):
+                invoke_grants.append(stmt)
+    assert invoke_grants, "expected at least one lambda:InvokeFunction grant"
+
+
+def test_api_lambda_has_code_exec_env_vars(dev_template):
+    """API Lambda env vars include ``STARTER_CODE_EXEC_LAMBDA_ARN`` and
+    ``STARTER_CODE_EXEC_ENABLED=1``."""
+    api_fn = _api_function(dev_template)
+    env_vars = api_fn["Properties"]["Environment"]["Variables"]
+    assert "STARTER_CODE_EXEC_LAMBDA_ARN" in env_vars
+    assert env_vars.get("STARTER_CODE_EXEC_ENABLED") == "1"
