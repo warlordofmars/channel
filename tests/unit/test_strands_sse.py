@@ -544,3 +544,98 @@ def test_translate_tool_interrupt_event_missing_tool_use_id_skips():
     kind, payload = translate_event(event)
     assert kind == "skip"
     assert payload is None
+
+
+def test_translate_event_emits_code_output_kind_for_code_exec_shaped_result():
+    """tool_result whose ``content[0].text`` parses as JSON with
+    ``exit_code`` + ``stdout`` keys → emit ``kind="code-output"`` +
+    ``payload`` on the ``tool_finished`` event. The default literal
+    summary ``"completed"`` is still set so legacy SPA paths don't
+    crash."""
+    from channel.agents.strands_sse import translate_event
+
+    sandbox_payload = {
+        "stdout": "42\n",
+        "stderr": "",
+        "exit_code": 0,
+        "duration_ms": 12,
+        "truncated": False,
+        "timed_out": False,
+        "images": [],
+    }
+    event = {
+        "type": "tool_result",
+        "tool_result": {
+            "toolUseId": "tu-abc",
+            "status": "success",
+            "content": [{"text": json.dumps(sandbox_payload)}],
+        },
+    }
+    kind, payload = translate_event(event)
+    assert kind == "tool_finished"
+    assert payload["tool_use_id"] == "tu-abc"
+    assert payload["summary"] == "completed"
+    assert payload["kind"] == "code-output"
+    assert payload["payload"] == sandbox_payload
+
+
+def test_translate_event_falls_back_to_default_for_non_code_exec_results():
+    """tool_result whose content does NOT match the code-exec shape
+    (e.g. a web_search result) keeps the legacy summary-only payload —
+    no ``kind`` or ``payload`` fields."""
+    from channel.agents.strands_sse import translate_event
+
+    web_search_payload = {"results": [{"url": "https://example.com"}]}
+    event = {
+        "type": "tool_result",
+        "tool_result": {
+            "toolUseId": "tu-xyz",
+            "status": "success",
+            "content": [{"text": json.dumps(web_search_payload)}],
+        },
+    }
+    kind, payload = translate_event(event)
+    assert kind == "tool_finished"
+    assert payload == {"tool_use_id": "tu-xyz", "summary": "completed"}
+
+
+def test_translate_event_falls_back_when_content_is_not_valid_json():
+    """tool_result content that doesn't parse as JSON → legacy payload."""
+    from channel.agents.strands_sse import translate_event
+
+    event = {
+        "type": "tool_result",
+        "tool_result": {
+            "toolUseId": "tu-xyz",
+            "status": "success",
+            "content": [{"text": "not json"}],
+        },
+    }
+    kind, payload = translate_event(event)
+    assert kind == "tool_finished"
+    assert payload == {"tool_use_id": "tu-xyz", "summary": "completed"}
+
+
+def test_sse_tool_finished_includes_kind_and_payload_when_provided():
+    """``kind`` + ``payload`` ride along on the SSE wire."""
+    from channel.agents.strands_sse import sse_tool_finished
+
+    out = sse_tool_finished(
+        tool_use_id="tu-x",
+        summary="completed",
+        kind="code-output",
+        payload={"stdout": "42", "exit_code": 0},
+    )
+    text = out.decode()
+    assert '"kind": "code-output"' in text or "'kind': 'code-output'" in text
+    assert '"stdout": "42"' in text or "'stdout': '42'" in text
+
+
+def test_sse_tool_finished_omits_kind_and_payload_when_unset():
+    """Without ``kind``/``payload`` the wire shape is the legacy 3-field event."""
+    from channel.agents.strands_sse import sse_tool_finished
+
+    out = sse_tool_finished(tool_use_id="tu-x", summary="completed")
+    text = out.decode()
+    assert "kind" not in text
+    assert "payload" not in text

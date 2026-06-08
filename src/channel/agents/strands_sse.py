@@ -126,15 +126,37 @@ def translate_event(event: dict[str, Any]) -> tuple[str, Any]:
                 },
             )
         # Success: emit a generic completion marker. The raw tool
-        # result text DOES NOT leak over SSE — that is the contract
-        # documented on ``sse_tool_finished``. Tools that want a
-        # richer SPA summary will provide one via a structured
-        # ``ToolResult`` summary field in #182 / #183; the chassis
-        # does NOT infer summaries from raw content. The actual tool
-        # output still feeds the model (Strands' event_loop), which
-        # incorporates it into the assistant's text reply — that is
-        # where users see the real data, not the SSE step row.
-        return ("tool_finished", {"tool_use_id": tool_use_id, "summary": "completed"})
+        # result text DOES NOT leak over SSE by default — that is the
+        # contract documented on ``sse_tool_finished``. The ONE
+        # exception is the code-exec sandbox (#183), whose entire
+        # purpose is to surface stdout/stderr/images to the user via
+        # a structured renderer in the SPA. We detect the code-exec
+        # shape by structure (parsed JSON with ``exit_code`` +
+        # ``stdout`` keys) rather than plumbing tool_name through —
+        # tool_name lives on the preceding ``ToolUseStreamEvent``
+        # not on the result, and translate_event is stateless.
+        success_payload: dict[str, Any] = {
+            "tool_use_id": tool_use_id,
+            "summary": "completed",
+        }
+        joined_text = "".join(
+            block.get("text", "")
+            for block in result.get("content", [])
+            if isinstance(block, dict) and "text" in block
+        )
+        if joined_text:
+            try:
+                parsed = json.loads(joined_text)
+            except (ValueError, TypeError):
+                parsed = None
+            if (
+                isinstance(parsed, dict)
+                and "exit_code" in parsed
+                and "stdout" in parsed
+            ):
+                success_payload["kind"] = "code-output"
+                success_payload["payload"] = parsed
+        return ("tool_finished", success_payload)
 
     if "tool_cancel_event" in event:
         cancel = event["tool_cancel_event"]
@@ -312,29 +334,43 @@ def sse_tool_progress(*, tool_use_id: str, status_text: str) -> bytes:
     )
 
 
-def sse_tool_finished(*, tool_use_id: str, summary: str) -> bytes:
-    """Emit a ``tool_finished`` SSE event (epic #128 / #181).
+def sse_tool_finished(
+    *,
+    tool_use_id: str,
+    summary: str,
+    kind: str | None = None,
+    payload: dict[str, Any] | None = None,
+) -> bytes:
+    """Emit a ``tool_finished`` SSE event (epic #128 / #181, #183).
 
     Marks tool completion. ``summary`` is a short, bounded marker — the
-    chassis never sends raw tool output over SSE. Today the chassis
-    emits a literal ``"completed"`` for every success; #182 (Exa) and
-    #183 (code-exec) will add tool-specific structured summaries
-    ("Found 3 results", "Ran 5 lines") via an explicit ``ToolResult``
-    summary field.
+    chassis never sends raw tool output over SSE for the default case.
+    The chassis emits a literal ``"completed"`` for every success.
+
+    ``kind`` and ``payload`` are #183's extension for structured tool
+    results: when ``code_exec`` returns ``{stdout, stderr, exit_code,
+    ...}``, ``translate_event`` sets ``kind="code-output"`` and
+    ``payload=<that dict>`` so the SPA's ``ToolResultBlock`` can
+    render the code-output branch. Other tools (e.g. ``web_search``)
+    leave both ``None`` and the SPA falls back to the default summary
+    branch.
 
     The actual tool output reaches the user via the model's text reply
     (the assistant invokes the tool, Strands' event_loop feeds the
     result back into the model, the model writes a reply that
     incorporates the data). The SSE step row is telemetry, not the
-    delivery channel for tool data.
-    """
-    return _sse(
-        {
-            "type": "tool_finished",
-            "tool_use_id": tool_use_id,
-            "summary": summary[:_SUMMARY_MAX],
-        }
-    )
+    delivery channel for tool data — except for code-exec, where the
+    structured payload IS user-visible data."""
+    body: dict[str, Any] = {
+        "type": "tool_finished",
+        "tool_use_id": tool_use_id,
+        "summary": summary[:_SUMMARY_MAX],
+    }
+    if kind is not None:
+        body["kind"] = kind
+    if payload is not None:
+        body["payload"] = payload
+    return _sse(body)
 
 
 def sse_tool_error(*, tool_use_id: str, error_type: str, partial_result_count: int) -> bytes:
