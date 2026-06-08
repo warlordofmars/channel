@@ -107,10 +107,29 @@ def code_exec(code: str) -> dict[str, Any]:
         logger.warning("code_exec.rate_limit code_len=%d", len(code))
         return _error_result("rate_limit")
     except botocore.exceptions.ClientError as exc:
+        # Service-side errors — auth denied, throttling we didn't catch
+        # above, validation failures, etc. All return as a single
+        # error_type to keep the SPA's affordance set bounded.
         logger.warning("code_exec.client_error %r code_len=%d", exc, len(code))
+        return _error_result("invoke_failed")
+    except botocore.exceptions.BotoCoreError as exc:
+        # Transport-level failures — EndpointConnectionError,
+        # ReadTimeoutError, ConnectTimeoutError, etc. (parent class
+        # for all client-side boto errors that aren't ClientError).
+        # Without this catch they'd bubble out of the @tool and crash
+        # the chassis with an unhandled exception, leaving the SPA
+        # step row stuck on "running".
+        logger.warning("code_exec.transport_error %r code_len=%d", exc, len(code))
         return _error_result("invoke_failed")
     if "FunctionError" in resp:
         logger.warning("code_exec.sandbox_init_error code_len=%d", len(code))
         return _error_result("sandbox_init_error")
-    payload = json.loads(resp["Payload"].read())
+    try:
+        payload = json.loads(resp["Payload"].read())
+    except (json.JSONDecodeError, ValueError) as exc:
+        # Defense in depth: if the Lambda returns a non-JSON payload
+        # (truncated stream, malformed handler response, etc.) we
+        # surface a structured error rather than crashing the chassis.
+        logger.warning("code_exec.invalid_payload %r code_len=%d", exc, len(code))
+        return _error_result("invalid_payload")
     return payload  # type: ignore[no-any-return]

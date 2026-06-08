@@ -180,6 +180,62 @@ def test_code_exec_returns_sandbox_init_error_on_function_error(monkeypatch):
     }
 
 
+def test_code_exec_returns_invoke_failed_on_endpoint_connection_error(monkeypatch):
+    """Transport-level botocore failures
+    (``EndpointConnectionError`` / ``ReadTimeoutError`` / etc.) inherit
+    from ``BotoCoreError`` (NOT ``ClientError``). Without an explicit
+    catch they'd bubble out of the @tool and crash the chassis. We map
+    them to ``invoke_failed`` — same SPA affordance as a generic
+    ClientError, since either way the model didn't get a real result."""
+    import botocore.exceptions
+
+    fake_client = MagicMock()
+    fake_client.exceptions.TooManyRequestsException = type("X", (Exception,), {})
+    fake_client.invoke.side_effect = botocore.exceptions.EndpointConnectionError(
+        endpoint_url="https://lambda.us-east-1.amazonaws.com"
+    )
+    monkeypatch.setattr(
+        "channel.agents.tools.code_exec._get_lambda_client",
+        lambda: fake_client,
+    )
+    monkeypatch.setenv("STARTER_CODE_EXEC_LAMBDA_ARN", "arn:fake")
+
+    from channel.agents.tools.code_exec import code_exec
+
+    result = code_exec(code="print(1)")
+
+    assert result == {"status": "error", "content": [{"text": "invoke_failed"}]}
+
+
+def test_code_exec_returns_invalid_payload_on_non_json_response(monkeypatch):
+    """If the sandbox Lambda returns a non-JSON payload (truncated
+    stream, malformed handler response, etc.) we surface a structured
+    ``invalid_payload`` error rather than crashing the chassis with
+    ``JSONDecodeError``."""
+    fake_client = MagicMock()
+    fake_client.exceptions.TooManyRequestsException = type("X", (Exception,), {})
+    stream = MagicMock()
+    stream.read.return_value = b"<html>this is not json</html>"
+    fake_client.invoke.return_value = {
+        "StatusCode": 200,
+        "Payload": stream,
+    }
+    monkeypatch.setattr(
+        "channel.agents.tools.code_exec._get_lambda_client",
+        lambda: fake_client,
+    )
+    monkeypatch.setenv("STARTER_CODE_EXEC_LAMBDA_ARN", "arn:fake")
+
+    from channel.agents.tools.code_exec import code_exec
+
+    result = code_exec(code="print(1)")
+
+    assert result == {
+        "status": "error",
+        "content": [{"text": "invalid_payload"}],
+    }
+
+
 def test_code_exec_error_round_trips_through_translate_event(monkeypatch):
     """End-to-end contract test for the SSE error_type chain (same shape
     as ``test_web_search.py:test_error_result_shape_round_trips``).
