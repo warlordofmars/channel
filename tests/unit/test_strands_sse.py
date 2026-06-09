@@ -628,10 +628,7 @@ def test_translate_event_handles_malformed_json_passing_precheck():
 
     # Crafted blob: passes the precheck (starts with { and contains
     # all three sentinels) but isn't valid JSON (unterminated string).
-    bogus = (
-        '{"stdout": "broken, "exit_code": 0, '
-        '"duration_ms": 1, "timed_out": false'
-    )
+    bogus = '{"stdout": "broken, "exit_code": 0, "duration_ms": 1, "timed_out": false'
     event = {
         "type": "tool_result",
         "tool_result": {
