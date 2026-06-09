@@ -409,58 +409,111 @@ def test_handler_timeout_with_no_stdout_returns_empty_string(monkeypatch):
     assert result["stderr"] == ""
 
 
-def test_handler_timeout_kills_process_group_then_drains_output(monkeypatch):
-    """On timeout the handler kills the whole process group BEFORE the
-    second communicate() — otherwise children blocked on a pipe could
-    keep stdout/stderr open and stall the read. Verifies the
-    ``_killpg_quiet`` call lands between the timeout exception and the
-    second communicate(), and that ``stdout`` / ``stderr`` come from
-    the post-kill drain rather than the (bytes-or-str-or-None) exception
-    payload."""
-    import subprocess
+def test_start_pipe_reader_stops_at_byte_budget():
+    """Streaming cap (line 231 in handler.py): the reader stops
+    accumulating after the budget is met, so user code that prints
+    hundreds of MB can't OOM the Lambda before the post-run ``_cap``
+    truncates."""
+    from channel.sandbox import handler as handler_module
+
+    # A pipe that produces 1 MB per read forever.
+    class _FloodingPipe:
+        def read(self, size):
+            return "x" * size
+
+    chunks: list[str] = []
+    # Budget 10 KB; chunk size in _start_pipe_reader is 4 KB.
+    t = handler_module._start_pipe_reader(_FloodingPipe(), chunks, budget=10_000)
+    t.join(timeout=2)
+    assert not t.is_alive()
+    # Total buffered = at most budget + chunk_size (one final chunk
+    # could land before the loop notices it crossed the budget).
+    total = sum(len(c) for c in chunks)
+    assert total >= 10_000
+    assert total <= 10_000 + 4096
+
+
+def test_start_pipe_reader_swallows_oserror_when_pipe_closes_mid_read(monkeypatch):
+    """The reader thread's ``except (OSError, ValueError)`` swallows
+    the race where the subprocess gets killed mid-read and the pipe
+    fd closes underneath the read() call. Defensive — exercises the
+    catch directly since orchestrating the race via real subprocess
+    is fragile across platforms."""
+    import threading
 
     from channel.sandbox import handler as handler_module
 
-    killpg_called_at: list[str] = []
+    class _DyingPipe:
+        def read(self, _size):
+            raise OSError("simulated mid-read closure")
+
+    chunks: list[str] = []
+    t = handler_module._start_pipe_reader(_DyingPipe(), chunks, budget=1000)
+    # Thread should swallow the exception and exit cleanly.
+    t.join(timeout=2)
+    assert not t.is_alive()
+    assert chunks == []
+    # Sanity: a clean thread API is what the lambda_handler expects.
+    assert isinstance(t, threading.Thread)
+
+
+def test_handler_timeout_kills_process_group_and_drains_readers(monkeypatch):
+    """On timeout the handler kills the whole process group, the reader
+    threads see EOF on their pipes and exit, and the final wait() in
+    the except block reaps the zombie. Verifies the ``_killpg_quiet``
+    call lands between the wait-timeout and the second wait(), and the
+    finally-block fires once more idempotently."""
+    import subprocess as subprocess_mod
+
+    from channel.sandbox import handler as handler_module
+
+    killpg_calls: list[int] = []
+    wait_calls: list[float | None] = []
+
+    class _ClosedPipe:
+        """Stub pipe that immediately returns EOF so the reader thread
+        exits cleanly without touching real fds."""
+
+        def read(self, _size):
+            return ""
 
     class FakeProc:
         def __init__(self):
-            self.pid = 99999
+            self.pid = 12345
             self.returncode = -9
+            self.stdout = _ClosedPipe()
+            self.stderr = _ClosedPipe()
             self._call = 0
 
-        def communicate(self, timeout=None):
+        def wait(self, timeout=None):
             self._call += 1
+            wait_calls.append(timeout)
             if self._call == 1:
-                # First call: simulate the timeout.
-                raise subprocess.TimeoutExpired(cmd="x", timeout=timeout)
-            # Second call: returns post-kill drained output.
-            killpg_called_at.append("before_second_communicate")
-            return ("drained out", "drained err")
+                # First wait: timeout fires.
+                raise subprocess_mod.TimeoutExpired(cmd="x", timeout=timeout)
+            # Second wait: process has been killed; returns normally.
+            return self.returncode
 
-    def spy_killpg(_pgid, _sig):
-        killpg_called_at.append("killpg")
+    def spy_killpg(pgid, _sig):
+        killpg_calls.append(pgid)
 
-    def fake_popen(*_args, **_kwargs):
-        return FakeProc()
-
-    monkeypatch.setattr(handler_module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(handler_module.subprocess, "Popen", lambda *a, **k: FakeProc())
     monkeypatch.setattr(handler_module.os, "killpg", spy_killpg)
 
     result = handler_module.lambda_handler({"code": "anything"}, None)
 
     assert result["timed_out"] is True
     assert result["exit_code"] == -1
-    # post-kill drain reaches the response.
-    assert result["stdout"] == "drained out"
-    assert result["stderr"] == "drained err"
-    # killpg fired before the second communicate (the timeout-recover
-    # path), then again in finally (idempotent / swallows ProcessLookup).
-    assert killpg_called_at == [
-        "killpg",
-        "before_second_communicate",
-        "killpg",
-    ]
+    # No output from the stubbed closed pipes.
+    assert result["stdout"] == ""
+    assert result["stderr"] == ""
+    # killpg fires twice: once in the timeout-recovery path, once in
+    # the finally defense-in-depth.
+    assert killpg_calls == [12345, 12345]
+    # wait() called twice: first with the configured timeout, then
+    # post-kill with no timeout to reap.
+    assert wait_calls[0] == handler_module._SUBPROCESS_TIMEOUT_SEC
+    assert wait_calls[1] is None
 
 
 def test_handler_harvests_png_images_from_tmp(monkeypatch, tmp_path):

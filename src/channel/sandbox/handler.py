@@ -39,6 +39,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 from typing import Any
 
@@ -54,6 +55,37 @@ _IMAGE_MIME = {
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
 }
+
+
+def _start_pipe_reader(pipe, chunks: list[str], budget: int) -> threading.Thread:
+    """Spawn a daemon thread that reads ``pipe`` into ``chunks`` until
+    either EOF or ``budget`` bytes have been buffered (whichever comes
+    first), then exits. Returns the thread so the caller can join it.
+
+    Bounded-memory guarantee: at most ``budget + chunk_size`` bytes
+    sit in memory per stream regardless of how much the subprocess
+    writes. Once the budget is hit the thread STOPS reading; the
+    subprocess will block on its next pipe write until either
+    finishes naturally (small) or the wall-clock timeout fires and
+    the caller kills the process group."""
+
+    def _pump() -> None:
+        total = 0
+        try:
+            while total < budget:
+                chunk = pipe.read(4096)
+                if not chunk:
+                    return
+                chunks.append(chunk)
+                total += len(chunk)
+        except (OSError, ValueError):
+            # Pipe was closed mid-read (subprocess killed). Normal
+            # exit path; nothing else to do.
+            return
+
+    t = threading.Thread(target=_pump, daemon=True)
+    t.start()
+    return t
 
 
 def _killpg_quiet(pgid: int) -> None:
@@ -176,7 +208,8 @@ def _harvest_tmp_images() -> list[dict[str, str]]:
         if not (real_path == real_tmp or real_path.startswith(real_tmp + os.sep)):
             continue
         try:
-            data = open(real_path, "rb").read()  # noqa: SIM115 — short-lived
+            with open(real_path, "rb") as f:
+                data = f.read()
         except OSError:
             continue
         # Post-read cap check: TOCTOU backstop — the file could have
@@ -236,16 +269,28 @@ def lambda_handler(event: dict, _ctx: object) -> dict[str, Any]:
         start_new_session=True,
     )
     pgid = proc.pid
+    # Bounded-memory streaming capture: read stdout/stderr in worker
+    # threads with a hard per-stream byte budget so user code that
+    # ``print('x' * 100_000_000)`` can't OOM the Lambda BEFORE the
+    # post-run ``_cap`` truncates. Budgets are 2× the soft cap to
+    # leave headroom for the truncation marker. When a reader hits
+    # its budget it stops reading; the subprocess will block on the
+    # next pipe write and either finish naturally (small) or hit the
+    # 270s timeout (and we kill the group). Either way the handler's
+    # memory footprint stays bounded.
+    stdout_chunks: list[str] = []
+    stderr_chunks: list[str] = []
+    stdout_thread = _start_pipe_reader(proc.stdout, stdout_chunks, _STDOUT_CAP * 2)
+    stderr_thread = _start_pipe_reader(proc.stderr, stderr_chunks, _STDERR_CAP * 2)
     try:
         try:
-            stdout, stderr = proc.communicate(timeout=_SUBPROCESS_TIMEOUT_SEC)
+            proc.wait(timeout=_SUBPROCESS_TIMEOUT_SEC)
             exit_code = proc.returncode
         except subprocess.TimeoutExpired:
-            # Kill the whole group BEFORE the second communicate() so
-            # children blocked on a pipe don't keep stdout/stderr open
-            # and stall the read.
+            # Kill the whole group so the reader threads' pipes EOF
+            # and the threads can drain + exit cleanly.
             _killpg_quiet(pgid)
-            stdout, stderr = proc.communicate()
+            proc.wait()
             exit_code = -1
             timed_out = True
     finally:
@@ -254,9 +299,16 @@ def lambda_handler(event: dict, _ctx: object) -> dict[str, Any]:
         # the group here is idempotent — ProcessLookupError on the
         # normal-exit path is expected and swallowed by ``_killpg_quiet``.
         _killpg_quiet(pgid)
+    # Reader threads exit when their pipes EOF (subprocess finished +
+    # closed stdio) or when they hit the hard byte budget. Join with
+    # a bounded timeout so chunk lists are fully populated before we
+    # read them — if a reader is stuck, the subprocess has already
+    # been killed and the pipe's underlying fd should close imminently.
+    stdout_thread.join(timeout=5)
+    stderr_thread.join(timeout=5)
     duration_ms = int((time.monotonic() - start) * 1000)
-    stdout, stdout_trunc = _cap(stdout, _STDOUT_CAP)
-    stderr, stderr_trunc = _cap(stderr, _STDERR_CAP)
+    stdout, stdout_trunc = _cap("".join(stdout_chunks), _STDOUT_CAP)
+    stderr, stderr_trunc = _cap("".join(stderr_chunks), _STDERR_CAP)
     images = _harvest_tmp_images()
     return {
         "stdout": stdout,
