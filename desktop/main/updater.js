@@ -27,11 +27,10 @@ export function init({ channel, webContents }) {
 }
 
 export function relaunchToUpdate() {
-  // (isSilent=false, isForceRunAfter=true). isForceRunAfter is the macOS
-  // knob that flips Squirrel.Mac's ShipItState.plist launchAfterInstallation
-  // from false to true. Without it, quitAndInstall quits the app and
-  // performs the bundle swap but never relaunches — observed in the wild
-  // on macOS 15 with ShipIt logging "Installation completed successfully"
-  // immediately followed by a quiet exit (no new process spawned).
-  autoUpdater.quitAndInstall(false, true);
+  // MacUpdater.quitAndInstall ignores its args; relaunch is governed by
+  // autoRunAppAfterInstall (default true). The caller is responsible for
+  // flipping window.js's isQuitting flag first — Electron's autoUpdater
+  // closes all windows before app.quit() fires, so before-quit (which
+  // normally sets isQuitting) arrives too late.
+  autoUpdater.quitAndInstall();
 }
