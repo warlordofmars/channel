@@ -3,11 +3,16 @@
 
 Runs user-supplied Python code under ``subprocess.Popen`` (with
 ``start_new_session=True`` so the child gets its own process group)
-plus ``proc.communicate(timeout=...)`` for the wall-clock cap. The
-process group is killed via ``os.killpg`` on both the timeout-recovery
-path and a ``finally`` defense-in-depth so user code that spawns
-grandchildren (e.g. ``subprocess.Popen([...]); sys.exit(0)``) doesn't
-leak orphans into the Lambda warm container.
+plus ``proc.wait(timeout=...)`` for the wall-clock cap. stdout and
+stderr are drained in dedicated daemon reader threads with hard
+per-stream byte budgets — bounded memory regardless of how much the
+subprocess writes, and the reader kills the process group immediately
+when its budget is exceeded so a runaway ``print`` loop doesn't tie
+up the sandbox slot for the full timeout. The process group is also
+killed via ``os.killpg`` on the timeout-recovery path and a
+``finally`` defense-in-depth so user code that spawns grandchildren
+(e.g. ``subprocess.Popen([...]); sys.exit(0)``) doesn't leak orphans
+into the Lambda warm container.
 
 Constraints:
 
@@ -57,17 +62,25 @@ _IMAGE_MIME = {
 }
 
 
-def _start_pipe_reader(pipe, chunks: list[str], budget: int) -> threading.Thread:
+def _start_pipe_reader(
+    pipe,
+    chunks: list[str],
+    budget: int,
+    on_overflow=None,
+) -> threading.Thread:
     """Spawn a daemon thread that reads ``pipe`` into ``chunks`` until
     either EOF or ``budget`` bytes have been buffered (whichever comes
     first), then exits. Returns the thread so the caller can join it.
 
     Bounded-memory guarantee: at most ``budget + chunk_size`` bytes
     sit in memory per stream regardless of how much the subprocess
-    writes. Once the budget is hit the thread STOPS reading; the
-    subprocess will block on its next pipe write until either
-    finishes naturally (small) or the wall-clock timeout fires and
-    the caller kills the process group."""
+    writes. Once the budget is hit, ``on_overflow()`` is invoked
+    (typically to kill the subprocess process group) so the reader
+    doesn't tie up the sandbox slot waiting for the 270s wall-clock
+    timer — a runaway ``print('x' * 10**9)`` loop should fail fast,
+    not look like a timeout. Without ``on_overflow`` the reader just
+    stops reading and the subprocess will eventually block on its
+    next pipe write."""
 
     def _pump() -> None:
         total = 0
@@ -78,6 +91,8 @@ def _start_pipe_reader(pipe, chunks: list[str], budget: int) -> threading.Thread
                     return
                 chunks.append(chunk)
                 total += len(chunk)
+            if on_overflow is not None:
+                on_overflow()
         except (OSError, ValueError):
             # Pipe was closed mid-read (subprocess killed). Normal
             # exit path; nothing else to do.
@@ -226,8 +241,9 @@ def _harvest_tmp_images() -> list[dict[str, str]]:
     Resolution happens AFTER the extension check so we don't waste
     syscalls on non-image files.
 
-    The post-exec scan happens AFTER ``subprocess.run`` returns and
-    BEFORE the response is serialized. Empty /tmp returns ``[]``."""
+    The post-exec scan happens AFTER ``proc.wait()`` returns (whether
+    via normal exit, timeout-kill, or budget-overflow-kill) and BEFORE
+    the response is serialized. Empty /tmp returns ``[]``."""
     candidates = _collect_image_candidates()
     if not candidates:
         return []
@@ -296,8 +312,21 @@ def lambda_handler(event: dict, _ctx: object) -> dict[str, Any]:
     # memory footprint stays bounded.
     stdout_chunks: list[str] = []
     stderr_chunks: list[str] = []
-    stdout_thread = _start_pipe_reader(proc.stdout, stdout_chunks, _STDOUT_CAP * 2)
-    stderr_thread = _start_pipe_reader(proc.stderr, stderr_chunks, _STDERR_CAP * 2)
+    # When a reader hits its budget we kill the process group
+    # immediately. Otherwise the subprocess would block on its next
+    # pipe write and we'd wait the full 270s wall-clock cap before
+    # cleaning up — wasting reserved-concurrency slot capacity on
+    # runaway output that we already know we're going to truncate.
+
+    def _kill_on_overflow() -> None:
+        _killpg_quiet(pgid)
+
+    stdout_thread = _start_pipe_reader(
+        proc.stdout, stdout_chunks, _STDOUT_CAP * 2, on_overflow=_kill_on_overflow
+    )
+    stderr_thread = _start_pipe_reader(
+        proc.stderr, stderr_chunks, _STDERR_CAP * 2, on_overflow=_kill_on_overflow
+    )
     try:
         try:
             proc.wait(timeout=_SUBPROCESS_TIMEOUT_SEC)

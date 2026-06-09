@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import os
+import time
 
 import pytest
 
@@ -410,10 +411,9 @@ def test_handler_timeout_with_no_stdout_returns_empty_string(monkeypatch):
 
 
 def test_start_pipe_reader_stops_at_byte_budget():
-    """Streaming cap (line 231 in handler.py): the reader stops
-    accumulating after the budget is met, so user code that prints
-    hundreds of MB can't OOM the Lambda before the post-run ``_cap``
-    truncates."""
+    """Streaming cap: the reader stops accumulating after the budget
+    is met, so user code that prints hundreds of MB can't OOM the
+    Lambda before the post-run ``_cap`` truncates."""
     from channel.sandbox import handler as handler_module
 
     # A pipe that produces 1 MB per read forever.
@@ -431,6 +431,94 @@ def test_start_pipe_reader_stops_at_byte_budget():
     total = sum(len(c) for c in chunks)
     assert total >= 10_000
     assert total <= 10_000 + 4096
+
+
+def test_start_pipe_reader_invokes_on_overflow_when_budget_exceeded():
+    """When a flood overshoots the budget, the reader fires
+    ``on_overflow``. lambda_handler wires this to kill the subprocess
+    group so a runaway ``print('x' * 10**9)`` loop fails fast instead
+    of tying up the sandbox slot for the full 270s wall-clock cap."""
+    from channel.sandbox import handler as handler_module
+
+    class _FloodingPipe:
+        def read(self, size):
+            return "x" * size
+
+    overflow_calls: list[bool] = []
+    chunks: list[str] = []
+    t = handler_module._start_pipe_reader(
+        _FloodingPipe(),
+        chunks,
+        budget=1000,
+        on_overflow=lambda: overflow_calls.append(True),
+    )
+    t.join(timeout=2)
+    assert not t.is_alive()
+    assert overflow_calls == [True]
+
+
+def test_handler_kills_subprocess_on_stdout_overflow(monkeypatch):
+    """End-to-end: when user code's stdout exceeds the streaming
+    budget, the reader's ``on_overflow`` callback fires and kills the
+    process group. The handler returns FAST (without waiting for the
+    270s wall-clock timer), so a runaway ``print`` can't tie up the
+    sandbox slot. Covers the ``_kill_on_overflow`` closure body."""
+    from channel.sandbox import handler as handler_module
+
+    # Shrink the soft cap so the budget (2x = 200 bytes) is small
+    # enough that a single subprocess print() round-trips through
+    # overflow quickly.
+    monkeypatch.setattr(handler_module, "_STDOUT_CAP", 100)
+
+    start = time.monotonic()
+    # Print 5x250 bytes = 1250 bytes total (>> 200-byte budget).
+    result = handler_module.lambda_handler(
+        {
+            "code": "import sys\nfor _ in range(5):\n    sys.stdout.write('x' * 250)\n    sys.stdout.flush()\n",
+        },
+        None,
+    )
+    duration_seconds = time.monotonic() - start
+
+    # The subprocess was killed by the overflow path. exit_code is
+    # nonzero (Python's exit on SIGTERM/SIGKILL). truncated=True
+    # because stdout exceeded _STDOUT_CAP.
+    assert result["truncated"] is True
+    # Critically: the handler returned FAR before the 270s timer.
+    assert duration_seconds < 30, (
+        f"Overflow kill path should complete promptly; took {duration_seconds:.2f}s"
+    )
+    # timed_out stays False — this is the overflow path, not the timer.
+    assert result["timed_out"] is False
+
+
+def test_start_pipe_reader_does_not_call_on_overflow_on_eof():
+    """If the pipe EOFs before the budget is reached (the normal
+    happy path — small output), ``on_overflow`` MUST NOT fire."""
+    from channel.sandbox import handler as handler_module
+
+    class _SmallPipe:
+        def __init__(self):
+            self._sent = False
+
+        def read(self, _size):
+            if self._sent:
+                return ""
+            self._sent = True
+            return "hello"
+
+    overflow_calls: list[bool] = []
+    chunks: list[str] = []
+    t = handler_module._start_pipe_reader(
+        _SmallPipe(),
+        chunks,
+        budget=100_000,
+        on_overflow=lambda: overflow_calls.append(True),
+    )
+    t.join(timeout=2)
+    assert not t.is_alive()
+    assert overflow_calls == []
+    assert chunks == ["hello"]
 
 
 def test_start_pipe_reader_swallows_oserror_when_pipe_closes_mid_read(monkeypatch):

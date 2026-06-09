@@ -51,6 +51,7 @@ function CodeOutputBlock({ payload }) {
                 type="button"
                 onClick={() => setExpanded((v) => !v)}
                 className="code-output-toggle"
+                aria-expanded={expanded}
               >
                 {expanded ? "Collapse" : `Show all ${lineCount} lines`}
               </button>
@@ -67,12 +68,13 @@ function CodeOutputBlock({ payload }) {
       )}
       {Array.isArray(payload.images) &&
         payload.images.map((img, i) => (
-          // Use the b64 payload as the key — it's stable across renders
-          // and unique per image (collisions only if the model produced
-          // two byte-identical PNGs, which collapses to the same row
-          // visually anyway). Avoids React's array-index-keys warning.
+          // Compose key from index + mime + a short prefix of the b64
+          // payload. Using the full b64 would push ~1 MB strings
+          // through React reconciliation; a small prefix is stable
+          // enough since adjacent images rarely share their first
+          // bytes (PNG/JPEG headers vary by metadata).
           <img
-            key={img.b64}
+            key={`${i}-${img.mime}-${img.b64.slice(0, 16)}`}
             src={`data:${img.mime};base64,${img.b64}`}
             alt={`code-exec output ${i + 1}`}
             className="code-output-image"
