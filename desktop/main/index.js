@@ -34,7 +34,16 @@ app.whenReady().then(() => {
       login: () => login({ authBaseUrl: AUTH_BASE }),
       logout: () => {},                          // renderer clears localStorage itself
       getVersion: () => app.getVersion(),
-      relaunchToUpdate,
+      // Electron's autoUpdater.quitAndInstall closes all windows before
+      // calling app.quit() — but window.js's close handler hides (rather
+      // than closes) until isQuitting flips, and isQuitting only flips on
+      // before-quit, which fires AFTER the close-windows phase. Set it
+      // here so the close-windows phase can complete and the quit-and-
+      // install sequence actually exits the process.
+      relaunchToUpdate: () => {
+        isQuitting = true;
+        relaunchToUpdate();
+      },
     },
   });
 

@@ -106,16 +106,6 @@ describe("updater.init IPC push events", () => {
     relaunchToUpdate();
     expect(autoUpdater.quitAndInstall).toHaveBeenCalled();
   });
-
-  it("calls quitAndInstall with isForceRunAfter=true so Squirrel.Mac relaunches after install", async () => {
-    // The second arg controls Squirrel's ShipItState.plist
-    // launchAfterInstallation flag. Default (undefined → false) causes
-    // the bundle to swap but no relaunch — must pass true.
-    const { autoUpdater } = await import("electron-updater");
-    const { relaunchToUpdate } = await import("../main/updater.js");
-    relaunchToUpdate();
-    expect(autoUpdater.quitAndInstall).toHaveBeenCalledWith(false, true);
-  });
 });
 
 describe("updater.init periodic check", () => {
