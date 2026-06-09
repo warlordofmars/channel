@@ -433,6 +433,66 @@ def test_start_pipe_reader_stops_at_byte_budget():
     assert total <= 10_000 + 4096
 
 
+def test_start_pipe_reader_counts_bytes_not_characters():
+    """Budget is enforced in BYTES so non-ASCII output (each emoji is
+    4 UTF-8 bytes, each CJK rune is 3) doesn't sneak past the cap.
+    Counting ``len(chunk)`` on the decoded str would let the budget
+    overflow by 2-4× on emoji-heavy output."""
+    from channel.sandbox import handler as handler_module
+
+    # Each emoji is 4 bytes UTF-8. A single read returns 4 emojis (16 bytes).
+    class _EmojiPipe:
+        def __init__(self):
+            self._left = 4  # 4 reads × 4 emojis × 4 bytes = 64 bytes total
+
+        def read(self, _size):
+            if self._left <= 0:
+                return ""
+            self._left -= 1
+            return "🔥" * 4  # 4 chars, 16 bytes
+
+    overflow_calls: list[bool] = []
+    chunks: list[str] = []
+    # Budget 30 bytes — should fire overflow after ~2 reads (32 bytes).
+    handler_module._start_pipe_reader(
+        _EmojiPipe(),
+        chunks,
+        budget=30,
+        on_overflow=lambda: overflow_calls.append(True),
+    ).join(timeout=2)
+
+    total_bytes = sum(len(c.encode("utf-8")) for c in chunks)
+    # Overflow MUST fire (total bytes > budget).
+    assert overflow_calls == [True]
+    # And we capped near the budget (within one chunk's worth).
+    assert total_bytes >= 30
+    assert total_bytes <= 30 + 4096 * 4  # one chunk's worth of bytes
+
+
+def test_handler_passes_unbuffered_flag_to_python_subprocess(monkeypatch):
+    """The child Python runs with ``-u`` so block-buffered stdout
+    doesn't swallow partial output on timeout/overflow kills. Without
+    this, a ``print('almost-done'); time.sleep(1000)`` user code
+    pattern would lose the print on timeout."""
+    from channel.sandbox import handler as handler_module
+
+    captured: dict[str, list[str]] = {}
+
+    real_popen = handler_module.subprocess.Popen
+
+    def spy_popen(args, **kwargs):
+        captured["args"] = list(args)
+        return real_popen(args, **kwargs)
+
+    monkeypatch.setattr(handler_module.subprocess, "Popen", spy_popen)
+
+    handler_module.lambda_handler({"code": "print('x')"}, None)
+
+    # args should be [python, "-u", "-c", code]
+    assert captured["args"][1] == "-u"
+    assert captured["args"][2] == "-c"
+
+
 def test_start_pipe_reader_invokes_on_overflow_when_budget_exceeded():
     """When a flood overshoots the budget, the reader fires
     ``on_overflow``. lambda_handler wires this to kill the subprocess

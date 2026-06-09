@@ -90,7 +90,11 @@ def _start_pipe_reader(
                 if not chunk:
                     return
                 chunks.append(chunk)
-                total += len(chunk)
+                # Budget is in BYTES, not characters. Non-ASCII output
+                # would exceed the intended cap (and risk OOM) if we
+                # counted ``len(chunk)`` on the decoded str — one
+                # emoji is 4 UTF-8 bytes, one CJK rune is 3, etc.
+                total += len(chunk.encode("utf-8"))
             if on_overflow is not None:
                 on_overflow()
         except (OSError, ValueError):
@@ -290,7 +294,13 @@ def lambda_handler(event: dict, _ctx: object) -> dict[str, Any]:
     # this, Python's ``text=True`` decoder raises UnicodeDecodeError
     # and the handler would crash on otherwise-valid runs.
     proc = subprocess.Popen(  # noqa: S603
-        [sys.executable, "-c", code],
+        # ``-u`` runs the child interpreter unbuffered. Writing to a
+        # pipe normally engages block buffering (4 KB default) which
+        # would mean that on timeout-kill or overflow-kill the last
+        # block of partial output is lost — defeating the point of
+        # surfacing partial stdout/stderr in the response. With ``-u``
+        # every ``print(...)`` flushes immediately.
+        [sys.executable, "-u", "-c", code],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         cwd=_TMP_DIR,
