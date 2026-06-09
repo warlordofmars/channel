@@ -67,8 +67,12 @@ function CodeOutputBlock({ payload }) {
       )}
       {Array.isArray(payload.images) &&
         payload.images.map((img, i) => (
+          // Use the b64 payload as the key — it's stable across renders
+          // and unique per image (collisions only if the model produced
+          // two byte-identical PNGs, which collapses to the same row
+          // visually anyway). Avoids React's array-index-keys warning.
           <img
-            key={i}
+            key={img.b64}
             src={`data:${img.mime};base64,${img.b64}`}
             alt={`code-exec output ${i + 1}`}
             className="code-output-image"

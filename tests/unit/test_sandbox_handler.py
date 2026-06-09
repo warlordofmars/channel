@@ -512,8 +512,8 @@ def test_handler_timeout_kills_process_group_and_drains_readers(monkeypatch):
     assert killpg_calls == [12345, 12345]
     # wait() called twice: first with the configured timeout, then
     # post-kill with no timeout to reap.
-    assert wait_calls[0] == handler_module._SUBPROCESS_TIMEOUT_SEC
-    assert wait_calls[1] is None
+    assert len(wait_calls) == 2
+    assert wait_calls == [handler_module._SUBPROCESS_TIMEOUT_SEC, None]
 
 
 def test_handler_harvests_png_images_from_tmp(monkeypatch, tmp_path):

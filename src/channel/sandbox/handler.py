@@ -151,6 +151,64 @@ def _wipe_tmp() -> None:
             pass
 
 
+def _collect_image_candidates() -> list[tuple[float, str, int]]:
+    """Return a list of ``(mtime, path, st_size)`` tuples for files in
+    ``_TMP_DIR`` whose extension matches ``_IMAGE_EXTENSIONS``. Sorted
+    newest-first by mtime so the caller can take the most-recent
+    ``_MAX_IMAGES`` without walking the whole list. Files we can't
+    stat (permission errors, broken symlinks) are silently skipped."""
+    if not os.path.isdir(_TMP_DIR):
+        return []
+    candidates: list[tuple[float, str, int]] = []
+    for name in os.listdir(_TMP_DIR):
+        if not name.lower().endswith(_IMAGE_EXTENSIONS):
+            continue
+        path = os.path.join(_TMP_DIR, name)
+        try:
+            stat = os.stat(path)
+        except OSError:
+            continue
+        candidates.append((stat.st_mtime, path, stat.st_size))
+    candidates.sort(reverse=True)
+    return candidates
+
+
+def _read_image_safely(path: str, st_size: int, real_tmp: str) -> dict[str, str] | None:
+    """Try to read one harvest candidate into a base64-encoded image dict.
+
+    Returns ``None`` if the file fails any safety check:
+    - st_size over the per-image cap (pre-read short-circuit so we
+      never even open multi-MB files)
+    - realpath fails (broken symlink etc.)
+    - realpath resolves outside ``_TMP_DIR`` (symlink exfiltration
+      defense — see the security note on ``_harvest_tmp_images``)
+    - open/read fails (permission error)
+    - post-read length exceeds the cap (TOCTOU backstop — file could
+      have grown between stat and open)"""
+    if st_size > _MAX_IMAGE_BYTES:
+        return None
+    try:
+        real_path = os.path.realpath(path)
+    except OSError:
+        return None
+    # Reject symlinks that resolve outside _TMP_DIR. os.sep guards
+    # against the "/tmp/xyz" vs "/tmp-something" prefix-match trap.
+    if not (real_path == real_tmp or real_path.startswith(real_tmp + os.sep)):
+        return None
+    try:
+        with open(real_path, "rb") as f:
+            data = f.read()
+    except OSError:
+        return None
+    if len(data) > _MAX_IMAGE_BYTES:
+        return None
+    ext = os.path.splitext(path)[1].lower()
+    return {
+        "mime": _IMAGE_MIME.get(ext, "application/octet-stream"),
+        "b64": base64.b64encode(data).decode("ascii"),
+    }
+
+
 def _harvest_tmp_images() -> list[dict[str, str]]:
     """Scan ``_TMP_DIR`` for image files and return up to ``_MAX_IMAGES``
     base64-encoded.
@@ -170,59 +228,17 @@ def _harvest_tmp_images() -> list[dict[str, str]]:
 
     The post-exec scan happens AFTER ``subprocess.run`` returns and
     BEFORE the response is serialized. Empty /tmp returns ``[]``."""
-    if not os.path.isdir(_TMP_DIR):
+    candidates = _collect_image_candidates()
+    if not candidates:
         return []
     real_tmp = os.path.realpath(_TMP_DIR)
-    # Stuff st_size alongside st_mtime so the harvest loop below can
-    # cheaply skip oversize candidates BEFORE reading them into memory.
-    # User code could write a multi-hundred-MB PNG to /tmp (up to the
-    # Lambda /tmp limit); reading it before the cap check would burn
-    # memory + CPU and could OOM the sandbox.
-    candidates: list[tuple[float, str, int]] = []
-    for name in os.listdir(_TMP_DIR):
-        if not name.lower().endswith(_IMAGE_EXTENSIONS):
-            continue
-        path = os.path.join(_TMP_DIR, name)
-        try:
-            stat = os.stat(path)
-        except OSError:
-            continue
-        candidates.append((stat.st_mtime, path, stat.st_size))
-    candidates.sort(reverse=True)  # newest first
     out: list[dict[str, str]] = []
     for _mtime, path, st_size in candidates:
         if len(out) >= _MAX_IMAGES:
             break
-        # Pre-read cap check: skip oversize files without ever
-        # touching their bytes.
-        if st_size > _MAX_IMAGE_BYTES:
-            continue
-        try:
-            real_path = os.path.realpath(path)
-        except OSError:
-            continue
-        # Reject symlinks that resolve outside _TMP_DIR — defense
-        # against ``os.symlink('/etc/passwd', '/tmp/leak.png')`` style
-        # exfiltration. ``os.sep`` guards against the "/tmp/xyz" vs
-        # "/tmp-something" prefix-match trap.
-        if not (real_path == real_tmp or real_path.startswith(real_tmp + os.sep)):
-            continue
-        try:
-            with open(real_path, "rb") as f:
-                data = f.read()
-        except OSError:
-            continue
-        # Post-read cap check: TOCTOU backstop — the file could have
-        # been replaced between stat() and open() by a larger one.
-        if len(data) > _MAX_IMAGE_BYTES:
-            continue
-        ext = os.path.splitext(path)[1].lower()
-        out.append(
-            {
-                "mime": _IMAGE_MIME.get(ext, "application/octet-stream"),
-                "b64": base64.b64encode(data).decode("ascii"),
-            }
-        )
+        image = _read_image_safely(path, st_size, real_tmp)
+        if image is not None:
+            out.append(image)
     return out
 
 

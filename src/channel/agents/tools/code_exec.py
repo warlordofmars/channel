@@ -126,10 +126,12 @@ def code_exec(code: str) -> dict[str, Any]:
         return _error_result("sandbox_init_error")
     try:
         payload = json.loads(resp["Payload"].read())
-    except (json.JSONDecodeError, ValueError) as exc:
+    except ValueError as exc:
         # Defense in depth: if the Lambda returns a non-JSON payload
         # (truncated stream, malformed handler response, etc.) we
         # surface a structured error rather than crashing the chassis.
+        # ``json.JSONDecodeError`` extends ``ValueError`` — catching
+        # the parent covers both.
         logger.warning("code_exec.invalid_payload %r code_len=%d", exc, len(code))
         return _error_result("invalid_payload")
     return payload  # type: ignore[no-any-return]
