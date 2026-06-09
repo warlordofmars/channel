@@ -15,6 +15,16 @@ from __future__ import annotations
 import json
 from typing import Any
 
+# The full key set of the code-exec sandbox handler's return contract
+# (see ``src/channel/sandbox/handler.py:lambda_handler``). Used by
+# ``_translate_single_tool_result`` to discriminate code_exec results
+# from any future tool that happens to return JSON with overlapping
+# keys (e.g. ``{stdout, exit_code, ...}``) so we don't accidentally
+# leak that other tool's raw payload as ``kind="code-output"``.
+_CODE_EXEC_PAYLOAD_KEYS: frozenset[str] = frozenset(
+    {"stdout", "stderr", "exit_code", "duration_ms", "truncated", "timed_out", "images"}
+)
+
 
 def _translate_single_tool_result(result: dict[str, Any]) -> tuple[str, Any]:
     """Translate one ``ToolResult`` dict into a single SSE-emit tuple.
@@ -62,9 +72,13 @@ def _translate_single_tool_result(result: dict[str, Any]) -> tuple[str, Any]:
     # code-exec sandbox (#183), whose entire purpose is to surface
     # stdout/stderr/images to the user via a structured renderer in
     # the SPA. We detect the code-exec shape by structure (parsed
-    # JSON with ``exit_code`` + ``stdout`` keys) rather than plumbing
-    # tool_name through — tool_name lives on the preceding
-    # ``ToolUseStreamEvent``, not on the result.
+    # JSON containing the FULL sandbox-handler return contract — see
+    # ``src/channel/sandbox/handler.py`` for the keys) rather than
+    # plumbing tool_name through, since tool_name lives on the
+    # preceding ``ToolUseStreamEvent`` and not on the result. The
+    # full-key signature avoids accidentally classifying any future
+    # tool that happens to return ``{stdout, exit_code, ...}`` as
+    # code-output and leaking its raw payload over SSE.
     success_payload: dict[str, Any] = {
         "tool_use_id": tool_use_id,
         "summary": "completed",
@@ -79,7 +93,7 @@ def _translate_single_tool_result(result: dict[str, Any]) -> tuple[str, Any]:
             parsed = json.loads(joined_text)
         except (ValueError, TypeError):
             parsed = None
-        if isinstance(parsed, dict) and "exit_code" in parsed and "stdout" in parsed:
+        if isinstance(parsed, dict) and _CODE_EXEC_PAYLOAD_KEYS.issubset(parsed.keys()):
             success_payload["kind"] = "code-output"
             success_payload["payload"] = parsed
     return ("tool_finished", success_payload)

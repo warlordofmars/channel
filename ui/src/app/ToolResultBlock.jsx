@@ -9,7 +9,14 @@
 import { useState } from "react";
 
 export default function ToolResultBlock({ kind, summary, payload }) {
-  if (kind === "code-output") {
+  // The code-output branch requires the structured payload to render
+  // anything meaningful (stdout pane, stderr details, images, meta
+  // line). If a server-side bug or partial SSE delivery sets kind
+  // without payload, fall through to the default summary renderer so
+  // the step still shows something — Conversation.jsx renders this
+  // when ``summary || payload``, so a kind-only event would otherwise
+  // produce a blank block.
+  if (kind === "code-output" && payload) {
     return <CodeOutputBlock payload={payload} />;
   }
   return (
@@ -20,13 +27,10 @@ export default function ToolResultBlock({ kind, summary, payload }) {
 }
 
 function CodeOutputBlock({ payload }) {
-  // Render-safe defaults so a missing payload doesn't crash the row.
+  // ``payload`` is guaranteed truthy by the caller (the default branch
+  // in ``ToolResultBlock`` handles the missing-payload case). Subfield
+  // defaults still apply for partial payloads.
   const [expanded, setExpanded] = useState(false);
-  if (!payload) {
-    return (
-      <div className="tool-result-block" data-kind="code-output" />
-    );
-  }
   const stdout = payload.stdout || "";
   const lines = stdout.split("\n");
   // Trailing-newline-only stdout produces one extra empty line; trim

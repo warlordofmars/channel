@@ -579,6 +579,32 @@ def test_translate_event_emits_code_output_kind_for_code_exec_shaped_result():
     assert payload["payload"] == sandbox_payload
 
 
+def test_translate_event_does_not_misclassify_partial_code_exec_shape():
+    """A hypothetical future tool that returns JSON with just ``stdout``
+    + ``exit_code`` (the LOOSE check from the original design) must NOT
+    be classified as code-output. The tightened check requires the
+    FULL sandbox handler return contract before flipping the SSE
+    kind — defense against accidentally leaking another tool's raw
+    payload over the structured-payload channel."""
+    from channel.agents.strands_sse import translate_event
+
+    # Partial-shape blob: only 2 of the 7 sandbox-payload keys.
+    bogus_payload = {"stdout": "fake", "exit_code": 0}
+    event = {
+        "type": "tool_result",
+        "tool_result": {
+            "toolUseId": "tu-bogus",
+            "status": "success",
+            "content": [{"text": json.dumps(bogus_payload)}],
+        },
+    }
+    kind, payload = translate_event(event)
+    assert kind == "tool_finished"
+    # No kind or payload fields — falls back to the default summary path.
+    assert "kind" not in payload
+    assert "payload" not in payload
+
+
 def test_translate_event_falls_back_to_default_for_non_code_exec_results():
     """tool_result whose content does NOT match the code-exec shape
     (e.g. a web_search result) keeps the legacy summary-only payload —

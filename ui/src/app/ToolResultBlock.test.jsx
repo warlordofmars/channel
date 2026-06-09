@@ -119,9 +119,22 @@ describe("ToolResultBlock — code-output branch", () => {
     expect(screen.getByText(/timed out at 270s/)).toBeInTheDocument();
   });
 
-  it("handles missing payload gracefully (no crash)", () => {
-    const { container } = render(<ToolResultBlock kind="code-output" />);
+  it("falls back to the default summary renderer when payload is missing", () => {
+    // A streaming bug or partial SSE delivery could set kind without
+    // payload. Rather than render an empty CodeOutputBlock (which
+    // would visually drop the row), fall through to the default
+    // summary path so the user still sees the completion marker.
+    // ``data-kind`` is preserved as "code-output" (the SSE intent)
+    // but the body renders the summary pane instead of the structured
+    // output panes.
+    const { container } = render(
+      <ToolResultBlock kind="code-output" summary="completed" />,
+    );
     expect(container.firstChild).toHaveAttribute("data-kind", "code-output");
+    // Summary text appears in the default <pre> (not inside the
+    // CodeOutputBlock's panes — those aren't rendered without payload).
+    expect(screen.getByText("completed")).toBeInTheDocument();
+    expect(container.querySelector(".code-output-pane")).toBeNull();
   });
 
   it("handles payload with no stdout field (renders meta without stdout pane)", () => {
