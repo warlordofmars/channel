@@ -72,15 +72,23 @@ def _start_pipe_reader(
     either EOF or ``budget`` bytes have been buffered (whichever comes
     first), then exits. Returns the thread so the caller can join it.
 
-    Bounded-memory guarantee: at most ``budget + chunk_size`` bytes
-    sit in memory per stream regardless of how much the subprocess
-    writes. Once the budget is hit, ``on_overflow()`` is invoked
-    (typically to kill the subprocess process group) so the reader
-    doesn't tie up the sandbox slot waiting for the 270s wall-clock
-    timer — a runaway ``print('x' * 10**9)`` loop should fail fast,
-    not look like a timeout. Without ``on_overflow`` the reader just
-    stops reading and the subprocess will eventually block on its
-    next pipe write."""
+    Bounded-memory guarantee: at most ``budget + 4 * chunk_size``
+    bytes sit in memory per stream regardless of how much the
+    subprocess writes. ``pipe.read(chunk_size)`` returns up to
+    ``chunk_size`` CHARACTERS (text mode); for non-ASCII output that
+    final chunk can be up to ``4 * chunk_size`` BYTES (4-byte UTF-8
+    sequences like emoji). With chunk_size = 4096 and the default
+    20 KB / 5 KB caps, the worst-case buffer per stream is roughly
+    36 KB / 21 KB — well within Lambda's memory headroom. Typical
+    mixed ASCII / Latin output overshoots by ~1 chunk (4 KB).
+
+    Once the budget is hit, ``on_overflow()`` is invoked (typically
+    to kill the subprocess process group) so the reader doesn't tie
+    up the sandbox slot waiting for the 270s wall-clock timer — a
+    runaway ``print('x' * 10**9)`` loop should fail fast, not look
+    like a timeout. Without ``on_overflow`` the reader just stops
+    reading and the subprocess will eventually block on its next
+    pipe write."""
 
     def _pump() -> None:
         total = 0
