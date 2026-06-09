@@ -579,6 +579,73 @@ def test_translate_event_emits_code_output_kind_for_code_exec_shaped_result():
     assert payload["payload"] == sandbox_payload
 
 
+def test_looks_like_code_exec_payload_short_circuits_non_json_text():
+    """Plain-text tool results (no leading ``{``) skip the JSON parse
+    entirely — important for any tool that returns prose."""
+    from channel.agents.strands_sse import _looks_like_code_exec_payload
+
+    assert _looks_like_code_exec_payload("Found 3 results for ...") is False
+    assert _looks_like_code_exec_payload("") is False
+
+
+def test_looks_like_code_exec_payload_short_circuits_other_json_shapes():
+    """Web-search-style JSON (no ``exit_code`` / ``duration_ms`` /
+    ``timed_out`` sentinels) skips the JSON parse — that result can be
+    hundreds of KB and we don't want to parse it on every successful
+    tool call just to discriminate code_exec."""
+    from channel.agents.strands_sse import _looks_like_code_exec_payload
+
+    web_search_blob = json.dumps({"results": [{"url": "https://example.com", "text": "..."}]})
+    assert _looks_like_code_exec_payload(web_search_blob) is False
+
+
+def test_looks_like_code_exec_payload_passes_real_code_exec_blob():
+    """A real sandbox-handler return blob passes the substring
+    pre-check, advancing to the full JSON parse + key-set verification."""
+    from channel.agents.strands_sse import _looks_like_code_exec_payload
+
+    blob = json.dumps(
+        {
+            "stdout": "42\n",
+            "stderr": "",
+            "exit_code": 0,
+            "duration_ms": 12,
+            "truncated": False,
+            "timed_out": False,
+            "images": [],
+        }
+    )
+    assert _looks_like_code_exec_payload(blob) is True
+
+
+def test_translate_event_handles_malformed_json_passing_precheck():
+    """If a tool result LOOKS like code-exec to the cheap pre-check
+    (leading ``{`` plus the three sentinel substrings) but the full
+    JSON parse fails (truncated stream, mismatched quotes, etc.), we
+    quietly fall back to the default summary path rather than
+    crashing the chassis."""
+    from channel.agents.strands_sse import translate_event
+
+    # Crafted blob: passes the precheck (starts with { and contains
+    # all three sentinels) but isn't valid JSON (unterminated string).
+    bogus = (
+        '{"stdout": "broken, "exit_code": 0, '
+        '"duration_ms": 1, "timed_out": false'
+    )
+    event = {
+        "type": "tool_result",
+        "tool_result": {
+            "toolUseId": "tu-malformed",
+            "status": "success",
+            "content": [{"text": bogus}],
+        },
+    }
+    kind, payload = translate_event(event)
+    assert kind == "tool_finished"
+    assert "kind" not in payload
+    assert "payload" not in payload
+
+
 def test_translate_event_does_not_misclassify_partial_code_exec_shape():
     """A hypothetical future tool that returns JSON with just ``stdout``
     + ``exit_code`` (the LOOSE check from the original design) must NOT

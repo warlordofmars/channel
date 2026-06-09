@@ -25,6 +25,32 @@ _CODE_EXEC_PAYLOAD_KEYS: frozenset[str] = frozenset(
     {"stdout", "stderr", "exit_code", "duration_ms", "truncated", "timed_out", "images"}
 )
 
+# Cheap substring sentinels used by ``_looks_like_code_exec_payload``
+# to short-circuit the ``json.loads`` parse for non-code-exec tool
+# results. ``web_search`` in particular can return hundreds of KB of
+# JSON (text=True embeds full page content); avoiding the full parse
+# on every successful tool result matters at the chassis hot path.
+_CODE_EXEC_SENTINELS: tuple[str, ...] = (
+    '"exit_code"',
+    '"duration_ms"',
+    '"timed_out"',
+)
+
+
+def _looks_like_code_exec_payload(text: str) -> bool:
+    """Cheap pre-check: does ``text`` plausibly contain a code-exec
+    sandbox-handler return blob?
+
+    Looks for a JSON-object lead byte plus a couple of sandbox-specific
+    quoted-key substrings. False positives only cost a redundant
+    ``json.loads`` (the full key-set check below still gates).
+    False negatives would silently drop code-output classification —
+    we pick three highly-specific keys (``exit_code`` / ``duration_ms``
+    / ``timed_out``) that the sandbox handler always emits."""
+    if not text or text[0] != "{":
+        return False
+    return all(sentinel in text for sentinel in _CODE_EXEC_SENTINELS)
+
 
 def _translate_single_tool_result(result: dict[str, Any]) -> tuple[str, Any]:
     """Translate one ``ToolResult`` dict into a single SSE-emit tuple.
@@ -88,7 +114,7 @@ def _translate_single_tool_result(result: dict[str, Any]) -> tuple[str, Any]:
         for block in result.get("content", [])
         if isinstance(block, dict) and "text" in block
     )
-    if joined_text:
+    if joined_text and _looks_like_code_exec_payload(joined_text):
         try:
             parsed = json.loads(joined_text)
         except (ValueError, TypeError):
