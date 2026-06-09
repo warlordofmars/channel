@@ -236,7 +236,7 @@ class Prefs(BaseModel):
     show_reasoning: bool = False
     suggest_followups: bool = True
 
-    model_config = {"extra": "forbid"}
+    model_config = ConfigDict(extra="forbid")
 
 
 class MCPServerAuthStatus(str, Enum):

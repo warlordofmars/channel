@@ -345,3 +345,33 @@ def test_chat_mcp_settings_inherit_is_default():
     settings = ChatMCPSettings(chat_id="chat-1")
     assert settings.mode == ChatMCPMode.INHERIT
     assert settings.explicit_server_ids == []
+
+
+def test_new_mcp_models_reject_unknown_keys() -> None:
+    base_server = {
+        "server_id": "x",
+        "user_id": "u",
+        "name": "Hive",
+        "url": "https://h.example/mcp",
+        "client_id": "dcr",
+        "tool_prefix": "hive",
+        "auth_status": MCPServerAuthStatus.NEVER_AUTHED,
+        "created_at": "x",
+        "updated_at": "x",
+    }
+    with pytest.raises(ValidationError):
+        MCPServer(**base_server, unknown_field="x")
+
+    with pytest.raises(ValidationError):
+        MCPToken(
+            server_id="s",
+            user_id="u",
+            access_token_ciphertext=b"x",
+            expires_at=1,
+            granted_scope="",
+            updated_at="x",
+            unknown="y",
+        )
+
+    with pytest.raises(ValidationError):
+        ChatMCPSettings(chat_id="c", unknown="y")
