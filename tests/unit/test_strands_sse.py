@@ -544,3 +544,325 @@ def test_translate_tool_interrupt_event_missing_tool_use_id_skips():
     kind, payload = translate_event(event)
     assert kind == "skip"
     assert payload is None
+
+
+def test_translate_event_emits_code_output_kind_for_code_exec_shaped_result():
+    """tool_result whose ``content[0].text`` parses as JSON with
+    ``exit_code`` + ``stdout`` keys → emit ``kind="code-output"`` +
+    ``payload`` on the ``tool_finished`` event. The default literal
+    summary ``"completed"`` is still set so legacy SPA paths don't
+    crash."""
+    from channel.agents.strands_sse import translate_event
+
+    sandbox_payload = {
+        "stdout": "42\n",
+        "stderr": "",
+        "exit_code": 0,
+        "duration_ms": 12,
+        "truncated": False,
+        "timed_out": False,
+        "images": [],
+    }
+    event = {
+        "type": "tool_result",
+        "tool_result": {
+            "toolUseId": "tu-abc",
+            "status": "success",
+            "content": [{"text": json.dumps(sandbox_payload)}],
+        },
+    }
+    kind, payload = translate_event(event)
+    assert kind == "tool_finished"
+    assert payload["tool_use_id"] == "tu-abc"
+    assert payload["summary"] == "completed"
+    assert payload["kind"] == "code-output"
+    assert payload["payload"] == sandbox_payload
+
+
+def test_looks_like_code_exec_payload_short_circuits_non_json_text():
+    """Plain-text tool results (no leading ``{``) skip the JSON parse
+    entirely — important for any tool that returns prose."""
+    from channel.agents.strands_sse import _looks_like_code_exec_payload
+
+    assert _looks_like_code_exec_payload("Found 3 results for ...") is False
+    assert _looks_like_code_exec_payload("") is False
+
+
+def test_looks_like_code_exec_payload_short_circuits_other_json_shapes():
+    """Web-search-style JSON (no ``exit_code`` / ``duration_ms`` /
+    ``timed_out`` sentinels) skips the JSON parse — that result can be
+    hundreds of KB and we don't want to parse it on every successful
+    tool call just to discriminate code_exec."""
+    from channel.agents.strands_sse import _looks_like_code_exec_payload
+
+    web_search_blob = json.dumps({"results": [{"url": "https://example.com", "text": "..."}]})
+    assert _looks_like_code_exec_payload(web_search_blob) is False
+
+
+def test_looks_like_code_exec_payload_passes_real_code_exec_blob():
+    """A real sandbox-handler return blob passes the substring
+    pre-check, advancing to the full JSON parse + key-set verification."""
+    from channel.agents.strands_sse import _looks_like_code_exec_payload
+
+    blob = json.dumps(
+        {
+            "stdout": "42\n",
+            "stderr": "",
+            "exit_code": 0,
+            "duration_ms": 12,
+            "truncated": False,
+            "timed_out": False,
+            "images": [],
+        }
+    )
+    assert _looks_like_code_exec_payload(blob) is True
+
+
+def test_translate_event_handles_malformed_json_passing_precheck():
+    """If a tool result LOOKS like code-exec to the cheap pre-check
+    (leading ``{`` plus the three sentinel substrings) but the full
+    JSON parse fails (truncated stream, mismatched quotes, etc.), we
+    quietly fall back to the default summary path rather than
+    crashing the chassis."""
+    from channel.agents.strands_sse import translate_event
+
+    # Crafted blob: passes the precheck (starts with { and contains
+    # all three sentinels) but isn't valid JSON (unterminated string).
+    bogus = '{"stdout": "broken, "exit_code": 0, "duration_ms": 1, "timed_out": false'
+    event = {
+        "type": "tool_result",
+        "tool_result": {
+            "toolUseId": "tu-malformed",
+            "status": "success",
+            "content": [{"text": bogus}],
+        },
+    }
+    kind, payload = translate_event(event)
+    assert kind == "tool_finished"
+    assert "kind" not in payload
+    assert "payload" not in payload
+
+
+def test_translate_event_does_not_misclassify_partial_code_exec_shape():
+    """A hypothetical future tool that returns JSON with just ``stdout``
+    + ``exit_code`` (the LOOSE check from the original design) must NOT
+    be classified as code-output. The tightened check requires the
+    FULL sandbox handler return contract before flipping the SSE
+    kind — defense against accidentally leaking another tool's raw
+    payload over the structured-payload channel."""
+    from channel.agents.strands_sse import translate_event
+
+    # Partial-shape blob: only 2 of the 7 sandbox-payload keys.
+    bogus_payload = {"stdout": "fake", "exit_code": 0}
+    event = {
+        "type": "tool_result",
+        "tool_result": {
+            "toolUseId": "tu-bogus",
+            "status": "success",
+            "content": [{"text": json.dumps(bogus_payload)}],
+        },
+    }
+    kind, payload = translate_event(event)
+    assert kind == "tool_finished"
+    # No kind or payload fields — falls back to the default summary path.
+    assert "kind" not in payload
+    assert "payload" not in payload
+
+
+def test_translate_event_falls_back_to_default_for_non_code_exec_results():
+    """tool_result whose content does NOT match the code-exec shape
+    (e.g. a web_search result) keeps the legacy summary-only payload —
+    no ``kind`` or ``payload`` fields."""
+    from channel.agents.strands_sse import translate_event
+
+    web_search_payload = {"results": [{"url": "https://example.com"}]}
+    event = {
+        "type": "tool_result",
+        "tool_result": {
+            "toolUseId": "tu-xyz",
+            "status": "success",
+            "content": [{"text": json.dumps(web_search_payload)}],
+        },
+    }
+    kind, payload = translate_event(event)
+    assert kind == "tool_finished"
+    assert payload == {"tool_use_id": "tu-xyz", "summary": "completed"}
+
+
+def test_translate_event_falls_back_when_content_is_not_valid_json():
+    """tool_result content that doesn't parse as JSON → legacy payload."""
+    from channel.agents.strands_sse import translate_event
+
+    event = {
+        "type": "tool_result",
+        "tool_result": {
+            "toolUseId": "tu-xyz",
+            "status": "success",
+            "content": [{"text": "not json"}],
+        },
+    }
+    kind, payload = translate_event(event)
+    assert kind == "tool_finished"
+    assert payload == {"tool_use_id": "tu-xyz", "summary": "completed"}
+
+
+def test_translate_event_handles_tool_result_message_event():
+    """Strands' ``ToolResultMessageEvent`` is the LIVE tool-result event
+    in production (1.41.0). Its dict shape is ``{"message": {...}}`` with
+    no ``type`` field — content carries ``[{"toolResult": result}, ...]``
+    blocks. translate_event must split that into a ``("tool_results",
+    list)`` batch with one (kind, payload) tuple per result.
+
+    Regression guard for the 2026-06-08 dev-smoke bug where ``tool_started``
+    fired but no ``tool_finished`` ever followed — the legacy
+    ``"type": "tool_result"`` branch is dead code because
+    ``ToolResultEvent.is_callback_event`` returns False in Strands 1.41."""
+    from channel.agents.strands_sse import translate_event
+
+    code_exec_payload = {
+        "stdout": "42\n",
+        "stderr": "",
+        "exit_code": 0,
+        "duration_ms": 12,
+        "truncated": False,
+        "timed_out": False,
+        "images": [],
+    }
+    event = {
+        "message": {
+            "role": "user",
+            "content": [
+                {
+                    "toolResult": {
+                        "toolUseId": "tu-a",
+                        "status": "success",
+                        "content": [{"text": json.dumps(code_exec_payload)}],
+                    },
+                },
+            ],
+        },
+    }
+    kind, payload = translate_event(event)
+    assert kind == "tool_results"
+    assert len(payload) == 1
+    sub_kind, sub_payload = payload[0]
+    assert sub_kind == "tool_finished"
+    assert sub_payload["tool_use_id"] == "tu-a"
+    assert sub_payload["kind"] == "code-output"
+    assert sub_payload["payload"] == code_exec_payload
+
+
+def test_translate_event_tool_result_message_splits_mixed_success_and_error():
+    """One ToolResultMessageEvent can carry multiple toolResult blocks
+    (Strands batches all results from one event-loop cycle). Each must
+    be translated independently — success → tool_finished, error →
+    tool_error, with toolUseId-less blocks dropped."""
+    from channel.agents.strands_sse import translate_event
+
+    event = {
+        "message": {
+            "role": "user",
+            "content": [
+                {
+                    "toolResult": {
+                        "toolUseId": "tu-ok",
+                        "status": "success",
+                        "content": [{"text": "result-1"}],
+                    },
+                },
+                {
+                    "toolResult": {
+                        "toolUseId": "tu-bad",
+                        "status": "error",
+                        "content": [{"text": "rate_limit"}],
+                    },
+                },
+                # Uncorrelatable block (no toolUseId) — dropped.
+                {
+                    "toolResult": {
+                        "status": "success",
+                        "content": [{"text": "orphan"}],
+                    },
+                },
+            ],
+        },
+    }
+    kind, payload = translate_event(event)
+    assert kind == "tool_results"
+    assert len(payload) == 2
+    assert payload[0] == ("tool_finished", {"tool_use_id": "tu-ok", "summary": "completed"})
+    assert payload[1][0] == "tool_error"
+    assert payload[1][1]["tool_use_id"] == "tu-bad"
+    assert payload[1][1]["error_type"] == "rate_limit"
+
+
+def test_translate_event_tool_result_message_skips_non_dict_blocks():
+    """Defensive guard: content blocks that aren't dicts (malformed event,
+    forward-compat with future block types) are silently skipped — the
+    surrounding well-formed blocks still translate."""
+    from channel.agents.strands_sse import translate_event
+
+    event = {
+        "message": {
+            "role": "user",
+            "content": [
+                "not a dict",  # garbage block — must not crash
+                {
+                    "toolResult": {
+                        "toolUseId": "tu-ok",
+                        "status": "success",
+                        "content": [{"text": "result"}],
+                    },
+                },
+            ],
+        },
+    }
+    kind, payload = translate_event(event)
+    assert kind == "tool_results"
+    assert len(payload) == 1
+    assert payload[0][1]["tool_use_id"] == "tu-ok"
+
+
+def test_translate_event_tool_result_message_with_no_valid_results_returns_skip():
+    """A message event whose content has NO toolResult blocks (or only
+    uncorrelatable ones) translates to ``("skip", None)`` — chats.py
+    ignores skip kinds, so nothing flows over the wire."""
+    from channel.agents.strands_sse import translate_event
+
+    event = {
+        "message": {
+            "role": "user",
+            "content": [
+                {"text": "just text, no toolResult"},
+                {"toolResult": {"content": [{"text": "no toolUseId"}]}},
+            ],
+        },
+    }
+    kind, payload = translate_event(event)
+    assert kind == "skip"
+    assert payload is None
+
+
+def test_sse_tool_finished_includes_kind_and_payload_when_provided():
+    """``kind`` + ``payload`` ride along on the SSE wire."""
+    from channel.agents.strands_sse import sse_tool_finished
+
+    out = sse_tool_finished(
+        tool_use_id="tu-x",
+        summary="completed",
+        kind="code-output",
+        payload={"stdout": "42", "exit_code": 0},
+    )
+    text = out.decode()
+    assert '"kind": "code-output"' in text or "'kind': 'code-output'" in text
+    assert '"stdout": "42"' in text or "'stdout': '42'" in text
+
+
+def test_sse_tool_finished_omits_kind_and_payload_when_unset():
+    """Without ``kind``/``payload`` the wire shape is the legacy 3-field event."""
+    from channel.agents.strands_sse import sse_tool_finished
+
+    out = sse_tool_finished(tool_use_id="tu-x", summary="completed")
+    text = out.decode()
+    assert "kind" not in text
+    assert "payload" not in text

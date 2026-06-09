@@ -8,6 +8,7 @@ claims dict.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -501,13 +502,18 @@ def test_post_message_falls_back_to_prefs_effort_when_payload_omits_it(
 # Tool flags currently mounted on the chassis. Each row is
 # ``(env_var, tool_name)``. The two parametrized tests below assert that
 # (a) flipping any one flag on registers exactly its matching tool and
-# (b) leaving all flags off keeps the tools list empty. Per-tool prod
-# policy (see ``infra/stacks/channel_stack.py``): ``current_time`` is
-# off in prod (smoke-test only, on in dev/jc); ``web_search`` is on in
-# all envs (the flag is an emergency kill switch, not a rollout knob).
+# (b) leaving all flags off keeps the tools list empty. The PARSING
+# rule is "anything other than '1' is disabled" — so unset env vars
+# in local dev / tests omit the tool, which is what these tests
+# exercise. Per-env DEFAULTS (see ``infra/stacks/channel_stack.py``):
+# ``current_time`` is "0" in prod / "1" in dev (smoke-test only,
+# strategy spec policy P2); ``web_search`` ships "1" in all deployed
+# envs (kill-switch on default-on); ``code_exec`` ships "1" in all
+# deployed envs (kill-switch on default-on).
 _TOOL_FLAGS: list[tuple[str, str]] = [
     ("STARTER_CLOCK_TOOL_ENABLED", "current_time"),
     ("STARTER_WEB_SEARCH_ENABLED", "web_search"),
+    ("STARTER_CODE_EXEC_ENABLED", "code_exec"),
 ]
 
 
@@ -575,6 +581,38 @@ def test_post_message_omits_tools_when_all_flags_off(
     )
     assert response.status_code == 200
     assert captured["build_agent_kwargs"]["tools"] == []
+
+
+def test_tool_registry_includes_code_exec_when_flag_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``STARTER_CODE_EXEC_ENABLED=1`` → ``code_exec`` registered."""
+    from channel.agents.tools.code_exec import code_exec
+
+    monkeypatch.setenv("STARTER_CODE_EXEC_ENABLED", "1")
+    monkeypatch.delenv("STARTER_CLOCK_TOOL_ENABLED", raising=False)
+    monkeypatch.delenv("STARTER_WEB_SEARCH_ENABLED", raising=False)
+
+    from channel.api.chats import _build_tool_registry
+
+    registry = _build_tool_registry()
+    assert code_exec in registry
+
+
+def test_tool_registry_excludes_code_exec_when_flag_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``STARTER_CODE_EXEC_ENABLED`` unset → ``code_exec`` NOT registered."""
+    from channel.agents.tools.code_exec import code_exec
+
+    monkeypatch.delenv("STARTER_CODE_EXEC_ENABLED", raising=False)
+    monkeypatch.delenv("STARTER_CLOCK_TOOL_ENABLED", raising=False)
+    monkeypatch.delenv("STARTER_WEB_SEARCH_ENABLED", raising=False)
+
+    from channel.api.chats import _build_tool_registry
+
+    registry = _build_tool_registry()
+    assert code_exec not in registry
 
 
 def test_regenerate_forwards_payload_effort_to_build_agent(
@@ -722,6 +760,102 @@ def test_post_message_emits_tool_sse_events_and_dedupes_started(
     assert '"summary": "completed"' in body
     # No error in the happy path.
     assert '"type": "tool_error"' not in body
+
+
+def test_post_message_emits_tool_finished_from_tool_result_message_event(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ToolResultMessageEvent is the LIVE production shape (Strands 1.41)
+    — it bundles all completed tool results from one event-loop cycle
+    into a single ``{"message": {"content": [{"toolResult": ...}, ...]}}``
+    event. The chassis MUST translate this into per-result
+    ``tool_finished`` SSE frames; otherwise the SPA's step row stays
+    stuck on ``"running"`` forever (the 2026-06-08 dev-smoke bug for
+    code_exec). Mixed success/error results are split per-frame."""
+
+    _stub_storage_for_one_turn(monkeypatch)
+    monkeypatch.setenv("STARTER_FOLLOWUPS_ENABLED", "0")
+
+    async def fake_stream(self, prompt):
+        # Two tool calls in one cycle: one succeeds (code_exec shape), one errors.
+        yield {
+            "type": "tool_use_stream",
+            "current_tool_use": {
+                "toolUseId": "tu-ok",
+                "name": "code_exec",
+                "input": {},
+            },
+        }
+        yield {
+            "type": "tool_use_stream",
+            "current_tool_use": {
+                "toolUseId": "tu-bad",
+                "name": "web_search",
+                "input": {},
+            },
+        }
+        yield {
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "toolResult": {
+                            "toolUseId": "tu-ok",
+                            "status": "success",
+                            "content": [
+                                {
+                                    "text": json.dumps(
+                                        {
+                                            "stdout": "42\n",
+                                            "stderr": "",
+                                            "exit_code": 0,
+                                            "duration_ms": 12,
+                                            "truncated": False,
+                                            "timed_out": False,
+                                            "images": [],
+                                        }
+                                    )
+                                }
+                            ],
+                        },
+                    },
+                    {
+                        "toolResult": {
+                            "toolUseId": "tu-bad",
+                            "status": "error",
+                            "content": [{"text": "rate_limit"}],
+                        },
+                    },
+                ],
+            },
+        }
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+
+    class FakeAgent:
+        stream_async = fake_stream
+
+    monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
+
+    response = client.post(
+        "/api/chats/c1/messages",
+        json={"message": "hi", "model": "claude-sonnet-4-6"},
+    )
+    assert response.status_code == 200
+    body = response.text
+
+    # Both tool_finished events emitted from the single message event.
+    assert body.count('"type": "tool_finished"') == 1
+    assert '"tool_use_id": "tu-ok"' in body
+    assert '"kind": "code-output"' in body
+    assert '"exit_code": 0' in body
+    # The errored result emits a tool_error.
+    assert '"type": "tool_error"' in body
+    assert '"tool_use_id": "tu-bad"' in body
+    assert '"error_type": "rate_limit"' in body
+    # partial_result_count counts prior tool_finished events on this cycle.
+    # tu-ok finished first (completed_tool_calls=1), tu-bad errored after,
+    # so its partial_result_count is 1.
+    assert '"partial_result_count": 1' in body
 
 
 def test_post_message_emits_tool_error_on_failed_result(

@@ -220,7 +220,9 @@ function ToolStepRow({ step }) {
         <strong>{step.toolName}</strong>
         <span className="tool-step-status">{step.status}</span>
       </div>
-      {step.summary && <ToolResultBlock kind={step.kind} summary={step.summary} />}
+      {(step.summary || step.payload) && (
+        <ToolResultBlock kind={step.kind} summary={step.summary} payload={step.payload} />
+      )}
     </li>
   );
 }

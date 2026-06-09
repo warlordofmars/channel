@@ -15,6 +15,115 @@ from __future__ import annotations
 import json
 from typing import Any
 
+# The full key set of the code-exec sandbox handler's return contract
+# (see ``src/channel/sandbox/handler.py:lambda_handler``). Used by
+# ``_translate_single_tool_result`` to discriminate code_exec results
+# from any future tool that happens to return JSON with overlapping
+# keys (e.g. ``{stdout, exit_code, ...}``) so we don't accidentally
+# leak that other tool's raw payload as ``kind="code-output"``.
+_CODE_EXEC_PAYLOAD_KEYS: frozenset[str] = frozenset(
+    {"stdout", "stderr", "exit_code", "duration_ms", "truncated", "timed_out", "images"}
+)
+
+# Cheap substring sentinels used by ``_looks_like_code_exec_payload``
+# to short-circuit the ``json.loads`` parse for non-code-exec tool
+# results. ``web_search`` in particular can return hundreds of KB of
+# JSON (text=True embeds full page content); avoiding the full parse
+# on every successful tool result matters at the chassis hot path.
+_CODE_EXEC_SENTINELS: tuple[str, ...] = (
+    '"exit_code"',
+    '"duration_ms"',
+    '"timed_out"',
+)
+
+
+def _looks_like_code_exec_payload(text: str) -> bool:
+    """Cheap pre-check: does ``text`` plausibly contain a code-exec
+    sandbox-handler return blob?
+
+    Looks for a JSON-object lead byte plus a couple of sandbox-specific
+    quoted-key substrings. False positives only cost a redundant
+    ``json.loads`` (the full key-set check below still gates).
+    False negatives would silently drop code-output classification —
+    we pick three highly-specific keys (``exit_code`` / ``duration_ms``
+    / ``timed_out``) that the sandbox handler always emits."""
+    if not text or text[0] != "{":
+        return False
+    return all(sentinel in text for sentinel in _CODE_EXEC_SENTINELS)
+
+
+def _translate_single_tool_result(result: dict[str, Any]) -> tuple[str, Any]:
+    """Translate one ``ToolResult`` dict into a single SSE-emit tuple.
+
+    Shared by the legacy ``"type": "tool_result"`` branch (unit-tested,
+    unreachable in production) and the live ``ToolResultMessageEvent``
+    branch — that event bundles multiple tool results into one message,
+    and ``translate_event`` iterates this helper per result.
+
+    Returns ``("skip", None)`` if the result is uncorrelatable
+    (missing ``toolUseId``)."""
+    tool_use_id = result.get("toolUseId", "")
+    # Uncorrelatable-event guard: without a ``tool_use_id`` the SPA
+    # can't attach the ``tool_finished`` / ``tool_error`` payload to
+    # any step row.
+    if not tool_use_id:
+        return ("skip", None)
+    status = result.get("status", "success")
+    if status == "error":
+        # Error path concatenates ``text`` blocks because Strands
+        # wraps the cancel-reason string from
+        # ``BeforeToolCallEvent.cancel_tool`` into ``content`` as
+        # ``{"content": [{"text": cancel_message}]}`` (see
+        # ``strands/tools/executors/_executor.py``). Surfacing that
+        # string as ``error_type`` is how ``ToolCallGuardHook``'s
+        # reason codes (``chain_cap`` / ``cancelled`` / ``wall_clock``)
+        # reach the SPA so it can render the right affordance.
+        reason_text = "".join(
+            block.get("text", "")
+            for block in result.get("content", [])
+            if isinstance(block, dict) and "text" in block
+        )
+        error_type = reason_text.strip() or "tool_failed"
+        return (
+            "tool_error",
+            {
+                "tool_use_id": tool_use_id,
+                "error_type": error_type[:_ARGS_PREVIEW_MAX],
+                "partial_result_count": 0,
+            },
+        )
+    # Success: emit a generic completion marker. The raw tool result
+    # text DOES NOT leak over SSE by default — that is the contract
+    # documented on ``sse_tool_finished``. The ONE exception is the
+    # code-exec sandbox (#183), whose entire purpose is to surface
+    # stdout/stderr/images to the user via a structured renderer in
+    # the SPA. We detect the code-exec shape by structure (parsed
+    # JSON containing the FULL sandbox-handler return contract — see
+    # ``src/channel/sandbox/handler.py`` for the keys) rather than
+    # plumbing tool_name through, since tool_name lives on the
+    # preceding ``ToolUseStreamEvent`` and not on the result. The
+    # full-key signature avoids accidentally classifying any future
+    # tool that happens to return ``{stdout, exit_code, ...}`` as
+    # code-output and leaking its raw payload over SSE.
+    success_payload: dict[str, Any] = {
+        "tool_use_id": tool_use_id,
+        "summary": "completed",
+    }
+    joined_text = "".join(
+        block.get("text", "")
+        for block in result.get("content", [])
+        if isinstance(block, dict) and "text" in block
+    )
+    if joined_text and _looks_like_code_exec_payload(joined_text):
+        try:
+            parsed = json.loads(joined_text)
+        except (ValueError, TypeError):
+            parsed = None
+        if isinstance(parsed, dict) and _CODE_EXEC_PAYLOAD_KEYS.issubset(parsed.keys()):
+            success_payload["kind"] = "code-output"
+            success_payload["payload"] = parsed
+    return ("tool_finished", success_payload)
+
 
 def translate_event(event: dict[str, Any]) -> tuple[str, Any]:
     """Classify one Strands stream event.
@@ -91,50 +200,44 @@ def translate_event(event: dict[str, Any]) -> tuple[str, Any]:
             )
 
     if event_type == "tool_result":
+        # Legacy single-result event shape (kept for unit-test coverage and
+        # any future Strands version that flips ToolResultEvent's
+        # is_callback_event to True). In Strands 1.41.0 this branch is
+        # unreachable in production: ToolResultEvent.is_callback_event
+        # returns False so stream_async filters it out before our loop
+        # ever sees it. The live path is ``ToolResultMessageEvent``
+        # (the ``"message" in event`` branch below).
         result = event.get("tool_result") or {}
-        tool_use_id = result.get("toolUseId", "")
-        # Same uncorrelatable-event guard as ``tool_progress`` / cancel /
-        # interrupt: without a ``tool_use_id`` the SPA can't attach the
-        # ``tool_finished`` / ``tool_error`` payload to any step row.
-        if not tool_use_id:
-            return ("skip", None)
-        status = result.get("status", "success")
-        if status == "error":
-            # Error path concatenates ``text`` blocks because Strands
-            # wraps the cancel-reason string from
-            # ``BeforeToolCallEvent.cancel_tool`` into ``content`` as
-            # ``{"content": [{"text": cancel_message}]}`` (see
-            # ``strands/tools/executors/_executor.py``). Surfacing
-            # that string as ``error_type`` is how ``ToolCallGuardHook``'s
-            # reason codes (``chain_cap`` / ``cancelled`` /
-            # ``wall_clock``) reach the SPA so it can render the right
-            # affordance. This IS bounded telemetry — short, fixed
-            # reason strings — and ``sse_tool_error`` caps it at
-            # ``_ARGS_PREVIEW_MAX`` as defense in depth.
-            reason_text = "".join(
-                block.get("text", "")
-                for block in result.get("content", [])
-                if isinstance(block, dict) and "text" in block
-            )
-            error_type = reason_text.strip() or "tool_failed"
-            return (
-                "tool_error",
-                {
-                    "tool_use_id": tool_use_id,
-                    "error_type": error_type[:_ARGS_PREVIEW_MAX],
-                    "partial_result_count": 0,
-                },
-            )
-        # Success: emit a generic completion marker. The raw tool
-        # result text DOES NOT leak over SSE — that is the contract
-        # documented on ``sse_tool_finished``. Tools that want a
-        # richer SPA summary will provide one via a structured
-        # ``ToolResult`` summary field in #182 / #183; the chassis
-        # does NOT infer summaries from raw content. The actual tool
-        # output still feeds the model (Strands' event_loop), which
-        # incorporates it into the assistant's text reply — that is
-        # where users see the real data, not the SSE step row.
-        return ("tool_finished", {"tool_use_id": tool_use_id, "summary": "completed"})
+        return _translate_single_tool_result(result)
+
+    # ``ToolResultMessageEvent`` shape (#183 post-deploy fix): Strands
+    # bundles all completed tool results from a single event-loop cycle
+    # into a ``user`` message with ``[{"toolResult": ...}, ...]`` content
+    # blocks. This event IS callback-eligible (unlike ToolResultEvent)
+    # so it reaches our SSE loop. We translate it to a ``tool_results``
+    # batch — chats.py iterates and emits one SSE frame per result.
+    #
+    # Captured by the 2026-06-08 dev smoke of code_exec: tool_started
+    # fired but no tool_finished ever followed because the chassis's
+    # single-result ``"tool_result"`` branch above never matched in
+    # production. The stuck-running step (#221) was a symptom of this
+    # — the SSE event was never sent, so no SPA fix could surface it.
+    message = event.get("message")
+    if isinstance(message, dict) and isinstance(message.get("content"), list):
+        translated: list[tuple[str, dict[str, Any]]] = []
+        for block in message["content"]:
+            if not isinstance(block, dict):
+                continue
+            tool_result = block.get("toolResult")
+            if not isinstance(tool_result, dict):
+                continue
+            kind, payload = _translate_single_tool_result(tool_result)
+            if kind == "skip":
+                continue
+            translated.append((kind, payload))
+        if translated:
+            return ("tool_results", translated)
+        return ("skip", None)
 
     if "tool_cancel_event" in event:
         cancel = event["tool_cancel_event"]
@@ -312,29 +415,43 @@ def sse_tool_progress(*, tool_use_id: str, status_text: str) -> bytes:
     )
 
 
-def sse_tool_finished(*, tool_use_id: str, summary: str) -> bytes:
-    """Emit a ``tool_finished`` SSE event (epic #128 / #181).
+def sse_tool_finished(
+    *,
+    tool_use_id: str,
+    summary: str,
+    kind: str | None = None,
+    payload: dict[str, Any] | None = None,
+) -> bytes:
+    """Emit a ``tool_finished`` SSE event (epic #128 / #181, #183).
 
     Marks tool completion. ``summary`` is a short, bounded marker — the
-    chassis never sends raw tool output over SSE. Today the chassis
-    emits a literal ``"completed"`` for every success; #182 (Exa) and
-    #183 (code-exec) will add tool-specific structured summaries
-    ("Found 3 results", "Ran 5 lines") via an explicit ``ToolResult``
-    summary field.
+    chassis never sends raw tool output over SSE for the default case.
+    The chassis emits a literal ``"completed"`` for every success.
+
+    ``kind`` and ``payload`` are #183's extension for structured tool
+    results: when ``code_exec`` returns ``{stdout, stderr, exit_code,
+    ...}``, ``translate_event`` sets ``kind="code-output"`` and
+    ``payload=<that dict>`` so the SPA's ``ToolResultBlock`` can
+    render the code-output branch. Other tools (e.g. ``web_search``)
+    leave both ``None`` and the SPA falls back to the default summary
+    branch.
 
     The actual tool output reaches the user via the model's text reply
     (the assistant invokes the tool, Strands' event_loop feeds the
     result back into the model, the model writes a reply that
     incorporates the data). The SSE step row is telemetry, not the
-    delivery channel for tool data.
-    """
-    return _sse(
-        {
-            "type": "tool_finished",
-            "tool_use_id": tool_use_id,
-            "summary": summary[:_SUMMARY_MAX],
-        }
-    )
+    delivery channel for tool data — except for code-exec, where the
+    structured payload IS user-visible data."""
+    body: dict[str, Any] = {
+        "type": "tool_finished",
+        "tool_use_id": tool_use_id,
+        "summary": summary[:_SUMMARY_MAX],
+    }
+    if kind is not None:
+        body["kind"] = kind
+    if payload is not None:
+        body["payload"] = payload
+    return _sse(body)
 
 
 def sse_tool_error(*, tool_use_id: str, error_type: str, partial_result_count: int) -> bytes:

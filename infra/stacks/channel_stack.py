@@ -599,6 +599,73 @@ class ChannelStack(cdk.Stack):
             ],
         )
 
+        # ─── Code-exec sandbox (#183) ─────────────────────────────────
+        # Separate Lambda with its own IAM role. The IAM boundary is
+        # the load-bearing isolation: AWSLambdaBasicExecutionRole only
+        # (CloudWatch Logs writes) — no DynamoDB, S3, Bedrock, Secrets,
+        # or SSM grants. Even if user code escapes the subprocess
+        # (it shouldn't), the sandbox can't reach Channel data.
+        #
+        # Network: this Lambda is NOT in a VPC. The AWS Lambda default
+        # for non-VPC functions is outbound internet via AWS's managed
+        # runtime — so the sandbox CAN make external HTTP requests.
+        # That gap is documented in code_exec.py's docstring and the
+        # tool nudges the model away from gratuitous outbound calls.
+        # Hard no-egress isolation is a follow-up (place the Lambda in
+        # private subnets with no NAT route + security group with
+        # egress disabled). Tracked separately; not blocking v1.
+        # SnapStart on published versions masks the sci-stack imports.
+        sandbox_role = iam.Role(
+            self,
+            "CodeExecLambdaRole",
+            assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
+            managed_policies=[
+                iam.ManagedPolicy.from_aws_managed_policy_name(
+                    "service-role/AWSLambdaBasicExecutionRole"
+                ),
+            ],
+        )
+        code_exec_fn = lambda_.Function(
+            self,
+            "CodeExecLambda",
+            function_name=f"channel-{env_name}-code-exec",
+            runtime=lambda_.Runtime.PYTHON_3_13,
+            handler="channel.sandbox.handler.lambda_handler",
+            code=lambda_.Code.from_asset(
+                # Asset path mirrors the API Lambda's ``from_asset("..")``
+                # — the path is relative to ``infra/`` (the cdk.json
+                # context); ``..`` resolves to the worktree root which
+                # holds ``src/channel/sandbox/``. The bundling command
+                # pulls only what the sandbox needs (no FastAPI,
+                # uvicorn, or Strands tree).
+                "..",
+                bundling=cdk.BundlingOptions(
+                    image=lambda_.Runtime.PYTHON_3_13.bundling_image,
+                    command=[
+                        "bash",
+                        "-c",
+                        (
+                            "pip install -r src/channel/sandbox/requirements.txt "
+                            "-t /asset-output && "
+                            "mkdir -p /asset-output/channel/sandbox && "
+                            "touch /asset-output/channel/__init__.py && "
+                            "cp src/channel/sandbox/__init__.py "
+                            "/asset-output/channel/sandbox/__init__.py && "
+                            "cp src/channel/sandbox/handler.py "
+                            "/asset-output/channel/sandbox/handler.py"
+                        ),
+                    ],
+                ),
+            ),
+            timeout=cdk.Duration.minutes(5),
+            memory_size=1024,
+            reserved_concurrent_executions=5,
+            role=sandbox_role,
+            snap_start=lambda_.SnapStartConf.ON_PUBLISHED_VERSIONS,
+            environment={"PYTHONHASHSEED": "0"},
+            log_retention=logs.RetentionDays.ONE_WEEK,
+        )
+
         api_fn = lambda_.Function(
             self,
             "ApiFunction",
@@ -645,6 +712,16 @@ class ChannelStack(cdk.Stack):
                 ],
             )
         )
+
+        # Grant the API Lambda permission to invoke the sandbox version (#183).
+        # InvokeFunction on the published version so SnapStart-eligible
+        # invocations route to the warm snapshot.
+        code_exec_fn.current_version.grant_invoke(api_fn)
+        api_fn.add_environment(
+            "STARTER_CODE_EXEC_LAMBDA_ARN",
+            code_exec_fn.current_version.function_arn,
+        )
+        api_fn.add_environment("STARTER_CODE_EXEC_ENABLED", "1")
 
         api_url = api_fn.add_function_url(
             auth_type=lambda_.FunctionUrlAuthType.NONE,

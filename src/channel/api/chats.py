@@ -482,6 +482,46 @@ async def delete_chat(
     return Response(status_code=204)
 
 
+def _build_tool_registry() -> list[Any]:
+    """Assemble the per-turn tool registry from env-var kill switches.
+
+    Each tool's registration is gated by its own ``STARTER_<NAME>_ENABLED``
+    flag. The code treats anything other than ``"1"`` as disabled —
+    so an unset flag in a stale dev env (e.g. someone running tests
+    without the CDK env vars wired up) results in the tool being
+    silently omitted rather than crashing on import.
+
+    The deployed envs ship explicit values:
+      * ``STARTER_WEB_SEARCH_ENABLED`` — "1" everywhere (kill switch
+        only; default-on posture once deployed)
+      * ``STARTER_CODE_EXEC_ENABLED`` — "1" everywhere (kill switch
+        only; default-on posture once deployed)
+      * ``STARTER_CLOCK_TOOL_ENABLED`` — "1" in dev, "0" in prod
+        (strategy spec policy P2: clock is a smoke-test tool, not a
+        user-visible capability)
+
+    Order is not significant — Strands collects tools into a name-keyed
+    spec for the model.
+
+    Extracted into a helper in #183 so the unit tests can exercise the
+    flag matrix without spinning up the streaming coroutine. The
+    ``web_search`` and ``code_exec`` imports stay lazy (per-call inside
+    the helper) so a stale dev env without ``strands-agents-tools`` /
+    ``boto3`` installed still loads ``chats`` for a smoke test."""
+    registry: list[Any] = []
+    if os.environ.get("STARTER_CLOCK_TOOL_ENABLED") == "1":
+        registry.append(current_time)
+    if os.environ.get("STARTER_WEB_SEARCH_ENABLED") == "1":
+        from channel.agents.tools.web_search import web_search  # noqa: PLC0415
+
+        registry.append(web_search)
+    if os.environ.get("STARTER_CODE_EXEC_ENABLED") == "1":
+        from channel.agents.tools.code_exec import code_exec  # noqa: PLC0415
+
+        registry.append(code_exec)
+    return registry
+
+
 async def _stream_bedrock_reply(
     *,
     chat: Chat,
@@ -583,22 +623,7 @@ async def _stream_bedrock_reply(
     for err in errors_list:
         yield sse_attachment_error(**err)
 
-    # Tool registry — chassis registers ``current_time`` behind
-    # ``STARTER_CLOCK_TOOL_ENABLED`` (strategy spec policy P2: smoke-test,
-    # off by default in prod) and ``web_search`` behind
-    # ``STARTER_WEB_SEARCH_ENABLED`` (#182, on by default — flag is a
-    # kill switch). #183 (code-exec sandbox) will append a similar
-    # branch later behind its own flag.
-    tool_registry: list[Any] = []
-    if os.environ.get("STARTER_CLOCK_TOOL_ENABLED") == "1":
-        tool_registry.append(current_time)
-    if os.environ.get("STARTER_WEB_SEARCH_ENABLED") == "1":
-        # Lazy import: ``strands_tools.exa`` pulls in aiohttp + console
-        # + Panel + Rich, so the chassis shouldn't pay the import cost
-        # when the flag is off (same rationale as ``current_time``).
-        from channel.agents.tools.web_search import web_search
-
-        tool_registry.append(web_search)
+    tool_registry = _build_tool_registry()
 
     agent = build_agent(
         model_id=model,
@@ -674,6 +699,22 @@ async def _stream_bedrock_reply(
                 # ``sse_tool_error`` docstring for the contract.
                 payload = {**payload, "partial_result_count": completed_tool_calls}
                 yield sse_tool_error(**payload)
+            elif kind == "tool_results":
+                # #183 post-deploy fix: Strands' ``ToolResultMessageEvent``
+                # bundles all completed tool results from one cycle into a
+                # single message. translate_event splits this into a list
+                # of (kind, payload) tuples — one per result. Iterate and
+                # emit per the existing tool_finished / tool_error rules.
+                for sub_kind, sub_payload in payload:
+                    if sub_kind == "tool_finished":
+                        completed_tool_calls += 1
+                        yield sse_tool_finished(**sub_payload)
+                    elif sub_kind == "tool_error":
+                        sub_payload = {
+                            **sub_payload,
+                            "partial_result_count": completed_tool_calls,
+                        }
+                        yield sse_tool_error(**sub_payload)
     except (asyncio.CancelledError, GeneratorExit):
         set_cancel_signal(chat.chat_id)
         raise

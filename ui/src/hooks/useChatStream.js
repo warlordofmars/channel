@@ -10,13 +10,23 @@ import { makeSseDecoder } from "../lib/sseParser.js";
 // Reference-equality short-circuit lets React's useState setter no-op
 // (skip re-render) for stale / unknown tool_use_id events.
 //
+// #221 fix (Option B): the lookup key is the STABLE ``client_msg_id``,
+// not ``msg_id``. The ``done`` SSE event swaps ``msg_id`` from the
+// client-generated temp id to the persisted server id. Without a
+// stable secondary id, ``tool_finished`` events arriving AFTER ``done``
+// (the chassis sometimes flushes them with or after the final frame)
+// can't find the turn and the step stays on ``"running"`` forever.
+// We assign ``client_msg_id = tempAsstId`` when seeding the optimistic
+// row and never overwrite it; patchToolStep + the tool_started turn
+// lookup both key off it.
+//
 // Implementation: locate the target turn + step via findIndex BEFORE
 // cloning anything. On no-op (no match) we return early without
 // allocating a throwaway array — tool events fire frequently during
 // streaming so the allocation matters.
 function patchToolStep(turns, tempAsstId, toolUseId, patch) {
   const turnIdx = turns.findIndex(
-    (t) => t.msg_id === tempAsstId && t.toolSteps,
+    (t) => t.client_msg_id === tempAsstId && t.toolSteps,
   );
   if (turnIdx === -1) return turns;
   const target = turns[turnIdx];
@@ -189,33 +199,42 @@ export function useChatStream(chatId, { onTitleSuggested } = {}) {
           } else if (event.type === "tool_started") {
             // #181 PR-3: push a new running step onto the in-flight
             // assistant turn's toolSteps array. The active assistant
-            // turn is the one matching tempAsstId (set when send /
-            // regenerate seeded the streaming row). Same `mutated`
-            // short-circuit as patchToolStep: if no turn matches (e.g.
-            // tool_started arrives after the temp id was swapped to the
-            // persisted id on `done`), return `prev` so React's
-            // useState setter no-ops and we skip an unnecessary
-            // re-render.
-            setTurns((prev) => {
-              let mutated = false;
-              const next = prev.map((t) => {
-                if (t.msg_id !== tempAsstId) return t;
-                const steps = [...(t.toolSteps || [])];
-                steps.push({
-                  toolUseId: event.tool_use_id,
-                  toolName: event.tool_name,
-                  argsPreview: event.args_preview,
-                  statusText: null,
-                  summary: null,
-                  errorType: null,
-                  partialResultCount: 0,
-                  status: "running",
-                });
-                mutated = true;
-                return { ...t, toolSteps: steps };
-              });
-              return mutated ? next : prev;
-            });
+            // turn is identified by ``client_msg_id`` (#221 fix —
+            // ``msg_id`` swaps to the persisted server id on ``done``;
+            // ``client_msg_id`` stays put for the lifetime of the
+            // turn). ``prev.map`` returns ``prev`` unchanged for every
+            // non-matching turn, so the only allocation in the
+            // common-case "no turn matches" path is one shallow array
+            // copy — ~10 turns × microseconds × ~5 tool events per
+            // chat, negligible. We deliberately don't use the
+            // findIndex+early-return pattern (like ``patchToolStep``
+            // below) because the no-match branch is structurally
+            // unreachable here — ``client_msg_id`` is set at send()
+            // time and never overwritten, so for any tool_started
+            // event the matching turn exists unless a chatId change
+            // raced the stream (and the abort handler cancels reads
+            // before that point).
+            setTurns((prev) =>
+              prev.map((t) => {
+                if (t.client_msg_id !== tempAsstId) return t;
+                return {
+                  ...t,
+                  toolSteps: [
+                    ...(t.toolSteps || []),
+                    {
+                      toolUseId: event.tool_use_id,
+                      toolName: event.tool_name,
+                      argsPreview: event.args_preview,
+                      statusText: null,
+                      summary: null,
+                      errorType: null,
+                      partialResultCount: 0,
+                      status: "running",
+                    },
+                  ],
+                };
+              }),
+            );
           } else if (event.type === "tool_progress") {
             setTurns((prev) =>
               patchToolStep(prev, tempAsstId, event.tool_use_id, {
@@ -226,6 +245,16 @@ export function useChatStream(chatId, { onTitleSuggested } = {}) {
             setTurns((prev) =>
               patchToolStep(prev, tempAsstId, event.tool_use_id, {
                 summary: event.summary,
+                // #183: when the chassis SSE carries kind="code-output"
+                // + payload (sandbox stdout/stderr/images), route them
+                // onto step state so the Conversation view can render
+                // the code-output ToolResultBlock branch. Only spread
+                // the keys that are actually on the SSE event —
+                // patchToolStep does a shallow merge, so passing
+                // ``kind: undefined`` would overwrite a previously-set
+                // value rather than preserving it.
+                ...(event.kind !== undefined && { kind: event.kind }),
+                ...(event.payload !== undefined && { payload: event.payload }),
                 status: "finished",
               }),
             );
@@ -259,7 +288,21 @@ export function useChatStream(chatId, { onTitleSuggested } = {}) {
       setTurns((prev) => [
         ...prev,
         { msg_id: tempUserId, role: "user", text: message, pending: true },
-        { msg_id: tempAsstId, role: "assistant", text: "", streaming: true },
+        {
+          // #221 fix: client_msg_id is the STABLE lookup key for tool
+          // events. msg_id swaps on ``done`` (to the persisted server
+          // id); client_msg_id does not — it stays as the temp value
+          // for the lifetime of the row. patchToolStep + the
+          // tool_started turn lookup both key off client_msg_id so
+          // tool events arriving AFTER ``done`` (sometimes the
+          // chassis flushes them with or after the final frame) still
+          // find their turn and flip the step to ``"finished"``.
+          msg_id: tempAsstId,
+          client_msg_id: tempAsstId,
+          role: "assistant",
+          text: "",
+          streaming: true,
+        },
       ]);
       setStatus("streaming");
 
@@ -303,7 +346,15 @@ export function useChatStream(chatId, { onTitleSuggested } = {}) {
             : [...prev];
         return [
           ...next,
-          { msg_id: tempAsstId, role: "assistant", text: "", streaming: true },
+          {
+            // #221 fix: see send() for the rationale on client_msg_id
+            // as the stable tool-event lookup key.
+            msg_id: tempAsstId,
+            client_msg_id: tempAsstId,
+            role: "assistant",
+            text: "",
+            streaming: true,
+          },
         ];
       });
       setStatus("streaming");

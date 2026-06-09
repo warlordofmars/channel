@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Code execution via Lambda sandbox: `code_exec` tool registered on the
+  chassis behind `STARTER_CODE_EXEC_ENABLED` (default on in deployed envs;
+  kill switch only). A separate `CodeExecLambda` CDK construct runs user
+  Python in a subprocess on a least-privilege IAM role (no DDB / S3 /
+  Bedrock / Secrets / SSM — pure compute), with SnapStart on Python 3.13,
+  reserved-concurrency 5, no VPC, 270s subprocess cap, 20 KB stdout / 5 KB
+  stderr length caps, `/tmp` wiped at entry, and post-exec `/tmp/*.png|jpg`
+  harvest (≤3 × 1 MB base64-encoded) with symlink-escape rejection.
+  Sci-stack pre-installed (numpy, pandas, matplotlib, requests, httpx,
+  python-dateutil — scipy excluded from v1 because the full stack
+  exceeded Lambda's 250 MB unzipped limit; follow-up will move scipy
+  to a Lambda layer). The chassis SSE protocol grew an optional
+  `kind="code-output"` + structured `payload` field on `tool_finished`
+  events, and the SPA's `ToolResultBlock` gained the matching code-output
+  branch (collapsible stdout pane >5 lines, `<details>`-wrapped stderr,
+  inline images, meta line with exit/duration/truncation/timeout flags).
+  Closes epic #128 part C (#183).
 - Web search via Exa: `web_search` tool registered on the chassis behind
   `STARTER_WEB_SEARCH_ENABLED` (default on in all envs; kill switch only,
   not progressive rollout). The model writes replies with inline markdown
