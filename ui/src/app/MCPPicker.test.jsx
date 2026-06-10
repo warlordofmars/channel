@@ -123,4 +123,34 @@ describe("MCPPicker", () => {
     fireEvent.click(backdrop);
     expect(container.querySelector(".pop")).toBeNull();
   });
+
+  it("backdrop Escape key closes the popover", () => {
+    const { container } = render(
+      <MCPPicker servers={SERVERS} mode="inherit" explicitIds={[]} onChange={() => {}} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /tool servers?\b/i }));
+    const backdrop = container.querySelector(".backdrop");
+    fireEvent.keyDown(backdrop, { key: "Escape" });
+    expect(container.querySelector(".pop")).toBeNull();
+  });
+
+  it("backdrop Enter key closes the popover", () => {
+    const { container } = render(
+      <MCPPicker servers={SERVERS} mode="inherit" explicitIds={[]} onChange={() => {}} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /tool servers?\b/i }));
+    const backdrop = container.querySelector(".backdrop");
+    fireEvent.keyDown(backdrop, { key: "Enter" });
+    expect(container.querySelector(".pop")).toBeNull();
+  });
+
+  it("backdrop ignores unrelated keys", () => {
+    const { container } = render(
+      <MCPPicker servers={SERVERS} mode="inherit" explicitIds={[]} onChange={() => {}} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /tool servers?\b/i }));
+    const backdrop = container.querySelector(".backdrop");
+    fireEvent.keyDown(backdrop, { key: "a" });
+    expect(container.querySelector(".pop")).not.toBeNull();
+  });
 });
