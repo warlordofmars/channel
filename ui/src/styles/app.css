@@ -1035,7 +1035,7 @@ html.is-electron-mac .sb-top {
 .mcp-add-form { display: flex; flex-direction: column; gap: 12px; }
 .mcp-add-form .modal-h { margin: 0 0 4px; font-size: 1.05rem; font-weight: 600; color: var(--ink); }
 .mcp-field { display: flex; flex-direction: column; gap: 4px; }
-.mcp-field > span { font-size: 0.85rem; color: var(--ink-muted); }
+.mcp-field > span { font-size: 0.85rem; color: var(--ink-faint); }
 .mcp-field > input {
   background: var(--canvas);
   color: var(--ink);
@@ -1045,12 +1045,12 @@ html.is-electron-mac .sb-top {
 }
 .mcp-consent {
   font-size: 0.85rem;
-  color: var(--ink-muted);
+  color: var(--ink-faint);
   background: var(--raised);
   border-radius: var(--r-sm);
   padding: 10px 12px;
 }
-.mcp-err { color: var(--accent); font-size: 0.9rem; }
+.mcp-err { color: var(--danger); font-size: 0.9rem; }
 .mcp-actions { display: flex; justify-content: flex-end; gap: 8px; }
 
 /* MCP — Customize section list (#207) */
@@ -1062,16 +1062,20 @@ html.is-electron-mac .sb-top {
 }
 .mcp-row-main { flex: 1; min-width: 0; }
 .mcp-row-name { display: flex; align-items: center; gap: 8px; font-weight: 500; }
-.mcp-row-url { font-size: 0.8rem; color: var(--ink-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mcp-row-url { font-size: 0.8rem; color: var(--ink-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mcp-row-actions { display: flex; align-items: center; gap: 8px; }
 .mcp-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+/* No semantic "success" token exists in channel.css today; the green
+ * literal is the only use-site of a non-token color and is intentionally
+ * left as OKLCH here. Expired / revoked map to --danger; never_authed
+ * to --ink-faint so it adapts between light and dark themes. */
 .mcp-dot-active { background: oklch(0.70 0.16 150); }
-.mcp-dot-expired, .mcp-dot-revoked { background: oklch(0.65 0.18 30); }
-.mcp-dot-never_authed { background: var(--ink-muted); }
+.mcp-dot-expired, .mcp-dot-revoked { background: var(--danger); }
+.mcp-dot-never_authed { background: var(--ink-faint); }
 .mcp-status-text {
   font-size: 0.75rem;
   font-weight: 400;
-  color: var(--ink-muted);
+  color: var(--ink-faint);
   background: var(--canvas);
   border: 1px solid var(--border);
   border-radius: var(--r-sm);
