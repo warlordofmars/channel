@@ -32,7 +32,9 @@ def test_thunk_attaches_authorization_header(monkeypatch: Any) -> None:
     captured: dict[str, Any] = {}
 
     class _FakeAsyncClient:
-        def __init__(self, *args: Any, headers: dict[str, str] | None = None, **kwargs: Any) -> None:
+        def __init__(
+            self, *args: Any, headers: dict[str, str] | None = None, **kwargs: Any
+        ) -> None:
             captured["headers"] = headers
 
     from channel.mcp import transports

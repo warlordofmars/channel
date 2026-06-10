@@ -174,9 +174,7 @@ class ChannelStack(cdk.Stack):
         # All parameters use per-environment paths to prevent secret sharing.
         # Prod keeps legacy paths (no env suffix) for backward compatibility.
         def _ssm_path(name: str) -> str:
-            return (
-                f"/channel/{name}" if is_prod else f"/channel/{env_name}/{name}"
-            )
+            return f"/channel/{name}" if is_prod else f"/channel/{env_name}/{name}"
 
         ssm_param_name = _ssm_path("jwt-secret")
 
@@ -513,9 +511,7 @@ class ChannelStack(cdk.Stack):
         # MCP servers persist this in their DCR client record; changing
         # it later requires re-registering, so derive it from the env's
         # custom_domain.
-        common_env["STARTER_MCP_REDIRECT_URI"] = (
-            f"https://{custom_domain}/auth/mcp/callback"
-        )
+        common_env["STARTER_MCP_REDIRECT_URI"] = f"https://{custom_domain}/auth/mcp/callback"
         common_env["STARTER_SPA_BASE_URL"] = f"https://{custom_domain}"
 
         # ----------------------------------------------------------------
@@ -531,9 +527,7 @@ class ChannelStack(cdk.Stack):
         # in tasks.py around line 432).
         attachments_cors_origins = [f"https://{custom_domain}"]
         if not is_prod:
-            attachments_cors_origins += [
-                f"http://localhost:{port}" for port in range(5173, 5180)
-            ]
+            attachments_cors_origins += [f"http://localhost:{port}" for port in range(5173, 5180)]
 
         # SSE-KMS via the AWS-managed ``aws/s3`` key. No dedicated CMK —
         # the AWS-managed key auto-grants any IAM principal in the account
@@ -583,9 +577,7 @@ class ChannelStack(cdk.Stack):
         api_role.add_to_policy(
             iam.PolicyStatement(
                 actions=["s3:PutObjectTagging", "s3:DeleteObjectTagging"],
-                resources=[
-                    attachments_bucket.arn_for_objects("attachments/user/*")
-                ],
+                resources=[attachments_bucket.arn_for_objects("attachments/user/*")],
             )
         )
         # CDK's grant_read does NOT inject KMS permissions when the bucket
@@ -808,8 +800,7 @@ class ChannelStack(cdk.Stack):
         # renders cleanly so smoke tools and CI synth gates work, but a
         # deploy without the context value produces a non-functional stack.
         origin_verify_secret = (
-            self.node.try_get_context("origin_verify_secret")
-            or "CHANGE_ME_ON_FIRST_DEPLOY"
+            self.node.try_get_context("origin_verify_secret") or "CHANGE_ME_ON_FIRST_DEPLOY"
         )
         origin_verify_header = {"X-Origin-Verify": origin_verify_secret}
 

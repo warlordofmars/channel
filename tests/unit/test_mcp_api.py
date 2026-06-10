@@ -43,7 +43,8 @@ def public_dns(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_list_servers_returns_empty(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from channel import storage
 
@@ -54,7 +55,9 @@ def test_list_servers_returns_empty(
 
 
 def test_register_server_runs_dcr_and_returns_auth_url(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch, public_dns: None,
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    public_dns: None,
 ) -> None:
     from mcp.shared.auth import (
         OAuthClientInformationFull,
@@ -67,31 +70,40 @@ def test_register_server_runs_dcr_and_returns_auth_url(
     from channel.models import MCPServer, MCPServerAuthStatus
 
     monkeypatch.setattr(
-        mcp_auth, "discover_resource_metadata",
-        AsyncMock(return_value=ProtectedResourceMetadata(
-            authorization_servers=["https://auth.example.com"],
-            resource="https://hive.example.com/mcp",
-        )),
+        mcp_auth,
+        "discover_resource_metadata",
+        AsyncMock(
+            return_value=ProtectedResourceMetadata(
+                authorization_servers=["https://auth.example.com"],
+                resource="https://hive.example.com/mcp",
+            )
+        ),
     )
     monkeypatch.setattr(
-        mcp_auth, "discover_auth_server_metadata",
-        AsyncMock(return_value=OAuthMetadata(
-            issuer="https://auth.example.com",
-            authorization_endpoint="https://auth.example.com/authorize",
-            token_endpoint="https://auth.example.com/token",
-            registration_endpoint="https://auth.example.com/register",
-            response_types_supported=["code"],
-        )),
+        mcp_auth,
+        "discover_auth_server_metadata",
+        AsyncMock(
+            return_value=OAuthMetadata(
+                issuer="https://auth.example.com",
+                authorization_endpoint="https://auth.example.com/authorize",
+                token_endpoint="https://auth.example.com/token",
+                registration_endpoint="https://auth.example.com/register",
+                response_types_supported=["code"],
+            )
+        ),
     )
     monkeypatch.setattr(
-        mcp_auth, "register_dynamic_client",
-        AsyncMock(return_value=OAuthClientInformationFull(
-            client_id="dcr-new",
-            redirect_uris=["https://channel.example.com/auth/mcp/callback"],
-            token_endpoint_auth_method="none",
-            grant_types=["authorization_code", "refresh_token"],
-            response_types=["code"],
-        )),
+        mcp_auth,
+        "register_dynamic_client",
+        AsyncMock(
+            return_value=OAuthClientInformationFull(
+                client_id="dcr-new",
+                redirect_uris=["https://channel.example.com/auth/mcp/callback"],
+                token_endpoint_auth_method="none",
+                grant_types=["authorization_code", "refresh_token"],
+                response_types=["code"],
+            )
+        ),
     )
     monkeypatch.setattr(
         "channel.api.mcp.state_store.put_state",
@@ -103,17 +115,22 @@ def test_register_server_runs_dcr_and_returns_auth_url(
     def fake_create(**kwargs: Any) -> MCPServer:
         created.update(kwargs)
         return MCPServer(
-            server_id="srv-1", user_id="user-1", name=kwargs["name"],
-            url=kwargs["url"], client_id=kwargs["client_id"],
+            server_id="srv-1",
+            user_id="user-1",
+            name=kwargs["name"],
+            url=kwargs["url"],
+            client_id=kwargs["client_id"],
             tool_prefix=kwargs["tool_prefix"],
             auth_status=MCPServerAuthStatus.NEVER_AUTHED,
-            created_at="x", updated_at="x",
+            created_at="x",
+            updated_at="x",
         )
 
     monkeypatch.setattr(storage, "create_mcp_server", fake_create)
 
     monkeypatch.setenv(
-        "STARTER_MCP_REDIRECT_URI", "https://channel.example.com/auth/mcp/callback",
+        "STARTER_MCP_REDIRECT_URI",
+        "https://channel.example.com/auth/mcp/callback",
     )
 
     resp = client.post(
@@ -150,7 +167,8 @@ def test_register_rejects_http_when_not_localhost(
 
 
 def test_register_rejects_link_local_metadata_ip(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Block the AWS IMDS at 169.254.169.254 — the SSRF threat that the
     URL validator exists to prevent."""
@@ -167,7 +185,8 @@ def test_register_rejects_link_local_metadata_ip(
 
 
 def test_register_rejects_loopback_when_carve_out_disabled(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("STARTER_MCP_ALLOW_LOCALHOST", raising=False)
     resp = client.post(
@@ -178,7 +197,8 @@ def test_register_rejects_loopback_when_carve_out_disabled(
 
 
 def test_register_rejects_when_dns_resolves_to_private(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Even a non-loopback hostname is blocked if DNS resolves to a
     private address."""
@@ -202,7 +222,8 @@ def test_register_rejects_when_dns_resolves_to_private(
 
 
 def test_register_allows_localhost_carve_out_when_flag_set(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Local dev still works behind the explicit STARTER_MCP_ALLOW_LOCALHOST=1."""
     from channel.api.mcp import _validate_mcp_server_url
@@ -227,7 +248,8 @@ def test_callback_with_invalid_state_redirects_with_error(
 
 
 def test_callback_happy_path_persists_token_and_flips_status(
-    monkeypatch: pytest.MonkeyPatch, public_dns: None,
+    monkeypatch: pytest.MonkeyPatch,
+    public_dns: None,
 ) -> None:
     from mcp.shared.auth import OAuthMetadata, OAuthToken, ProtectedResourceMetadata
 
@@ -238,7 +260,8 @@ def test_callback_happy_path_persists_token_and_flips_status(
     from channel.models import MCPServer, MCPServerAuthStatus
 
     monkeypatch.setattr(
-        state_store, "consume_state",
+        state_store,
+        "consume_state",
         lambda _: {
             "purpose": "mcp",
             "user_id": "u1",
@@ -248,50 +271,69 @@ def test_callback_happy_path_persists_token_and_flips_status(
         },
     )
     monkeypatch.setattr(
-        storage, "get_mcp_server",
+        storage,
+        "get_mcp_server",
         lambda **_: MCPServer(
-            server_id="srv-1", user_id="u1", name="Hive",
+            server_id="srv-1",
+            user_id="u1",
+            name="Hive",
             url="https://hive.example.com/mcp",
-            client_id="dcr-1", tool_prefix="hive",
+            client_id="dcr-1",
+            tool_prefix="hive",
             auth_status=MCPServerAuthStatus.NEVER_AUTHED,
-            created_at="x", updated_at="x",
+            created_at="x",
+            updated_at="x",
         ),
     )
     monkeypatch.setattr(
-        mcp_auth, "discover_resource_metadata",
-        AsyncMock(return_value=ProtectedResourceMetadata(
-            authorization_servers=["https://auth.example.com"],
-            resource="https://hive.example.com/mcp",
-        )),
+        mcp_auth,
+        "discover_resource_metadata",
+        AsyncMock(
+            return_value=ProtectedResourceMetadata(
+                authorization_servers=["https://auth.example.com"],
+                resource="https://hive.example.com/mcp",
+            )
+        ),
     )
     monkeypatch.setattr(
-        mcp_auth, "discover_auth_server_metadata",
-        AsyncMock(return_value=OAuthMetadata(
-            issuer="https://auth.example.com",
-            authorization_endpoint="https://auth.example.com/authorize",
-            token_endpoint="https://auth.example.com/token",
-            response_types_supported=["code"],
-        )),
+        mcp_auth,
+        "discover_auth_server_metadata",
+        AsyncMock(
+            return_value=OAuthMetadata(
+                issuer="https://auth.example.com",
+                authorization_endpoint="https://auth.example.com/authorize",
+                token_endpoint="https://auth.example.com/token",
+                response_types_supported=["code"],
+            )
+        ),
     )
     monkeypatch.setattr(
-        mcp_auth, "exchange_code",
-        AsyncMock(return_value=OAuthToken(
-            access_token="acc-1", refresh_token="ref-1",
-            expires_in=3600, token_type="Bearer", scope="read",
-        )),
+        mcp_auth,
+        "exchange_code",
+        AsyncMock(
+            return_value=OAuthToken(
+                access_token="acc-1",
+                refresh_token="ref-1",
+                expires_in=3600,
+                token_type="Bearer",
+                scope="read",
+            )
+        ),
     )
     monkeypatch.setattr(crypto, "encrypt_blob", lambda s: ("ENC::" + s).encode())
     persisted: dict[str, Any] = {}
     monkeypatch.setattr(storage, "put_mcp_token", lambda **kw: persisted.update(kw))
     flipped: dict[str, Any] = {}
     monkeypatch.setattr(
-        storage, "set_mcp_server_auth_status",
+        storage,
+        "set_mcp_server_auth_status",
         lambda **kw: flipped.update(kw),
     )
 
     raw_client = TestClient(app)
     resp = raw_client.get(
-        "/auth/mcp/callback?state=ok&code=auth-code", follow_redirects=False,
+        "/auth/mcp/callback?state=ok&code=auth-code",
+        follow_redirects=False,
     )
     assert resp.status_code == 302, resp.text
     assert "mcp_authed=ok" in resp.headers["location"]

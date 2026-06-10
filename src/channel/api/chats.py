@@ -18,6 +18,7 @@ from typing import Any
 import boto3
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Response
 from fastapi.responses import StreamingResponse
+from strands.tools.mcp import MCPClient
 from strands.types.exceptions import MaxTokensReachedException
 
 from channel import storage
@@ -44,15 +45,15 @@ from channel.agents.strands_sse import (
 from channel.agents.tool_hooks import clear_cancel_signal, set_cancel_signal
 from channel.agents.tools.clock import current_time
 from channel.api._auth import require_mgmt_user
+from channel.mcp import auth as mcp_auth
+from channel.mcp.auth import MCPAuthFailedError
+from channel.mcp.transports import make_authenticated_transport
 from channel.metrics import (
     record_auto_title_outcome,
     record_chat_delete_attachment_wipe_outcome,
     record_chat_delete_memory_wipe_outcome,
     record_followup_outcome,
 )
-from channel.mcp import auth as mcp_auth
-from channel.mcp.auth import MCPAuthFailedError
-from channel.mcp.transports import make_authenticated_transport
 from channel.models import (
     Chat,
     ChatCreate,
@@ -65,7 +66,6 @@ from channel.models import (
     RegenerateRequest,
     SendMessageRequest,
 )
-from strands.tools.mcp import MCPClient
 
 logger = logging.getLogger(__name__)
 
@@ -529,7 +529,9 @@ def _build_tool_registry() -> list[Any]:
 
 
 async def _build_mcp_clients_for_chat(
-    *, user_id: str, chat_id: str,
+    *,
+    user_id: str,
+    chat_id: str,
 ) -> list[MCPClient]:
     """Resolve active MCP servers + tokens for one chat turn.
 
@@ -558,12 +560,15 @@ async def _build_mcp_clients_for_chat(
     for server in active:
         try:
             token = await mcp_auth.get_valid_access_token(
-                user_id=user_id, server=server,
+                user_id=user_id,
+                server=server,
             )
         except MCPAuthFailedError as exc:
             logger.warning(
                 "mcp.token_resolution_failed user=%s server=%s %s",
-                user_id, server.server_id, exc,
+                user_id,
+                server.server_id,
+                exc,
             )
             storage.set_mcp_server_auth_status(
                 user_id=user_id,
@@ -574,7 +579,8 @@ async def _build_mcp_clients_for_chat(
         clients.append(
             MCPClient(
                 make_authenticated_transport(
-                    server_url=server.url, access_token=token,
+                    server_url=server.url,
+                    access_token=token,
                 ),
                 prefix=server.tool_prefix,
             )
@@ -688,7 +694,8 @@ async def _stream_bedrock_reply(
     # swallowed inside _build_mcp_clients_for_chat (the helper flips
     # the MCPSERVER row to EXPIRED so the SPA can surface Reconnect).
     mcp_clients = await _build_mcp_clients_for_chat(
-        user_id=claims["sub"], chat_id=chat.chat_id,
+        user_id=claims["sub"],
+        chat_id=chat.chat_id,
     )
     tool_registry = [*tool_registry, *mcp_clients]
 

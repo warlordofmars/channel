@@ -41,24 +41,35 @@ def test_register_promote_delete_round_trip() -> None:
         status=MCPServerAuthStatus.ACTIVE,
     )
     fetched = storage.get_mcp_server(
-        user_id="user-int-1", server_id=server.server_id,
+        user_id="user-int-1",
+        server_id=server.server_id,
     )
     assert fetched is not None
     assert fetched.auth_status == MCPServerAuthStatus.ACTIVE
     token = storage.get_mcp_token(
-        user_id="user-int-1", server_id=server.server_id,
+        user_id="user-int-1",
+        server_id=server.server_id,
     )
     assert token is not None
 
     storage.delete_mcp_server(
-        user_id="user-int-1", server_id=server.server_id,
+        user_id="user-int-1",
+        server_id=server.server_id,
     )
-    assert storage.get_mcp_server(
-        user_id="user-int-1", server_id=server.server_id,
-    ) is None
-    assert storage.get_mcp_token(
-        user_id="user-int-1", server_id=server.server_id,
-    ) is None
+    assert (
+        storage.get_mcp_server(
+            user_id="user-int-1",
+            server_id=server.server_id,
+        )
+        is None
+    )
+    assert (
+        storage.get_mcp_token(
+            user_id="user-int-1",
+            server_id=server.server_id,
+        )
+        is None
+    )
 
 
 def test_chat_mcp_settings_round_trip() -> None:

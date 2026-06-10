@@ -50,8 +50,7 @@ _HTTP_TIMEOUT_SEC = 30.0
 def generate_pkce() -> tuple[str, str]:
     """Return ``(code_verifier, code_challenge)`` for PKCE S256."""
     verifier = "".join(
-        secrets.choice(string.ascii_letters + string.digits + "-._~")
-        for _ in range(128)
+        secrets.choice(string.ascii_letters + string.digits + "-._~") for _ in range(128)
     )
     digest = hashlib.sha256(verifier.encode("utf-8")).digest()
     challenge = base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
@@ -68,7 +67,8 @@ async def discover_resource_metadata(server_url: str) -> ProtectedResourceMetada
     origin = _origin_of(server_url)
     url = origin + _PRM_PATH
     async with httpx.AsyncClient(
-        timeout=_HTTP_TIMEOUT_SEC, follow_redirects=False,
+        timeout=_HTTP_TIMEOUT_SEC,
+        follow_redirects=False,
     ) as client:
         resp = await client.get(url)
     resp.raise_for_status()
@@ -80,7 +80,8 @@ async def discover_auth_server_metadata(auth_server_url: str) -> OAuthMetadata:
     origin = _origin_of(auth_server_url)
     url = origin + _AS_PATH
     async with httpx.AsyncClient(
-        timeout=_HTTP_TIMEOUT_SEC, follow_redirects=False,
+        timeout=_HTTP_TIMEOUT_SEC,
+        follow_redirects=False,
     ) as client:
         resp = await client.get(url)
     resp.raise_for_status()
@@ -108,7 +109,8 @@ async def register_dynamic_client(
         "client_name": client_name,
     }
     async with httpx.AsyncClient(
-        timeout=_HTTP_TIMEOUT_SEC, follow_redirects=False,
+        timeout=_HTTP_TIMEOUT_SEC,
+        follow_redirects=False,
     ) as client:
         resp = await client.post(registration_endpoint, json=body)
     resp.raise_for_status()
@@ -156,7 +158,8 @@ async def exchange_code(
         "code_verifier": code_verifier,
     }
     async with httpx.AsyncClient(
-        timeout=_HTTP_TIMEOUT_SEC, follow_redirects=False,
+        timeout=_HTTP_TIMEOUT_SEC,
+        follow_redirects=False,
     ) as client:
         resp = await client.post(
             token_endpoint,
@@ -180,7 +183,8 @@ async def refresh_token(
         "client_id": client_id,
     }
     async with httpx.AsyncClient(
-        timeout=_HTTP_TIMEOUT_SEC, follow_redirects=False,
+        timeout=_HTTP_TIMEOUT_SEC,
+        follow_redirects=False,
     ) as client:
         resp = await client.post(
             token_endpoint,
@@ -223,9 +227,7 @@ async def get_valid_access_token(
     """
     token = storage.get_mcp_token(user_id=user_id, server_id=server.server_id)
     if token is None:
-        raise MCPAuthFailedError(
-            f"no token row for user={user_id} server={server.server_id}"
-        )
+        raise MCPAuthFailedError(f"no token row for user={user_id} server={server.server_id}")
     now = int(time.time())
     if token.expires_at - now > _REFRESH_SKEW_SEC:
         return crypto.decrypt_blob(token.access_token_ciphertext)
@@ -239,11 +241,7 @@ async def get_valid_access_token(
     try:
         prm = await discover_resource_metadata(server.url)
         # MCP servers either point at an external auth server or self-issue.
-        as_url = (
-            str(prm.authorization_servers[0])
-            if prm.authorization_servers
-            else server.url
-        )
+        as_url = str(prm.authorization_servers[0]) if prm.authorization_servers else server.url
         as_meta = await discover_auth_server_metadata(as_url)
         new_tok = await refresh_token(
             token_endpoint=str(as_meta.token_endpoint),

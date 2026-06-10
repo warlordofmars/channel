@@ -120,9 +120,7 @@ def _validate_mcp_server_url(url: str) -> None:
         # it loosely as ``str | int`` because of the Unix-socket case.
         addr = str(info[4][0])
         if _is_dangerous_address(addr):
-            raise HTTPException(
-                status_code=400, detail="URL targets a blocked address range"
-            )
+            raise HTTPException(status_code=400, detail="URL targets a blocked address range")
 
 
 def _normalize_tool_prefix(value: str | None, fallback_url: str) -> str:
@@ -179,17 +177,19 @@ def list_servers(
 ) -> _ServerListResponse:
     response.headers["Cache-Control"] = "no-store"
     servers = storage.list_mcp_servers_for_user(claims["sub"])
-    return _ServerListResponse(
-        servers=[_to_out(s) for s in servers]
-    )
+    return _ServerListResponse(servers=[_to_out(s) for s in servers])
 
 
 def _to_out(s: MCPServer) -> _ServerOut:
     return _ServerOut(
-        server_id=s.server_id, name=s.name, url=s.url,
-        tool_prefix=s.tool_prefix, auth_status=s.auth_status,
+        server_id=s.server_id,
+        name=s.name,
+        url=s.url,
+        tool_prefix=s.tool_prefix,
+        auth_status=s.auth_status,
         globally_enabled=s.globally_enabled,
-        created_at=s.created_at, updated_at=s.updated_at,
+        created_at=s.created_at,
+        updated_at=s.updated_at,
     )
 
 
@@ -213,11 +213,7 @@ async def register_server(
     redirect_uri = _redirect_uri()
     try:
         prm = await mcp_auth.discover_resource_metadata(body.url)
-        as_url = (
-            str(prm.authorization_servers[0])
-            if prm.authorization_servers
-            else body.url
-        )
+        as_url = str(prm.authorization_servers[0]) if prm.authorization_servers else body.url
         as_meta = await mcp_auth.discover_auth_server_metadata(as_url)
         if not as_meta.registration_endpoint:
             raise HTTPException(
@@ -342,11 +338,7 @@ async def mcp_callback(state: str, code: str | None = None, error: str | None = 
         )
     try:
         prm = await mcp_auth.discover_resource_metadata(server.url)
-        as_url = (
-            str(prm.authorization_servers[0])
-            if prm.authorization_servers
-            else server.url
-        )
+        as_url = str(prm.authorization_servers[0]) if prm.authorization_servers else server.url
         as_meta = await mcp_auth.discover_auth_server_metadata(as_url)
         tok = await mcp_auth.exchange_code(
             token_endpoint=str(as_meta.token_endpoint),
@@ -356,8 +348,9 @@ async def mcp_callback(state: str, code: str | None = None, error: str | None = 
             code_verifier=code_verifier,
         )
     except Exception as exc:
-        logger.warning("mcp.callback.token_exchange_failed user=%s server=%s %r",
-                       user_id, server_id, exc)
+        logger.warning(
+            "mcp.callback.token_exchange_failed user=%s server=%s %r", user_id, server_id, exc
+        )
         return RedirectResponse(
             url=f"{spa}/app/customize?mcp_authed=error&reason=token_exchange",
             status_code=302,
@@ -437,16 +430,10 @@ async def reauth_server(
     redirect_uri = _redirect_uri()
     try:
         prm = await mcp_auth.discover_resource_metadata(s.url)
-        as_url = (
-            str(prm.authorization_servers[0])
-            if prm.authorization_servers
-            else s.url
-        )
+        as_url = str(prm.authorization_servers[0]) if prm.authorization_servers else s.url
         as_meta = await mcp_auth.discover_auth_server_metadata(as_url)
     except Exception as exc:
-        raise HTTPException(
-            status_code=502, detail="Failed to refresh discovery metadata"
-        ) from exc
+        raise HTTPException(status_code=502, detail="Failed to refresh discovery metadata") from exc
     auth_url = _begin_auth_flow(
         user_id=claims["sub"],
         server=s,

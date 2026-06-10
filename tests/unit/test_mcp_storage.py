@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 
 from channel import storage
-from channel.models import MCPServer, MCPServerAuthStatus
+from channel.models import MCPServerAuthStatus
 
 
 class _FakeTable:
@@ -32,9 +32,7 @@ class _FakeTable:
         return {}
 
     def update_item(self, Key: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
-        item = self.items.setdefault(
-            (Key["PK"], Key["SK"]), {"PK": Key["PK"], "SK": Key["SK"]}
-        )
+        item = self.items.setdefault((Key["PK"], Key["SK"]), {"PK": Key["PK"], "SK": Key["SK"]})
         expression = kwargs.get("UpdateExpression", "")
         values = kwargs.get("ExpressionAttributeValues") or {}
         names = kwargs.get("ExpressionAttributeNames") or {}
@@ -54,8 +52,7 @@ class _FakeTable:
         pk_value = key_cond._values[0]._values[1]
         sk_prefix = key_cond._values[1]._values[1]
         items = [
-            v for (pk, sk), v in self.items.items()
-            if pk == pk_value and sk.startswith(sk_prefix)
+            v for (pk, sk), v in self.items.items() if pk == pk_value and sk.startswith(sk_prefix)
         ]
         return {"Items": items}
 
@@ -85,16 +82,25 @@ def test_create_and_get_mcp_server(fake_table: _FakeTable) -> None:
 
 def test_list_mcp_servers_for_user(fake_table: _FakeTable) -> None:
     storage.create_mcp_server(
-        user_id="user-1", name="Hive", url="https://h.example.com/mcp",
-        client_id="dcr-1", tool_prefix="hive",
+        user_id="user-1",
+        name="Hive",
+        url="https://h.example.com/mcp",
+        client_id="dcr-1",
+        tool_prefix="hive",
     )
     storage.create_mcp_server(
-        user_id="user-1", name="Acme", url="https://a.example.com/mcp",
-        client_id="dcr-2", tool_prefix="acme",
+        user_id="user-1",
+        name="Acme",
+        url="https://a.example.com/mcp",
+        client_id="dcr-2",
+        tool_prefix="acme",
     )
     storage.create_mcp_server(
-        user_id="user-2", name="Other", url="https://o.example.com/mcp",
-        client_id="dcr-3", tool_prefix="other",
+        user_id="user-2",
+        name="Other",
+        url="https://o.example.com/mcp",
+        client_id="dcr-3",
+        tool_prefix="other",
     )
     listed = storage.list_mcp_servers_for_user("user-1")
     assert {s.name for s in listed} == {"Hive", "Acme"}
@@ -102,8 +108,11 @@ def test_list_mcp_servers_for_user(fake_table: _FakeTable) -> None:
 
 def test_delete_mcp_server_wipes_token_sibling(fake_table: _FakeTable) -> None:
     server = storage.create_mcp_server(
-        user_id="user-1", name="Hive", url="https://h.example.com/mcp",
-        client_id="dcr-1", tool_prefix="hive",
+        user_id="user-1",
+        name="Hive",
+        url="https://h.example.com/mcp",
+        client_id="dcr-1",
+        tool_prefix="hive",
     )
     storage.put_mcp_token(
         user_id="user-1",
@@ -114,18 +123,17 @@ def test_delete_mcp_server_wipes_token_sibling(fake_table: _FakeTable) -> None:
         granted_scope="read",
     )
     storage.delete_mcp_server(user_id="user-1", server_id=server.server_id)
-    assert storage.get_mcp_server(
-        user_id="user-1", server_id=server.server_id
-    ) is None
-    assert storage.get_mcp_token(
-        user_id="user-1", server_id=server.server_id
-    ) is None
+    assert storage.get_mcp_server(user_id="user-1", server_id=server.server_id) is None
+    assert storage.get_mcp_token(user_id="user-1", server_id=server.server_id) is None
 
 
 def test_update_mcp_server_persists_name_and_flag(fake_table: _FakeTable) -> None:
     server = storage.create_mcp_server(
-        user_id="user-1", name="Hive", url="https://h.example.com/mcp",
-        client_id="dcr-1", tool_prefix="hive",
+        user_id="user-1",
+        name="Hive",
+        url="https://h.example.com/mcp",
+        client_id="dcr-1",
+        tool_prefix="hive",
     )
     storage.update_mcp_server(
         user_id="user-1",
@@ -134,7 +142,8 @@ def test_update_mcp_server_persists_name_and_flag(fake_table: _FakeTable) -> Non
         globally_enabled=False,
     )
     refreshed = storage.get_mcp_server(
-        user_id="user-1", server_id=server.server_id,
+        user_id="user-1",
+        server_id=server.server_id,
     )
     assert refreshed is not None
     assert refreshed.name == "Hive renamed"
@@ -143,8 +152,11 @@ def test_update_mcp_server_persists_name_and_flag(fake_table: _FakeTable) -> Non
 
 def test_set_auth_status(fake_table: _FakeTable) -> None:
     server = storage.create_mcp_server(
-        user_id="user-1", name="Hive", url="https://h.example.com/mcp",
-        client_id="dcr-1", tool_prefix="hive",
+        user_id="user-1",
+        name="Hive",
+        url="https://h.example.com/mcp",
+        client_id="dcr-1",
+        tool_prefix="hive",
     )
     storage.set_mcp_server_auth_status(
         user_id="user-1",
@@ -152,7 +164,8 @@ def test_set_auth_status(fake_table: _FakeTable) -> None:
         status=MCPServerAuthStatus.ACTIVE,
     )
     refreshed = storage.get_mcp_server(
-        user_id="user-1", server_id=server.server_id,
+        user_id="user-1",
+        server_id=server.server_id,
     )
     assert refreshed is not None
     assert refreshed.auth_status == MCPServerAuthStatus.ACTIVE

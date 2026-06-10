@@ -942,9 +942,7 @@ def create_mcp_server(
 
 
 def get_mcp_server(*, user_id: str, server_id: str) -> MCPServer | None:
-    result = _get_table().get_item(
-        Key={"PK": f"USER#{user_id}", "SK": _mcp_server_sk(server_id)}
-    )
+    result = _get_table().get_item(Key={"PK": f"USER#{user_id}", "SK": _mcp_server_sk(server_id)})
     item = result.get("Item")
     return _mcp_server_from_item(item) if item else None
 
@@ -1016,12 +1014,8 @@ def delete_mcp_server(*, user_id: str, server_id: str) -> None:
     list-build time (#207 chassis wiring, Task 8).
     """
     table = _get_table()
-    table.delete_item(
-        Key={"PK": f"USER#{user_id}", "SK": _mcp_server_sk(server_id)}
-    )
-    table.delete_item(
-        Key={"PK": f"USER#{user_id}", "SK": _mcp_token_sk(server_id)}
-    )
+    table.delete_item(Key={"PK": f"USER#{user_id}", "SK": _mcp_server_sk(server_id)})
+    table.delete_item(Key={"PK": f"USER#{user_id}", "SK": _mcp_token_sk(server_id)})
 
 
 def put_mcp_token(
@@ -1055,9 +1049,7 @@ def put_mcp_token(
 
 
 def get_mcp_token(*, user_id: str, server_id: str) -> MCPToken | None:
-    result = _get_table().get_item(
-        Key={"PK": f"USER#{user_id}", "SK": _mcp_token_sk(server_id)}
-    )
+    result = _get_table().get_item(Key={"PK": f"USER#{user_id}", "SK": _mcp_token_sk(server_id)})
     item = result.get("Item")
     if not item:
         return None
@@ -1078,9 +1070,7 @@ def get_mcp_token(*, user_id: str, server_id: str) -> MCPToken | None:
 
 def get_chat_mcp_settings(chat_id: str) -> ChatMCPSettings:
     """Read the chat's MCP override. Returns defaults if no row exists."""
-    result = _get_table().get_item(
-        Key={"PK": f"CHAT#{chat_id}", "SK": _mcp_chat_override_sk()}
-    )
+    result = _get_table().get_item(Key={"PK": f"CHAT#{chat_id}", "SK": _mcp_chat_override_sk()})
     item = result.get("Item")
     if not item:
         return ChatMCPSettings(chat_id=chat_id)

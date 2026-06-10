@@ -404,10 +404,7 @@ def test_dev_stack_mcp_token_kms_key_id_is_not_local_sentinel(dev_template):
 def test_stack_creates_mcp_token_kms_key(prod_template):
     """A dedicated CMK with rotation enabled exists for MCP tokens."""
     keys = prod_template.find_resources("AWS::KMS::Key")
-    mcp_keys = {
-        k: v for k, v in keys.items()
-        if "MCP" in v["Properties"].get("Description", "")
-    }
+    mcp_keys = {k: v for k, v in keys.items() if "MCP" in v["Properties"].get("Description", "")}
     assert len(mcp_keys) >= 1, (
         f"Expected an MCP token-encryption KMS key in stack; "
         f"found descriptions: {[v['Properties'].get('Description') for v in keys.values()]}"

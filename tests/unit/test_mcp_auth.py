@@ -3,13 +3,16 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 from unittest.mock import MagicMock
 
 import httpx
 import pytest
 
+from channel import storage
 from channel.mcp import auth as mcp_auth
+from channel.models import MCPServer, MCPServerAuthStatus
 
 
 @pytest.fixture
@@ -25,7 +28,7 @@ def fake_async_client(monkeypatch: pytest.MonkeyPatch) -> dict[str, MagicMock]:
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             pass
 
-        async def __aenter__(self) -> "_StubClient":
+        async def __aenter__(self) -> _StubClient:
             return self
 
         async def __aexit__(self, *args: Any) -> None:
@@ -50,10 +53,12 @@ def _ok_json(body: dict[str, Any]) -> httpx.Response:
 @pytest.mark.asyncio
 async def test_discover_resource_metadata(fake_async_client: dict[str, Any]) -> None:
     fake_async_client["responses"].append(
-        _ok_json({
-            "authorization_servers": ["https://hive.example.com"],
-            "resource": "https://hive.example.com/mcp",
-        })
+        _ok_json(
+            {
+                "authorization_servers": ["https://hive.example.com"],
+                "resource": "https://hive.example.com/mcp",
+            }
+        )
     )
     meta = await mcp_auth.discover_resource_metadata("https://hive.example.com/mcp")
     # pydantic AnyHttpUrl normalises with a trailing slash; compare as strings.
@@ -63,13 +68,15 @@ async def test_discover_resource_metadata(fake_async_client: dict[str, Any]) -> 
 @pytest.mark.asyncio
 async def test_register_dynamic_client(fake_async_client: dict[str, Any]) -> None:
     fake_async_client["responses"].append(
-        _ok_json({
-            "client_id": "dcr-issued-id",
-            "redirect_uris": ["https://channel.example.com/auth/mcp/callback"],
-            "grant_types": ["authorization_code", "refresh_token"],
-            "response_types": ["code"],
-            "token_endpoint_auth_method": "none",
-        })
+        _ok_json(
+            {
+                "client_id": "dcr-issued-id",
+                "redirect_uris": ["https://channel.example.com/auth/mcp/callback"],
+                "grant_types": ["authorization_code", "refresh_token"],
+                "response_types": ["code"],
+                "token_endpoint_auth_method": "none",
+            }
+        )
     )
     info = await mcp_auth.register_dynamic_client(
         registration_endpoint="https://auth.example.com/register",
@@ -100,13 +107,15 @@ def test_build_authorization_url() -> None:
 @pytest.mark.asyncio
 async def test_exchange_code(fake_async_client: dict[str, Any]) -> None:
     fake_async_client["responses"].append(
-        _ok_json({
-            "access_token": "acc-1",
-            "refresh_token": "ref-1",
-            "expires_in": 3600,
-            "token_type": "Bearer",
-            "scope": "read",
-        })
+        _ok_json(
+            {
+                "access_token": "acc-1",
+                "refresh_token": "ref-1",
+                "expires_in": 3600,
+                "token_type": "Bearer",
+                "scope": "read",
+            }
+        )
     )
     tok = await mcp_auth.exchange_code(
         token_endpoint="https://auth.example.com/token",
@@ -123,11 +132,13 @@ async def test_exchange_code(fake_async_client: dict[str, Any]) -> None:
 @pytest.mark.asyncio
 async def test_refresh_token(fake_async_client: dict[str, Any]) -> None:
     fake_async_client["responses"].append(
-        _ok_json({
-            "access_token": "acc-2",
-            "expires_in": 3600,
-            "token_type": "Bearer",
-        })
+        _ok_json(
+            {
+                "access_token": "acc-2",
+                "expires_in": 3600,
+                "token_type": "Bearer",
+            }
+        )
     )
     tok = await mcp_auth.refresh_token(
         token_endpoint="https://auth.example.com/token",
@@ -147,11 +158,6 @@ def test_generate_pkce_returns_43_to_128_chars() -> None:
 # ----------------------------------------------------------------
 # get_valid_access_token (#207 Task 6)
 # ----------------------------------------------------------------
-
-import time
-
-from channel import storage
-from channel.models import MCPServer, MCPServerAuthStatus
 
 
 class _FakeTable:
@@ -181,7 +187,8 @@ def fake_crypto(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(crypto, "encrypt_blob", lambda s: ("ENC::" + s).encode())
     monkeypatch.setattr(
-        crypto, "decrypt_blob",
+        crypto,
+        "decrypt_blob",
         lambda b: b.decode("utf-8").removeprefix("ENC::"),
     )
 
@@ -201,11 +208,15 @@ async def test_get_valid_access_token_returns_cached_when_not_expiring(
     token = await mcp_auth.get_valid_access_token(
         user_id="u1",
         server=MCPServer(
-            server_id="s1", user_id="u1", name="Hive",
+            server_id="s1",
+            user_id="u1",
+            name="Hive",
             url="https://hive.example.com/mcp",
-            client_id="dcr-1", tool_prefix="hive",
+            client_id="dcr-1",
+            tool_prefix="hive",
             auth_status=MCPServerAuthStatus.ACTIVE,
-            created_at="x", updated_at="x",
+            created_at="x",
+            updated_at="x",
         ),
     )
     assert token == "acc-cached"
@@ -226,6 +237,7 @@ async def test_get_valid_access_token_refreshes_when_expiring(
 
     async def fake_discover(_url: str) -> Any:
         from mcp.shared.auth import ProtectedResourceMetadata
+
         return ProtectedResourceMetadata(
             authorization_servers=["https://auth.example.com"],
             resource="https://hive.example.com/mcp",
@@ -233,6 +245,7 @@ async def test_get_valid_access_token_refreshes_when_expiring(
 
     async def fake_discover_as(_url: str) -> Any:
         from mcp.shared.auth import OAuthMetadata
+
         return OAuthMetadata(
             issuer="https://auth.example.com",
             authorization_endpoint="https://auth.example.com/authorize",
@@ -242,6 +255,7 @@ async def test_get_valid_access_token_refreshes_when_expiring(
 
     async def fake_refresh(**_: Any) -> Any:
         from mcp.shared.auth import OAuthToken
+
         return OAuthToken(
             access_token="fresh-acc",
             refresh_token="fresh-ref",
@@ -256,11 +270,15 @@ async def test_get_valid_access_token_refreshes_when_expiring(
     token = await mcp_auth.get_valid_access_token(
         user_id="u1",
         server=MCPServer(
-            server_id="s1", user_id="u1", name="Hive",
+            server_id="s1",
+            user_id="u1",
+            name="Hive",
             url="https://hive.example.com/mcp",
-            client_id="dcr-1", tool_prefix="hive",
+            client_id="dcr-1",
+            tool_prefix="hive",
             auth_status=MCPServerAuthStatus.ACTIVE,
-            created_at="x", updated_at="x",
+            created_at="x",
+            updated_at="x",
         ),
     )
     assert token == "fresh-acc"
