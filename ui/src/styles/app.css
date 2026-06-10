@@ -1040,14 +1040,14 @@ html.is-electron-mac .sb-top {
   background: var(--canvas);
   color: var(--ink);
   border: 1px solid var(--border);
-  border-radius: var(--radius-s);
+  border-radius: var(--r-sm);
   padding: 8px 10px;
 }
 .mcp-consent {
   font-size: 0.85rem;
   color: var(--ink-muted);
   background: var(--raised);
-  border-radius: var(--radius-s);
+  border-radius: var(--r-sm);
   padding: 10px 12px;
 }
 .mcp-err { color: var(--accent); font-size: 0.9rem; }
@@ -1058,7 +1058,7 @@ html.is-electron-mac .sb-top {
 .mcp-row {
   display: flex; justify-content: space-between; align-items: center; gap: 12px;
   background: var(--raised); border: 1px solid var(--border);
-  border-radius: var(--radius-s); padding: 10px 12px;
+  border-radius: var(--r-sm); padding: 10px 12px;
 }
 .mcp-row-main { flex: 1; min-width: 0; }
 .mcp-row-name { display: flex; align-items: center; gap: 8px; font-weight: 500; }
@@ -1073,7 +1073,7 @@ html.is-electron-mac .sb-top {
 .mcp-pill {
   display: inline-flex; align-items: center; gap: 6px;
   background: var(--raised); border: 1px solid var(--border);
-  border-radius: var(--radius-s); padding: 4px 8px;
+  border-radius: var(--r-sm); padding: 4px 8px;
   font-size: 0.85rem; color: var(--ink);
   cursor: pointer;
 }

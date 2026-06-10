@@ -96,7 +96,7 @@ describe("MCPPicker", () => {
     expect(screen.getByTestId("mcp-empty")).toBeInTheDocument();
   });
 
-  it("disables servers whose auth_status is not active", () => {
+  it("shows 'Needs reconnect' on a non-active server and reflects it in the pill count", () => {
     const expired = [
       {
         server_id: "z",
@@ -109,8 +109,68 @@ describe("MCPPicker", () => {
     render(
       <MCPPicker servers={expired} mode="inherit" explicitIds={[]} onChange={() => {}} />,
     );
+    // Even though Zed is in INHERIT mode's "active" derivation, its
+    // expired auth_status means the pill count is 0 — it can't carry
+    // tool calls until the user reconnects.
+    expect(
+      screen.getByRole("button", { name: /0 tool servers/i }),
+    ).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /tool servers?\b/i }));
     expect(screen.getByText(/needs reconnect/i)).toBeInTheDocument();
+  });
+
+  it("blocks selecting a non-active server but allows unselecting one that's already active in explicit mode", () => {
+    const onChange = vi.fn();
+    const expired = [
+      {
+        server_id: "z",
+        name: "Zed",
+        tool_prefix: "zed",
+        globally_enabled: true,
+        auth_status: "expired",
+      },
+    ];
+    // Explicit mode with Zed already in the list — user must be able
+    // to take it out of the active set even though its status is expired.
+    render(
+      <MCPPicker
+        servers={expired}
+        mode="explicit"
+        explicitIds={["z"]}
+        onChange={onChange}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /tool servers?\b/i }));
+    const checkbox = screen.getByLabelText(/^Zed$/).querySelector("input");
+    expect(checkbox.disabled).toBe(false);  // currently checked → unselectable allowed
+    fireEvent.click(checkbox);
+    expect(onChange).toHaveBeenCalledWith({
+      mode: "explicit",
+      explicit_server_ids: [],
+    });
+  });
+
+  it("non-active server with no current selection is disabled (can't be selected)", () => {
+    const expired = [
+      {
+        server_id: "z",
+        name: "Zed",
+        tool_prefix: "zed",
+        globally_enabled: false,  // not in inherit's active set
+        auth_status: "expired",
+      },
+    ];
+    render(
+      <MCPPicker
+        servers={expired}
+        mode="explicit"
+        explicitIds={[]}  // not selected
+        onChange={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /tool servers?\b/i }));
+    const checkbox = screen.getByLabelText(/^Zed$/).querySelector("input");
+    expect(checkbox.disabled).toBe(true);
   });
 
   it("backdrop click closes the popover", () => {

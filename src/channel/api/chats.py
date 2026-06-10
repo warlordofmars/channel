@@ -556,6 +556,18 @@ async def _build_mcp_clients_for_chat(
     else:
         active = [s for s in registered if s.globally_enabled]
 
+    # Filter to ACTIVE-only BEFORE token resolution. Without this:
+    #   1. A freshly-registered (NEVER_AUTHED) server has no token row,
+    #      so the resolver raises MCPAuthFailedError and we'd flip the
+    #      row to EXPIRED — losing the user-visible distinction between
+    #      "never connected" and "connection went stale".
+    #   2. An EXPIRED row's resolver runs the discovery + refresh dance
+    #      every single turn until the user reconnects — avoidable work
+    #      that won't recover until the user re-completes OAuth.
+    # The UI already hides inactive servers from the per-chat picker,
+    # so this mirrors that behavior at the runtime layer.
+    active = [s for s in active if s.auth_status == MCPServerAuthStatus.ACTIVE]
+
     clients: list[MCPClient] = []
     for server in active:
         try:

@@ -98,6 +98,97 @@ async def test_build_mcp_clients_explicit_mode_uses_exact_list(
 
 
 @pytest.mark.asyncio
+async def test_build_mcp_clients_skips_never_authed_servers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A NEVER_AUTHED server has no token row yet — silently skip it
+    instead of attempting token resolution (which would flip the row
+    to EXPIRED and lose the user-visible 'never connected' state)."""
+    never_authed = MCPServer(
+        server_id="a",
+        user_id="u1",
+        name="alpha",
+        url="https://alpha.example.com/mcp",
+        client_id="dcr-a",
+        tool_prefix="alpha",
+        auth_status=MCPServerAuthStatus.NEVER_AUTHED,
+        globally_enabled=True,
+        created_at="x",
+        updated_at="x",
+    )
+    monkeypatch.setattr(
+        chats_module.storage,
+        "list_mcp_servers_for_user",
+        lambda _: [never_authed],
+    )
+    monkeypatch.setattr(
+        chats_module.storage,
+        "get_chat_mcp_settings",
+        lambda _: ChatMCPSettings(chat_id="chat-1"),
+    )
+    # If we accidentally tried to resolve a token, this would raise.
+    monkeypatch.setattr(
+        chats_module.mcp_auth,
+        "get_valid_access_token",
+        AsyncMock(side_effect=AssertionError("must not be called")),
+    )
+    flipped: dict[str, Any] = {}
+    monkeypatch.setattr(
+        chats_module.storage,
+        "set_mcp_server_auth_status",
+        lambda **kw: flipped.update(kw),
+    )
+
+    clients = await chats_module._build_mcp_clients_for_chat(
+        user_id="u1",
+        chat_id="chat-1",
+    )
+    assert clients == []
+    # NEVER_AUTHED must NOT be flipped to EXPIRED on the chat-start path.
+    assert flipped == {}
+
+
+@pytest.mark.asyncio
+async def test_build_mcp_clients_skips_expired_servers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An already-EXPIRED server is silently skipped — no avoidable
+    refresh-roundtrip every turn."""
+    expired = MCPServer(
+        server_id="a",
+        user_id="u1",
+        name="alpha",
+        url="https://alpha.example.com/mcp",
+        client_id="dcr-a",
+        tool_prefix="alpha",
+        auth_status=MCPServerAuthStatus.EXPIRED,
+        globally_enabled=True,
+        created_at="x",
+        updated_at="x",
+    )
+    monkeypatch.setattr(
+        chats_module.storage,
+        "list_mcp_servers_for_user",
+        lambda _: [expired],
+    )
+    monkeypatch.setattr(
+        chats_module.storage,
+        "get_chat_mcp_settings",
+        lambda _: ChatMCPSettings(chat_id="chat-1"),
+    )
+    monkeypatch.setattr(
+        chats_module.mcp_auth,
+        "get_valid_access_token",
+        AsyncMock(side_effect=AssertionError("must not be called")),
+    )
+    clients = await chats_module._build_mcp_clients_for_chat(
+        user_id="u1",
+        chat_id="chat-1",
+    )
+    assert clients == []
+
+
+@pytest.mark.asyncio
 async def test_build_mcp_clients_skips_auth_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

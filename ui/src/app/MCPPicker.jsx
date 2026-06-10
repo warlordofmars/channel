@@ -28,6 +28,17 @@ export default function MCPPicker({ servers, mode, explicitIds, onChange }) {
     return servers.filter((s) => s.globally_enabled).map((s) => s.server_id);
   }, [servers, mode, explicitIds]);
 
+  // The pill label counts only servers that will actually fire — a
+  // selected server in `expired` / `revoked` / `never_authed` state
+  // can't carry tool calls until the user reconnects. Counting it
+  // would mislead "N tool servers" past its real capacity.
+  const usableActiveCount = useMemo(() => {
+    if (!servers || servers.length === 0) return 0;
+    return activeIds.filter((id) =>
+      servers.some((s) => s.server_id === id && s.auth_status === "active"),
+    ).length;
+  }, [servers, activeIds]);
+
   function toggle(serverId) {
     const next = activeIds.includes(serverId)
       ? activeIds.filter((id) => id !== serverId)
@@ -47,7 +58,7 @@ export default function MCPPicker({ servers, mode, explicitIds, onChange }) {
     setOpen((o) => !o);
   }
 
-  const label = `${activeIds.length} tool ${activeIds.length === 1 ? "server" : "servers"}`;
+  const label = `${usableActiveCount} tool ${usableActiveCount === 1 ? "server" : "servers"}`;
 
   return (
     <div style={{ position: "relative" }}>
@@ -86,7 +97,13 @@ export default function MCPPicker({ servers, mode, explicitIds, onChange }) {
             )}
             {servers && servers.map((s) => {
               const checked = activeIds.includes(s.server_id);
-              const disabled = s.auth_status !== "active";
+              // Inactive servers (expired/revoked/never_authed) can't
+              // be SELECTED, but if they're already in the active list
+              // the user MUST be able to UNCHECK them — otherwise
+              // explicit mode traps the selection and the only escape
+              // is "Reset to global defaults".
+              const inactive = s.auth_status !== "active";
+              const disabled = inactive && !checked;
               return (
                 <label
                   key={s.server_id}
@@ -102,7 +119,7 @@ export default function MCPPicker({ servers, mode, explicitIds, onChange }) {
                   <div style={{ flex: 1 }}>
                     <div className="nm">{s.name}</div>
                     <div className="ds">
-                      {disabled
+                      {inactive
                         ? "Needs reconnect"
                         : `Tools available as ${s.tool_prefix}_*`}
                     </div>
