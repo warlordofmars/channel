@@ -155,6 +155,14 @@ app.include_router(attachments_router, prefix="/api")
 # router so no prefix needed here)
 app.include_router(prefs_router)
 
+# MCP server registry — /api/mcp/* (auth-gated) + /auth/mcp/callback
+# (browser redirect target, unauthenticated, state-store guarded).
+from channel.api.mcp import callback_router as mcp_callback_router  # noqa: E402
+from channel.api.mcp import router as mcp_router  # noqa: E402
+
+app.include_router(mcp_router)
+app.include_router(mcp_callback_router)
+
 # Dev-only debug router (Phase 7c). Mounted ONLY when the env flag is
 # explicitly set; prod stacks must not set it. See channel_stack.py +
 # tests/unit/test_channel_stack.py for the deploy-time guard.
