@@ -261,13 +261,27 @@ def _begin_auth_flow(
 
 
 @callback_router.get("/auth/mcp/callback")
-async def mcp_callback(state: str, code: str | None = None, error: str | None = None) -> Any:
+async def mcp_callback(
+    state: str | None = None,
+    code: str | None = None,
+    error: str | None = None,
+) -> Any:
     """Handle the OAuth callback. Exchanges code → tokens, stores them,
     redirects browser to the SPA's Customize view with a status param.
+
+    ``state`` is typed as optional so a missing param 302-redirects with
+    ``reason=invalid_state`` (matching the other error paths) rather
+    than FastAPI's default 422 — browser OAuth callbacks shouldn't show
+    a raw FastAPI error page to the user.
     """
     if error:
         return RedirectResponse(
             url=_customize_redirect(mcp_authed="error", reason=error),
+            status_code=302,
+        )
+    if not state:
+        return RedirectResponse(
+            url=_customize_redirect(mcp_authed="error", reason="invalid_state"),
             status_code=302,
         )
     payload = state_store.consume_state(state)

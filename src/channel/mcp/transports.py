@@ -47,7 +47,19 @@ def make_authenticated_transport(
         # default headers means every request the transport issues
         # carries it. The new client is created fresh per thunk call so
         # Strands' MCPClient owns its lifecycle.
-        http_client = httpx.AsyncClient(headers={"Authorization": auth_header})
+        #
+        # ``follow_redirects=False`` mirrors the OAuth helpers in
+        # ``channel.mcp.auth`` — a 302 from a registered MCP server to
+        # 169.254.169.254 (or any other dangerous range) must NOT be
+        # silently followed by the transport, even though the URL guard
+        # has already validated the initial endpoint. ``timeout=30.0``
+        # matches the OAuth helper's explicit budget so the chassis
+        # wall-clock cap can model worst-case latency consistently.
+        http_client = httpx.AsyncClient(
+            headers={"Authorization": auth_header},
+            follow_redirects=False,
+            timeout=30.0,
+        )
         return streamable_http_client(server_url, http_client=http_client)
 
     return thunk

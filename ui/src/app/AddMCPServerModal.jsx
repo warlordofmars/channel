@@ -1,5 +1,5 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { registerMCPServer } from "../api.js";
 import Modal from "../components/Modal.jsx";
 
@@ -22,6 +22,19 @@ export default function AddMCPServerModal({ open, onClose, onRegistered }) {
   const [url, setUrl] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+
+  // Reset local state each time the modal opens. Modal.jsx returns
+  // null when `open` is false, but AddMCPServerModal itself stays
+  // mounted — without this reset, reopening the dialog would show
+  // the previous name/url/error from the prior session.
+  useEffect(() => {
+    if (open) {
+      setName("");
+      setUrl("");
+      setBusy(false);
+      setError("");
+    }
+  }, [open]);
 
   async function submit() {
     /* v8 ignore next -- defensive: button is also disabled in this state */

@@ -47,3 +47,27 @@ def test_thunk_attaches_authorization_header(monkeypatch: Any) -> None:
     # Calling the thunk constructs the AsyncClient internally.
     thunk()
     assert captured["headers"] == {"Authorization": "Bearer bearer-abc"}
+
+
+def test_thunk_disables_redirects_and_sets_timeout(monkeypatch: Any) -> None:
+    """SSRF defense: a 302 from a registered MCP server to a different
+    host (e.g. 169.254.169.254) must not be silently followed by the
+    transport. Timeout is explicit (matches the OAuth helpers in
+    channel.mcp.auth) so chassis behavior doesn't depend on httpx
+    defaults."""
+    captured: dict[str, Any] = {}
+
+    class _FakeAsyncClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            captured.update(kwargs)
+
+    from channel.mcp import transports
+
+    monkeypatch.setattr(transports.httpx, "AsyncClient", _FakeAsyncClient)
+    thunk = transports.make_authenticated_transport(
+        server_url="https://hive.example.com/mcp",
+        access_token="bearer-abc",
+    )
+    thunk()
+    assert captured["follow_redirects"] is False
+    assert captured["timeout"] == 30.0

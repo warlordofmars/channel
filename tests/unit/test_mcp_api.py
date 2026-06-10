@@ -1070,3 +1070,23 @@ def test_callback_error_param_with_query_injection_is_url_encoded() -> None:
     # The injected suffix is preserved as part of the reason value
     # (URL-encoded), NOT split into a second query parameter.
     assert "reason=foo%26mcp_authed%3Dok" in location
+
+
+def test_callback_without_state_param_redirects_with_invalid_state() -> None:
+    """A browser hit on ``/auth/mcp/callback`` with no ``state`` query
+    param previously 422'd from FastAPI's required-param validation.
+    Now it 302-redirects with ``reason=invalid_state`` so users land
+    on a usable SPA error page instead of FastAPI's raw error JSON."""
+    raw = TestClient(app)
+    resp = raw.get("/auth/mcp/callback", follow_redirects=False)
+    assert resp.status_code == 302
+    assert "reason=invalid_state" in resp.headers["location"]
+
+
+def test_callback_with_empty_state_param_redirects_with_invalid_state() -> None:
+    """Same as above but for ``?state=`` (empty value, e.g. a
+    misconfigured auth server)."""
+    raw = TestClient(app)
+    resp = raw.get("/auth/mcp/callback?state=", follow_redirects=False)
+    assert resp.status_code == 302
+    assert "reason=invalid_state" in resp.headers["location"]

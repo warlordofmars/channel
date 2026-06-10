@@ -116,4 +116,34 @@ describe("AddMCPServerModal", () => {
     fireEvent.click(screen.getByRole("button", { name: /cancel/i }));
     expect(onClose).toHaveBeenCalled();
   });
+
+  it("resets local state when reopened — no stale name/url/error from a prior session", async () => {
+    registerMCPServer.mockRejectedValueOnce(new Error("502"));
+    const { rerender } = render(
+      <AddMCPServerModal open onClose={() => {}} onRegistered={() => {}} />,
+    );
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Hive" } });
+    fireEvent.change(screen.getByLabelText("Server URL"), {
+      target: { value: "https://hive.example.com/mcp" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /add server/i }));
+    await waitFor(() =>
+      expect(
+        screen.getByText(/couldn't register that server/i),
+      ).toBeInTheDocument(),
+    );
+
+    // Close → reopen: stale name/url/error must be cleared.
+    rerender(
+      <AddMCPServerModal open={false} onClose={() => {}} onRegistered={() => {}} />,
+    );
+    rerender(
+      <AddMCPServerModal open onClose={() => {}} onRegistered={() => {}} />,
+    );
+    expect(screen.getByLabelText("Name").value).toBe("");
+    expect(screen.getByLabelText("Server URL").value).toBe("");
+    expect(
+      screen.queryByText(/couldn't register that server/i),
+    ).not.toBeInTheDocument();
+  });
 });
