@@ -49,6 +49,20 @@ def _stub_get_prefs(monkeypatch: pytest.MonkeyPatch) -> None:
         lambda **_kwargs: (0, 0),
     )
 
+    # #207 — default the MCP-registry resolver to "no servers" so legacy
+    # chats_api tests that pre-date MCP don't need to stub each call
+    # site. Tests exercising MCP-client behaviour override these inline.
+    monkeypatch.setattr(
+        "channel.api.chats.storage.list_mcp_servers_for_user",
+        lambda _user_id: [],
+    )
+    from channel.models import ChatMCPSettings as _ChatMCPSettings  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        "channel.api.chats.storage.get_chat_mcp_settings",
+        lambda chat_id: _ChatMCPSettings(chat_id=chat_id),
+    )
+
 
 @pytest.fixture
 def client() -> TestClient:

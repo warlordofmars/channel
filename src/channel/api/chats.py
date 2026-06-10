@@ -50,16 +50,22 @@ from channel.metrics import (
     record_chat_delete_memory_wipe_outcome,
     record_followup_outcome,
 )
+from channel.mcp import auth as mcp_auth
+from channel.mcp.auth import MCPAuthFailedError
+from channel.mcp.transports import make_authenticated_transport
 from channel.models import (
     Chat,
     ChatCreate,
+    ChatMCPMode,
     ChatPatch,
     FeedbackRequest,
+    MCPServerAuthStatus,
     Message,
     MessageRole,
     RegenerateRequest,
     SendMessageRequest,
 )
+from strands.tools.mcp import MCPClient
 
 logger = logging.getLogger(__name__)
 
@@ -522,6 +528,60 @@ def _build_tool_registry() -> list[Any]:
     return registry
 
 
+async def _build_mcp_clients_for_chat(
+    *, user_id: str, chat_id: str,
+) -> list[MCPClient]:
+    """Resolve active MCP servers + tokens for one chat turn.
+
+    Per the spike (§Question 2): chats inherit user-level
+    ``globally_enabled`` servers by default; ``mode="explicit"`` rows
+    capture an exact list at override time. Per-tool-call
+    re-instantiation (spike §Question 3 v1 strategy) — every turn
+    builds fresh ``MCPClient`` instances bound to the bearer token
+    valid at turn start. Mid-chain refresh stays a v2 follow-up.
+
+    Auth-resolution failures are best-effort logged + the MCPSERVER row
+    flipped to ``EXPIRED`` so the SPA can surface the Reconnect
+    affordance on the next Customize visit — but they do NOT raise into
+    the streaming generator. A broken Hive registration must not block
+    the chain's other tools.
+    """
+    registered = storage.list_mcp_servers_for_user(user_id)
+    settings = storage.get_chat_mcp_settings(chat_id)
+    if settings.mode == ChatMCPMode.EXPLICIT:
+        allowed = set(settings.explicit_server_ids)
+        active = [s for s in registered if s.server_id in allowed]
+    else:
+        active = [s for s in registered if s.globally_enabled]
+
+    clients: list[MCPClient] = []
+    for server in active:
+        try:
+            token = await mcp_auth.get_valid_access_token(
+                user_id=user_id, server=server,
+            )
+        except MCPAuthFailedError as exc:
+            logger.warning(
+                "mcp.token_resolution_failed user=%s server=%s %s",
+                user_id, server.server_id, exc,
+            )
+            storage.set_mcp_server_auth_status(
+                user_id=user_id,
+                server_id=server.server_id,
+                status=MCPServerAuthStatus.EXPIRED,
+            )
+            continue
+        clients.append(
+            MCPClient(
+                make_authenticated_transport(
+                    server_url=server.url, access_token=token,
+                ),
+                prefix=server.tool_prefix,
+            )
+        )
+    return clients
+
+
 async def _stream_bedrock_reply(
     *,
     chat: Chat,
@@ -624,6 +684,13 @@ async def _stream_bedrock_reply(
         yield sse_attachment_error(**err)
 
     tool_registry = _build_tool_registry()
+    # #207 — append MCPClient instances. Resolution failures are
+    # swallowed inside _build_mcp_clients_for_chat (the helper flips
+    # the MCPSERVER row to EXPIRED so the SPA can surface Reconnect).
+    mcp_clients = await _build_mcp_clients_for_chat(
+        user_id=claims["sub"], chat_id=chat.chat_id,
+    )
+    tool_registry = [*tool_registry, *mcp_clients]
 
     agent = build_agent(
         model_id=model,
@@ -718,6 +785,18 @@ async def _stream_bedrock_reply(
     except (asyncio.CancelledError, GeneratorExit):
         set_cancel_signal(chat.chat_id)
         raise
+    finally:
+        # #207 — Strands' MCPClient holds a background thread + httpx
+        # client that must be released when the turn ends. agent.cleanup()
+        # is a no-op for natives; safe to call unconditionally on real
+        # Agent instances. Without this we rely on the GC finalizer
+        # which isn't deterministic in async generators and can leak
+        # the MCP background thread across warm Lambda invocations.
+        # getattr keeps the call safe under unit-test FakeAgent doubles
+        # that don't implement the optional Strands cleanup surface.
+        cleanup = getattr(agent, "cleanup", None)
+        if cleanup is not None:
+            cleanup()
 
     assistant_text = "".join(accumulated)
     state["assistant_text"] = assistant_text
