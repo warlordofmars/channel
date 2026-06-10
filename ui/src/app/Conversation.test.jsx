@@ -9,6 +9,11 @@ import { __resetChannelPrefsForTest } from "../hooks/useChannelPrefs.js";
 vi.mock("../api.js", () => ({
   listModels: vi.fn(),
   submitFeedback: vi.fn(),
+  listMCPServers: vi.fn(() => Promise.resolve({ servers: [] })),
+  getChatMCPSettings: vi.fn(() =>
+    Promise.resolve({ mode: "inherit", explicit_server_ids: [] }),
+  ),
+  putChatMCPSettings: vi.fn(() => Promise.resolve()),
 }));
 
 import * as api from "../api.js";

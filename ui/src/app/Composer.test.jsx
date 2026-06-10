@@ -1078,6 +1078,28 @@ describe("Composer", () => {
       expect(chip.querySelector(".sz").textContent).toBe("512 KB");
     });
 
+    it("renders the MCPPicker pill when mcpServers prop is non-null (#207)", () => {
+      render(
+        <Composer
+          {...defaultProps({
+            mcpServers: [],
+            mcpSettings: { mode: "inherit", explicit_server_ids: [] },
+            setMcpSettings: vi.fn(),
+          })}
+        />,
+      );
+      expect(
+        screen.getByRole("button", { name: /0 tool servers/i }),
+      ).toBeInTheDocument();
+    });
+
+    it("does NOT render the MCPPicker pill when mcpServers prop is null", () => {
+      render(<Composer {...defaultProps()} />);
+      expect(
+        screen.queryByRole("button", { name: /tool servers?\b/i }),
+      ).toBeNull();
+    });
+
     it("exposes the full filename via title= on the chip", async () => {
       render(<Composer {...defaultProps()} />);
       const longName = "very-long-attachment-filename.pdf";

@@ -6,7 +6,12 @@ import ChatHeader from "./ChatHeader.jsx";
 import Composer from "./Composer.jsx";
 import Icon from "../components/Icon.jsx";
 import ToolResultBlock from "./ToolResultBlock.jsx";
-import { submitFeedback } from "../api.js";
+import {
+  getChatMCPSettings,
+  listMCPServers,
+  putChatMCPSettings,
+  submitFeedback,
+} from "../api.js";
 import { useChannelPrefs } from "../hooks/useChannelPrefs.js";
 import { useChats } from "../hooks/ChatsContext.jsx";
 import { useChatStream } from "../hooks/useChatStream.js";
@@ -315,6 +320,53 @@ export default function Conversation() {
   // local display meta so the Composer can still send.
   const [models, setModels] = useState(() => cachedModels());
 
+  // #207 — MCP servers list (per-account) + per-chat override settings.
+  // Both are tolerant of fetch failures: the picker simply hides if
+  // mcpServers stays null. Per-chat settings default to inherit mode
+  // on any error so the picker still works without persistence.
+  const [mcpServers, setMcpServers] = useState(null);
+  const [mcpSettings, setMcpSettings] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    listMCPServers()
+      .then(({ servers }) => {
+        if (!cancelled) setMcpServers(servers);
+      })
+      .catch(() => {
+        /* tolerate — the pill simply doesn't render */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!chatId) return undefined;
+    let cancelled = false;
+    getChatMCPSettings(chatId)
+      .then((s) => {
+        if (!cancelled) setMcpSettings(s);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setMcpSettings({ mode: "inherit", explicit_server_ids: [] });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [chatId]);
+
+  async function handleMcpChange(next) {
+    setMcpSettings(next);
+    try {
+      await putChatMCPSettings(chatId, next);
+    } catch (e) {
+      console.error("putChatMCPSettings", e);
+    }
+  }
+
   // Tool-step expand/collapse state lives here (not in ToolStepList) so
   // it survives the streaming-assistant-turn `msg_id` swap from the
   // temp client id to the persisted server id on the `done` SSE event.
@@ -500,6 +552,9 @@ export default function Conversation() {
           setEffort={prefs.setEffort}
           onSend={followUp}
           placeholder="Reply…"
+          mcpServers={mcpServers}
+          mcpSettings={mcpSettings}
+          setMcpSettings={handleMcpChange}
         />
       </div>
     </>
