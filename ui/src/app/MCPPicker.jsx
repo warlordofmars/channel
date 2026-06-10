@@ -1,5 +1,5 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import Icon from "../components/Icon.jsx";
 
 /**
@@ -58,6 +58,20 @@ export default function MCPPicker({ servers, mode, explicitIds, onChange }) {
     setOpen((o) => !o);
   }
 
+  // Escape closes the popover for real keyboard users. The backdrop's
+  // ``tabIndex={-1}`` means it never receives focus, so its own
+  // ``onKeyDown`` only fires from tests that dispatch the event
+  // directly. Window-level listener matches the pattern in
+  // ChatRowMenu / Modal.
+  useEffect(() => {
+    if (!open) return undefined;
+    function onKey(e) {
+      if (e.key === "Escape") closePopover();
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open]);
+
   const label = `${usableActiveCount} tool ${usableActiveCount === 1 ? "server" : "servers"}`;
 
   return (
@@ -77,12 +91,7 @@ export default function MCPPicker({ servers, mode, explicitIds, onChange }) {
           <div
             className="backdrop"
             onClick={closePopover}
-            onKeyDown={(e) => {
-              if (e.key === "Escape" || e.key === "Enter") closePopover();
-            }}
-            role="button"
-            tabIndex={-1}
-            aria-label="Close popover"
+            aria-hidden="true"
           />
           <div className="pop" style={{ bottom: "calc(100% + 8px)", right: 0 }}>
             <div className="pop-h">MCP servers for this chat</div>

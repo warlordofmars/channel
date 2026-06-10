@@ -184,33 +184,41 @@ describe("MCPPicker", () => {
     expect(container.querySelector(".pop")).toBeNull();
   });
 
-  it("backdrop Escape key closes the popover", () => {
+  it("Escape on window closes the popover for keyboard users", () => {
     const { container } = render(
       <MCPPicker servers={SERVERS} mode="inherit" explicitIds={[]} onChange={() => {}} />,
     );
     fireEvent.click(screen.getByRole("button", { name: /tool servers?\b/i }));
-    const backdrop = container.querySelector(".backdrop");
-    fireEvent.keyDown(backdrop, { key: "Escape" });
-    expect(container.querySelector(".pop")).toBeNull();
-  });
-
-  it("backdrop Enter key closes the popover", () => {
-    const { container } = render(
-      <MCPPicker servers={SERVERS} mode="inherit" explicitIds={[]} onChange={() => {}} />,
-    );
-    fireEvent.click(screen.getByRole("button", { name: /tool servers?\b/i }));
-    const backdrop = container.querySelector(".backdrop");
-    fireEvent.keyDown(backdrop, { key: "Enter" });
-    expect(container.querySelector(".pop")).toBeNull();
-  });
-
-  it("backdrop ignores unrelated keys", () => {
-    const { container } = render(
-      <MCPPicker servers={SERVERS} mode="inherit" explicitIds={[]} onChange={() => {}} />,
-    );
-    fireEvent.click(screen.getByRole("button", { name: /tool servers?\b/i }));
-    const backdrop = container.querySelector(".backdrop");
-    fireEvent.keyDown(backdrop, { key: "a" });
     expect(container.querySelector(".pop")).not.toBeNull();
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(container.querySelector(".pop")).toBeNull();
+  });
+
+  it("unrelated keys do not close the popover", () => {
+    const { container } = render(
+      <MCPPicker servers={SERVERS} mode="inherit" explicitIds={[]} onChange={() => {}} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /tool servers?\b/i }));
+    fireEvent.keyDown(window, { key: "a" });
+    expect(container.querySelector(".pop")).not.toBeNull();
+  });
+
+  it("window keydown listener is detached when the popover closes", () => {
+    const addSpy = vi.spyOn(window, "addEventListener");
+    const removeSpy = vi.spyOn(window, "removeEventListener");
+    const { unmount } = render(
+      <MCPPicker servers={SERVERS} mode="inherit" explicitIds={[]} onChange={() => {}} />,
+    );
+    // Open then close — the open useEffect attaches a listener, the
+    // close cleanup removes it.
+    fireEvent.click(screen.getByRole("button", { name: /tool servers?\b/i }));
+    const keydownAdds = addSpy.mock.calls.filter(([k]) => k === "keydown").length;
+    expect(keydownAdds).toBeGreaterThan(0);
+    fireEvent.keyDown(window, { key: "Escape" });
+    const keydownRemoves = removeSpy.mock.calls.filter(([k]) => k === "keydown").length;
+    expect(keydownRemoves).toBeGreaterThan(0);
+    unmount();
+    addSpy.mockRestore();
+    removeSpy.mockRestore();
   });
 });

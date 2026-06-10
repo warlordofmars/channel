@@ -48,6 +48,7 @@ from channel.api._auth import require_mgmt_user
 from channel.mcp import auth as mcp_auth
 from channel.mcp.auth import MCPAuthFailedError
 from channel.mcp.transports import make_authenticated_transport
+from channel.mcp.url_guard import validate_mcp_server_url
 from channel.metrics import (
     record_auto_title_outcome,
     record_chat_delete_attachment_wipe_outcome,
@@ -547,7 +548,15 @@ async def _build_mcp_clients_for_chat(
     affordance on the next Customize visit — but they do NOT raise into
     the streaming generator. A broken Hive registration must not block
     the chain's other tools.
+
+    Kill switch: ``STARTER_MCP_REGISTRY_ENABLED != "1"`` short-circuits
+    to an empty list with no DynamoDB reads. Defaults to enabled when
+    unset so dev / test envs that don't provision the env var still see
+    MCP behavior; CDK + ``inv dev`` both wire ``"1"`` explicitly.
     """
+    if os.environ.get("STARTER_MCP_REGISTRY_ENABLED", "1") != "1":
+        return []
+
     registered = storage.list_mcp_servers_for_user(user_id)
     settings = storage.get_chat_mcp_settings(chat_id)
     if settings.mode == ChatMCPMode.EXPLICIT:
@@ -570,6 +579,24 @@ async def _build_mcp_clients_for_chat(
 
     clients: list[MCPClient] = []
     for server in active:
+        # DNS-rebinding defense: re-validate the persisted URL with a
+        # fresh DNS lookup before each turn. A hostname that resolved
+        # to a public address at registration can later resolve to
+        # loopback / link-local / RFC1918, which would let the Lambda
+        # egress to internal infra via the MCP transport. The validator
+        # raises HTTPException(400) on failure; we treat that as
+        # "skip + log" rather than letting it bubble into the stream.
+        try:
+            validate_mcp_server_url(server.url)
+        except HTTPException:
+            logger.warning(
+                "mcp.url_revalidation_failed",
+                extra={
+                    "user_id_hash": str(hash(user_id)),
+                    "server_id_hash": str(hash(server.server_id)),
+                },
+            )
+            continue
         try:
             token = await mcp_auth.get_valid_access_token(
                 user_id=user_id,

@@ -22,11 +22,9 @@ For per-chat ownership, the read/write routes call
 
 from __future__ import annotations
 
-import ipaddress
 import logging
 import os
 import secrets
-import socket
 import time
 from typing import Any
 from urllib.parse import urlparse
@@ -41,6 +39,7 @@ from channel.api.chats import _load_owned_chat
 from channel.auth import state_store
 from channel.mcp import auth as mcp_auth
 from channel.mcp import crypto
+from channel.mcp.url_guard import validate_mcp_server_url
 from channel.models import (
     ChatMCPMode,
     ChatMCPSettings,
@@ -58,84 +57,29 @@ callback_router = APIRouter()
 
 _TOOL_PREFIX_OK_CHARS = set("abcdefghijklmnopqrstuvwxyz0123456789_")
 
-
-def _is_dangerous_address(addr: str) -> bool:
-    """Return True for any address that should never be the target of an
-    MCP-server URL — loopback, link-local (incl. cloud metadata at
-    169.254.169.254), private RFC1918, multicast, or unspecified.
-    """
-    try:
-        ip = ipaddress.ip_address(addr)
-    except ValueError:
-        return False
-    return (
-        ip.is_loopback
-        or ip.is_link_local
-        or ip.is_private
-        or ip.is_multicast
-        or ip.is_unspecified
-        or ip.is_reserved
-    )
-
-
-def _validate_mcp_server_url(url: str) -> None:
-    """SSRF defense for the MCP server URL.
-
-    Reject any URL whose scheme isn't ``https`` (except the explicit
-    dev-only ``http://localhost[:port]/...`` form, gated by
-    ``STARTER_MCP_ALLOW_LOCALHOST=1``), whose userinfo is set, or whose
-    hostname resolves to a loopback / link-local / private / multicast
-    / reserved address. Raise :class:`HTTPException` 400 on failure.
-    """
-    try:
-        parsed = urlparse(url)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail="malformed URL") from exc
-    if parsed.username or parsed.password:
-        raise HTTPException(status_code=400, detail="URL must not include credentials")
-    if not parsed.hostname:
-        raise HTTPException(status_code=400, detail="URL must include a hostname")
-
-    allow_localhost = os.environ.get("STARTER_MCP_ALLOW_LOCALHOST") == "1"
-    if parsed.scheme == "https":
-        pass
-    elif parsed.scheme == "http" and allow_localhost and parsed.hostname == "localhost":
-        # Dev-only carve-out — only when the env flag is explicitly set
-        # AND the hostname is the literal "localhost" (not "localhost.evil.com").
-        return
-    else:
-        raise HTTPException(status_code=400, detail="MCP server URL must use https")
-
-    # If the hostname IS an IP literal, validate it directly.
-    if _is_dangerous_address(parsed.hostname):
-        raise HTTPException(status_code=400, detail="URL targets a blocked address range")
-    # Otherwise resolve via DNS and reject if ANY resolved address is dangerous.
-    try:
-        infos = socket.getaddrinfo(parsed.hostname, None)
-    except socket.gaierror as exc:
-        raise HTTPException(status_code=400, detail="hostname did not resolve") from exc
-    for info in infos:
-        # getaddrinfo's sockaddr is (host, port[, flow, scope]); the host
-        # is always a str for the IPv4/IPv6 address families. mypy types
-        # it loosely as ``str | int`` because of the Unix-socket case.
-        addr = str(info[4][0])
-        if _is_dangerous_address(addr):
-            raise HTTPException(status_code=400, detail="URL targets a blocked address range")
+# Hard upper bound on the normalized tool prefix. Strands prepends the
+# prefix to every tool name surfaced to the model (``<prefix>_<tool>``);
+# without a cap, a malicious client can blow up the model-visible tool
+# spec, the SSE step-list UI, and operator logs. 32 chars is generous
+# for any realistic server name + tool name combination.
+_TOOL_PREFIX_MAX_LEN = 32
 
 
 def _normalize_tool_prefix(value: str | None, fallback_url: str) -> str:
     """Pick a Strands-safe tool prefix.
 
-    User-supplied prefixes are lowercased + filtered to ``[a-z0-9_]+``.
-    On empty / missing input, fall back to a sanitised host token from
+    User-supplied prefixes are lowercased + filtered to ``[a-z0-9_]+``
+    and then truncated to :data:`_TOOL_PREFIX_MAX_LEN` characters. On
+    empty / missing input, fall back to a sanitised host token from
     the URL (e.g. ``https://hive.warlordofmars.net/mcp`` → ``hive``).
     """
     if value:
         cleaned = "".join(c for c in value.lower() if c in _TOOL_PREFIX_OK_CHARS)
         if cleaned:
-            return cleaned
+            return cleaned[:_TOOL_PREFIX_MAX_LEN]
     host = urlparse(fallback_url).hostname or "mcp"
-    return "".join(c for c in host.split(".")[0].lower() if c in _TOOL_PREFIX_OK_CHARS) or "mcp"
+    derived = "".join(c for c in host.split(".")[0].lower() if c in _TOOL_PREFIX_OK_CHARS) or "mcp"
+    return derived[:_TOOL_PREFIX_MAX_LEN]
 
 
 def _redirect_uri() -> str:
@@ -196,7 +140,10 @@ def _to_out(s: MCPServer) -> _ServerOut:
 class _RegisterRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=64)
     url: str = Field(..., min_length=10, max_length=2048)
-    tool_prefix: str | None = None
+    # Bound at the request boundary too — _normalize_tool_prefix also
+    # truncates to _TOOL_PREFIX_MAX_LEN, but a 422 here is friendlier
+    # than silently dropping the tail of the user's input.
+    tool_prefix: str | None = Field(default=None, max_length=_TOOL_PREFIX_MAX_LEN)
 
 
 class _RegisterResponse(BaseModel):
@@ -209,7 +156,7 @@ async def register_server(
     body: _RegisterRequest,
     claims: dict[str, Any] = Depends(require_mgmt_user),
 ) -> _RegisterResponse:
-    _validate_mcp_server_url(body.url)
+    validate_mcp_server_url(body.url)
     redirect_uri = _redirect_uri()
     try:
         prm = await mcp_auth.discover_resource_metadata(body.url)
@@ -338,7 +285,7 @@ async def mcp_callback(state: str, code: str | None = None, error: str | None = 
     # Re-validate the persisted server URL — defense in depth against
     # registration-time TOCTOU (DNS changes between register + callback).
     try:
-        _validate_mcp_server_url(server.url)
+        validate_mcp_server_url(server.url)
     except HTTPException:
         return RedirectResponse(
             url=f"{spa}/app/customize?mcp_authed=error&reason=blocked_url",
@@ -440,7 +387,7 @@ async def reauth_server(
     s = storage.get_mcp_server(user_id=claims["sub"], server_id=server_id)
     if s is None:
         raise HTTPException(status_code=404, detail="server not found")
-    _validate_mcp_server_url(s.url)
+    validate_mcp_server_url(s.url)
     redirect_uri = _redirect_uri()
     try:
         prm = await mcp_auth.discover_resource_metadata(s.url)

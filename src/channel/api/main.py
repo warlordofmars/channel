@@ -157,11 +157,19 @@ app.include_router(prefs_router)
 
 # MCP server registry — /api/mcp/* (auth-gated) + /auth/mcp/callback
 # (browser redirect target, unauthenticated, state-store guarded).
-from channel.api.mcp import callback_router as mcp_callback_router  # noqa: E402
-from channel.api.mcp import router as mcp_router  # noqa: E402
+#
+# Kill switch: ``STARTER_MCP_REGISTRY_ENABLED != "1"`` skips both
+# router mounts so there's no /api/mcp/* surface at all. Defaults to
+# enabled when unset so tests / local dev that don't provision the
+# env var still work; CDK + ``inv dev`` both wire ``"1"`` explicitly,
+# and ``_build_mcp_clients_for_chat`` short-circuits on the same flag
+# so DDB reads are also skipped when disabled.
+if os.environ.get("STARTER_MCP_REGISTRY_ENABLED", "1") == "1":
+    from channel.api.mcp import callback_router as mcp_callback_router  # noqa: E402
+    from channel.api.mcp import router as mcp_router  # noqa: E402
 
-app.include_router(mcp_router)
-app.include_router(mcp_callback_router)
+    app.include_router(mcp_router)
+    app.include_router(mcp_callback_router)
 
 # Dev-only debug router (Phase 7c). Mounted ONLY when the env flag is
 # explicitly set; prod stacks must not set it. See channel_stack.py +

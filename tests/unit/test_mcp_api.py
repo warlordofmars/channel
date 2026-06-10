@@ -237,7 +237,7 @@ def test_register_allows_localhost_carve_out_when_flag_set(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Local dev still works behind the explicit STARTER_MCP_ALLOW_LOCALHOST=1."""
-    from channel.api.mcp import _validate_mcp_server_url
+    from channel.mcp.url_guard import validate_mcp_server_url as _validate_mcp_server_url
 
     monkeypatch.setenv("STARTER_MCP_ALLOW_LOCALHOST", "1")
     # Direct call; the carve-out only suppresses HTTPException — no fetch.
@@ -983,3 +983,68 @@ def test_callback_blocked_url_redirects_with_error(
     )
     assert resp.status_code == 302
     assert "reason=blocked_url" in resp.headers["location"]
+
+
+def test_tool_prefix_request_field_caps_at_32_chars(client: TestClient) -> None:
+    """Pydantic Field(max_length=32) rejects oversized tool_prefix
+    values at the request boundary (defense-in-depth against
+    log/spec/UI blow-up). 422 is friendlier than silent truncation."""
+    long_prefix = "x" * 100
+    resp = client.post(
+        "/api/mcp/servers",
+        json={
+            "name": "X",
+            "url": "https://hive.example.com/mcp",
+            "tool_prefix": long_prefix,
+        },
+    )
+    assert resp.status_code == 422
+
+
+def test_normalize_tool_prefix_truncates_when_pydantic_bypassed() -> None:
+    """The normalizer's own cap protects internal callers (e.g. a
+    direct create_mcp_server call) from hitting the same blow-up.
+    Defense-in-depth — both layers cap independently."""
+    from channel.api.mcp import _normalize_tool_prefix
+
+    out = _normalize_tool_prefix("x" * 200, "https://hive.example.com/mcp")
+    assert len(out) == 32
+
+
+def test_normalize_tool_prefix_truncates_host_fallback() -> None:
+    """When tool_prefix is absent, the host-derived fallback is also
+    truncated."""
+    from channel.api.mcp import _normalize_tool_prefix
+
+    long_host = ("a" * 100) + ".example.com"
+    out = _normalize_tool_prefix(None, f"https://{long_host}/mcp")
+    assert len(out) == 32
+
+
+def test_main_mount_kill_switch_skipped_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When STARTER_MCP_REGISTRY_ENABLED != '1' the FastAPI app does
+    NOT include the MCP routers — /api/mcp/servers + /auth/mcp/callback
+    return 404. The test reloads ``channel.api.main`` so the
+    module-import-time gate runs again with the new env value."""
+    import importlib
+    import sys
+
+    monkeypatch.setenv("STARTER_MCP_REGISTRY_ENABLED", "0")
+    # Force re-import of main so the gated mount runs again. Modules
+    # that may reference the previous app instance get reloaded too.
+    sys.modules.pop("channel.api.main", None)
+    sys.modules.pop("channel.api.mcp", None)
+    reloaded_main = importlib.import_module("channel.api.main")
+    try:
+        raw = TestClient(reloaded_main.app)
+        resp = raw.get("/api/mcp/servers")
+        assert resp.status_code == 404
+        resp2 = raw.get("/auth/mcp/callback?state=anything&code=anything")
+        assert resp2.status_code == 404
+    finally:
+        # Restore the canonical app instance for subsequent tests.
+        sys.modules.pop("channel.api.main", None)
+        sys.modules.pop("channel.api.mcp", None)
+        importlib.import_module("channel.api.main")

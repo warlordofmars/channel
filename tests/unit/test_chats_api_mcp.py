@@ -18,6 +18,19 @@ from channel.models import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _public_dns(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub ``socket.getaddrinfo`` so the URL re-validator's DNS lookup
+    doesn't depend on real resolution for synthetic test hostnames."""
+    import socket as _socket
+
+    def fake_getaddrinfo(_host: str, _port: int | None, *_a: Any, **_kw: Any) -> Any:
+        # 8.8.8.8 — globally-routable IPv4, not in any blocked range.
+        return [(2, 1, 6, "", ("8.8.8.8", 0))]
+
+    monkeypatch.setattr(_socket, "getaddrinfo", fake_getaddrinfo)
+
+
 def _make_server(server_id: str, name: str, globally_enabled: bool = True) -> MCPServer:
     return MCPServer(
         server_id=server_id,
@@ -186,6 +199,96 @@ async def test_build_mcp_clients_skips_expired_servers(
         chat_id="chat-1",
     )
     assert clients == []
+
+
+@pytest.mark.asyncio
+async def test_build_mcp_clients_kill_switch_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """STARTER_MCP_REGISTRY_ENABLED != '1' short-circuits with zero DDB
+    reads."""
+    monkeypatch.setenv("STARTER_MCP_REGISTRY_ENABLED", "0")
+
+    def _explode(*_a: Any, **_kw: Any) -> Any:
+        raise AssertionError("must not be called when kill switch is off")
+
+    monkeypatch.setattr(chats_module.storage, "list_mcp_servers_for_user", _explode)
+    clients = await chats_module._build_mcp_clients_for_chat(
+        user_id="u1",
+        chat_id="chat-1",
+    )
+    assert clients == []
+
+
+@pytest.mark.asyncio
+async def test_build_mcp_clients_kill_switch_default_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unset env var defaults to enabled — test/dev envs that don't
+    provision the flag still see MCP behavior."""
+    monkeypatch.delenv("STARTER_MCP_REGISTRY_ENABLED", raising=False)
+    called: dict[str, bool] = {}
+
+    def _track(_user_id: str) -> list[Any]:
+        called["yes"] = True
+        return []
+
+    monkeypatch.setattr(chats_module.storage, "list_mcp_servers_for_user", _track)
+    monkeypatch.setattr(
+        chats_module.storage,
+        "get_chat_mcp_settings",
+        lambda _: ChatMCPSettings(chat_id="chat-1"),
+    )
+    await chats_module._build_mcp_clients_for_chat(user_id="u1", chat_id="chat-1")
+    assert called.get("yes") is True
+
+
+@pytest.mark.asyncio
+async def test_build_mcp_clients_skips_server_when_url_revalidation_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A persisted URL that fails the turn-time validator (e.g. DNS
+    now resolves to RFC1918) is silently skipped — no transport, no
+    discovery, no flip of auth_status. Logs at WARNING only."""
+    import socket as _socket
+
+    monkeypatch.setattr(
+        chats_module.storage,
+        "list_mcp_servers_for_user",
+        lambda _: [_make_server("a", "alpha")],
+    )
+    monkeypatch.setattr(
+        chats_module.storage,
+        "get_chat_mcp_settings",
+        lambda _: ChatMCPSettings(chat_id="chat-1"),
+    )
+
+    # Force DNS to resolve to a private RFC1918 address — simulates
+    # a DNS-rebinding scenario between registration and chat-time.
+    def fake_gai(_h: str, _p: int | None, *_a: Any, **_kw: Any) -> Any:
+        return [(2, 1, 6, "", ("10.0.0.5", 0))]
+
+    monkeypatch.setattr(_socket, "getaddrinfo", fake_gai)
+    monkeypatch.setattr(
+        chats_module.mcp_auth,
+        "get_valid_access_token",
+        AsyncMock(side_effect=AssertionError("must not be called")),
+    )
+    flipped: dict[str, Any] = {}
+    monkeypatch.setattr(
+        chats_module.storage,
+        "set_mcp_server_auth_status",
+        lambda **kw: flipped.update(kw),
+    )
+
+    clients = await chats_module._build_mcp_clients_for_chat(
+        user_id="u1",
+        chat_id="chat-1",
+    )
+    assert clients == []
+    # The skip does NOT flip auth_status — DNS rebinding is a network
+    # issue, not a user-revocable auth state.
+    assert flipped == {}
 
 
 @pytest.mark.asyncio
