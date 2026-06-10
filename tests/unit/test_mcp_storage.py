@@ -156,3 +156,58 @@ def test_set_auth_status(fake_table: _FakeTable) -> None:
     )
     assert refreshed is not None
     assert refreshed.auth_status == MCPServerAuthStatus.ACTIVE
+
+
+def test_list_mcp_servers_for_user_empty_when_no_rows(fake_table: _FakeTable) -> None:
+    assert storage.list_mcp_servers_for_user("user-with-no-servers") == []
+
+
+def test_get_mcp_server_returns_none_when_missing(fake_table: _FakeTable) -> None:
+    assert storage.get_mcp_server(user_id="u", server_id="missing") is None
+
+
+def test_get_mcp_token_returns_none_when_missing(fake_table: _FakeTable) -> None:
+    assert storage.get_mcp_token(user_id="u", server_id="missing") is None
+
+
+def test_get_chat_mcp_settings_returns_defaults_when_missing(fake_table: _FakeTable) -> None:
+    from channel.models import ChatMCPMode
+
+    settings = storage.get_chat_mcp_settings("missing-chat")
+    assert settings.mode == ChatMCPMode.INHERIT
+    assert settings.explicit_server_ids == []
+
+
+def test_put_chat_mcp_settings_round_trip(fake_table: _FakeTable) -> None:
+    from channel.models import ChatMCPMode, ChatMCPSettings
+
+    storage.put_chat_mcp_settings(
+        ChatMCPSettings(
+            chat_id="c1",
+            mode=ChatMCPMode.EXPLICIT,
+            explicit_server_ids=["srv-a", "srv-b"],
+        )
+    )
+    fetched = storage.get_chat_mcp_settings("c1")
+    assert fetched.mode == ChatMCPMode.EXPLICIT
+    assert fetched.explicit_server_ids == ["srv-a", "srv-b"]
+
+
+def test_put_mcp_token_without_refresh_token_omits_field(fake_table: _FakeTable) -> None:
+    storage.put_mcp_token(
+        user_id="u",
+        server_id="s",
+        access_token_ciphertext=b"a",
+        refresh_token_ciphertext=None,
+        expires_at=1_700_000_000,
+        granted_scope="read",
+    )
+    token = storage.get_mcp_token(user_id="u", server_id="s")
+    assert token is not None
+    assert token.refresh_token_ciphertext is None
+
+
+def test_delete_mcp_server_idempotent(fake_table: _FakeTable) -> None:
+    storage.delete_mcp_server(user_id="u", server_id="never-existed")
+    # second call must also not raise
+    storage.delete_mcp_server(user_id="u", server_id="never-existed")

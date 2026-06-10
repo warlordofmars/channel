@@ -32,8 +32,13 @@ from pydantic import ValidationError
 from channel.models import (
     Attachment,
     Chat,
+    ChatMCPMode,
+    ChatMCPSettings,
     Feedback,
     FeedbackKind,
+    MCPServer,
+    MCPServerAuthStatus,
+    MCPToken,
     Message,
     MessageRole,
     Prefs,
@@ -872,7 +877,7 @@ def _mcp_chat_override_sk() -> str:
     return "MCPSERVERS#META"
 
 
-def _mcp_server_item(server: "MCPServer") -> dict[str, Any]:
+def _mcp_server_item(server: MCPServer) -> dict[str, Any]:
     return {
         "PK": f"USER#{server.user_id}",
         "SK": _mcp_server_sk(server.server_id),
@@ -889,9 +894,7 @@ def _mcp_server_item(server: "MCPServer") -> dict[str, Any]:
     }
 
 
-def _mcp_server_from_item(item: dict[str, Any]) -> "MCPServer":
-    from channel.models import MCPServer, MCPServerAuthStatus  # noqa: PLC0415
-
+def _mcp_server_from_item(item: dict[str, Any]) -> MCPServer:
     return MCPServer(
         server_id=item["server_id"],
         user_id=item["user_id"],
@@ -913,7 +916,7 @@ def create_mcp_server(
     url: str,
     client_id: str,
     tool_prefix: str,
-) -> "MCPServer":
+) -> MCPServer:
     """Persist a freshly-registered MCP server row.
 
     Caller supplies the DCR-issued ``client_id`` and a normalized
@@ -921,8 +924,6 @@ def create_mcp_server(
     completes the auth-code flow next and the callback handler flips
     this to ``ACTIVE``.
     """
-    from channel.models import MCPServer, MCPServerAuthStatus  # noqa: PLC0415
-
     now = _now_iso()
     server = MCPServer(
         server_id=str(uuid.uuid4()),
@@ -940,7 +941,7 @@ def create_mcp_server(
     return server
 
 
-def get_mcp_server(*, user_id: str, server_id: str) -> "MCPServer | None":
+def get_mcp_server(*, user_id: str, server_id: str) -> MCPServer | None:
     result = _get_table().get_item(
         Key={"PK": f"USER#{user_id}", "SK": _mcp_server_sk(server_id)}
     )
@@ -948,7 +949,7 @@ def get_mcp_server(*, user_id: str, server_id: str) -> "MCPServer | None":
     return _mcp_server_from_item(item) if item else None
 
 
-def list_mcp_servers_for_user(user_id: str) -> list["MCPServer"]:
+def list_mcp_servers_for_user(user_id: str) -> list[MCPServer]:
     """List all registered MCP servers for one user. Newest first."""
     result = _get_table().query(
         KeyConditionExpression=(
@@ -992,7 +993,7 @@ def set_mcp_server_auth_status(
     *,
     user_id: str,
     server_id: str,
-    status: "MCPServerAuthStatus",
+    status: MCPServerAuthStatus,
 ) -> None:
     _get_table().update_item(
         Key={"PK": f"USER#{user_id}", "SK": _mcp_server_sk(server_id)},
@@ -1008,6 +1009,11 @@ def delete_mcp_server(*, user_id: str, server_id: str) -> None:
     Caller (API layer) is responsible for the best-effort revoke at the
     MCP server's token endpoint BEFORE this — but the revoke is not a
     correctness condition for this helper.
+
+    Per-chat override rows (PK=CHAT#{chat_id}, SK=MCPSERVERS#META) that
+    reference this server are NOT cleaned up — they degrade gracefully
+    when the chassis resolver filters out unknown server IDs at
+    list-build time (#207 chassis wiring, Task 8).
     """
     table = _get_table()
     table.delete_item(
@@ -1048,9 +1054,7 @@ def put_mcp_token(
     _get_table().put_item(Item=item)
 
 
-def get_mcp_token(*, user_id: str, server_id: str) -> "MCPToken | None":
-    from channel.models import MCPToken  # noqa: PLC0415
-
+def get_mcp_token(*, user_id: str, server_id: str) -> MCPToken | None:
     result = _get_table().get_item(
         Key={"PK": f"USER#{user_id}", "SK": _mcp_token_sk(server_id)}
     )
@@ -1072,10 +1076,8 @@ def get_mcp_token(*, user_id: str, server_id: str) -> "MCPToken | None":
     )
 
 
-def get_chat_mcp_settings(chat_id: str) -> "ChatMCPSettings":
+def get_chat_mcp_settings(chat_id: str) -> ChatMCPSettings:
     """Read the chat's MCP override. Returns defaults if no row exists."""
-    from channel.models import ChatMCPMode, ChatMCPSettings  # noqa: PLC0415
-
     result = _get_table().get_item(
         Key={"PK": f"CHAT#{chat_id}", "SK": _mcp_chat_override_sk()}
     )
@@ -1089,7 +1091,7 @@ def get_chat_mcp_settings(chat_id: str) -> "ChatMCPSettings":
     )
 
 
-def put_chat_mcp_settings(settings: "ChatMCPSettings") -> None:
+def put_chat_mcp_settings(settings: ChatMCPSettings) -> None:
     _get_table().put_item(
         Item={
             "PK": f"CHAT#{settings.chat_id}",
