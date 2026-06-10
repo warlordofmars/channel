@@ -29,6 +29,7 @@ from aws_cdk import aws_cloudwatch as cw
 from aws_cdk import aws_cloudwatch_actions as cw_actions
 from aws_cdk import aws_dynamodb as dynamodb
 from aws_cdk import aws_iam as iam
+from aws_cdk import aws_kms as kms
 from aws_cdk import aws_lambda as lambda_
 from aws_cdk import aws_logs as logs
 from aws_cdk import aws_route53 as route53
@@ -491,6 +492,31 @@ class ChannelStack(cdk.Stack):
         common_env["STARTER_EXA_API_KEY_PARAM"] = f"/channel/{env_name}/exa-api-key"
         # Default enabled in every env; flag is a kill switch, not a rollout knob
         common_env["STARTER_WEB_SEARCH_ENABLED"] = "1"
+
+        # #207 MCP registry — dedicated CMK + redirect-URI env + IAM.
+        # The CMK has annual rotation enabled and is destroyed on stack
+        # teardown only in non-prod envs (data_removal mirrors the other
+        # stateful resources). Token blobs encrypted by it never leave
+        # DynamoDB; losing the key on prod would mean every user has to
+        # re-authenticate every registered MCP server, which is recoverable.
+        mcp_token_key = kms.Key(
+            self,
+            "MCPTokenKey",
+            description=f"Channel {env_name} — encrypts MCP OAuth token blobs at rest",
+            enable_key_rotation=True,
+            removal_policy=data_removal,
+        )
+        mcp_token_key.grant_encrypt_decrypt(api_role)
+        common_env["STARTER_MCP_TOKEN_KMS_KEY_ID"] = mcp_token_key.key_arn
+        common_env["STARTER_MCP_REGISTRY_ENABLED"] = "1"
+        # The redirect URI is the API origin's /auth/mcp/callback path.
+        # MCP servers persist this in their DCR client record; changing
+        # it later requires re-registering, so derive it from the env's
+        # custom_domain.
+        common_env["STARTER_MCP_REDIRECT_URI"] = (
+            f"https://{custom_domain}/auth/mcp/callback"
+        )
+        common_env["STARTER_SPA_BASE_URL"] = f"https://{custom_domain}"
 
         # ----------------------------------------------------------------
         # Attachments S3 bucket (#173) — file attachments + vision (epic #109)

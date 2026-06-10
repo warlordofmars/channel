@@ -57,3 +57,12 @@ def test_missing_key_id_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("STARTER_MCP_TOKEN_KMS_KEY_ID", raising=False)
     with pytest.raises(RuntimeError, match="STARTER_MCP_TOKEN_KMS_KEY_ID"):
         crypto.encrypt_blob("payload")
+
+
+def test_local_dev_sentinel_round_trip(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When STARTER_MCP_TOKEN_KMS_KEY_ID is literally 'local', encrypt/
+    decrypt short-circuit to a passthrough wrapping — used by ``inv dev``."""
+    monkeypatch.setenv("STARTER_MCP_TOKEN_KMS_KEY_ID", "local")
+    enc = crypto.encrypt_blob("plain")
+    assert enc == b"LOCAL::plain"
+    assert crypto.decrypt_blob(enc) == "plain"

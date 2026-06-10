@@ -372,6 +372,50 @@ def test_dev_stack_enables_web_search(dev_template):
     assert env_vars.get("STARTER_WEB_SEARCH_ENABLED") == "1"
 
 
+def test_prod_stack_carries_mcp_env_vars(prod_template):
+    """API Lambda must receive STARTER_MCP_REDIRECT_URI + STARTER_SPA_BASE_URL
+    + STARTER_MCP_TOKEN_KMS_KEY_ID + STARTER_MCP_REGISTRY_ENABLED.
+
+    The KMS key ID isn't a literal at synth-time (it's a CFN ref) so
+    we just confirm presence, not value."""
+    api_fn = _api_function(prod_template)
+    env_vars = api_fn["Properties"]["Environment"]["Variables"]
+    assert env_vars.get("STARTER_MCP_REGISTRY_ENABLED") == "1"
+    assert "STARTER_MCP_REDIRECT_URI" in env_vars
+    assert "STARTER_SPA_BASE_URL" in env_vars
+    assert "STARTER_MCP_TOKEN_KMS_KEY_ID" in env_vars
+
+
+def test_prod_stack_mcp_token_kms_key_id_is_not_local_sentinel(prod_template):
+    """Defense-in-depth — the local-dev passthrough sentinel must never
+    leak to a deployed env. The CDK stack always wires a real KMS ARN
+    via key_arn; this test confirms it's not the literal string 'local'."""
+    api_fn = _api_function(prod_template)
+    env_vars = api_fn["Properties"]["Environment"]["Variables"]
+    assert env_vars.get("STARTER_MCP_TOKEN_KMS_KEY_ID") != "local"
+
+
+def test_dev_stack_mcp_token_kms_key_id_is_not_local_sentinel(dev_template):
+    api_fn = _api_function(dev_template)
+    env_vars = api_fn["Properties"]["Environment"]["Variables"]
+    assert env_vars.get("STARTER_MCP_TOKEN_KMS_KEY_ID") != "local"
+
+
+def test_stack_creates_mcp_token_kms_key(prod_template):
+    """A dedicated CMK with rotation enabled exists for MCP tokens."""
+    keys = prod_template.find_resources("AWS::KMS::Key")
+    mcp_keys = {
+        k: v for k, v in keys.items()
+        if "MCP" in v["Properties"].get("Description", "")
+    }
+    assert len(mcp_keys) >= 1, (
+        f"Expected an MCP token-encryption KMS key in stack; "
+        f"found descriptions: {[v['Properties'].get('Description') for v in keys.values()]}"
+    )
+    one = next(iter(mcp_keys.values()))
+    assert one["Properties"].get("EnableKeyRotation") is True
+
+
 def test_prod_stack_sets_exa_api_key_param_path(prod_template):
     """STARTER_EXA_API_KEY_PARAM points at the per-env SSM path so the
     Lambda knows where to fetch the key."""
