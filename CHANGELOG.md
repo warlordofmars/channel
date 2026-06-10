@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- MCP-server registry + per-chat selection. Users can register external
+  Model Context Protocol servers from `/app/customize`; each chat
+  inherits the globally-enabled set or opts into an explicit list via a
+  new composer popover. Channel owns OAuth 2.1 + DCR + refresh while
+  Strands' `MCPClient` consumes a pre-authenticated transport thunk —
+  MCP tools flow through the existing `BeforeToolCallEvent` /
+  `AfterToolCallEvent` chassis hooks identically to native tools.
+  Tokens are KMS-encrypted at the application layer (dedicated CMK with
+  annual rotation; passthrough sentinel for local dev) and refreshed
+  lazily on every turn. A defensive SSRF guard validates the
+  user-supplied URL (reject userinfo, require https except an explicit
+  localhost carve-out, resolve hostname and block any
+  loopback/link-local/private/reserved address). (#207, #184 spike,
+  epic #128 part D)
 - Code execution via Lambda sandbox: `code_exec` tool registered on the
   chassis behind `STARTER_CODE_EXEC_ENABLED` (default on in deployed envs;
   kill switch only). A separate `CodeExecLambda` CDK construct runs user
