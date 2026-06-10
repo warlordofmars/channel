@@ -27,6 +27,21 @@ def client() -> TestClient:
     app.dependency_overrides.clear()
 
 
+@pytest.fixture
+def public_dns(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub socket.getaddrinfo so test hostnames resolve to a public IP.
+
+    Without this, the SSRF validator runs real DNS and ``hive.example.com``
+    may not resolve, which would 400 every register/callback test."""
+    import socket as _socket
+
+    def fake_getaddrinfo(host: str, _port: int | None, *_a: Any, **_kw: Any) -> Any:
+        # 8.8.8.8 — globally-routable IPv4 not in any blocked range.
+        return [(2, 1, 6, "", ("8.8.8.8", 0))]
+
+    monkeypatch.setattr(_socket, "getaddrinfo", fake_getaddrinfo)
+
+
 def test_list_servers_returns_empty(
     client: TestClient, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -39,7 +54,7 @@ def test_list_servers_returns_empty(
 
 
 def test_register_server_runs_dcr_and_returns_auth_url(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch,
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, public_dns: None,
 ) -> None:
     from mcp.shared.auth import (
         OAuthClientInformationFull,
@@ -112,6 +127,91 @@ def test_register_server_runs_dcr_and_returns_auth_url(
     assert created["client_id"] == "dcr-new"
 
 
+def test_register_rejects_userinfo_in_url(
+    client: TestClient,
+) -> None:
+    resp = client.post(
+        "/api/mcp/servers",
+        json={"name": "X", "url": "https://user:pass@hive.example.com/mcp"},
+    )
+    assert resp.status_code == 400
+    assert "credentials" in resp.json()["detail"]
+
+
+def test_register_rejects_http_when_not_localhost(
+    client: TestClient,
+) -> None:
+    resp = client.post(
+        "/api/mcp/servers",
+        json={"name": "X", "url": "http://hive.example.com/mcp"},
+    )
+    assert resp.status_code == 400
+    assert "https" in resp.json()["detail"]
+
+
+def test_register_rejects_link_local_metadata_ip(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Block the AWS IMDS at 169.254.169.254 — the SSRF threat that the
+    URL validator exists to prevent."""
+    monkeypatch.setenv(
+        "STARTER_MCP_REDIRECT_URI",
+        "https://channel.example.com/auth/mcp/callback",
+    )
+    resp = client.post(
+        "/api/mcp/servers",
+        json={"name": "X", "url": "https://169.254.169.254/mcp"},
+    )
+    assert resp.status_code == 400
+    assert "blocked" in resp.json()["detail"]
+
+
+def test_register_rejects_loopback_when_carve_out_disabled(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("STARTER_MCP_ALLOW_LOCALHOST", raising=False)
+    resp = client.post(
+        "/api/mcp/servers",
+        json={"name": "X", "url": "http://localhost:9000/mcp"},
+    )
+    assert resp.status_code == 400
+
+
+def test_register_rejects_when_dns_resolves_to_private(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Even a non-loopback hostname is blocked if DNS resolves to a
+    private address."""
+    import socket as _socket
+
+    def fake_getaddrinfo(host: str, _port: int | None, *_a: Any, **_kw: Any) -> Any:
+        # AF_INET, SOCK_STREAM, IPPROTO_TCP, '', (addr, port)
+        return [(2, 1, 6, "", ("10.0.0.5", 0))]
+
+    monkeypatch.setattr(_socket, "getaddrinfo", fake_getaddrinfo)
+    monkeypatch.setenv(
+        "STARTER_MCP_REDIRECT_URI",
+        "https://channel.example.com/auth/mcp/callback",
+    )
+    resp = client.post(
+        "/api/mcp/servers",
+        json={"name": "X", "url": "https://internal.example.com/mcp"},
+    )
+    assert resp.status_code == 400
+    assert "blocked" in resp.json()["detail"]
+
+
+def test_register_allows_localhost_carve_out_when_flag_set(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Local dev still works behind the explicit STARTER_MCP_ALLOW_LOCALHOST=1."""
+    from channel.api.mcp import _validate_mcp_server_url
+
+    monkeypatch.setenv("STARTER_MCP_ALLOW_LOCALHOST", "1")
+    # Direct call; the carve-out only suppresses HTTPException — no fetch.
+    _validate_mcp_server_url("http://localhost:9000/mcp")
+
+
 def test_callback_with_invalid_state_redirects_with_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -127,7 +227,7 @@ def test_callback_with_invalid_state_redirects_with_error(
 
 
 def test_callback_happy_path_persists_token_and_flips_status(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, public_dns: None,
 ) -> None:
     from mcp.shared.auth import OAuthMetadata, OAuthToken, ProtectedResourceMetadata
 

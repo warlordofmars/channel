@@ -22,9 +22,11 @@ For per-chat ownership, the read/write routes call
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import os
 import secrets
+import socket
 import time
 from typing import Any
 from urllib.parse import urlparse
@@ -55,6 +57,69 @@ callback_router = APIRouter()
 
 
 _TOOL_PREFIX_OK_CHARS = set("abcdefghijklmnopqrstuvwxyz0123456789_")
+
+
+def _is_dangerous_address(addr: str) -> bool:
+    """Return True for any address that should never be the target of an
+    MCP-server URL — loopback, link-local (incl. cloud metadata at
+    169.254.169.254), private RFC1918, multicast, or unspecified.
+    """
+    try:
+        ip = ipaddress.ip_address(addr)
+    except ValueError:
+        return False
+    return (
+        ip.is_loopback
+        or ip.is_link_local
+        or ip.is_private
+        or ip.is_multicast
+        or ip.is_unspecified
+        or ip.is_reserved
+    )
+
+
+def _validate_mcp_server_url(url: str) -> None:
+    """SSRF defense for the MCP server URL.
+
+    Reject any URL whose scheme isn't ``https`` (except the explicit
+    dev-only ``http://localhost[:port]/...`` form, gated by
+    ``STARTER_MCP_ALLOW_LOCALHOST=1``), whose userinfo is set, or whose
+    hostname resolves to a loopback / link-local / private / multicast
+    / reserved address. Raise :class:`HTTPException` 400 on failure.
+    """
+    try:
+        parsed = urlparse(url)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="malformed URL") from exc
+    if parsed.username or parsed.password:
+        raise HTTPException(status_code=400, detail="URL must not include credentials")
+    if not parsed.hostname:
+        raise HTTPException(status_code=400, detail="URL must include a hostname")
+
+    allow_localhost = os.environ.get("STARTER_MCP_ALLOW_LOCALHOST") == "1"
+    if parsed.scheme == "https":
+        pass
+    elif parsed.scheme == "http" and allow_localhost and parsed.hostname == "localhost":
+        # Dev-only carve-out — only when the env flag is explicitly set
+        # AND the hostname is the literal "localhost" (not "localhost.evil.com").
+        return
+    else:
+        raise HTTPException(status_code=400, detail="MCP server URL must use https")
+
+    # If the hostname IS an IP literal, validate it directly.
+    if _is_dangerous_address(parsed.hostname):
+        raise HTTPException(status_code=400, detail="URL targets a blocked address range")
+    # Otherwise resolve via DNS and reject if ANY resolved address is dangerous.
+    try:
+        infos = socket.getaddrinfo(parsed.hostname, None)
+    except socket.gaierror as exc:
+        raise HTTPException(status_code=400, detail="hostname did not resolve") from exc
+    for info in infos:
+        addr = info[4][0]
+        if _is_dangerous_address(addr):
+            raise HTTPException(
+                status_code=400, detail="URL targets a blocked address range"
+            )
 
 
 def _normalize_tool_prefix(value: str | None, fallback_url: str) -> str:
@@ -141,9 +206,8 @@ async def register_server(
     body: _RegisterRequest,
     claims: dict[str, Any] = Depends(require_mgmt_user),
 ) -> _RegisterResponse:
+    _validate_mcp_server_url(body.url)
     redirect_uri = _redirect_uri()
-    if not body.url.startswith(("https://", "http://localhost")):
-        raise HTTPException(status_code=400, detail="MCP server URL must use https")
     try:
         prm = await mcp_auth.discover_resource_metadata(body.url)
         as_url = (
@@ -264,6 +328,15 @@ async def mcp_callback(state: str, code: str | None = None, error: str | None = 
             url=f"{spa}/app/customize?mcp_authed=error&reason=server_gone",
             status_code=302,
         )
+    # Re-validate the persisted server URL — defense in depth against
+    # registration-time TOCTOU (DNS changes between register + callback).
+    try:
+        _validate_mcp_server_url(server.url)
+    except HTTPException:
+        return RedirectResponse(
+            url=f"{spa}/app/customize?mcp_authed=error&reason=blocked_url",
+            status_code=302,
+        )
     try:
         prm = await mcp_auth.discover_resource_metadata(server.url)
         as_url = (
@@ -357,6 +430,7 @@ async def reauth_server(
     s = storage.get_mcp_server(user_id=claims["sub"], server_id=server_id)
     if s is None:
         raise HTTPException(status_code=404, detail="server not found")
+    _validate_mcp_server_url(s.url)
     redirect_uri = _redirect_uri()
     try:
         prm = await mcp_auth.discover_resource_metadata(s.url)

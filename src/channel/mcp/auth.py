@@ -67,7 +67,9 @@ async def discover_resource_metadata(server_url: str) -> ProtectedResourceMetada
     """
     origin = _origin_of(server_url)
     url = origin + _PRM_PATH
-    async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT_SEC) as client:
+    async with httpx.AsyncClient(
+        timeout=_HTTP_TIMEOUT_SEC, follow_redirects=False,
+    ) as client:
         resp = await client.get(url)
     resp.raise_for_status()
     return ProtectedResourceMetadata.model_validate(resp.json())
@@ -77,7 +79,9 @@ async def discover_auth_server_metadata(auth_server_url: str) -> OAuthMetadata:
     """Fetch RFC 8414 authorization-server metadata."""
     origin = _origin_of(auth_server_url)
     url = origin + _AS_PATH
-    async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT_SEC) as client:
+    async with httpx.AsyncClient(
+        timeout=_HTTP_TIMEOUT_SEC, follow_redirects=False,
+    ) as client:
         resp = await client.get(url)
     resp.raise_for_status()
     return OAuthMetadata.model_validate(resp.json())
@@ -103,7 +107,9 @@ async def register_dynamic_client(
         "response_types": ["code"],
         "client_name": client_name,
     }
-    async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT_SEC) as client:
+    async with httpx.AsyncClient(
+        timeout=_HTTP_TIMEOUT_SEC, follow_redirects=False,
+    ) as client:
         resp = await client.post(registration_endpoint, json=body)
     resp.raise_for_status()
     return OAuthClientInformationFull.model_validate(resp.json())
@@ -149,7 +155,9 @@ async def exchange_code(
         "client_id": client_id,
         "code_verifier": code_verifier,
     }
-    async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT_SEC) as client:
+    async with httpx.AsyncClient(
+        timeout=_HTTP_TIMEOUT_SEC, follow_redirects=False,
+    ) as client:
         resp = await client.post(
             token_endpoint,
             data=data,
@@ -171,7 +179,9 @@ async def refresh_token(
         "refresh_token": refresh_token,
         "client_id": client_id,
     }
-    async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT_SEC) as client:
+    async with httpx.AsyncClient(
+        timeout=_HTTP_TIMEOUT_SEC, follow_redirects=False,
+    ) as client:
         resp = await client.post(
             token_endpoint,
             data=data,
