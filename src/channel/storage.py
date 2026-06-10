@@ -853,3 +853,249 @@ def delete_chat_attachments(*, chat_id: str, user_id: str) -> tuple[int, int]:
             continue
         deleted += 1
     return deleted, failed
+
+
+# ----------------------------------------------------------------
+# MCP servers / tokens (#207) — registry + per-chat override
+# ----------------------------------------------------------------
+
+
+def _mcp_server_sk(server_id: str) -> str:
+    return f"MCPSERVER#{server_id}"
+
+
+def _mcp_token_sk(server_id: str) -> str:
+    return f"MCPTOKEN#{server_id}"
+
+
+def _mcp_chat_override_sk() -> str:
+    return "MCPSERVERS#META"
+
+
+def _mcp_server_item(server: "MCPServer") -> dict[str, Any]:
+    return {
+        "PK": f"USER#{server.user_id}",
+        "SK": _mcp_server_sk(server.server_id),
+        "server_id": server.server_id,
+        "user_id": server.user_id,
+        "name": server.name,
+        "url": server.url,
+        "client_id": server.client_id,
+        "tool_prefix": server.tool_prefix,
+        "auth_status": server.auth_status.value,
+        "globally_enabled": server.globally_enabled,
+        "created_at": server.created_at,
+        "updated_at": server.updated_at,
+    }
+
+
+def _mcp_server_from_item(item: dict[str, Any]) -> "MCPServer":
+    from channel.models import MCPServer, MCPServerAuthStatus  # noqa: PLC0415
+
+    return MCPServer(
+        server_id=item["server_id"],
+        user_id=item["user_id"],
+        name=item["name"],
+        url=item["url"],
+        client_id=item["client_id"],
+        tool_prefix=item["tool_prefix"],
+        auth_status=MCPServerAuthStatus(item["auth_status"]),
+        globally_enabled=bool(item.get("globally_enabled", True)),
+        created_at=item["created_at"],
+        updated_at=item["updated_at"],
+    )
+
+
+def create_mcp_server(
+    *,
+    user_id: str,
+    name: str,
+    url: str,
+    client_id: str,
+    tool_prefix: str,
+) -> "MCPServer":
+    """Persist a freshly-registered MCP server row.
+
+    Caller supplies the DCR-issued ``client_id`` and a normalized
+    ``tool_prefix``. Auth status starts ``NEVER_AUTHED`` — the user
+    completes the auth-code flow next and the callback handler flips
+    this to ``ACTIVE``.
+    """
+    from channel.models import MCPServer, MCPServerAuthStatus  # noqa: PLC0415
+
+    now = _now_iso()
+    server = MCPServer(
+        server_id=str(uuid.uuid4()),
+        user_id=user_id,
+        name=name,
+        url=url,
+        client_id=client_id,
+        tool_prefix=tool_prefix,
+        auth_status=MCPServerAuthStatus.NEVER_AUTHED,
+        globally_enabled=True,
+        created_at=now,
+        updated_at=now,
+    )
+    _get_table().put_item(Item=_mcp_server_item(server))
+    return server
+
+
+def get_mcp_server(*, user_id: str, server_id: str) -> "MCPServer | None":
+    result = _get_table().get_item(
+        Key={"PK": f"USER#{user_id}", "SK": _mcp_server_sk(server_id)}
+    )
+    item = result.get("Item")
+    return _mcp_server_from_item(item) if item else None
+
+
+def list_mcp_servers_for_user(user_id: str) -> list["MCPServer"]:
+    """List all registered MCP servers for one user. Newest first."""
+    result = _get_table().query(
+        KeyConditionExpression=(
+            Key("PK").eq(f"USER#{user_id}") & Key("SK").begins_with("MCPSERVER#")
+        ),
+    )
+    items = result.get("Items") or []
+    servers = [_mcp_server_from_item(it) for it in items]
+    # Sort newest first by created_at — list query has no implicit order.
+    servers.sort(key=lambda s: s.created_at, reverse=True)
+    return servers
+
+
+def update_mcp_server(
+    *,
+    user_id: str,
+    server_id: str,
+    name: str | None = None,
+    globally_enabled: bool | None = None,
+) -> None:
+    sets: list[str] = ["updated_at = :u"]
+    values: dict[str, Any] = {":u": _now_iso()}
+    if name is not None:
+        sets.append("#n = :n")
+        values[":n"] = name
+    if globally_enabled is not None:
+        sets.append("globally_enabled = :g")
+        values[":g"] = globally_enabled
+    kwargs: dict[str, Any] = {
+        "Key": {"PK": f"USER#{user_id}", "SK": _mcp_server_sk(server_id)},
+        "UpdateExpression": "SET " + ", ".join(sets),
+        "ExpressionAttributeValues": values,
+    }
+    # ``name`` is a DynamoDB reserved word; alias when we touch it.
+    if name is not None:
+        kwargs["ExpressionAttributeNames"] = {"#n": "name"}
+    _get_table().update_item(**kwargs)
+
+
+def set_mcp_server_auth_status(
+    *,
+    user_id: str,
+    server_id: str,
+    status: "MCPServerAuthStatus",
+) -> None:
+    _get_table().update_item(
+        Key={"PK": f"USER#{user_id}", "SK": _mcp_server_sk(server_id)},
+        UpdateExpression="SET auth_status = :s, updated_at = :u",
+        ExpressionAttributeValues={":s": status.value, ":u": _now_iso()},
+    )
+
+
+def delete_mcp_server(*, user_id: str, server_id: str) -> None:
+    """Delete the MCPSERVER row + its sibling MCPTOKEN row.
+
+    Idempotent — each delete_item no-ops if the row is already gone.
+    Caller (API layer) is responsible for the best-effort revoke at the
+    MCP server's token endpoint BEFORE this — but the revoke is not a
+    correctness condition for this helper.
+    """
+    table = _get_table()
+    table.delete_item(
+        Key={"PK": f"USER#{user_id}", "SK": _mcp_server_sk(server_id)}
+    )
+    table.delete_item(
+        Key={"PK": f"USER#{user_id}", "SK": _mcp_token_sk(server_id)}
+    )
+
+
+def put_mcp_token(
+    *,
+    user_id: str,
+    server_id: str,
+    access_token_ciphertext: bytes,
+    refresh_token_ciphertext: bytes | None,
+    expires_at: int,
+    granted_scope: str,
+) -> None:
+    """Persist a token bundle. Ciphertext supplied by the caller.
+
+    TTL is set to ``expires_at + 30 days`` as a hard upper bound for the
+    orphan-row case where DELETE lost a race; the application's own
+    expires_at check still drives refresh."""
+    item: dict[str, Any] = {
+        "PK": f"USER#{user_id}",
+        "SK": _mcp_token_sk(server_id),
+        "user_id": user_id,
+        "server_id": server_id,
+        "access_token_ciphertext": access_token_ciphertext,
+        "expires_at": expires_at,
+        "granted_scope": granted_scope,
+        "updated_at": _now_iso(),
+        "ttl": expires_at + (30 * 86400),
+    }
+    if refresh_token_ciphertext is not None:
+        item["refresh_token_ciphertext"] = refresh_token_ciphertext
+    _get_table().put_item(Item=item)
+
+
+def get_mcp_token(*, user_id: str, server_id: str) -> "MCPToken | None":
+    from channel.models import MCPToken  # noqa: PLC0415
+
+    result = _get_table().get_item(
+        Key={"PK": f"USER#{user_id}", "SK": _mcp_token_sk(server_id)}
+    )
+    item = result.get("Item")
+    if not item:
+        return None
+    return MCPToken(
+        server_id=item["server_id"],
+        user_id=item["user_id"],
+        access_token_ciphertext=bytes(item["access_token_ciphertext"]),
+        refresh_token_ciphertext=(
+            bytes(item["refresh_token_ciphertext"])
+            if item.get("refresh_token_ciphertext") is not None
+            else None
+        ),
+        expires_at=int(item["expires_at"]),
+        granted_scope=item.get("granted_scope", ""),
+        updated_at=item["updated_at"],
+    )
+
+
+def get_chat_mcp_settings(chat_id: str) -> "ChatMCPSettings":
+    """Read the chat's MCP override. Returns defaults if no row exists."""
+    from channel.models import ChatMCPMode, ChatMCPSettings  # noqa: PLC0415
+
+    result = _get_table().get_item(
+        Key={"PK": f"CHAT#{chat_id}", "SK": _mcp_chat_override_sk()}
+    )
+    item = result.get("Item")
+    if not item:
+        return ChatMCPSettings(chat_id=chat_id)
+    return ChatMCPSettings(
+        chat_id=chat_id,
+        mode=ChatMCPMode(item.get("mode", "inherit")),
+        explicit_server_ids=list(item.get("explicit_server_ids") or []),
+    )
+
+
+def put_chat_mcp_settings(settings: "ChatMCPSettings") -> None:
+    _get_table().put_item(
+        Item={
+            "PK": f"CHAT#{settings.chat_id}",
+            "SK": _mcp_chat_override_sk(),
+            "mode": settings.mode.value,
+            "explicit_server_ids": settings.explicit_server_ids,
+            "updated_at": _now_iso(),
+        }
+    )
