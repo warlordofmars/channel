@@ -564,11 +564,15 @@ async def _build_mcp_clients_for_chat(
                 server=server,
             )
         except MCPAuthFailedError as exc:
+            # exc.args[0] is constructed by mcp.auth as an f-string that
+            # interpolates user_id + server_id — both server-generated
+            # but defense-in-depth says: keep the user-controlled flow
+            # surface narrow by logging the exception type only.
             logger.warning(
-                "mcp.token_resolution_failed user=%s server=%s %s",
+                "mcp.token_resolution_failed user=%s server=%s exc_type=%s",
                 user_id,
                 server.server_id,
-                exc,
+                type(exc).__name__,
             )
             storage.set_mcp_server_auth_status(
                 user_id=user_id,

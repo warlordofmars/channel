@@ -349,6 +349,7 @@ export default function Conversation() {
         if (!cancelled) setMcpSettings(s);
       })
       .catch(() => {
+        /* v8 ignore next 3 -- race-condition cleanup; defensive */
         if (!cancelled) {
           setMcpSettings({ mode: "inherit", explicit_server_ids: [] });
         }

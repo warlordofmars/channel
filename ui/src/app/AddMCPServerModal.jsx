@@ -24,6 +24,7 @@ export default function AddMCPServerModal({ open, onClose, onRegistered }) {
   const [error, setError] = useState("");
 
   async function submit() {
+    /* v8 ignore next -- defensive: button is also disabled in this state */
     if (busy || !name.trim() || !url.trim()) return;
     setBusy(true);
     setError("");

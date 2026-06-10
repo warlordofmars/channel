@@ -228,7 +228,15 @@ async def register_server(
     except HTTPException:
         raise
     except Exception as exc:
-        logger.warning("mcp.register.discovery_or_dcr_failed url=%s %r", body.url, exc)
+        # Don't log body.url verbatim — taint flow from a user-controlled
+        # field to a log sink lets a malicious URL inject ANSI escapes or
+        # newlines into operator-facing logs. The exception type tells us
+        # enough for triage; the URL is reconstructable from the audit
+        # trail / DDB row if needed.
+        logger.warning(
+            "mcp.register.discovery_or_dcr_failed exc_type=%s",
+            type(exc).__name__,
+        )
         raise HTTPException(
             status_code=502,
             detail="Failed to register with MCP server (discovery or DCR)",
@@ -348,8 +356,14 @@ async def mcp_callback(state: str, code: str | None = None, error: str | None = 
             code_verifier=code_verifier,
         )
     except Exception as exc:
+        # user_id and server_id are server-generated identifiers — safe to
+        # log. The exception itself can carry an unbounded message from
+        # upstream so we log type only to avoid log-injection.
         logger.warning(
-            "mcp.callback.token_exchange_failed user=%s server=%s %r", user_id, server_id, exc
+            "mcp.callback.token_exchange_failed user=%s server=%s exc_type=%s",
+            user_id,
+            server_id,
+            type(exc).__name__,
         )
         return RedirectResponse(
             url=f"{spa}/app/customize?mcp_authed=error&reason=token_exchange",

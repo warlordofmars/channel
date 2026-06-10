@@ -63,7 +63,16 @@ export default function MCPPicker({ servers, mode, explicitIds, onChange }) {
       </button>
       {open && (
         <>
-          <div className="backdrop" onClick={closePopover} />
+          <div
+            className="backdrop"
+            onClick={closePopover}
+            onKeyDown={(e) => {
+              if (e.key === "Escape" || e.key === "Enter") closePopover();
+            }}
+            role="button"
+            tabIndex={-1}
+            aria-label="Close popover"
+          />
           <div className="pop" style={{ bottom: "calc(100% + 8px)", right: 0 }}>
             <div className="pop-h">MCP servers for this chat</div>
             {(!servers || servers.length === 0) && (
