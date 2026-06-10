@@ -142,3 +142,129 @@ def test_generate_pkce_returns_43_to_128_chars() -> None:
     assert 43 <= len(verifier) <= 128
     assert 43 <= len(challenge) <= 128
     assert verifier != challenge
+
+
+# ----------------------------------------------------------------
+# get_valid_access_token (#207 Task 6)
+# ----------------------------------------------------------------
+
+import time
+
+from channel import storage
+from channel.models import MCPServer, MCPServerAuthStatus
+
+
+class _FakeTable:
+    """Minimal in-memory table for storage helpers."""
+
+    def __init__(self) -> None:
+        self.items: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def put_item(self, Item: dict[str, Any]) -> None:
+        self.items[(Item["PK"], Item["SK"])] = Item
+
+    def get_item(self, Key: dict[str, Any]) -> dict[str, Any]:
+        it = self.items.get((Key["PK"], Key["SK"]))
+        return {"Item": it} if it else {}
+
+
+@pytest.fixture
+def storage_table(monkeypatch: pytest.MonkeyPatch) -> _FakeTable:
+    table = _FakeTable()
+    monkeypatch.setattr(storage, "_get_table", lambda: table)
+    return table
+
+
+@pytest.fixture
+def fake_crypto(monkeypatch: pytest.MonkeyPatch) -> None:
+    from channel.mcp import crypto
+
+    monkeypatch.setattr(crypto, "encrypt_blob", lambda s: ("ENC::" + s).encode())
+    monkeypatch.setattr(
+        crypto, "decrypt_blob",
+        lambda b: b.decode("utf-8").removeprefix("ENC::"),
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_valid_access_token_returns_cached_when_not_expiring(
+    storage_table: _FakeTable, fake_crypto: None
+) -> None:
+    storage.put_mcp_token(
+        user_id="u1",
+        server_id="s1",
+        access_token_ciphertext=b"ENC::acc-cached",
+        refresh_token_ciphertext=b"ENC::ref-1",
+        expires_at=int(time.time()) + 600,  # well above the 60s skew window
+        granted_scope="read",
+    )
+    token = await mcp_auth.get_valid_access_token(
+        user_id="u1",
+        server=MCPServer(
+            server_id="s1", user_id="u1", name="Hive",
+            url="https://hive.example.com/mcp",
+            client_id="dcr-1", tool_prefix="hive",
+            auth_status=MCPServerAuthStatus.ACTIVE,
+            created_at="x", updated_at="x",
+        ),
+    )
+    assert token == "acc-cached"
+
+
+@pytest.mark.asyncio
+async def test_get_valid_access_token_refreshes_when_expiring(
+    storage_table: _FakeTable, fake_crypto: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage.put_mcp_token(
+        user_id="u1",
+        server_id="s1",
+        access_token_ciphertext=b"ENC::stale",
+        refresh_token_ciphertext=b"ENC::ref-1",
+        expires_at=int(time.time()) + 30,  # within the 60s refresh skew window
+        granted_scope="read",
+    )
+
+    async def fake_discover(_url: str) -> Any:
+        from mcp.shared.auth import ProtectedResourceMetadata
+        return ProtectedResourceMetadata(
+            authorization_servers=["https://auth.example.com"],
+            resource="https://hive.example.com/mcp",
+        )
+
+    async def fake_discover_as(_url: str) -> Any:
+        from mcp.shared.auth import OAuthMetadata
+        return OAuthMetadata(
+            issuer="https://auth.example.com",
+            authorization_endpoint="https://auth.example.com/authorize",
+            token_endpoint="https://auth.example.com/token",
+            response_types_supported=["code"],
+        )
+
+    async def fake_refresh(**_: Any) -> Any:
+        from mcp.shared.auth import OAuthToken
+        return OAuthToken(
+            access_token="fresh-acc",
+            refresh_token="fresh-ref",
+            expires_in=3600,
+            token_type="Bearer",
+        )
+
+    monkeypatch.setattr(mcp_auth, "discover_resource_metadata", fake_discover)
+    monkeypatch.setattr(mcp_auth, "discover_auth_server_metadata", fake_discover_as)
+    monkeypatch.setattr(mcp_auth, "refresh_token", fake_refresh)
+
+    token = await mcp_auth.get_valid_access_token(
+        user_id="u1",
+        server=MCPServer(
+            server_id="s1", user_id="u1", name="Hive",
+            url="https://hive.example.com/mcp",
+            client_id="dcr-1", tool_prefix="hive",
+            auth_status=MCPServerAuthStatus.ACTIVE,
+            created_at="x", updated_at="x",
+        ),
+    )
+    assert token == "fresh-acc"
+    # Confirm the refreshed token landed back in storage.
+    refreshed = storage.get_mcp_token(user_id="u1", server_id="s1")
+    assert refreshed is not None
+    assert refreshed.access_token_ciphertext == b"ENC::fresh-acc"

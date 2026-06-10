@@ -23,6 +23,7 @@ import base64
 import hashlib
 import secrets
 import string
+import time
 from urllib.parse import urlencode, urlparse
 
 import httpx
@@ -32,6 +33,10 @@ from mcp.shared.auth import (
     OAuthToken,
     ProtectedResourceMetadata,
 )
+
+from channel import storage
+from channel.mcp import crypto
+from channel.models import MCPServer
 
 # Discovery endpoint suffixes (RFC 8414 / RFC 9728).
 _PRM_PATH = "/.well-known/oauth-protected-resource"
@@ -180,3 +185,74 @@ def _origin_of(url: str) -> str:
     """Strip path/query from an MCP server URL to its scheme+host[:port] root."""
     parsed = urlparse(url)
     return f"{parsed.scheme}://{parsed.netloc}"
+
+
+# Refresh skew: if a token expires within this many seconds, force a
+# refresh before the next tool call. Bigger window = more refreshes;
+# smaller window = higher chance of mid-call expiry. 60s matches the
+# spike's "Lazy check on every tool call" recommendation.
+_REFRESH_SKEW_SEC = 60
+
+
+class MCPAuthFailedError(RuntimeError):
+    """Raised when token refresh fails — caller should surface as
+    ``sse_tool_error(error_type="auth_expired")`` and flip the
+    MCPSERVER row's auth_status to EXPIRED."""
+
+
+async def get_valid_access_token(
+    *,
+    user_id: str,
+    server: MCPServer,
+) -> str:
+    """Resolve the current access token for ``(user_id, server)``.
+
+    Refreshes if within :data:`_REFRESH_SKEW_SEC` of expiry. Persists
+    the refreshed token transparently. Raises
+    :class:`MCPAuthFailedError` when refresh fails or no token exists.
+    """
+    token = storage.get_mcp_token(user_id=user_id, server_id=server.server_id)
+    if token is None:
+        raise MCPAuthFailedError(
+            f"no token row for user={user_id} server={server.server_id}"
+        )
+    now = int(time.time())
+    if token.expires_at - now > _REFRESH_SKEW_SEC:
+        return crypto.decrypt_blob(token.access_token_ciphertext)
+
+    # Refresh required.
+    if token.refresh_token_ciphertext is None:
+        raise MCPAuthFailedError(
+            f"token expired and no refresh token user={user_id} server={server.server_id}"
+        )
+    refresh_plain = crypto.decrypt_blob(token.refresh_token_ciphertext)
+    try:
+        prm = await discover_resource_metadata(server.url)
+        # MCP servers either point at an external auth server or self-issue.
+        as_url = (
+            str(prm.authorization_servers[0])
+            if prm.authorization_servers
+            else server.url
+        )
+        as_meta = await discover_auth_server_metadata(as_url)
+        new_tok = await refresh_token(
+            token_endpoint=str(as_meta.token_endpoint),
+            client_id=server.client_id,
+            refresh_token=refresh_plain,
+        )
+    except httpx.HTTPError as exc:
+        raise MCPAuthFailedError(
+            f"refresh round-trip failed user={user_id} server={server.server_id}"
+        ) from exc
+
+    new_expires_at = now + (new_tok.expires_in or 3600)
+    new_refresh = new_tok.refresh_token or refresh_plain
+    storage.put_mcp_token(
+        user_id=user_id,
+        server_id=server.server_id,
+        access_token_ciphertext=crypto.encrypt_blob(new_tok.access_token),
+        refresh_token_ciphertext=crypto.encrypt_blob(new_refresh),
+        expires_at=new_expires_at,
+        granted_scope=new_tok.scope or token.granted_scope,
+    )
+    return new_tok.access_token
