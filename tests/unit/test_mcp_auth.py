@@ -390,3 +390,76 @@ async def test_get_valid_access_token_raises_on_http_failure(
     )
     with pytest.raises(MCPAuthFailedError, match="refresh round-trip"):
         await mcp_auth.get_valid_access_token(user_id="u1", server=server)
+
+
+@pytest.mark.asyncio
+async def test_get_valid_access_token_honors_expires_in_zero(
+    storage_table: _FakeTable,
+    fake_crypto: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """expires_in=0 from the upstream auth server must NOT be silently
+    promoted to 1h via ``or 3600`` — the token is correctly persisted
+    as "already expired" so the next turn refreshes again."""
+    storage.put_mcp_token(
+        user_id="u1",
+        server_id="s1",
+        access_token_ciphertext=b"ENC::stale",
+        refresh_token_ciphertext=b"ENC::ref-1",
+        expires_at=int(time.time()) + 30,  # within skew window
+        granted_scope="read",
+    )
+
+    async def fake_discover(_url: str) -> Any:
+        from mcp.shared.auth import ProtectedResourceMetadata
+
+        return ProtectedResourceMetadata(
+            authorization_servers=["https://auth.example.com"],
+            resource="https://hive.example.com/mcp",
+        )
+
+    async def fake_discover_as(_url: str) -> Any:
+        from mcp.shared.auth import OAuthMetadata
+
+        return OAuthMetadata(
+            issuer="https://auth.example.com",
+            authorization_endpoint="https://auth.example.com/authorize",
+            token_endpoint="https://auth.example.com/token",
+            response_types_supported=["code"],
+        )
+
+    async def fake_refresh(**_: Any) -> Any:
+        from mcp.shared.auth import OAuthToken
+
+        # expires_in=0 — server tells us the token is already expired.
+        return OAuthToken(
+            access_token="fresh-acc",
+            refresh_token="fresh-ref",
+            expires_in=0,
+            token_type="Bearer",
+        )
+
+    monkeypatch.setattr(mcp_auth, "discover_resource_metadata", fake_discover)
+    monkeypatch.setattr(mcp_auth, "discover_auth_server_metadata", fake_discover_as)
+    monkeypatch.setattr(mcp_auth, "refresh_token", fake_refresh)
+
+    now_before = int(time.time())
+    await mcp_auth.get_valid_access_token(
+        user_id="u1",
+        server=MCPServer(
+            server_id="s1",
+            user_id="u1",
+            name="Hive",
+            url="https://hive.example.com/mcp",
+            client_id="dcr-1",
+            tool_prefix="hive",
+            auth_status=MCPServerAuthStatus.ACTIVE,
+            created_at="x",
+            updated_at="x",
+        ),
+    )
+    refreshed = storage.get_mcp_token(user_id="u1", server_id="s1")
+    assert refreshed is not None
+    # expires_at is approximately now (within 2s). If we had used
+    # ``or 3600`` this would land an hour in the future.
+    assert refreshed.expires_at - now_before <= 2

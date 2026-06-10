@@ -1090,3 +1090,98 @@ def test_callback_with_empty_state_param_redirects_with_invalid_state() -> None:
     resp = raw.get("/auth/mcp/callback?state=", follow_redirects=False)
     assert resp.status_code == 302
     assert "reason=invalid_state" in resp.headers["location"]
+
+
+def test_callback_honors_expires_in_zero(
+    monkeypatch: pytest.MonkeyPatch,
+    public_dns: None,
+) -> None:
+    """expires_in=0 in the OAuth token-exchange response must NOT be
+    silently promoted to 1h via ``or 3600`` — the persisted token row's
+    expires_at reflects "already expired" so the next chat turn triggers
+    a refresh again."""
+    from mcp.shared.auth import OAuthMetadata, OAuthToken, ProtectedResourceMetadata
+
+    from channel import storage as _storage
+    from channel.auth import state_store
+    from channel.mcp import auth as _mcp_auth
+    from channel.mcp import crypto
+    from channel.models import MCPServer, MCPServerAuthStatus
+
+    monkeypatch.setattr(
+        state_store,
+        "consume_state",
+        lambda _: {
+            "purpose": "mcp",
+            "user_id": "u1",
+            "server_id": "srv-1",
+            "code_verifier": "v",
+            "redirect_uri": "https://channel.example.com/auth/mcp/callback",
+        },
+    )
+    monkeypatch.setattr(
+        _storage,
+        "get_mcp_server",
+        lambda **_: MCPServer(
+            server_id="srv-1",
+            user_id="u1",
+            name="Hive",
+            url="https://hive.example.com/mcp",
+            client_id="dcr-1",
+            tool_prefix="hive",
+            auth_status=MCPServerAuthStatus.NEVER_AUTHED,
+            created_at="x",
+            updated_at="x",
+        ),
+    )
+    monkeypatch.setattr(
+        _mcp_auth,
+        "discover_resource_metadata",
+        AsyncMock(
+            return_value=ProtectedResourceMetadata(
+                authorization_servers=["https://auth.example.com"],
+                resource="https://hive.example.com/mcp",
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        _mcp_auth,
+        "discover_auth_server_metadata",
+        AsyncMock(
+            return_value=OAuthMetadata(
+                issuer="https://auth.example.com",
+                authorization_endpoint="https://auth.example.com/authorize",
+                token_endpoint="https://auth.example.com/token",
+                response_types_supported=["code"],
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        _mcp_auth,
+        "exchange_code",
+        AsyncMock(
+            return_value=OAuthToken(
+                access_token="acc-1",
+                refresh_token="ref-1",
+                expires_in=0,  # Already expired per upstream.
+                token_type="Bearer",
+                scope="read",
+            )
+        ),
+    )
+    monkeypatch.setattr(crypto, "encrypt_blob", lambda s: ("ENC::" + s).encode())
+    persisted: dict[str, Any] = {}
+    monkeypatch.setattr(_storage, "put_mcp_token", lambda **kw: persisted.update(kw))
+    monkeypatch.setattr(_storage, "set_mcp_server_auth_status", lambda **_kw: None)
+
+    import time as _time
+
+    now_before = int(_time.time())
+    raw = TestClient(app)
+    resp = raw.get(
+        "/auth/mcp/callback?state=ok&code=auth-code",
+        follow_redirects=False,
+    )
+    assert resp.status_code == 302
+    # If we had used ``or 3600`` this would land an hour in the future.
+    assert persisted["expires_at"] - now_before <= 2

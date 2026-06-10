@@ -1064,7 +1064,10 @@ html.is-electron-mac .sb-top {
 .mcp-row-name { display: flex; align-items: center; gap: 8px; font-weight: 500; }
 .mcp-row-url { font-size: 0.8rem; color: var(--ink-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mcp-row-actions { display: flex; align-items: center; gap: 8px; }
-.mcp-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+/* Default --ink-faint covers any unknown auth_status the backend might
+ * return — the row label intentionally renders the raw status string,
+ * but without a default the dot itself would be invisible. */
+.mcp-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; background: var(--ink-faint); }
 /* No semantic "success" token exists in channel.css today; the green
  * literal is the only use-site of a non-token color and is intentionally
  * left as OKLCH here. Expired / revoked map to --danger; never_authed

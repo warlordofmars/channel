@@ -54,8 +54,14 @@ export default function AddMCPServerModal({ open, onClose, onRegistered }) {
     }
   }
 
+  // While registerMCPServer is in flight, suppress Modal's Escape /
+  // backdrop dismissal — otherwise a late success would still fire
+  // `window.open(...)` and `onRegistered(...)` after the user dismissed
+  // the dialog. The Cancel button is also disabled below.
+  const handleClose = busy ? () => {} : onClose;
+
   return (
-    <Modal open={open} onClose={onClose}>
+    <Modal open={open} onClose={handleClose}>
       <div className="mcp-add-form">
         <h3 className="modal-h">Add MCP server</h3>
         <label className="mcp-field">
@@ -92,7 +98,12 @@ export default function AddMCPServerModal({ open, onClose, onRegistered }) {
           </div>
         )}
         <div className="mcp-actions">
-          <button type="button" className="btn-secondary" onClick={onClose}>
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={onClose}
+            disabled={busy}
+          >
             Cancel
           </button>
           <button

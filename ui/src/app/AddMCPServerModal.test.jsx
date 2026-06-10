@@ -117,6 +117,52 @@ describe("AddMCPServerModal", () => {
     expect(onClose).toHaveBeenCalled();
   });
 
+  it("Cancel is disabled while a registration is in flight", async () => {
+    // Hang the API call so the modal stays in busy state.
+    registerMCPServer.mockReturnValueOnce(new Promise(() => {}));
+    render(<AddMCPServerModal open onClose={() => {}} onRegistered={() => {}} />);
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Hive" } });
+    fireEvent.change(screen.getByLabelText("Server URL"), {
+      target: { value: "https://hive.example.com/mcp" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /add server/i }));
+    await waitFor(() => expect(registerMCPServer).toHaveBeenCalled());
+    const cancel = screen.getByRole("button", { name: /cancel/i });
+    expect(cancel).toBeDisabled();
+  });
+
+  it("onClose is ignored while busy — a late-success registration can't fire onRegistered behind the user's back", async () => {
+    let resolveIt;
+    registerMCPServer.mockReturnValueOnce(
+      new Promise((res) => {
+        resolveIt = res;
+      }),
+    );
+    const onClose = vi.fn();
+    const onRegistered = vi.fn();
+    render(
+      <AddMCPServerModal open onClose={onClose} onRegistered={onRegistered} />,
+    );
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Hive" } });
+    fireEvent.change(screen.getByLabelText("Server URL"), {
+      target: { value: "https://hive.example.com/mcp" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /add server/i }));
+    await waitFor(() => expect(registerMCPServer).toHaveBeenCalled());
+    // Simulate user pressing Escape via Modal's keydown listener — the
+    // window-level Esc handler in Modal.jsx calls onClose. With the
+    // busy guard, our wrapped handleClose is a no-op so onClose
+    // shouldn't fire.
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(onClose).not.toHaveBeenCalled();
+    // Resolve the in-flight request — submit's success branch still
+    // fires window.open + onRegistered + onClose because that's the
+    // normal completion path. The guard only blocks DISMISSAL while
+    // busy, not the legitimate post-success close.
+    resolveIt({ server_id: "srv-1", auth_start_url: "https://x" });
+    await waitFor(() => expect(onRegistered).toHaveBeenCalledWith("srv-1"));
+  });
+
   it("resets local state when reopened — no stale name/url/error from a prior session", async () => {
     registerMCPServer.mockRejectedValueOnce(new Error("502"));
     const { rerender } = render(

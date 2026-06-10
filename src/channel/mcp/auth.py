@@ -253,7 +253,12 @@ async def get_valid_access_token(
             f"refresh round-trip failed user={user_id} server={server.server_id}"
         ) from exc
 
-    new_expires_at = now + (new_tok.expires_in or 3600)
+    # `or 3600` would treat expires_in=0 as missing — explicit None check
+    # so a server-supplied "already expired" token honours that signal
+    # (we'd then immediately refresh again on the next turn, which is
+    # the correct behaviour).
+    expires_in = new_tok.expires_in if new_tok.expires_in is not None else 3600
+    new_expires_at = now + expires_in
     new_refresh = new_tok.refresh_token or refresh_plain
     storage.put_mcp_token(
         user_id=user_id,

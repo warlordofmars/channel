@@ -341,7 +341,10 @@ async def mcp_callback(
             status_code=302,
         )
 
-    expires_at = int(time.time()) + (tok.expires_in or 3600)
+    # `or 3600` would treat expires_in=0 as missing — explicit None check
+    # so a server-supplied "already expired" token honours that signal.
+    expires_in = tok.expires_in if tok.expires_in is not None else 3600
+    expires_at = int(time.time()) + expires_in
     storage.put_mcp_token(
         user_id=user_id,
         server_id=server_id,
