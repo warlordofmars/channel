@@ -1,7 +1,15 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
+import {
+  deleteMCPServer,
+  listMCPServers,
+  patchMCPServer,
+  reauthMCPServer,
+} from "../../api.js";
 import Icon from "../../components/Icon.jsx";
 import { useChannelPrefs } from "../../hooks/useChannelPrefs.js";
+import AddMCPServerModal from "../AddMCPServerModal.jsx";
 import { EFFORTS, cachedModels, loadModels, mergeWithDisplayMeta } from "../data.js";
 
 // Five accent hues. Co-located here because nothing else in the app reads
@@ -60,6 +68,60 @@ export default function Customize() {
       .then(setModels)
       .catch(function onModelsFetchError() { setModelsError(true); });
   }, []);
+
+  const [mcpServers, setMcpServers] = useState([]);
+  const [mcpLoading, setMcpLoading] = useState(true);
+  const [mcpError, setMcpError] = useState("");
+  const [showAddMCP, setShowAddMCP] = useState(false);
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  const refreshMCP = useCallback(async () => {
+    setMcpLoading(true);
+    setMcpError("");
+    try {
+      const { servers } = await listMCPServers();
+      setMcpServers(servers);
+    } catch (e) {
+      console.error("listMCPServers", e);
+      setMcpError("Couldn't load MCP servers.");
+    } finally {
+      setMcpLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshMCP();
+  }, [refreshMCP]);
+
+  // Refresh after the OAuth round-trip lands us back here.
+  useEffect(() => {
+    if (searchParams.get("mcp_authed")) {
+      refreshMCP();
+      const next = new URLSearchParams(searchParams);
+      next.delete("mcp_authed");
+      next.delete("server_id");
+      next.delete("reason");
+      setSearchParams(next, { replace: true });
+    }
+  }, [searchParams, setSearchParams, refreshMCP]);
+
+  async function toggleGlobal(server) {
+    await patchMCPServer(server.server_id, {
+      globally_enabled: !server.globally_enabled,
+    });
+    refreshMCP();
+  }
+
+  async function removeServer(server) {
+    if (!window.confirm(`Remove ${server.name}?`)) return;
+    await deleteMCPServer(server.server_id);
+    refreshMCP();
+  }
+
+  async function reauth(server) {
+    const { auth_start_url } = await reauthMCPServer(server.server_id);
+    window.open(auth_start_url, "_blank", "noopener,noreferrer");
+  }
 
   // The hook stores `model` as an id string; the seg-ctl needs the model
   // object for its `desc` hint and `short` label.
@@ -212,6 +274,82 @@ export default function Customize() {
             />
           ))}
         </div>
+
+        <div className="set-group">
+          <h3>MCP servers</h3>
+          <p className="hint">
+            Connect external Model Context Protocol servers that this account
+            can call from any chat. Toggle off to keep a server registered
+            without making its tools available by default.
+          </p>
+          {mcpError && (
+            <div className="hint" role="alert">{mcpError}</div>
+          )}
+          {mcpLoading ? (
+            <div className="hint">Loading…</div>
+          ) : mcpServers.length === 0 ? (
+            <div className="hint">No MCP servers yet.</div>
+          ) : (
+            <ul className="mcp-list">
+              {mcpServers.map((s) => (
+                <li key={s.server_id} className="mcp-row">
+                  <div className="mcp-row-main">
+                    <div className="mcp-row-name">
+                      <span className={`mcp-dot mcp-dot-${s.auth_status}`} />
+                      {s.name}
+                    </div>
+                    <div className="mcp-row-url">{s.url}</div>
+                  </div>
+                  <div className="mcp-row-actions">
+                    <button
+                      type="button"
+                      className={"toggle" + (s.globally_enabled ? " on" : "")}
+                      onClick={() => toggleGlobal(s)}
+                      aria-label={
+                        s.globally_enabled
+                          ? `Disable ${s.name} globally`
+                          : `Enable ${s.name} globally`
+                      }
+                    >
+                      <span className="knob" />
+                    </button>
+                    <button
+                      type="button"
+                      className="ck"
+                      onClick={() => reauth(s)}
+                    >
+                      Reconnect
+                    </button>
+                    <button
+                      type="button"
+                      className="ck"
+                      onClick={() => removeServer(s)}
+                    >
+                      Remove
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+          <div className="set-row">
+            <div />
+            <div className="ctl">
+              <button
+                type="button"
+                className="btn-primary"
+                onClick={() => setShowAddMCP(true)}
+              >
+                Add server
+              </button>
+            </div>
+          </div>
+        </div>
+        <AddMCPServerModal
+          open={showAddMCP}
+          onClose={() => setShowAddMCP(false)}
+          onRegistered={() => refreshMCP()}
+        />
       </div>
     </div>
   );

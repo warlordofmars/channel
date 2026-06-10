@@ -5,6 +5,15 @@ import { MemoryRouter } from "react-router-dom";
 
 vi.mock("../../api.js", () => ({
   listModels: vi.fn(),
+  listMCPServers: vi.fn(() => Promise.resolve({ servers: [] })),
+  patchMCPServer: vi.fn(() => Promise.resolve()),
+  deleteMCPServer: vi.fn(() => Promise.resolve()),
+  reauthMCPServer: vi.fn(() =>
+    Promise.resolve({ auth_start_url: "https://x" }),
+  ),
+  registerMCPServer: vi.fn(() =>
+    Promise.resolve({ server_id: "srv-1", auth_start_url: "https://x" }),
+  ),
 }));
 
 import * as api from "../../api.js";
@@ -240,5 +249,54 @@ describe("Customize", () => {
     api.listModels.mockRejectedValueOnce(new Error("network"));
     renderCustomize();
     await waitFor(() => expect(screen.getByTestId("models-error")).toBeTruthy());
+  });
+
+  it("renders the MCP servers empty state by default", async () => {
+    renderCustomize();
+    expect(
+      await screen.findByText(/no mcp servers yet/i),
+    ).toBeInTheDocument();
+  });
+
+  it("renders the MCP servers section heading", async () => {
+    renderCustomize();
+    expect(
+      await screen.findByRole("heading", { name: /mcp servers/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("renders MCP server rows when the list is non-empty", async () => {
+    api.listMCPServers.mockResolvedValueOnce({
+      servers: [
+        {
+          server_id: "srv-1",
+          name: "Hive",
+          url: "https://hive.example.com/mcp",
+          tool_prefix: "hive",
+          auth_status: "active",
+          globally_enabled: true,
+          created_at: "x",
+          updated_at: "x",
+        },
+      ],
+    });
+    renderCustomize();
+    expect(await screen.findByText("Hive")).toBeInTheDocument();
+    expect(
+      screen.getByText("https://hive.example.com/mcp"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /reconnect/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("shows an error message when listMCPServers fails", async () => {
+    api.listMCPServers.mockRejectedValueOnce(new Error("boom"));
+    renderCustomize();
+    await waitFor(() =>
+      expect(
+        screen.getByText(/couldn't load mcp servers/i),
+      ).toBeInTheDocument(),
+    );
   });
 });
