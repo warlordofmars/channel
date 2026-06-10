@@ -23,6 +23,19 @@ const ACCENTS = [
   { h: 300, label: "Plum" },
 ];
 
+// Human-readable label for an MCP server's auth_status. The dot's
+// color tells sighted users at a glance; this label backs the dot's
+// aria-label / title attributes and the visible badge text next to
+// the server name so screen reader / low-vision / color-blind users
+// get the same information.
+function mcpStatusLabel(status) {
+  if (status === "active") return "Connected";
+  if (status === "expired") return "Reconnect needed";
+  if (status === "revoked") return "Revoked";
+  if (status === "never_authed") return "Not yet connected";
+  return status;
+}
+
 // Each row: [label, hint, hook getter key, hook setter key]. The hook
 // exposes booleans + boolean setters so we just thread the keys through.
 const BEHAVIOR_ROWS = [
@@ -106,21 +119,36 @@ export default function Customize() {
   }, [searchParams, setSearchParams, refreshMCP]);
 
   async function toggleGlobal(server) {
-    await patchMCPServer(server.server_id, {
-      globally_enabled: !server.globally_enabled,
-    });
-    refreshMCP();
+    try {
+      await patchMCPServer(server.server_id, {
+        globally_enabled: !server.globally_enabled,
+      });
+      refreshMCP();
+    } catch (e) {
+      console.error("patchMCPServer", e);
+      setMcpError(`Couldn't update ${server.name}.`);
+    }
   }
 
   async function removeServer(server) {
     if (!window.confirm(`Remove ${server.name}?`)) return;
-    await deleteMCPServer(server.server_id);
-    refreshMCP();
+    try {
+      await deleteMCPServer(server.server_id);
+      refreshMCP();
+    } catch (e) {
+      console.error("deleteMCPServer", e);
+      setMcpError(`Couldn't remove ${server.name}.`);
+    }
   }
 
   async function reauth(server) {
-    const { auth_start_url } = await reauthMCPServer(server.server_id);
-    window.open(auth_start_url, "_blank", "noopener,noreferrer");
+    try {
+      const { auth_start_url } = await reauthMCPServer(server.server_id);
+      window.open(auth_start_url, "_blank", "noopener,noreferrer");
+    } catch (e) {
+      console.error("reauthMCPServer", e);
+      setMcpError(`Couldn't start reconnect for ${server.name}.`);
+    }
   }
 
   // The hook stores `model` as an id string; the seg-ctl needs the model
@@ -295,8 +323,16 @@ export default function Customize() {
                 <li key={s.server_id} className="mcp-row">
                   <div className="mcp-row-main">
                     <div className="mcp-row-name">
-                      <span className={`mcp-dot mcp-dot-${s.auth_status}`} />
+                      <span
+                        className={`mcp-dot mcp-dot-${s.auth_status}`}
+                        role="img"
+                        aria-label={mcpStatusLabel(s.auth_status)}
+                        title={mcpStatusLabel(s.auth_status)}
+                      />
                       {s.name}
+                      <span className="mcp-status-text">
+                        {mcpStatusLabel(s.auth_status)}
+                      </span>
                     </div>
                     <div className="mcp-row-url">{s.url}</div>
                   </div>

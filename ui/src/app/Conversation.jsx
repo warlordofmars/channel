@@ -361,6 +361,10 @@ export default function Conversation() {
 
   async function handleMcpChange(next) {
     setMcpSettings(next);
+    // Mirror the fetch effect's guard — without a chatId we'd POST to
+    // /api/chats/undefined/mcp on edge cases (early renders, unexpected
+    // routing). State stays local until a real chatId is in scope.
+    if (!chatId) return;
     try {
       await putChatMCPSettings(chatId, next);
     } catch (e) {

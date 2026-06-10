@@ -1454,6 +1454,38 @@ describe("Conversation", () => {
       );
     });
 
+    it("MCP picker onChange does NOT POST when chatId is absent (#207)", async () => {
+      // Render Conversation under a route with an optional :id so
+      // useParams() returns { id: undefined } — exercises the
+      // defensive !chatId guard in handleMcpChange.
+      api.putChatMCPSettings.mockClear();
+      api.listMCPServers.mockResolvedValue({
+        servers: [
+          {
+            server_id: "srv-1", name: "Hive", tool_prefix: "hive",
+            globally_enabled: true, auth_status: "active",
+          },
+        ],
+      });
+      api.getChatMCPSettings.mockResolvedValue({
+        mode: "inherit", explicit_server_ids: [],
+      });
+      mockStream();
+      render(
+        <MemoryRouter initialEntries={["/app/c/"]}>
+          <Routes>
+            <Route path="/app/c/:id?" element={<Conversation />} />
+          </Routes>
+        </MemoryRouter>,
+      );
+      const pill = await screen.findByRole("button", { name: /tool servers?\b/i });
+      fireEvent.click(pill);
+      fireEvent.click(screen.getByLabelText(/^Hive$/));
+      // putChatMCPSettings must NOT be invoked — chatId is undefined.
+      await new Promise((r) => setTimeout(r, 0));
+      expect(api.putChatMCPSettings).not.toHaveBeenCalled();
+    });
+
     it("MCP picker onChange tolerates putChatMCPSettings failure (#207)", async () => {
       api.listMCPServers.mockResolvedValue({
         servers: [

@@ -1068,6 +1068,16 @@ html.is-electron-mac .sb-top {
 .mcp-dot-active { background: oklch(0.70 0.16 150); }
 .mcp-dot-expired, .mcp-dot-revoked { background: oklch(0.65 0.18 30); }
 .mcp-dot-never_authed { background: var(--ink-muted); }
+.mcp-status-text {
+  font-size: 0.75rem;
+  font-weight: 400;
+  color: var(--ink-muted);
+  background: var(--canvas);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 1px 6px;
+  margin-left: 4px;
+}
 
 /* MCP picker (#207) */
 .mcp-pill {
