@@ -803,7 +803,7 @@ async def _stream_bedrock_reply(
         # that don't implement the optional Strands cleanup surface.
         cleanup = getattr(agent, "cleanup", None)
         if cleanup is not None:
-            cleanup()
+            cleanup()  # pragma: no cover - exercised by real Strands Agent only
 
     assistant_text = "".join(accumulated)
     state["assistant_text"] = assistant_text

@@ -66,6 +66,22 @@ async def test_discover_resource_metadata(fake_async_client: dict[str, Any]) -> 
 
 
 @pytest.mark.asyncio
+async def test_discover_auth_server_metadata(fake_async_client: dict[str, Any]) -> None:
+    fake_async_client["responses"].append(
+        _ok_json(
+            {
+                "issuer": "https://auth.example.com",
+                "authorization_endpoint": "https://auth.example.com/authorize",
+                "token_endpoint": "https://auth.example.com/token",
+                "response_types_supported": ["code"],
+            }
+        )
+    )
+    meta = await mcp_auth.discover_auth_server_metadata("https://auth.example.com")
+    assert str(meta.token_endpoint) == "https://auth.example.com/token"
+
+
+@pytest.mark.asyncio
 async def test_register_dynamic_client(fake_async_client: dict[str, Any]) -> None:
     fake_async_client["responses"].append(
         _ok_json(
@@ -286,3 +302,91 @@ async def test_get_valid_access_token_refreshes_when_expiring(
     refreshed = storage.get_mcp_token(user_id="u1", server_id="s1")
     assert refreshed is not None
     assert refreshed.access_token_ciphertext == b"ENC::fresh-acc"
+
+
+@pytest.mark.asyncio
+async def test_get_valid_access_token_raises_when_no_token_row(
+    storage_table: _FakeTable, fake_crypto: None
+) -> None:
+    """No token row in DDB → MCPAuthFailedError."""
+    from channel.mcp.auth import MCPAuthFailedError
+
+    server = MCPServer(
+        server_id="s1",
+        user_id="u1",
+        name="Hive",
+        url="https://hive.example.com/mcp",
+        client_id="dcr-1",
+        tool_prefix="hive",
+        auth_status=MCPServerAuthStatus.ACTIVE,
+        created_at="x",
+        updated_at="x",
+    )
+    with pytest.raises(MCPAuthFailedError, match="no token row"):
+        await mcp_auth.get_valid_access_token(user_id="u1", server=server)
+
+
+@pytest.mark.asyncio
+async def test_get_valid_access_token_raises_when_expired_no_refresh(
+    storage_table: _FakeTable, fake_crypto: None
+) -> None:
+    """Token within skew window AND no refresh token → MCPAuthFailedError."""
+    from channel.mcp.auth import MCPAuthFailedError
+
+    storage.put_mcp_token(
+        user_id="u1",
+        server_id="s1",
+        access_token_ciphertext=b"ENC::stale",
+        refresh_token_ciphertext=None,
+        expires_at=int(time.time()) + 30,
+        granted_scope="read",
+    )
+    server = MCPServer(
+        server_id="s1",
+        user_id="u1",
+        name="Hive",
+        url="https://hive.example.com/mcp",
+        client_id="dcr-1",
+        tool_prefix="hive",
+        auth_status=MCPServerAuthStatus.ACTIVE,
+        created_at="x",
+        updated_at="x",
+    )
+    with pytest.raises(MCPAuthFailedError, match="no refresh token"):
+        await mcp_auth.get_valid_access_token(user_id="u1", server=server)
+
+
+@pytest.mark.asyncio
+async def test_get_valid_access_token_raises_on_http_failure(
+    storage_table: _FakeTable, fake_crypto: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Refresh round-trip raises httpx.HTTPError → MCPAuthFailedError."""
+    from channel.mcp.auth import MCPAuthFailedError
+
+    storage.put_mcp_token(
+        user_id="u1",
+        server_id="s1",
+        access_token_ciphertext=b"ENC::stale",
+        refresh_token_ciphertext=b"ENC::ref-1",
+        expires_at=int(time.time()) + 30,
+        granted_scope="read",
+    )
+
+    async def fake_discover(_url: str) -> Any:
+        raise httpx.ConnectError("upstream unreachable")
+
+    monkeypatch.setattr(mcp_auth, "discover_resource_metadata", fake_discover)
+
+    server = MCPServer(
+        server_id="s1",
+        user_id="u1",
+        name="Hive",
+        url="https://hive.example.com/mcp",
+        client_id="dcr-1",
+        tool_prefix="hive",
+        auth_status=MCPServerAuthStatus.ACTIVE,
+        created_at="x",
+        updated_at="x",
+    )
+    with pytest.raises(MCPAuthFailedError, match="refresh round-trip"):
+        await mcp_auth.get_valid_access_token(user_id="u1", server=server)

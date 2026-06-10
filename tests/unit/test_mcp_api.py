@@ -340,3 +340,632 @@ def test_callback_happy_path_persists_token_and_flips_status(
     assert "server_id=srv-1" in resp.headers["location"]
     assert persisted["access_token_ciphertext"] == b"ENC::acc-1"
     assert flipped["status"] == MCPServerAuthStatus.ACTIVE
+
+
+# ----------------------------------------------------------------
+# Coverage for the remaining REST routes + error paths (#207)
+# ----------------------------------------------------------------
+
+
+def test_validate_rejects_malformed_url(client: TestClient) -> None:
+    """urlparse can raise ValueError on bytes-like input — defended at the API layer."""
+    resp = client.post(
+        "/api/mcp/servers",
+        json={"name": "X", "url": "https://[malformed"},
+    )
+    assert resp.status_code == 400
+
+
+def test_validate_rejects_url_with_no_hostname(client: TestClient) -> None:
+    resp = client.post(
+        "/api/mcp/servers",
+        json={"name": "X", "url": "https:///mcp"},
+    )
+    assert resp.status_code == 400
+
+
+def test_validate_rejects_when_hostname_does_not_resolve(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import socket as _socket
+
+    def fake_gai(_h: str, _p: int | None, *_a: Any, **_k: Any) -> Any:
+        raise _socket.gaierror("no resolution")
+
+    monkeypatch.setattr(_socket, "getaddrinfo", fake_gai)
+    monkeypatch.setenv(
+        "STARTER_MCP_REDIRECT_URI",
+        "https://channel.example.com/auth/mcp/callback",
+    )
+    resp = client.post(
+        "/api/mcp/servers",
+        json={"name": "X", "url": "https://nxdomain.example.com/mcp"},
+    )
+    assert resp.status_code == 400
+    assert "resolve" in resp.json()["detail"]
+
+
+def test_register_503_when_redirect_uri_unset(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, public_dns: None
+) -> None:
+    monkeypatch.delenv("STARTER_MCP_REDIRECT_URI", raising=False)
+    resp = client.post(
+        "/api/mcp/servers",
+        json={"name": "X", "url": "https://hive.example.com/mcp"},
+    )
+    assert resp.status_code == 503
+
+
+def test_tool_prefix_fallback_to_host(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    public_dns: None,
+) -> None:
+    """Empty tool_prefix → fallback to the host's first label."""
+    from mcp.shared.auth import (
+        OAuthClientInformationFull,
+        OAuthMetadata,
+        ProtectedResourceMetadata,
+    )
+
+    from channel import storage as _storage
+    from channel.mcp import auth as _mcp_auth
+    from channel.models import MCPServer, MCPServerAuthStatus
+
+    monkeypatch.setattr(
+        _mcp_auth,
+        "discover_resource_metadata",
+        AsyncMock(
+            return_value=ProtectedResourceMetadata(
+                authorization_servers=["https://auth.example.com"],
+                resource="https://hive.example.com/mcp",
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        _mcp_auth,
+        "discover_auth_server_metadata",
+        AsyncMock(
+            return_value=OAuthMetadata(
+                issuer="https://auth.example.com",
+                authorization_endpoint="https://auth.example.com/authorize",
+                token_endpoint="https://auth.example.com/token",
+                registration_endpoint="https://auth.example.com/register",
+                response_types_supported=["code"],
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        _mcp_auth,
+        "register_dynamic_client",
+        AsyncMock(
+            return_value=OAuthClientInformationFull(
+                client_id="dcr-new",
+                redirect_uris=["https://channel.example.com/auth/mcp/callback"],
+                token_endpoint_auth_method="none",
+                grant_types=["authorization_code", "refresh_token"],
+                response_types=["code"],
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        "channel.api.mcp.state_store.put_state",
+        lambda *_a, **_k: None,
+    )
+    captured: dict[str, Any] = {}
+
+    def fake_create(**kwargs: Any) -> MCPServer:
+        captured.update(kwargs)
+        return MCPServer(
+            server_id="srv-1",
+            user_id="user-1",
+            name=kwargs["name"],
+            url=kwargs["url"],
+            client_id=kwargs["client_id"],
+            tool_prefix=kwargs["tool_prefix"],
+            auth_status=MCPServerAuthStatus.NEVER_AUTHED,
+            created_at="x",
+            updated_at="x",
+        )
+
+    monkeypatch.setattr(_storage, "create_mcp_server", fake_create)
+    monkeypatch.setenv(
+        "STARTER_MCP_REDIRECT_URI",
+        "https://channel.example.com/auth/mcp/callback",
+    )
+    # Send an empty tool_prefix — the route should fallback to "hive".
+    resp = client.post(
+        "/api/mcp/servers",
+        json={"name": "Hive", "url": "https://hive.example.com/mcp", "tool_prefix": ""},
+    )
+    assert resp.status_code == 200, resp.text
+    assert captured["tool_prefix"] == "hive"
+
+
+def test_register_502_when_no_dcr_endpoint(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    public_dns: None,
+) -> None:
+    from mcp.shared.auth import OAuthMetadata, ProtectedResourceMetadata
+
+    from channel.mcp import auth as _mcp_auth
+
+    monkeypatch.setattr(
+        _mcp_auth,
+        "discover_resource_metadata",
+        AsyncMock(
+            return_value=ProtectedResourceMetadata(
+                authorization_servers=["https://auth.example.com"],
+                resource="https://hive.example.com/mcp",
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        _mcp_auth,
+        "discover_auth_server_metadata",
+        AsyncMock(
+            return_value=OAuthMetadata(
+                issuer="https://auth.example.com",
+                authorization_endpoint="https://auth.example.com/authorize",
+                token_endpoint="https://auth.example.com/token",
+                # NB: no registration_endpoint
+                response_types_supported=["code"],
+            )
+        ),
+    )
+    monkeypatch.setenv(
+        "STARTER_MCP_REDIRECT_URI",
+        "https://channel.example.com/auth/mcp/callback",
+    )
+    resp = client.post(
+        "/api/mcp/servers",
+        json={"name": "X", "url": "https://hive.example.com/mcp"},
+    )
+    assert resp.status_code == 400
+    assert "dynamic client registration" in resp.json()["detail"]
+
+
+def test_register_502_when_discovery_raises(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    public_dns: None,
+) -> None:
+    from channel.mcp import auth as _mcp_auth
+
+    async def boom(_url: str) -> Any:
+        raise RuntimeError("upstream blew up")
+
+    monkeypatch.setattr(_mcp_auth, "discover_resource_metadata", boom)
+    monkeypatch.setenv(
+        "STARTER_MCP_REDIRECT_URI",
+        "https://channel.example.com/auth/mcp/callback",
+    )
+    resp = client.post(
+        "/api/mcp/servers",
+        json={"name": "X", "url": "https://hive.example.com/mcp"},
+    )
+    assert resp.status_code == 502
+
+
+def test_register_502_when_dcr_returns_no_client_id(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    public_dns: None,
+) -> None:
+    from mcp.shared.auth import (
+        OAuthClientInformationFull,
+        OAuthMetadata,
+        ProtectedResourceMetadata,
+    )
+
+    from channel.mcp import auth as _mcp_auth
+
+    monkeypatch.setattr(
+        _mcp_auth,
+        "discover_resource_metadata",
+        AsyncMock(
+            return_value=ProtectedResourceMetadata(
+                authorization_servers=["https://auth.example.com"],
+                resource="https://hive.example.com/mcp",
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        _mcp_auth,
+        "discover_auth_server_metadata",
+        AsyncMock(
+            return_value=OAuthMetadata(
+                issuer="https://auth.example.com",
+                authorization_endpoint="https://auth.example.com/authorize",
+                token_endpoint="https://auth.example.com/token",
+                registration_endpoint="https://auth.example.com/register",
+                response_types_supported=["code"],
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        _mcp_auth,
+        "register_dynamic_client",
+        AsyncMock(
+            return_value=OAuthClientInformationFull(
+                client_id=None,
+                redirect_uris=["https://channel.example.com/auth/mcp/callback"],
+                token_endpoint_auth_method="none",
+                grant_types=["authorization_code", "refresh_token"],
+                response_types=["code"],
+            )
+        ),
+    )
+    monkeypatch.setenv(
+        "STARTER_MCP_REDIRECT_URI",
+        "https://channel.example.com/auth/mcp/callback",
+    )
+    resp = client.post(
+        "/api/mcp/servers",
+        json={"name": "X", "url": "https://hive.example.com/mcp"},
+    )
+    assert resp.status_code == 502
+    assert "client_id" in resp.json()["detail"]
+
+
+def _make_server() -> Any:
+    from channel.models import MCPServer, MCPServerAuthStatus
+
+    return MCPServer(
+        server_id="srv-1",
+        user_id="user-1",
+        name="Hive",
+        url="https://hive.example.com/mcp",
+        client_id="dcr-1",
+        tool_prefix="hive",
+        auth_status=MCPServerAuthStatus.ACTIVE,
+        created_at="x",
+        updated_at="x",
+    )
+
+
+def test_patch_server_404_when_missing(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from channel import storage as _storage
+
+    monkeypatch.setattr(_storage, "get_mcp_server", lambda **_: None)
+    resp = client.patch("/api/mcp/servers/missing", json={"name": "X"})
+    assert resp.status_code == 404
+
+
+def test_patch_server_happy_path(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from channel import storage as _storage
+
+    monkeypatch.setattr(_storage, "get_mcp_server", lambda **_: _make_server())
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        _storage,
+        "update_mcp_server",
+        lambda **kw: captured.update(kw),
+    )
+    resp = client.patch(
+        "/api/mcp/servers/srv-1",
+        json={"name": "Renamed", "globally_enabled": False},
+    )
+    assert resp.status_code == 204
+    assert captured["name"] == "Renamed"
+    assert captured["globally_enabled"] is False
+
+
+def test_delete_server_404_when_missing(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from channel import storage as _storage
+
+    monkeypatch.setattr(_storage, "get_mcp_server", lambda **_: None)
+    resp = client.delete("/api/mcp/servers/missing")
+    assert resp.status_code == 404
+
+
+def test_delete_server_happy_path(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from channel import storage as _storage
+
+    monkeypatch.setattr(_storage, "get_mcp_server", lambda **_: _make_server())
+    deleted: dict[str, Any] = {}
+    monkeypatch.setattr(
+        _storage,
+        "delete_mcp_server",
+        lambda **kw: deleted.update(kw),
+    )
+    resp = client.delete("/api/mcp/servers/srv-1")
+    assert resp.status_code == 204
+    assert deleted["server_id"] == "srv-1"
+
+
+def test_reauth_404_when_missing(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from channel import storage as _storage
+
+    monkeypatch.setattr(_storage, "get_mcp_server", lambda **_: None)
+    resp = client.post("/api/mcp/servers/missing/reauth")
+    assert resp.status_code == 404
+
+
+def test_reauth_happy_path(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    public_dns: None,
+) -> None:
+    from mcp.shared.auth import OAuthMetadata, ProtectedResourceMetadata
+
+    from channel import storage as _storage
+    from channel.mcp import auth as _mcp_auth
+
+    monkeypatch.setattr(_storage, "get_mcp_server", lambda **_: _make_server())
+    monkeypatch.setattr(
+        _mcp_auth,
+        "discover_resource_metadata",
+        AsyncMock(
+            return_value=ProtectedResourceMetadata(
+                authorization_servers=["https://auth.example.com"],
+                resource="https://hive.example.com/mcp",
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        _mcp_auth,
+        "discover_auth_server_metadata",
+        AsyncMock(
+            return_value=OAuthMetadata(
+                issuer="https://auth.example.com",
+                authorization_endpoint="https://auth.example.com/authorize",
+                token_endpoint="https://auth.example.com/token",
+                response_types_supported=["code"],
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        "channel.api.mcp.state_store.put_state",
+        lambda *_a, **_k: None,
+    )
+    monkeypatch.setenv(
+        "STARTER_MCP_REDIRECT_URI",
+        "https://channel.example.com/auth/mcp/callback",
+    )
+    resp = client.post("/api/mcp/servers/srv-1/reauth")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["auth_start_url"].startswith("https://auth.example.com/authorize?")
+
+
+def test_reauth_502_on_discovery_failure(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    public_dns: None,
+) -> None:
+    from channel import storage as _storage
+    from channel.mcp import auth as _mcp_auth
+
+    monkeypatch.setattr(_storage, "get_mcp_server", lambda **_: _make_server())
+
+    async def boom(_url: str) -> Any:
+        raise RuntimeError("upstream blew up")
+
+    monkeypatch.setattr(_mcp_auth, "discover_resource_metadata", boom)
+    monkeypatch.setenv(
+        "STARTER_MCP_REDIRECT_URI",
+        "https://channel.example.com/auth/mcp/callback",
+    )
+    resp = client.post("/api/mcp/servers/srv-1/reauth")
+    assert resp.status_code == 502
+
+
+def test_callback_no_code_redirects_with_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from channel.auth import state_store
+
+    monkeypatch.setattr(
+        state_store,
+        "consume_state",
+        lambda _: {
+            "purpose": "mcp",
+            "user_id": "u1",
+            "server_id": "srv-1",
+            "code_verifier": "v",
+            "redirect_uri": "https://channel.example.com/auth/mcp/callback",
+        },
+    )
+    raw = TestClient(app)
+    resp = raw.get("/auth/mcp/callback?state=ok", follow_redirects=False)
+    assert resp.status_code == 302
+    assert "reason=no_code" in resp.headers["location"]
+
+
+def test_callback_error_param_redirects_with_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw = TestClient(app)
+    resp = raw.get(
+        "/auth/mcp/callback?state=anything&error=access_denied",
+        follow_redirects=False,
+    )
+    assert resp.status_code == 302
+    assert "reason=access_denied" in resp.headers["location"]
+
+
+def test_callback_server_gone_redirects_with_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from channel import storage as _storage
+    from channel.auth import state_store
+
+    monkeypatch.setattr(
+        state_store,
+        "consume_state",
+        lambda _: {
+            "purpose": "mcp",
+            "user_id": "u1",
+            "server_id": "srv-1",
+            "code_verifier": "v",
+            "redirect_uri": "https://channel.example.com/auth/mcp/callback",
+        },
+    )
+    monkeypatch.setattr(_storage, "get_mcp_server", lambda **_: None)
+    raw = TestClient(app)
+    resp = raw.get(
+        "/auth/mcp/callback?state=ok&code=auth-code",
+        follow_redirects=False,
+    )
+    assert resp.status_code == 302
+    assert "reason=server_gone" in resp.headers["location"]
+
+
+def test_callback_token_exchange_failure_redirects_with_error(
+    monkeypatch: pytest.MonkeyPatch,
+    public_dns: None,
+) -> None:
+    from channel import storage as _storage
+    from channel.auth import state_store
+    from channel.mcp import auth as _mcp_auth
+
+    monkeypatch.setattr(
+        state_store,
+        "consume_state",
+        lambda _: {
+            "purpose": "mcp",
+            "user_id": "u1",
+            "server_id": "srv-1",
+            "code_verifier": "v",
+            "redirect_uri": "https://channel.example.com/auth/mcp/callback",
+        },
+    )
+    monkeypatch.setattr(_storage, "get_mcp_server", lambda **_: _make_server())
+
+    async def boom(_url: str) -> Any:
+        raise RuntimeError("upstream blew up")
+
+    monkeypatch.setattr(_mcp_auth, "discover_resource_metadata", boom)
+    raw = TestClient(app)
+    resp = raw.get(
+        "/auth/mcp/callback?state=ok&code=auth-code",
+        follow_redirects=False,
+    )
+    assert resp.status_code == 302
+    assert "reason=token_exchange" in resp.headers["location"]
+
+
+def test_chat_mcp_settings_get_and_put(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Per-chat override round trip; ownership enforced by _load_owned_chat."""
+    from channel import storage as _storage
+    from channel.models import (
+        Chat,
+        ChatMCPMode,
+        ChatMCPSettings,
+    )
+
+    async def fake_load(chat_id: str, _user_id: str) -> Chat:
+        return Chat(
+            chat_id=chat_id,
+            user_id="user-1",
+            title="t",
+            created_at="x",
+            last_message_at="x",
+            last_user_preview="",
+            model_default="m",
+            message_count=0,
+            archived=False,
+        )
+
+    monkeypatch.setattr("channel.api.mcp._load_owned_chat", fake_load)
+    monkeypatch.setattr(
+        _storage,
+        "get_chat_mcp_settings",
+        lambda _: ChatMCPSettings(chat_id="c1", mode=ChatMCPMode.INHERIT),
+    )
+    resp = client.get("/api/chats/c1/mcp")
+    assert resp.status_code == 200
+    assert resp.json() == {"mode": "inherit", "explicit_server_ids": []}
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        _storage,
+        "put_chat_mcp_settings",
+        lambda s: captured.update({"settings": s}),
+    )
+    resp = client.put(
+        "/api/chats/c1/mcp",
+        json={"mode": "explicit", "explicit_server_ids": ["a", "b"]},
+    )
+    assert resp.status_code == 204
+    assert captured["settings"].explicit_server_ids == ["a", "b"]
+
+
+def test_list_servers_serializes_rows_via_to_out(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """list_servers returns _ServerOut shapes — covers _to_out."""
+    from channel import storage as _storage
+
+    monkeypatch.setattr(
+        _storage,
+        "list_mcp_servers_for_user",
+        lambda _: [_make_server()],
+    )
+    resp = client.get("/api/mcp/servers")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["servers"][0]["server_id"] == "srv-1"
+    assert body["servers"][0]["name"] == "Hive"
+    assert body["servers"][0]["auth_status"] == "active"
+
+
+def test_callback_blocked_url_redirects_with_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Persisted server URL fails the TOCTOU re-validation in the callback
+    (e.g. DNS resolves differently between register and callback)."""
+    import socket as _socket
+
+    from channel import storage as _storage
+    from channel.auth import state_store
+
+    monkeypatch.setattr(
+        state_store,
+        "consume_state",
+        lambda _: {
+            "purpose": "mcp",
+            "user_id": "u1",
+            "server_id": "srv-1",
+            "code_verifier": "v",
+            "redirect_uri": "https://channel.example.com/auth/mcp/callback",
+        },
+    )
+    monkeypatch.setattr(_storage, "get_mcp_server", lambda **_: _make_server())
+
+    # Force the SSRF guard's DNS check to resolve hive.example.com to a
+    # private RFC1918 address. The callback should redirect with
+    # reason=blocked_url.
+    def fake_gai(_h: str, _p: int | None, *_a: Any, **_k: Any) -> Any:
+        return [(2, 1, 6, "", ("10.0.0.5", 0))]
+
+    monkeypatch.setattr(_socket, "getaddrinfo", fake_gai)
+
+    raw = TestClient(app)
+    resp = raw.get(
+        "/auth/mcp/callback?state=ok&code=auth-code",
+        follow_redirects=False,
+    )
+    assert resp.status_code == 302
+    assert "reason=blocked_url" in resp.headers["location"]
