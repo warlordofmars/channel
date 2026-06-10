@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from channel.mcp.transports import make_authenticated_transport
 
 
@@ -70,4 +72,6 @@ def test_thunk_disables_redirects_and_sets_timeout(monkeypatch: Any) -> None:
     )
     thunk()
     assert captured["follow_redirects"] is False
-    assert captured["timeout"] == 30.0
+    # Float comparison via pytest.approx — Sonar python:S1244 rightly
+    # flags raw == on floats.
+    assert captured["timeout"] == pytest.approx(30.0)
