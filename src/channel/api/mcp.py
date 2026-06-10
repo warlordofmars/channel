@@ -115,7 +115,10 @@ def _validate_mcp_server_url(url: str) -> None:
     except socket.gaierror as exc:
         raise HTTPException(status_code=400, detail="hostname did not resolve") from exc
     for info in infos:
-        addr = info[4][0]
+        # getaddrinfo's sockaddr is (host, port[, flow, scope]); the host
+        # is always a str for the IPv4/IPv6 address families. mypy types
+        # it loosely as ``str | int`` because of the Unix-socket case.
+        addr = str(info[4][0])
         if _is_dangerous_address(addr):
             raise HTTPException(
                 status_code=400, detail="URL targets a blocked address range"
