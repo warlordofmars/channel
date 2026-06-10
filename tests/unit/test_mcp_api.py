@@ -1048,3 +1048,25 @@ def test_main_mount_kill_switch_skipped_when_disabled(
         sys.modules.pop("channel.api.main", None)
         sys.modules.pop("channel.api.mcp", None)
         importlib.import_module("channel.api.main")
+
+
+def test_callback_error_param_with_query_injection_is_url_encoded() -> None:
+    """The OAuth ``error`` query param is supplied by the upstream auth
+    server. If it contained ``&`` or ``=``, an f-string interpolation
+    would inject extra parameters into the SPA redirect (e.g.
+    ``?mcp_authed=error&reason=foo&mcp_authed=ok`` — the SPA might pick
+    the LAST value and treat it as success). urlencode escapes those
+    characters so the malicious payload becomes the literal value of
+    ``reason``."""
+    raw = TestClient(app)
+    resp = raw.get(
+        "/auth/mcp/callback?state=anything&error=foo%26mcp_authed%3Dok",
+        follow_redirects=False,
+    )
+    assert resp.status_code == 302
+    location = resp.headers["location"]
+    # Exactly one ``mcp_authed=`` segment in the redirect URL.
+    assert location.count("mcp_authed=") == 1
+    # The injected suffix is preserved as part of the reason value
+    # (URL-encoded), NOT split into a second query parameter.
+    assert "reason=foo%26mcp_authed%3Dok" in location

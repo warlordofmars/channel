@@ -27,7 +27,7 @@ import os
 import secrets
 import time
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.responses import RedirectResponse
@@ -94,6 +94,17 @@ def _redirect_uri() -> str:
 
 def _spa_base_url() -> str:
     return os.environ.get("STARTER_SPA_BASE_URL", "http://localhost:5173")
+
+
+def _customize_redirect(**params: str) -> str:
+    """Build a Customize-view redirect URL with properly-encoded params.
+
+    The OAuth ``error`` query value comes from the upstream auth server
+    and can contain ``&``/``=``/other reserved characters; raw f-string
+    interpolation would let those characters inject extra parameters
+    into the SPA's URL. urlencode escapes them.
+    """
+    return f"{_spa_base_url()}/app/customize?{urlencode(params)}"
 
 
 # ---------- list / register ----------
@@ -254,21 +265,20 @@ async def mcp_callback(state: str, code: str | None = None, error: str | None = 
     """Handle the OAuth callback. Exchanges code → tokens, stores them,
     redirects browser to the SPA's Customize view with a status param.
     """
-    spa = _spa_base_url()
     if error:
         return RedirectResponse(
-            url=f"{spa}/app/customize?mcp_authed=error&reason={error}",
+            url=_customize_redirect(mcp_authed="error", reason=error),
             status_code=302,
         )
     payload = state_store.consume_state(state)
     if not payload or payload.get("purpose") != "mcp":
         return RedirectResponse(
-            url=f"{spa}/app/customize?mcp_authed=error&reason=invalid_state",
+            url=_customize_redirect(mcp_authed="error", reason="invalid_state"),
             status_code=302,
         )
     if not code:
         return RedirectResponse(
-            url=f"{spa}/app/customize?mcp_authed=error&reason=no_code",
+            url=_customize_redirect(mcp_authed="error", reason="no_code"),
             status_code=302,
         )
     user_id = payload["user_id"]
@@ -279,7 +289,7 @@ async def mcp_callback(state: str, code: str | None = None, error: str | None = 
     server = storage.get_mcp_server(user_id=user_id, server_id=server_id)
     if server is None:
         return RedirectResponse(
-            url=f"{spa}/app/customize?mcp_authed=error&reason=server_gone",
+            url=_customize_redirect(mcp_authed="error", reason="server_gone"),
             status_code=302,
         )
     # Re-validate the persisted server URL — defense in depth against
@@ -288,7 +298,7 @@ async def mcp_callback(state: str, code: str | None = None, error: str | None = 
         validate_mcp_server_url(server.url)
     except HTTPException:
         return RedirectResponse(
-            url=f"{spa}/app/customize?mcp_authed=error&reason=blocked_url",
+            url=_customize_redirect(mcp_authed="error", reason="blocked_url"),
             status_code=302,
         )
     try:
@@ -313,7 +323,7 @@ async def mcp_callback(state: str, code: str | None = None, error: str | None = 
             type(exc).__name__,
         )
         return RedirectResponse(
-            url=f"{spa}/app/customize?mcp_authed=error&reason=token_exchange",
+            url=_customize_redirect(mcp_authed="error", reason="token_exchange"),
             status_code=302,
         )
 
@@ -334,7 +344,7 @@ async def mcp_callback(state: str, code: str | None = None, error: str | None = 
         status=MCPServerAuthStatus.ACTIVE,
     )
     return RedirectResponse(
-        url=f"{spa}/app/customize?mcp_authed=ok&server_id={server_id}",
+        url=_customize_redirect(mcp_authed="ok", server_id=server_id),
         status_code=302,
     )
 
