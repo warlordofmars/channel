@@ -259,3 +259,44 @@ def test_set_mcp_server_auth_status_swallows_lost_race(fake_table: _FakeTable) -
         status=MCPServerAuthStatus.EXPIRED,
     )
     assert storage.get_mcp_server(user_id="u", server_id="ghost") is None
+
+
+def test_update_mcp_server_reraises_non_conditional_client_error(
+    fake_table: _FakeTable, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-ConditionalCheckFailedException ClientError must NOT be
+    swallowed by the lost-race guard — only the very specific
+    'row vanished' code is treated as a no-op."""
+    from botocore.exceptions import ClientError
+
+    def boom(**_kwargs: Any) -> Any:
+        raise ClientError(
+            {"Error": {"Code": "ProvisionedThroughputExceededException"}}, "UpdateItem"
+        )
+
+    monkeypatch.setattr(fake_table, "update_item", boom)
+    with pytest.raises(ClientError):
+        storage.update_mcp_server(
+            user_id="u",
+            server_id="s",
+            name="X",
+        )
+
+
+def test_set_mcp_server_auth_status_reraises_non_conditional_client_error(
+    fake_table: _FakeTable, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same — throttling / network error must bubble out so the
+    chassis log sees it instead of pretending the write succeeded."""
+    from botocore.exceptions import ClientError
+
+    def boom(**_kwargs: Any) -> Any:
+        raise ClientError({"Error": {"Code": "ThrottlingException"}}, "UpdateItem")
+
+    monkeypatch.setattr(fake_table, "update_item", boom)
+    with pytest.raises(ClientError):
+        storage.set_mcp_server_auth_status(
+            user_id="u",
+            server_id="s",
+            status=MCPServerAuthStatus.ACTIVE,
+        )

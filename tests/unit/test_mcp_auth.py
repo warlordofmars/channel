@@ -629,3 +629,79 @@ async def test_refresh_token_rejects_link_local_endpoint() -> None:
             refresh_token="x",
         )
     assert exc.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_get_valid_access_token_wraps_access_decrypt_failure(
+    storage_table: _FakeTable, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If KMS decrypt fails on the cached (non-refresh) path, the
+    exception must be wrapped as MCPAuthFailedError so the chassis
+    skip-+-flip handler covers it."""
+    from channel.mcp.auth import MCPAuthFailedError
+
+    storage.put_mcp_token(
+        user_id="u1",
+        server_id="s1",
+        access_token_ciphertext=b"opaque",
+        refresh_token_ciphertext=b"opaque-r",
+        expires_at=int(time.time()) + 600,  # above skew window
+        granted_scope="read",
+    )
+
+    from channel.mcp import crypto
+
+    def broken_decrypt(_b: bytes) -> str:
+        raise RuntimeError("KMS is having a bad day")
+
+    monkeypatch.setattr(crypto, "decrypt_blob", broken_decrypt)
+    server = MCPServer(
+        server_id="s1",
+        user_id="u1",
+        name="Hive",
+        url="https://hive.example.com/mcp",
+        client_id="dcr-1",
+        tool_prefix="hive",
+        auth_status=MCPServerAuthStatus.ACTIVE,
+        created_at="x",
+        updated_at="x",
+    )
+    with pytest.raises(MCPAuthFailedError, match="access token decrypt failed"):
+        await mcp_auth.get_valid_access_token(user_id="u1", server=server)
+
+
+@pytest.mark.asyncio
+async def test_get_valid_access_token_wraps_refresh_decrypt_failure(
+    storage_table: _FakeTable, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same guard on the refresh-token decrypt path."""
+    from channel.mcp.auth import MCPAuthFailedError
+
+    storage.put_mcp_token(
+        user_id="u1",
+        server_id="s1",
+        access_token_ciphertext=b"opaque",
+        refresh_token_ciphertext=b"opaque-r",
+        expires_at=int(time.time()) + 30,  # within skew window → refresh path
+        granted_scope="read",
+    )
+
+    from channel.mcp import crypto
+
+    def broken_decrypt(_b: bytes) -> str:
+        raise RuntimeError("KMS is having a bad day")
+
+    monkeypatch.setattr(crypto, "decrypt_blob", broken_decrypt)
+    server = MCPServer(
+        server_id="s1",
+        user_id="u1",
+        name="Hive",
+        url="https://hive.example.com/mcp",
+        client_id="dcr-1",
+        tool_prefix="hive",
+        auth_status=MCPServerAuthStatus.ACTIVE,
+        created_at="x",
+        updated_at="x",
+    )
+    with pytest.raises(MCPAuthFailedError, match="refresh token decrypt failed"):
+        await mcp_auth.get_valid_access_token(user_id="u1", server=server)

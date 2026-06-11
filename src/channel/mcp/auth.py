@@ -266,14 +266,28 @@ async def get_valid_access_token(
         raise MCPAuthFailedError(f"no token row for user={user_id} server={server.server_id}")
     now = int(time.time())
     if token.expires_at - now > _REFRESH_SKEW_SEC:
-        return crypto.decrypt_blob(token.access_token_ciphertext)
+        # KMS decrypt can raise (KMS unavailable, corrupted ciphertext,
+        # decode error). Funnel through MCPAuthFailedError so the
+        # chassis path skips + flips to EXPIRED instead of crashing
+        # the chat turn.
+        try:
+            return crypto.decrypt_blob(token.access_token_ciphertext)
+        except Exception as exc:
+            raise MCPAuthFailedError(
+                f"access token decrypt failed user={user_id} server={server.server_id}"
+            ) from exc
 
     # Refresh required.
     if token.refresh_token_ciphertext is None:
         raise MCPAuthFailedError(
             f"token expired and no refresh token user={user_id} server={server.server_id}"
         )
-    refresh_plain = crypto.decrypt_blob(token.refresh_token_ciphertext)
+    try:
+        refresh_plain = crypto.decrypt_blob(token.refresh_token_ciphertext)
+    except Exception as exc:
+        raise MCPAuthFailedError(
+            f"refresh token decrypt failed user={user_id} server={server.server_id}"
+        ) from exc
     try:
         prm = await discover_resource_metadata(server.url)
         # MCP servers either point at an external auth server or self-issue.
