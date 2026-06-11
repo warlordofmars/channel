@@ -623,6 +623,83 @@ describe("Customize", () => {
     openSpy.mockRestore();
   });
 
+  it("?mcp_authed=error&reason=invalid_state surfaces a human-readable message", async () => {
+    api.listMCPServers.mockResolvedValue({ servers: [] });
+    render(
+      <MemoryRouter initialEntries={["/app/customize?mcp_authed=error&reason=invalid_state"]}>
+        <Customize />
+      </MemoryRouter>,
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByText(/oauth session expired or invalid/i),
+      ).toBeInTheDocument(),
+    );
+  });
+
+  it.each([
+    ["no_code", /didn't return an auth code/i],
+    ["server_gone", /registration was removed/i],
+    ["blocked_url", /url is no longer allowed/i],
+  ])(
+    "?mcp_authed=error&reason=%s surfaces its specific message",
+    async (reason, expected) => {
+      api.listMCPServers.mockResolvedValue({ servers: [] });
+      render(
+        <MemoryRouter initialEntries={[`/app/customize?mcp_authed=error&reason=${reason}`]}>
+          <Customize />
+        </MemoryRouter>,
+      );
+      await waitFor(() =>
+        expect(screen.getByText(expected)).toBeInTheDocument(),
+      );
+    },
+  );
+
+  it("?mcp_authed=error with no reason still shows a fallback message", async () => {
+    api.listMCPServers.mockResolvedValue({ servers: [] });
+    render(
+      <MemoryRouter initialEntries={["/app/customize?mcp_authed=error"]}>
+        <Customize />
+      </MemoryRouter>,
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByText(/couldn't connect to mcp server: unknown error/i),
+      ).toBeInTheDocument(),
+    );
+  });
+
+  it("?mcp_authed=error with an unknown reason passes the raw reason through", async () => {
+    api.listMCPServers.mockResolvedValue({ servers: [] });
+    render(
+      <MemoryRouter initialEntries={["/app/customize?mcp_authed=error&reason=access_denied"]}>
+        <Customize />
+      </MemoryRouter>,
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByText(/couldn't connect to mcp server: access_denied/i),
+      ).toBeInTheDocument(),
+    );
+  });
+
+  it("?mcp_authed=error does NOT trigger an extra MCP refresh", async () => {
+    api.listMCPServers.mockClear();
+    api.listMCPServers.mockResolvedValue({ servers: [] });
+    render(
+      <MemoryRouter initialEntries={["/app/customize?mcp_authed=error&reason=token_exchange"]}>
+        <Customize />
+      </MemoryRouter>,
+    );
+    // Wait for the error message to land — by that point any list
+    // refresh would have fired too.
+    await screen.findByText(/failed to exchange the authorization code/i);
+    // Mount fires one refresh. The error-branch effect must NOT fire a
+    // second one.
+    expect(api.listMCPServers).toHaveBeenCalledTimes(1);
+  });
+
   it("?mcp_authed=ok in the URL triggers an MCP refresh on mount", async () => {
     api.listMCPServers.mockClear();
     api.listMCPServers.mockResolvedValue({ servers: [] });

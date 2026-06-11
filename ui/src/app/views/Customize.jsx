@@ -36,6 +36,30 @@ function mcpStatusLabel(status) {
   return status;
 }
 
+// Friendly message for the `?reason=` value the /auth/mcp/callback
+// redirect carries on the error branch. Keep the keys in sync with
+// channel/api/mcp.py. Unrecognised reasons (incl. raw OAuth errors
+// like `access_denied`) fall through to the reason string itself so
+// the user at least sees what the upstream server said.
+function mcpCallbackErrorMessage(reason) {
+  if (reason === "invalid_state") {
+    return "OAuth session expired or invalid. Try connecting again.";
+  }
+  if (reason === "no_code") {
+    return "Authorization server didn't return an auth code.";
+  }
+  if (reason === "server_gone") {
+    return "Server registration was removed during the OAuth flow.";
+  }
+  if (reason === "blocked_url") {
+    return "Server URL is no longer allowed (network changed?). Try registering again.";
+  }
+  if (reason === "token_exchange") {
+    return "Failed to exchange the authorization code for tokens.";
+  }
+  return `Couldn't connect to MCP server: ${reason || "unknown error"}.`;
+}
+
 // Each row: [label, hint, hook getter key, hook setter key]. The hook
 // exposes booleans + boolean setters so we just thread the keys through.
 const BEHAVIOR_ROWS = [
@@ -106,16 +130,24 @@ export default function Customize() {
     refreshMCP();
   }, [refreshMCP]);
 
-  // Refresh after the OAuth round-trip lands us back here.
+  // Consume the OAuth-callback query params. On the `ok` branch we
+  // refresh so the just-authed server shows up; on `error` we surface
+  // a human-readable message so the user knows WHY the connection
+  // attempt failed (Copilot review on #243: the previous version
+  // silently dropped `reason`).
   useEffect(() => {
-    if (searchParams.get("mcp_authed")) {
+    const status = searchParams.get("mcp_authed");
+    if (!status) return;
+    if (status === "ok") {
       refreshMCP();
-      const next = new URLSearchParams(searchParams);
-      next.delete("mcp_authed");
-      next.delete("server_id");
-      next.delete("reason");
-      setSearchParams(next, { replace: true });
+    } else {
+      setMcpError(mcpCallbackErrorMessage(searchParams.get("reason")));
     }
+    const next = new URLSearchParams(searchParams);
+    next.delete("mcp_authed");
+    next.delete("server_id");
+    next.delete("reason");
+    setSearchParams(next, { replace: true });
   }, [searchParams, setSearchParams, refreshMCP]);
 
   async function toggleGlobal(server) {
