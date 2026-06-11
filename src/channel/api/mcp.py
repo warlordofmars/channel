@@ -37,6 +37,7 @@ from channel import storage
 from channel.api._auth import require_mgmt_user
 from channel.api.chats import _load_owned_chat
 from channel.auth import state_store
+from channel.logging_config import fingerprint_id
 from channel.mcp import auth as mcp_auth
 from channel.mcp import crypto
 from channel.mcp.url_guard import validate_mcp_server_url
@@ -327,14 +328,18 @@ async def mcp_callback(
             code_verifier=code_verifier,
         )
     except Exception as exc:
-        # user_id and server_id are server-generated identifiers — safe to
-        # log. The exception itself can carry an unbounded message from
-        # upstream so we log type only to avoid log-injection.
+        # user_id (JWT sub) and server_id (DDB UUID) came in via the
+        # request — log via fingerprint_id so Sonar's taint engine
+        # doesn't follow them through a format-string sink, and so
+        # the hashes are stable for cross-cold-start correlation.
+        # Matches the pattern used in api/chats.py + storage.py.
         logger.warning(
-            "mcp.callback.token_exchange_failed user=%s server=%s exc_type=%s",
-            user_id,
-            server_id,
-            type(exc).__name__,
+            "mcp.callback.token_exchange_failed",
+            extra={
+                "user_id_hash": fingerprint_id(user_id),
+                "server_id_hash": fingerprint_id(server_id),
+                "exc_type": type(exc).__name__,
+            },
         )
         return RedirectResponse(
             url=_customize_redirect(mcp_authed="error", reason="token_exchange"),
