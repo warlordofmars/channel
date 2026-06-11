@@ -10,8 +10,13 @@ from channel.models import (
     Attachment,
     Chat,
     ChatCreate,
+    ChatMCPMode,
+    ChatMCPSettings,
     ChatPatch,
     Citation,
+    MCPServer,
+    MCPServerAuthStatus,
+    MCPToken,
     Message,
     MessageRole,
     Prefs,
@@ -301,3 +306,72 @@ def test_message_user_turn_with_none_citations_is_fine():
         citations=None,
     )
     assert msg.citations is None
+
+
+# ----------------------------------------------------------------
+# MCP server registry (#207) — MCPServer, MCPToken, ChatMCPSettings
+# ----------------------------------------------------------------
+
+
+def test_mcp_server_defaults_globally_enabled():
+    server = MCPServer(
+        server_id="11111111-2222-3333-4444-555555555555",
+        user_id="user-abc",
+        name="Hive",
+        url="https://hive.warlordofmars.net/mcp",
+        client_id="dcr-xyz",
+        tool_prefix="hive",
+        auth_status=MCPServerAuthStatus.NEVER_AUTHED,
+        created_at="2026-06-09T00:00:00+00:00",
+        updated_at="2026-06-09T00:00:00+00:00",
+    )
+    assert server.globally_enabled is True
+
+
+def test_mcp_token_carries_encrypted_blob():
+    token = MCPToken(
+        server_id="srv-1",
+        user_id="user-abc",
+        access_token_ciphertext=b"opaque",
+        refresh_token_ciphertext=b"opaque-refresh",
+        expires_at=1_700_000_000,
+        granted_scope="read write",
+        updated_at="2026-06-09T00:00:00+00:00",
+    )
+    assert token.access_token_ciphertext == b"opaque"
+
+
+def test_chat_mcp_settings_inherit_is_default():
+    settings = ChatMCPSettings(chat_id="chat-1")
+    assert settings.mode == ChatMCPMode.INHERIT
+    assert settings.explicit_server_ids == []
+
+
+def test_new_mcp_models_reject_unknown_keys() -> None:
+    base_server = {
+        "server_id": "x",
+        "user_id": "u",
+        "name": "Hive",
+        "url": "https://h.example/mcp",
+        "client_id": "dcr",
+        "tool_prefix": "hive",
+        "auth_status": MCPServerAuthStatus.NEVER_AUTHED,
+        "created_at": "x",
+        "updated_at": "x",
+    }
+    with pytest.raises(ValidationError):
+        MCPServer(**base_server, unknown_field="x")
+
+    with pytest.raises(ValidationError):
+        MCPToken(
+            server_id="s",
+            user_id="u",
+            access_token_ciphertext=b"x",
+            expires_at=1,
+            granted_scope="",
+            updated_at="x",
+            unknown="y",
+        )
+
+    with pytest.raises(ValidationError):
+        ChatMCPSettings(chat_id="c", unknown="y")

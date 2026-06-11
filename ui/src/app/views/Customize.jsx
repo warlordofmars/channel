@@ -1,7 +1,15 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
+import {
+  deleteMCPServer,
+  listMCPServers,
+  patchMCPServer,
+  reauthMCPServer,
+} from "../../api.js";
 import Icon from "../../components/Icon.jsx";
 import { useChannelPrefs } from "../../hooks/useChannelPrefs.js";
+import AddMCPServerModal from "../AddMCPServerModal.jsx";
 import { EFFORTS, cachedModels, loadModels, mergeWithDisplayMeta } from "../data.js";
 
 // Five accent hues. Co-located here because nothing else in the app reads
@@ -14,6 +22,43 @@ const ACCENTS = [
   { h: 235, label: "Slate" },
   { h: 300, label: "Plum" },
 ];
+
+// Human-readable label for an MCP server's auth_status. The dot's
+// color tells sighted users at a glance; this label backs the dot's
+// aria-label / title attributes and the visible badge text next to
+// the server name so screen reader / low-vision / color-blind users
+// get the same information.
+function mcpStatusLabel(status) {
+  if (status === "active") return "Connected";
+  if (status === "expired") return "Reconnect needed";
+  if (status === "revoked") return "Revoked";
+  if (status === "never_authed") return "Not yet connected";
+  return status;
+}
+
+// Friendly message for the `?reason=` value the /auth/mcp/callback
+// redirect carries on the error branch. Keep the keys in sync with
+// channel/api/mcp.py. Unrecognised reasons (incl. raw OAuth errors
+// like `access_denied`) fall through to the reason string itself so
+// the user at least sees what the upstream server said.
+function mcpCallbackErrorMessage(reason) {
+  if (reason === "invalid_state") {
+    return "OAuth session expired or invalid. Try connecting again.";
+  }
+  if (reason === "no_code") {
+    return "Authorization server didn't return an auth code.";
+  }
+  if (reason === "server_gone") {
+    return "Server registration was removed during the OAuth flow.";
+  }
+  if (reason === "blocked_url") {
+    return "Server URL is no longer allowed (network changed?). Try registering again.";
+  }
+  if (reason === "token_exchange") {
+    return "Failed to exchange the authorization code for tokens.";
+  }
+  return `Couldn't connect to MCP server: ${reason || "unknown error"}.`;
+}
 
 // Each row: [label, hint, hook getter key, hook setter key]. The hook
 // exposes booleans + boolean setters so we just thread the keys through.
@@ -60,6 +105,83 @@ export default function Customize() {
       .then(setModels)
       .catch(function onModelsFetchError() { setModelsError(true); });
   }, []);
+
+  const [mcpServers, setMcpServers] = useState([]);
+  const [mcpLoading, setMcpLoading] = useState(true);
+  const [mcpError, setMcpError] = useState("");
+  const [showAddMCP, setShowAddMCP] = useState(false);
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  const refreshMCP = useCallback(async () => {
+    setMcpLoading(true);
+    setMcpError("");
+    try {
+      const { servers } = await listMCPServers();
+      setMcpServers(servers);
+    } catch (e) {
+      console.error("listMCPServers", e);
+      setMcpError("Couldn't load MCP servers.");
+    } finally {
+      setMcpLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshMCP();
+  }, [refreshMCP]);
+
+  // Consume the OAuth-callback query params. On the `ok` branch we
+  // refresh so the just-authed server shows up; on `error` we surface
+  // a human-readable message so the user knows WHY the connection
+  // attempt failed (Copilot review on #243: the previous version
+  // silently dropped `reason`).
+  useEffect(() => {
+    const status = searchParams.get("mcp_authed");
+    if (!status) return;
+    if (status === "ok") {
+      refreshMCP();
+    } else {
+      setMcpError(mcpCallbackErrorMessage(searchParams.get("reason")));
+    }
+    const next = new URLSearchParams(searchParams);
+    next.delete("mcp_authed");
+    next.delete("server_id");
+    next.delete("reason");
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams, refreshMCP]);
+
+  async function toggleGlobal(server) {
+    try {
+      await patchMCPServer(server.server_id, {
+        globally_enabled: !server.globally_enabled,
+      });
+      refreshMCP();
+    } catch (e) {
+      console.error("patchMCPServer", e);
+      setMcpError(`Couldn't update ${server.name}.`);
+    }
+  }
+
+  async function removeServer(server) {
+    if (!window.confirm(`Remove ${server.name}?`)) return;
+    try {
+      await deleteMCPServer(server.server_id);
+      refreshMCP();
+    } catch (e) {
+      console.error("deleteMCPServer", e);
+      setMcpError(`Couldn't remove ${server.name}.`);
+    }
+  }
+
+  async function reauth(server) {
+    try {
+      const { auth_start_url } = await reauthMCPServer(server.server_id);
+      window.open(auth_start_url, "_blank", "noopener,noreferrer");
+    } catch (e) {
+      console.error("reauthMCPServer", e);
+      setMcpError(`Couldn't start reconnect for ${server.name}.`);
+    }
+  }
 
   // The hook stores `model` as an id string; the seg-ctl needs the model
   // object for its `desc` hint and `short` label.
@@ -212,6 +334,90 @@ export default function Customize() {
             />
           ))}
         </div>
+
+        <div className="set-group">
+          <h3>MCP servers</h3>
+          <p className="hint">
+            Connect external Model Context Protocol servers that this account
+            can call from any chat. Toggle off to keep a server registered
+            without making its tools available by default.
+          </p>
+          {mcpError && (
+            <div className="hint" role="alert">{mcpError}</div>
+          )}
+          {mcpLoading ? (
+            <div className="hint">Loading…</div>
+          ) : mcpServers.length === 0 ? (
+            <div className="hint">No MCP servers yet.</div>
+          ) : (
+            <ul className="mcp-list">
+              {mcpServers.map((s) => (
+                <li key={s.server_id} className="mcp-row">
+                  <div className="mcp-row-main">
+                    <div className="mcp-row-name">
+                      <span
+                        className={`mcp-dot mcp-dot-${s.auth_status}`}
+                        role="img"
+                        aria-label={mcpStatusLabel(s.auth_status)}
+                        title={mcpStatusLabel(s.auth_status)}
+                      />
+                      {s.name}
+                      <span className="mcp-status-text">
+                        {mcpStatusLabel(s.auth_status)}
+                      </span>
+                    </div>
+                    <div className="mcp-row-url">{s.url}</div>
+                  </div>
+                  <div className="mcp-row-actions">
+                    <button
+                      type="button"
+                      className={"toggle" + (s.globally_enabled ? " on" : "")}
+                      onClick={() => toggleGlobal(s)}
+                      aria-label={
+                        s.globally_enabled
+                          ? `Disable ${s.name} globally`
+                          : `Enable ${s.name} globally`
+                      }
+                    >
+                      <span className="knob" />
+                    </button>
+                    <button
+                      type="button"
+                      className="ck"
+                      onClick={() => reauth(s)}
+                    >
+                      Reconnect
+                    </button>
+                    <button
+                      type="button"
+                      className="ck"
+                      onClick={() => removeServer(s)}
+                    >
+                      Remove
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+          <div className="set-row">
+            <div />
+            <div className="ctl">
+              <button
+                type="button"
+                className="btn-primary"
+                onClick={() => setShowAddMCP(true)}
+              >
+                Add server
+              </button>
+            </div>
+          </div>
+        </div>
+        <AddMCPServerModal
+          open={showAddMCP}
+          onClose={() => setShowAddMCP(false)}
+          onRegistered={() => refreshMCP()}
+        />
       </div>
     </div>
   );

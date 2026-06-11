@@ -3,16 +3,23 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createChat,
   deleteChat,
+  deleteMCPServer,
   finalizeAttachment,
   getChat,
+  getChatMCPSettings,
   getPrefs,
   listChats,
+  listMCPServers,
   listModels,
   logout,
   patchChat,
+  patchMCPServer,
   presignAttachment,
+  putChatMCPSettings,
   putPrefs,
+  reauthMCPServer,
   regenerate,
+  registerMCPServer,
   sha256Hex,
   streamMessage,
   submitFeedback,
@@ -541,5 +548,138 @@ describe("chats wrappers", () => {
         finalizeAttachment({ presign_token: "bad", checksum_sha256: "x" }),
       ).rejects.toThrow(/finalizeAttachment 401/);
     });
+  });
+});
+
+describe("MCP API client", () => {
+  beforeEach(() => {
+    localStorage.setItem("starter_mgmt_token", "test-token");
+    global.fetch = vi.fn();
+  });
+
+  afterEach(() => {
+    localStorage.removeItem("starter_mgmt_token");
+    vi.restoreAllMocks();
+  });
+
+  it("listMCPServers GETs with auth", async () => {
+    global.fetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ servers: [] }),
+    });
+    const data = await listMCPServers();
+    expect(global.fetch).toHaveBeenCalledWith(
+      expect.stringContaining("/api/mcp/servers"),
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: "Bearer test-token" }),
+      }),
+    );
+    expect(data).toEqual({ servers: [] });
+  });
+
+  it("listMCPServers throws on non-ok response", async () => {
+    global.fetch.mockResolvedValueOnce({ ok: false, status: 500 });
+    await expect(listMCPServers()).rejects.toThrow(/listMCPServers 500/);
+  });
+
+  it("registerMCPServer POSTs JSON body and returns auth_start_url", async () => {
+    global.fetch.mockResolvedValueOnce({
+      ok: true,
+      json: () =>
+        Promise.resolve({ server_id: "srv-1", auth_start_url: "https://x" }),
+    });
+    const out = await registerMCPServer({
+      name: "Hive",
+      url: "https://hive.example.com/mcp",
+      tool_prefix: "hive",
+    });
+    expect(out.auth_start_url).toBe("https://x");
+  });
+
+  it("registerMCPServer throws on non-ok response", async () => {
+    global.fetch.mockResolvedValueOnce({ ok: false, status: 502 });
+    await expect(
+      registerMCPServer({ name: "X", url: "https://x/mcp" }),
+    ).rejects.toThrow(/registerMCPServer 502/);
+  });
+
+  it("patchMCPServer PATCHes a subset of fields", async () => {
+    global.fetch.mockResolvedValueOnce({ ok: true, status: 204 });
+    await patchMCPServer("srv-1", { globally_enabled: false });
+    expect(global.fetch).toHaveBeenCalledWith(
+      expect.stringContaining("/api/mcp/servers/srv-1"),
+      expect.objectContaining({ method: "PATCH" }),
+    );
+  });
+
+  it("patchMCPServer throws on non-ok response", async () => {
+    global.fetch.mockResolvedValueOnce({ ok: false, status: 404 });
+    await expect(patchMCPServer("srv-1", { name: "X" })).rejects.toThrow(
+      /patchMCPServer 404/,
+    );
+  });
+
+  it("deleteMCPServer DELETEs", async () => {
+    global.fetch.mockResolvedValueOnce({ ok: true, status: 204 });
+    await deleteMCPServer("srv-1");
+    expect(global.fetch).toHaveBeenCalledWith(
+      expect.stringContaining("/api/mcp/servers/srv-1"),
+      expect.objectContaining({ method: "DELETE" }),
+    );
+  });
+
+  it("deleteMCPServer throws on non-ok response", async () => {
+    global.fetch.mockResolvedValueOnce({ ok: false, status: 404 });
+    await expect(deleteMCPServer("srv-1")).rejects.toThrow(
+      /deleteMCPServer 404/,
+    );
+  });
+
+  it("reauthMCPServer POSTs and returns auth_start_url", async () => {
+    global.fetch.mockResolvedValueOnce({
+      ok: true,
+      json: () =>
+        Promise.resolve({ server_id: "srv-1", auth_start_url: "https://x" }),
+    });
+    const out = await reauthMCPServer("srv-1");
+    expect(out.auth_start_url).toBe("https://x");
+  });
+
+  it("reauthMCPServer throws on non-ok response", async () => {
+    global.fetch.mockResolvedValueOnce({ ok: false, status: 404 });
+    await expect(reauthMCPServer("srv-1")).rejects.toThrow(
+      /reauthMCPServer 404/,
+    );
+  });
+
+  it("getChatMCPSettings + putChatMCPSettings round trip", async () => {
+    global.fetch
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve({ mode: "inherit", explicit_server_ids: [] }),
+      })
+      .mockResolvedValueOnce({ ok: true, status: 204 });
+    const settings = await getChatMCPSettings("chat-1");
+    expect(settings.mode).toBe("inherit");
+    await putChatMCPSettings("chat-1", {
+      mode: "explicit",
+      explicit_server_ids: ["srv-1"],
+    });
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("getChatMCPSettings throws on non-ok response", async () => {
+    global.fetch.mockResolvedValueOnce({ ok: false, status: 404 });
+    await expect(getChatMCPSettings("chat-1")).rejects.toThrow(
+      /getChatMCPSettings 404/,
+    );
+  });
+
+  it("putChatMCPSettings throws on non-ok response", async () => {
+    global.fetch.mockResolvedValueOnce({ ok: false, status: 422 });
+    await expect(
+      putChatMCPSettings("chat-1", { mode: "inherit", explicit_server_ids: [] }),
+    ).rejects.toThrow(/putChatMCPSettings 422/);
   });
 });

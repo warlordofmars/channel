@@ -1,10 +1,19 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 
 vi.mock("../../api.js", () => ({
   listModels: vi.fn(),
+  listMCPServers: vi.fn(() => Promise.resolve({ servers: [] })),
+  patchMCPServer: vi.fn(() => Promise.resolve()),
+  deleteMCPServer: vi.fn(() => Promise.resolve()),
+  reauthMCPServer: vi.fn(() =>
+    Promise.resolve({ auth_start_url: "https://x" }),
+  ),
+  registerMCPServer: vi.fn(() =>
+    Promise.resolve({ server_id: "srv-1", auth_start_url: "https://x" }),
+  ),
 }));
 
 import * as api from "../../api.js";
@@ -240,5 +249,468 @@ describe("Customize", () => {
     api.listModels.mockRejectedValueOnce(new Error("network"));
     renderCustomize();
     await waitFor(() => expect(screen.getByTestId("models-error")).toBeTruthy());
+  });
+
+  it("renders the MCP servers empty state by default", async () => {
+    renderCustomize();
+    expect(
+      await screen.findByText(/no mcp servers yet/i),
+    ).toBeInTheDocument();
+  });
+
+  it("renders the MCP servers section heading", async () => {
+    renderCustomize();
+    expect(
+      await screen.findByRole("heading", { name: /mcp servers/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("renders MCP server rows when the list is non-empty", async () => {
+    api.listMCPServers.mockResolvedValueOnce({
+      servers: [
+        {
+          server_id: "srv-1",
+          name: "Hive",
+          url: "https://hive.example.com/mcp",
+          tool_prefix: "hive",
+          auth_status: "active",
+          globally_enabled: true,
+          created_at: "x",
+          updated_at: "x",
+        },
+      ],
+    });
+    renderCustomize();
+    expect(await screen.findByText("Hive")).toBeInTheDocument();
+    expect(
+      screen.getByText("https://hive.example.com/mcp"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /reconnect/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("shows an error message when listMCPServers fails", async () => {
+    api.listMCPServers.mockRejectedValueOnce(new Error("boom"));
+    renderCustomize();
+    await waitFor(() =>
+      expect(
+        screen.getByText(/couldn't load mcp servers/i),
+      ).toBeInTheDocument(),
+    );
+  });
+
+  it("renders Enable-globally aria-label for globally-disabled servers", async () => {
+    api.listMCPServers.mockResolvedValue({
+      servers: [
+        {
+          server_id: "srv-1",
+          name: "Hive",
+          url: "https://hive.example.com/mcp",
+          tool_prefix: "hive",
+          auth_status: "active",
+          globally_enabled: false,
+          created_at: "x",
+          updated_at: "x",
+        },
+      ],
+    });
+    renderCustomize();
+    expect(
+      await screen.findByLabelText(/enable hive globally/i),
+    ).toBeInTheDocument();
+  });
+
+  it("clicking the global-enable toggle calls patchMCPServer + refreshes", async () => {
+    api.listMCPServers.mockResolvedValue({
+      servers: [
+        {
+          server_id: "srv-1",
+          name: "Hive",
+          url: "https://hive.example.com/mcp",
+          tool_prefix: "hive",
+          auth_status: "active",
+          globally_enabled: true,
+          created_at: "x",
+          updated_at: "x",
+        },
+      ],
+    });
+    renderCustomize();
+    const toggle = await screen.findByLabelText(/disable hive globally/i);
+    fireEvent.click(toggle);
+    await waitFor(() =>
+      expect(api.patchMCPServer).toHaveBeenCalledWith("srv-1", {
+        globally_enabled: false,
+      }),
+    );
+  });
+
+  it("clicking Reconnect calls reauthMCPServer and opens a new tab", async () => {
+    api.listMCPServers.mockResolvedValue({
+      servers: [
+        {
+          server_id: "srv-1",
+          name: "Hive",
+          url: "https://hive.example.com/mcp",
+          tool_prefix: "hive",
+          auth_status: "expired",
+          globally_enabled: true,
+          created_at: "x",
+          updated_at: "x",
+        },
+      ],
+    });
+    const openSpy = vi.spyOn(window, "open").mockImplementation(() => null);
+    renderCustomize();
+    const reconnect = await screen.findByRole("button", { name: /reconnect/i });
+    fireEvent.click(reconnect);
+    await waitFor(() =>
+      expect(api.reauthMCPServer).toHaveBeenCalledWith("srv-1"),
+    );
+    expect(openSpy).toHaveBeenCalledWith(
+      "https://x",
+      "_blank",
+      "noopener,noreferrer",
+    );
+    openSpy.mockRestore();
+  });
+
+  it("clicking Remove calls deleteMCPServer when the confirm dialog is accepted", async () => {
+    api.listMCPServers.mockResolvedValue({
+      servers: [
+        {
+          server_id: "srv-1",
+          name: "Hive",
+          url: "https://hive.example.com/mcp",
+          tool_prefix: "hive",
+          auth_status: "active",
+          globally_enabled: true,
+          created_at: "x",
+          updated_at: "x",
+        },
+      ],
+    });
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    renderCustomize();
+    const remove = await screen.findByRole("button", { name: /remove/i });
+    fireEvent.click(remove);
+    await waitFor(() =>
+      expect(api.deleteMCPServer).toHaveBeenCalledWith("srv-1"),
+    );
+    confirmSpy.mockRestore();
+  });
+
+  it("clicking Remove is a no-op when the confirm dialog is cancelled", async () => {
+    api.listMCPServers.mockResolvedValue({
+      servers: [
+        {
+          server_id: "srv-1",
+          name: "Hive",
+          url: "https://hive.example.com/mcp",
+          tool_prefix: "hive",
+          auth_status: "active",
+          globally_enabled: true,
+          created_at: "x",
+          updated_at: "x",
+        },
+      ],
+    });
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    api.deleteMCPServer.mockClear();
+    renderCustomize();
+    const remove = await screen.findByRole("button", { name: /remove/i });
+    fireEvent.click(remove);
+    // give a microtask to flush
+    await new Promise((r) => setTimeout(r, 0));
+    expect(api.deleteMCPServer).not.toHaveBeenCalled();
+    confirmSpy.mockRestore();
+  });
+
+  it("clicking Add server opens the AddMCPServerModal, Cancel closes it", async () => {
+    renderCustomize();
+    const addButton = await screen.findByRole("button", { name: /^add server$/i });
+    fireEvent.click(addButton);
+    expect(
+      await screen.findByRole("heading", { name: /add mcp server/i }),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /cancel/i }));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("heading", { name: /add mcp server/i }),
+      ).not.toBeInTheDocument(),
+    );
+  });
+
+  it("renders accessible status text + aria-label on the auth-status dot", async () => {
+    api.listMCPServers.mockResolvedValueOnce({
+      servers: [
+        {
+          server_id: "srv-1",
+          name: "Hive",
+          url: "https://hive.example.com/mcp",
+          tool_prefix: "hive",
+          auth_status: "expired",
+          globally_enabled: true,
+          created_at: "x",
+          updated_at: "x",
+        },
+      ],
+    });
+    renderCustomize();
+    // Visible badge text — shown next to the server name.
+    expect(
+      await screen.findByText(/reconnect needed/i),
+    ).toBeInTheDocument();
+    // Dot itself carries the same label for screen reader users.
+    const dot = await screen.findByRole("img", { name: /reconnect needed/i });
+    expect(dot).toBeInTheDocument();
+  });
+
+  it("renders 'Not yet connected' badge for a never_authed server", async () => {
+    api.listMCPServers.mockResolvedValueOnce({
+      servers: [
+        {
+          server_id: "srv-1", name: "Hive",
+          url: "https://hive.example.com/mcp", tool_prefix: "hive",
+          auth_status: "never_authed",
+          globally_enabled: true, created_at: "x", updated_at: "x",
+        },
+      ],
+    });
+    renderCustomize();
+    expect(await screen.findByText(/not yet connected/i)).toBeInTheDocument();
+  });
+
+  it("renders 'Revoked' badge for a revoked-status server", async () => {
+    api.listMCPServers.mockResolvedValueOnce({
+      servers: [
+        {
+          server_id: "srv-1", name: "Hive",
+          url: "https://hive.example.com/mcp", tool_prefix: "hive",
+          auth_status: "revoked",
+          globally_enabled: true, created_at: "x", updated_at: "x",
+        },
+      ],
+    });
+    renderCustomize();
+    expect(await screen.findByText(/^Revoked$/)).toBeInTheDocument();
+  });
+
+  it("falls back to the raw status string for unknown auth_status values", async () => {
+    api.listMCPServers.mockResolvedValueOnce({
+      servers: [
+        {
+          server_id: "srv-1", name: "Hive",
+          url: "https://hive.example.com/mcp", tool_prefix: "hive",
+          // Defensive: future / unknown values shouldn't crash the row.
+          auth_status: "synthetic_future_value",
+          globally_enabled: true, created_at: "x", updated_at: "x",
+        },
+      ],
+    });
+    renderCustomize();
+    expect(
+      await screen.findByText(/synthetic_future_value/i),
+    ).toBeInTheDocument();
+  });
+
+  it("toggleGlobal surfaces a user-visible error when patchMCPServer rejects", async () => {
+    api.listMCPServers.mockResolvedValue({
+      servers: [
+        {
+          server_id: "srv-1",
+          name: "Hive",
+          url: "https://hive.example.com/mcp",
+          tool_prefix: "hive",
+          auth_status: "active",
+          globally_enabled: true,
+          created_at: "x",
+          updated_at: "x",
+        },
+      ],
+    });
+    api.patchMCPServer.mockRejectedValueOnce(new Error("500"));
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    renderCustomize();
+    fireEvent.click(await screen.findByLabelText(/disable hive globally/i));
+    await waitFor(() =>
+      expect(screen.getByText(/couldn't update hive/i)).toBeInTheDocument(),
+    );
+    errorSpy.mockRestore();
+  });
+
+  it("removeServer surfaces a user-visible error when deleteMCPServer rejects", async () => {
+    api.listMCPServers.mockResolvedValue({
+      servers: [
+        {
+          server_id: "srv-1",
+          name: "Hive",
+          url: "https://hive.example.com/mcp",
+          tool_prefix: "hive",
+          auth_status: "active",
+          globally_enabled: true,
+          created_at: "x",
+          updated_at: "x",
+        },
+      ],
+    });
+    api.deleteMCPServer.mockRejectedValueOnce(new Error("403"));
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    renderCustomize();
+    fireEvent.click(await screen.findByRole("button", { name: /remove/i }));
+    await waitFor(() =>
+      expect(screen.getByText(/couldn't remove hive/i)).toBeInTheDocument(),
+    );
+    confirmSpy.mockRestore();
+    errorSpy.mockRestore();
+  });
+
+  it("reauth surfaces a user-visible error when reauthMCPServer rejects", async () => {
+    api.listMCPServers.mockResolvedValue({
+      servers: [
+        {
+          server_id: "srv-1",
+          name: "Hive",
+          url: "https://hive.example.com/mcp",
+          tool_prefix: "hive",
+          auth_status: "expired",
+          globally_enabled: true,
+          created_at: "x",
+          updated_at: "x",
+        },
+      ],
+    });
+    api.reauthMCPServer.mockRejectedValueOnce(new Error("502"));
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    renderCustomize();
+    fireEvent.click(await screen.findByRole("button", { name: /reconnect/i }));
+    await waitFor(() =>
+      expect(
+        screen.getByText(/couldn't start reconnect for hive/i),
+      ).toBeInTheDocument(),
+    );
+    errorSpy.mockRestore();
+  });
+
+  it("successful registration through the modal refreshes the MCP server list", async () => {
+    api.listMCPServers.mockClear();
+    api.listMCPServers.mockResolvedValue({ servers: [] });
+    api.registerMCPServer.mockResolvedValueOnce({
+      server_id: "srv-1",
+      auth_start_url: "https://x",
+    });
+    const openSpy = vi.spyOn(window, "open").mockImplementation(() => null);
+    renderCustomize();
+    // Initial mount triggers one listMCPServers call.
+    await waitFor(() => expect(api.listMCPServers).toHaveBeenCalledTimes(1));
+    fireEvent.click(
+      await screen.findByRole("button", { name: /^add server$/i }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.change(within(dialog).getByLabelText("Name"), {
+      target: { value: "Hive" },
+    });
+    fireEvent.change(within(dialog).getByLabelText("Server URL"), {
+      target: { value: "https://hive.example.com/mcp" },
+    });
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: /^add server$/i }),
+    );
+    // onRegistered → refreshMCP → second listMCPServers call.
+    await waitFor(() => expect(api.listMCPServers).toHaveBeenCalledTimes(2));
+    openSpy.mockRestore();
+  });
+
+  it("?mcp_authed=error&reason=invalid_state surfaces a human-readable message", async () => {
+    api.listMCPServers.mockResolvedValue({ servers: [] });
+    render(
+      <MemoryRouter initialEntries={["/app/customize?mcp_authed=error&reason=invalid_state"]}>
+        <Customize />
+      </MemoryRouter>,
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByText(/oauth session expired or invalid/i),
+      ).toBeInTheDocument(),
+    );
+  });
+
+  it.each([
+    ["no_code", /didn't return an auth code/i],
+    ["server_gone", /registration was removed/i],
+    ["blocked_url", /url is no longer allowed/i],
+  ])(
+    "?mcp_authed=error&reason=%s surfaces its specific message",
+    async (reason, expected) => {
+      api.listMCPServers.mockResolvedValue({ servers: [] });
+      render(
+        <MemoryRouter initialEntries={[`/app/customize?mcp_authed=error&reason=${reason}`]}>
+          <Customize />
+        </MemoryRouter>,
+      );
+      await waitFor(() =>
+        expect(screen.getByText(expected)).toBeInTheDocument(),
+      );
+    },
+  );
+
+  it("?mcp_authed=error with no reason still shows a fallback message", async () => {
+    api.listMCPServers.mockResolvedValue({ servers: [] });
+    render(
+      <MemoryRouter initialEntries={["/app/customize?mcp_authed=error"]}>
+        <Customize />
+      </MemoryRouter>,
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByText(/couldn't connect to mcp server: unknown error/i),
+      ).toBeInTheDocument(),
+    );
+  });
+
+  it("?mcp_authed=error with an unknown reason passes the raw reason through", async () => {
+    api.listMCPServers.mockResolvedValue({ servers: [] });
+    render(
+      <MemoryRouter initialEntries={["/app/customize?mcp_authed=error&reason=access_denied"]}>
+        <Customize />
+      </MemoryRouter>,
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByText(/couldn't connect to mcp server: access_denied/i),
+      ).toBeInTheDocument(),
+    );
+  });
+
+  it("?mcp_authed=error does NOT trigger an extra MCP refresh", async () => {
+    api.listMCPServers.mockClear();
+    api.listMCPServers.mockResolvedValue({ servers: [] });
+    render(
+      <MemoryRouter initialEntries={["/app/customize?mcp_authed=error&reason=token_exchange"]}>
+        <Customize />
+      </MemoryRouter>,
+    );
+    // Wait for the error message to land — by that point any list
+    // refresh would have fired too.
+    await screen.findByText(/failed to exchange the authorization code/i);
+    // Mount fires one refresh. The error-branch effect must NOT fire a
+    // second one.
+    expect(api.listMCPServers).toHaveBeenCalledTimes(1);
+  });
+
+  it("?mcp_authed=ok in the URL triggers an MCP refresh on mount", async () => {
+    api.listMCPServers.mockClear();
+    api.listMCPServers.mockResolvedValue({ servers: [] });
+    render(
+      <MemoryRouter initialEntries={["/app/customize?mcp_authed=ok&server_id=srv-1"]}>
+        <Customize />
+      </MemoryRouter>,
+    );
+    await waitFor(() =>
+      // Once for mount + once for the search-params effect.
+      expect(api.listMCPServers).toHaveBeenCalledTimes(2),
+    );
   });
 });

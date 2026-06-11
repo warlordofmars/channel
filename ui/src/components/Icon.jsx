@@ -67,6 +67,7 @@ export default function Icon({ name, size = 18, stroke = 1.6, style = {} }) {
     case "pin":          return <svg {...p}><path d="M9 4h6l-1 5 3 3v2H7v-2l3-3z"/><path d="M12 14v6"/></svg>;
     case "dots":         return <svg {...p}><circle cx="5" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="19" cy="12" r="1.4"/></svg>;
     case "star":         return <svg {...p}><path d="M12 3.5l2.6 5.7 6.2.6-4.7 4.1 1.4 6.1L12 16.9 6.5 20l1.4-6.1L3.2 9.8l6.2-.6z"/></svg>;
+    case "plug":         return <svg {...p}><path d="M9 2v6M15 2v6M7 8h10v4a5 5 0 0 1-10 0z"/><path d="M12 17v5"/></svg>;
     case "database":     return <svg {...p}><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/></svg>;
     case "play":         return <svg {...p}><path d="M7 5l12 7-12 7z"/></svg>;
     case "pencil":       return <svg {...p}><path d="M4 20h4L19 9a2 2 0 0 0-3-3L5 16z"/><path d="M14 7l3 3"/></svg>;

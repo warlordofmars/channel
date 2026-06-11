@@ -240,3 +240,66 @@ export async function putPrefs(partial) {
   });
   if (!res.ok) throw new Error(`putPrefs failed: ${res.status}`);
 }
+
+// ---- MCP servers (#207) ---------------------------------------------------
+
+export async function listMCPServers() {
+  const response = await fetch(`${BASE}/api/mcp/servers`, {
+    headers: authHeader(),
+  });
+  if (!response.ok) throw new Error(`listMCPServers ${response.status}`);
+  return response.json();
+}
+
+export async function registerMCPServer({ name, url, tool_prefix = null }) {
+  const response = await fetch(`${BASE}/api/mcp/servers`, {
+    method: "POST",
+    headers: { ...authHeader(), "Content-Type": "application/json" },
+    body: JSON.stringify({ name, url, tool_prefix }),
+  });
+  if (!response.ok) throw new Error(`registerMCPServer ${response.status}`);
+  return response.json();
+}
+
+export async function patchMCPServer(serverId, updates) {
+  const response = await fetch(`${BASE}/api/mcp/servers/${serverId}`, {
+    method: "PATCH",
+    headers: { ...authHeader(), "Content-Type": "application/json" },
+    body: JSON.stringify(updates),
+  });
+  if (!response.ok) throw new Error(`patchMCPServer ${response.status}`);
+}
+
+export async function deleteMCPServer(serverId) {
+  const response = await fetch(`${BASE}/api/mcp/servers/${serverId}`, {
+    method: "DELETE",
+    headers: authHeader(),
+  });
+  if (!response.ok) throw new Error(`deleteMCPServer ${response.status}`);
+}
+
+export async function reauthMCPServer(serverId) {
+  const response = await fetch(`${BASE}/api/mcp/servers/${serverId}/reauth`, {
+    method: "POST",
+    headers: authHeader(),
+  });
+  if (!response.ok) throw new Error(`reauthMCPServer ${response.status}`);
+  return response.json();
+}
+
+export async function getChatMCPSettings(chatId) {
+  const response = await fetch(`${BASE}/api/chats/${chatId}/mcp`, {
+    headers: authHeader(),
+  });
+  if (!response.ok) throw new Error(`getChatMCPSettings ${response.status}`);
+  return response.json();
+}
+
+export async function putChatMCPSettings(chatId, settings) {
+  const response = await fetch(`${BASE}/api/chats/${chatId}/mcp`, {
+    method: "PUT",
+    headers: { ...authHeader(), "Content-Type": "application/json" },
+    body: JSON.stringify(settings),
+  });
+  if (!response.ok) throw new Error(`putChatMCPSettings ${response.status}`);
+}

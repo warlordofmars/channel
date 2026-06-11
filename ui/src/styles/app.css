@@ -1030,3 +1030,68 @@ html.is-electron-mac .sb-top {
   color: var(--ink-soft);
   font-variant-numeric: tabular-nums;
 }
+
+/* MCP — Add server modal (#207) */
+.mcp-add-form { display: flex; flex-direction: column; gap: 12px; }
+.mcp-add-form .modal-h { margin: 0 0 4px; font-size: 1.05rem; font-weight: 600; color: var(--ink); }
+.mcp-field { display: flex; flex-direction: column; gap: 4px; }
+.mcp-field > span { font-size: 0.85rem; color: var(--ink-faint); }
+.mcp-field > input {
+  background: var(--canvas);
+  color: var(--ink);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 8px 10px;
+}
+.mcp-consent {
+  font-size: 0.85rem;
+  color: var(--ink-faint);
+  background: var(--raised);
+  border-radius: var(--r-sm);
+  padding: 10px 12px;
+}
+.mcp-err { color: var(--danger); font-size: 0.9rem; }
+.mcp-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* MCP — Customize section list (#207) */
+.mcp-list { display: flex; flex-direction: column; gap: 8px; list-style: none; padding: 0; margin: 8px 0 0; }
+.mcp-row {
+  display: flex; justify-content: space-between; align-items: center; gap: 12px;
+  background: var(--raised); border: 1px solid var(--border);
+  border-radius: var(--r-sm); padding: 10px 12px;
+}
+.mcp-row-main { flex: 1; min-width: 0; }
+.mcp-row-name { display: flex; align-items: center; gap: 8px; font-weight: 500; }
+.mcp-row-url { font-size: 0.8rem; color: var(--ink-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mcp-row-actions { display: flex; align-items: center; gap: 8px; }
+/* Default --ink-faint covers any unknown auth_status the backend might
+ * return — the row label intentionally renders the raw status string,
+ * but without a default the dot itself would be invisible. */
+.mcp-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; background: var(--ink-faint); }
+/* No semantic "success" token exists in channel.css today; the green
+ * literal is the only use-site of a non-token color and is intentionally
+ * left as OKLCH here. Expired / revoked map to --danger; never_authed
+ * to --ink-faint so it adapts between light and dark themes. */
+.mcp-dot-active { background: oklch(0.70 0.16 150); }
+.mcp-dot-expired, .mcp-dot-revoked { background: var(--danger); }
+.mcp-dot-never_authed { background: var(--ink-faint); }
+.mcp-status-text {
+  font-size: 0.75rem;
+  font-weight: 400;
+  color: var(--ink-faint);
+  background: var(--canvas);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 1px 6px;
+  margin-left: 4px;
+}
+
+/* MCP picker (#207) */
+.mcp-pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: var(--raised); border: 1px solid var(--border);
+  border-radius: var(--r-sm); padding: 4px 8px;
+  font-size: 0.85rem; color: var(--ink);
+  cursor: pointer;
+}
+.mcp-pill:hover { background: var(--canvas); }

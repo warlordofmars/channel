@@ -154,6 +154,17 @@ require a valid Bearer mgmt JWT. JWT validation enforces `iss`,
 - Idempotency items: `PK=IDEMP#{user_id}`, `SK={key}`
   (TTL = 1 hour after reserve; used for the streaming POST replay
   short-circuit)
+- MCP server items: `PK=USER#{user_id}`, `SK=MCPSERVER#{server_id}`
+  (one row per registered MCP server; persists DCR client_id +
+  tool_prefix + globally_enabled flag; no GSI projection)
+- MCP token items: `PK=USER#{user_id}`, `SK=MCPTOKEN#{server_id}`
+  (sibling row to MCPSERVER; access/refresh tokens KMS-encrypted at
+  application layer; TTL set to `expires_at + 30 days` as a hard
+  upper bound for the orphan-row case where DELETE lost a race)
+- Chat MCP override items: `PK=CHAT#{chat_id}`, `SK=MCPSERVERS#META`
+  (one optional row per chat; `mode=inherit` means "follow user's
+  globally_enabled flags as of now", `mode=explicit` means
+  "use exactly this list, ignoring future changes to globally_enabled")
 - GSIs:
   - `UserEmailIndex` — `PK=EMAIL#{email}` (for user lookups by email)
   - `ChatByIdIndex` — `PK=CHAT_ID#{chat_id}`, `SK=META`

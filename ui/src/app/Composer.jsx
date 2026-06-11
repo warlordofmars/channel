@@ -9,6 +9,7 @@ import {
 import Icon from "../components/Icon.jsx";
 import { useChannelPrefs } from "../hooks/useChannelPrefs.js";
 import AttachMenu, { ALLOWED_MIMES } from "./AttachMenu.jsx";
+import MCPPicker from "./MCPPicker.jsx";
 import ModelPicker from "./ModelPicker.jsx";
 
 const ALLOWED_MIME_SET = new Set(ALLOWED_MIMES);
@@ -96,7 +97,18 @@ export function truncateName(name, max = 20) {
  * rendered at all — no dead control.
  */
 const Composer = forwardRef(function Composer(
-  { model, effort, setModel, setEffort, onSend, autofocus, placeholder },
+  {
+    model,
+    effort,
+    setModel,
+    setEffort,
+    onSend,
+    autofocus,
+    placeholder,
+    mcpServers,
+    mcpSettings,
+    setMcpSettings,
+  },
   ref,
 ) {
   const [text, setText] = useState("");
@@ -441,6 +453,14 @@ const Composer = forwardRef(function Composer(
         />
         <div className="composer-row">
           <AttachMenu onFiles={handleFiles} />
+          {mcpServers && (
+            <MCPPicker
+              servers={mcpServers}
+              mode={mcpSettings?.mode || "inherit"}
+              explicitIds={mcpSettings?.explicit_server_ids || []}
+              onChange={setMcpSettings}
+            />
+          )}
           <div className="spacer" />
           <ModelPicker model={model} effort={effort} onModel={setModel} onEffort={setEffort} />
           {speechSupported && (

@@ -11,7 +11,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class MessageRole(str, Enum):
@@ -236,4 +236,58 @@ class Prefs(BaseModel):
     show_reasoning: bool = False
     suggest_followups: bool = True
 
-    model_config = {"extra": "forbid"}
+    model_config = ConfigDict(extra="forbid")
+
+
+class MCPServerAuthStatus(str, Enum):
+    NEVER_AUTHED = "never_authed"
+    ACTIVE = "active"
+    EXPIRED = "expired"
+    REVOKED = "revoked"
+
+
+class MCPServer(BaseModel):
+    """A user-registered MCP server. Matches the spike's MCPSERVER row."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    server_id: str
+    user_id: str
+    name: str
+    url: str  # e.g. "https://hive.warlordofmars.net/mcp"
+    client_id: str  # DCR-issued; opaque to Channel
+    tool_prefix: str  # passed to MCPClient(prefix=...) — must be [a-z0-9_]+
+    auth_status: MCPServerAuthStatus
+    globally_enabled: bool = True  # spike default — see §Question 2 rationale
+    created_at: str
+    updated_at: str
+
+
+class MCPToken(BaseModel):
+    """Per-(user, server) OAuth token bundle. Encrypted at application layer."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    server_id: str
+    user_id: str
+    # KMS-encrypted blobs — see src/channel/mcp/crypto.py for the round-trip.
+    access_token_ciphertext: bytes
+    refresh_token_ciphertext: bytes | None = None
+    expires_at: int  # Unix seconds — absolute, not relative
+    granted_scope: str  # space-separated, as returned by the token endpoint
+    updated_at: str
+
+
+class ChatMCPMode(str, Enum):
+    INHERIT = "inherit"
+    EXPLICIT = "explicit"
+
+
+class ChatMCPSettings(BaseModel):
+    """Per-chat MCP override. Lives at PK=CHAT#{chat_id}, SK=MCPSERVERS#META."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    chat_id: str
+    mode: ChatMCPMode = ChatMCPMode.INHERIT
+    explicit_server_ids: list[str] = Field(default_factory=list)

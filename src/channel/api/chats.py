@@ -18,6 +18,7 @@ from typing import Any
 import boto3
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Response
 from fastapi.responses import StreamingResponse
+from strands.tools.mcp import MCPClient
 from strands.types.exceptions import MaxTokensReachedException
 
 from channel import storage
@@ -44,6 +45,11 @@ from channel.agents.strands_sse import (
 from channel.agents.tool_hooks import clear_cancel_signal, set_cancel_signal
 from channel.agents.tools.clock import current_time
 from channel.api._auth import require_mgmt_user
+from channel.logging_config import fingerprint_id
+from channel.mcp import auth as mcp_auth
+from channel.mcp.auth import MCPAuthFailedError
+from channel.mcp.transports import make_authenticated_transport
+from channel.mcp.url_guard import validate_mcp_server_url
 from channel.metrics import (
     record_auto_title_outcome,
     record_chat_delete_attachment_wipe_outcome,
@@ -53,8 +59,10 @@ from channel.metrics import (
 from channel.models import (
     Chat,
     ChatCreate,
+    ChatMCPMode,
     ChatPatch,
     FeedbackRequest,
+    MCPServerAuthStatus,
     Message,
     MessageRole,
     RegenerateRequest,
@@ -522,6 +530,114 @@ def _build_tool_registry() -> list[Any]:
     return registry
 
 
+async def _build_mcp_clients_for_chat(
+    *,
+    user_id: str,
+    chat_id: str,
+) -> list[MCPClient]:
+    """Resolve active MCP servers + tokens for one chat turn.
+
+    Per the spike (§Question 2): chats inherit user-level
+    ``globally_enabled`` servers by default; ``mode="explicit"`` rows
+    capture an exact list at override time. Per-tool-call
+    re-instantiation (spike §Question 3 v1 strategy) — every turn
+    builds fresh ``MCPClient`` instances bound to the bearer token
+    valid at turn start. Mid-chain refresh stays a v2 follow-up.
+
+    Auth-resolution failures are best-effort logged + the MCPSERVER row
+    flipped to ``EXPIRED`` so the SPA can surface the Reconnect
+    affordance on the next Customize visit — but they do NOT raise into
+    the streaming generator. A broken Hive registration must not block
+    the chain's other tools.
+
+    Kill switch: ``STARTER_MCP_REGISTRY_ENABLED != "1"`` short-circuits
+    to an empty list with no DynamoDB reads. Defaults to enabled when
+    unset so dev / test envs that don't provision the env var still see
+    MCP behavior; CDK + ``inv dev`` both wire ``"1"`` explicitly.
+    """
+    if os.environ.get("STARTER_MCP_REGISTRY_ENABLED", "1") != "1":
+        return []
+
+    registered = storage.list_mcp_servers_for_user(user_id)
+    settings = storage.get_chat_mcp_settings(chat_id)
+    if settings.mode == ChatMCPMode.EXPLICIT:
+        allowed = set(settings.explicit_server_ids)
+        active = [s for s in registered if s.server_id in allowed]
+    else:
+        active = [s for s in registered if s.globally_enabled]
+
+    # Filter to ACTIVE-only BEFORE token resolution. Without this:
+    #   1. A freshly-registered (NEVER_AUTHED) server has no token row,
+    #      so the resolver raises MCPAuthFailedError and we'd flip the
+    #      row to EXPIRED — losing the user-visible distinction between
+    #      "never connected" and "connection went stale".
+    #   2. An EXPIRED row's resolver runs the discovery + refresh dance
+    #      every single turn until the user reconnects — avoidable work
+    #      that won't recover until the user re-completes OAuth.
+    # The UI already hides inactive servers from the per-chat picker,
+    # so this mirrors that behavior at the runtime layer.
+    active = [s for s in active if s.auth_status == MCPServerAuthStatus.ACTIVE]
+
+    clients: list[MCPClient] = []
+    for server in active:
+        # DNS-rebinding defense: re-validate the persisted URL with a
+        # fresh DNS lookup before each turn. A hostname that resolved
+        # to a public address at registration can later resolve to
+        # loopback / link-local / RFC1918, which would let the Lambda
+        # egress to internal infra via the MCP transport. The validator
+        # raises HTTPException(400) on failure; we treat that as
+        # "skip + log" rather than letting it bubble into the stream.
+        try:
+            validate_mcp_server_url(server.url)
+        except HTTPException:
+            logger.warning(
+                "mcp.url_revalidation_failed",
+                extra={
+                    "user_id_hash": fingerprint_id(user_id),
+                    "server_id_hash": fingerprint_id(server.server_id),
+                },
+            )
+            continue
+        try:
+            token = await mcp_auth.get_valid_access_token(
+                user_id=user_id,
+                server=server,
+            )
+        except MCPAuthFailedError as exc:
+            # user_id (JWT sub) and server_id (DDB UUID) are
+            # server-validated identifiers, but Sonar's taint engine
+            # treats them as user-controlled because they came in via
+            # the request. Logging them via ``extra=`` (structured
+            # payload) bypasses the format-string sink the rule flags;
+            # ``fingerprint_id`` is a deterministic SHA-256 truncation
+            # so the hashes are stable across cold starts (unlike the
+            # builtin ``hash()`` which is salted per process).
+            logger.warning(
+                "mcp.token_resolution_failed",
+                extra={
+                    "user_id_hash": fingerprint_id(user_id),
+                    "server_id_hash": fingerprint_id(server.server_id),
+                    "exc_type": type(exc).__name__,
+                },
+            )
+            storage.set_mcp_server_auth_status(
+                user_id=user_id,
+                server_id=server.server_id,
+                status=MCPServerAuthStatus.EXPIRED,
+            )
+            continue
+        clients.append(
+            MCPClient(
+                make_authenticated_transport(
+                    server_url=server.url,
+                    access_token=token,
+                ),
+                prefix=server.tool_prefix,
+            )
+        )
+    return clients
+
+
 async def _stream_bedrock_reply(
     *,
     chat: Chat,
@@ -624,6 +740,14 @@ async def _stream_bedrock_reply(
         yield sse_attachment_error(**err)
 
     tool_registry = _build_tool_registry()
+    # #207 — append MCPClient instances. Resolution failures are
+    # swallowed inside _build_mcp_clients_for_chat (the helper flips
+    # the MCPSERVER row to EXPIRED so the SPA can surface Reconnect).
+    mcp_clients = await _build_mcp_clients_for_chat(
+        user_id=claims["sub"],
+        chat_id=chat.chat_id,
+    )
+    tool_registry = [*tool_registry, *mcp_clients]
 
     agent = build_agent(
         model_id=model,
@@ -718,6 +842,18 @@ async def _stream_bedrock_reply(
     except (asyncio.CancelledError, GeneratorExit):
         set_cancel_signal(chat.chat_id)
         raise
+    finally:
+        # #207 — Strands' MCPClient holds a background thread + httpx
+        # client that must be released when the turn ends. agent.cleanup()
+        # is a no-op for natives; safe to call unconditionally on real
+        # Agent instances. Without this we rely on the GC finalizer
+        # which isn't deterministic in async generators and can leak
+        # the MCP background thread across warm Lambda invocations.
+        # getattr keeps the call safe under unit-test FakeAgent doubles
+        # that don't implement the optional Strands cleanup surface.
+        cleanup = getattr(agent, "cleanup", None)
+        if cleanup is not None:
+            cleanup()  # pragma: no cover - exercised by real Strands Agent only
 
     assistant_text = "".join(accumulated)
     state["assistant_text"] = assistant_text

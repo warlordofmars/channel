@@ -547,6 +547,19 @@ def dev(ctx, seed=False):
         # AgentCore writes. Prod stacks do NOT set this — see
         # tests/unit/test_channel_stack.py for the guard.
         "STARTER_ENABLE_DEBUG_ENDPOINTS": "1",
+        # #207 MCP registry — local-dev sentinel for KMS so the encrypt/
+        # decrypt helpers don't try to talk to a real AWS KMS key. The
+        # passthrough wrapping is documented in src/channel/mcp/crypto.py
+        # and guarded by tests/unit/test_channel_stack.py against ever
+        # reaching a deployed env.
+        "STARTER_MCP_TOKEN_KMS_KEY_ID": "local",
+        "STARTER_MCP_REDIRECT_URI": "http://localhost:8001/auth/mcp/callback",
+        "STARTER_SPA_BASE_URL": "http://localhost:5173",
+        "STARTER_MCP_REGISTRY_ENABLED": "1",
+        # Allow http://localhost MCP server URLs in local dev only — the
+        # SSRF defender in src/channel/api/mcp.py refuses non-https
+        # otherwise. Production sets neither.
+        "STARTER_MCP_ALLOW_LOCALHOST": "1",
         # Phase 7c: AgentCore Memory writes need an env tag for the
         # ``channel-{env}`` naming convention. Personal dev points at
         # the developer's own AWS account, so default to "jc"; override

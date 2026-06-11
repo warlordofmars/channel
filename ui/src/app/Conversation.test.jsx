@@ -1,6 +1,6 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
 import React from "react";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, Route, Routes, useNavigate } from "react-router-dom";
 import { __resetModelsCacheForTest, loadModels } from "./data.js";
@@ -9,6 +9,11 @@ import { __resetChannelPrefsForTest } from "../hooks/useChannelPrefs.js";
 vi.mock("../api.js", () => ({
   listModels: vi.fn(),
   submitFeedback: vi.fn(),
+  listMCPServers: vi.fn(() => Promise.resolve({ servers: [] })),
+  getChatMCPSettings: vi.fn(() =>
+    Promise.resolve({ mode: "inherit", explicit_server_ids: [] }),
+  ),
+  putChatMCPSettings: vi.fn(() => Promise.resolve()),
 }));
 
 import * as api from "../api.js";
@@ -1416,6 +1421,101 @@ describe("Conversation", () => {
       const toggleAAgain = screen.getByRole("button", { name: /tool step/i });
       expect(toggleAAgain.getAttribute("aria-expanded")).toBe("false");
       expect(screen.queryByText("A's summary")).not.toBeInTheDocument();
+    });
+
+    it("MCP picker onChange persists via putChatMCPSettings (#207)", async () => {
+      api.listMCPServers.mockResolvedValue({
+        servers: [
+          {
+            server_id: "srv-1",
+            name: "Hive",
+            tool_prefix: "hive",
+            globally_enabled: true,
+            auth_status: "active",
+          },
+        ],
+      });
+      api.getChatMCPSettings.mockResolvedValue({
+        mode: "inherit",
+        explicit_server_ids: [],
+      });
+      mockStream();
+      renderAt("/app/c/c1");
+      // Wait for the MCP pill to render.
+      const pill = await screen.findByRole("button", { name: /tool servers?\b/i });
+      fireEvent.click(pill);
+      // Toggle the only server off — flips mode to explicit + empty list.
+      fireEvent.click(screen.getByLabelText(/^Hive$/));
+      await waitFor(() =>
+        expect(api.putChatMCPSettings).toHaveBeenCalledWith("c1", {
+          mode: "explicit",
+          explicit_server_ids: [],
+        }),
+      );
+    });
+
+    it("MCP picker onChange does NOT POST when chatId is absent (#207)", async () => {
+      // Render Conversation under a route with an optional :id so
+      // useParams() returns { id: undefined } — exercises the
+      // defensive !chatId guard in handleMcpChange.
+      api.putChatMCPSettings.mockClear();
+      api.listMCPServers.mockResolvedValue({
+        servers: [
+          {
+            server_id: "srv-1", name: "Hive", tool_prefix: "hive",
+            globally_enabled: true, auth_status: "active",
+          },
+        ],
+      });
+      api.getChatMCPSettings.mockResolvedValue({
+        mode: "inherit", explicit_server_ids: [],
+      });
+      mockStream();
+      render(
+        <MemoryRouter initialEntries={["/app/c/"]}>
+          <Routes>
+            <Route path="/app/c/:id?" element={<Conversation />} />
+          </Routes>
+        </MemoryRouter>,
+      );
+      const pill = await screen.findByRole("button", { name: /tool servers?\b/i });
+      fireEvent.click(pill);
+      fireEvent.click(screen.getByLabelText(/^Hive$/));
+      // putChatMCPSettings must NOT be invoked — chatId is undefined.
+      await new Promise((r) => setTimeout(r, 0));
+      expect(api.putChatMCPSettings).not.toHaveBeenCalled();
+    });
+
+    it("MCP picker onChange tolerates putChatMCPSettings failure (#207)", async () => {
+      api.listMCPServers.mockResolvedValue({
+        servers: [
+          {
+            server_id: "srv-1",
+            name: "Hive",
+            tool_prefix: "hive",
+            globally_enabled: true,
+            auth_status: "active",
+          },
+        ],
+      });
+      api.getChatMCPSettings.mockResolvedValue({
+        mode: "inherit",
+        explicit_server_ids: [],
+      });
+      api.putChatMCPSettings.mockRejectedValueOnce(new Error("boom"));
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      mockStream();
+      renderAt("/app/c/c1");
+      const pill = await screen.findByRole("button", { name: /tool servers?\b/i });
+      fireEvent.click(pill);
+      fireEvent.click(screen.getByLabelText(/^Hive$/));
+      await waitFor(() =>
+        expect(errorSpy).toHaveBeenCalledWith(
+          "putChatMCPSettings",
+          expect.any(Error),
+        ),
+      );
+      errorSpy.mockRestore();
     });
 
     it("renders code-output payload via ToolResultBlock for a finished code_exec step", () => {
