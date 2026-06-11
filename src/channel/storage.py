@@ -968,6 +968,16 @@ def update_mcp_server(
     name: str | None = None,
     globally_enabled: bool | None = None,
 ) -> None:
+    """Update an MCPSERVER row's caller-facing fields.
+
+    ``ConditionExpression="attribute_exists(PK)"`` guards the race
+    window where ``delete_mcp_server`` runs between the route's
+    existence check and this update — without it, DynamoDB silently
+    upserts and creates a ghost row containing only the touched
+    fields, which crashes ``_mcp_server_from_item`` later. We swallow
+    the conditional failure (the row is gone; the update is moot).
+    See ``mark_attachment_referenced`` for the same pattern.
+    """
     sets: list[str] = ["updated_at = :u"]
     values: dict[str, Any] = {":u": _now_iso()}
     if name is not None:
@@ -980,11 +990,22 @@ def update_mcp_server(
         "Key": {"PK": f"USER#{user_id}", "SK": _mcp_server_sk(server_id)},
         "UpdateExpression": "SET " + ", ".join(sets),
         "ExpressionAttributeValues": values,
+        "ConditionExpression": "attribute_exists(PK)",
     }
     # ``name`` is a DynamoDB reserved word; alias when we touch it.
     if name is not None:
         kwargs["ExpressionAttributeNames"] = {"#n": "name"}
-    _get_table().update_item(**kwargs)
+    try:
+        _get_table().update_item(**kwargs)
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            logger.warning(
+                "mcp_server.update_lost_race user_id=%s server_id=%s",
+                user_id,
+                server_id,
+            )
+            return
+        raise
 
 
 def set_mcp_server_auth_status(
@@ -993,11 +1014,31 @@ def set_mcp_server_auth_status(
     server_id: str,
     status: MCPServerAuthStatus,
 ) -> None:
-    _get_table().update_item(
-        Key={"PK": f"USER#{user_id}", "SK": _mcp_server_sk(server_id)},
-        UpdateExpression="SET auth_status = :s, updated_at = :u",
-        ExpressionAttributeValues={":s": status.value, ":u": _now_iso()},
-    )
+    """Promote / demote an MCPSERVER row's auth_status (e.g. EXPIRED
+    after a token-resolution failure, ACTIVE after a successful
+    callback).
+
+    Same ``attribute_exists(PK)`` race guard as
+    :func:`update_mcp_server` — a concurrent delete must not be able
+    to resurrect the row as a partial ghost item containing only
+    auth_status / updated_at.
+    """
+    try:
+        _get_table().update_item(
+            Key={"PK": f"USER#{user_id}", "SK": _mcp_server_sk(server_id)},
+            UpdateExpression="SET auth_status = :s, updated_at = :u",
+            ExpressionAttributeValues={":s": status.value, ":u": _now_iso()},
+            ConditionExpression="attribute_exists(PK)",
+        )
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            logger.warning(
+                "mcp_server.auth_status_lost_race user_id=%s server_id=%s",
+                user_id,
+                server_id,
+            )
+            return
+        raise
 
 
 def delete_mcp_server(*, user_id: str, server_id: str) -> None:

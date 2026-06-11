@@ -32,6 +32,14 @@ class _FakeTable:
         return {}
 
     def update_item(self, Key: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+        condition = kwargs.get("ConditionExpression")
+        existing = self.items.get((Key["PK"], Key["SK"]))
+        if condition == "attribute_exists(PK)" and existing is None:
+            from botocore.exceptions import ClientError
+
+            raise ClientError(
+                {"Error": {"Code": "ConditionalCheckFailedException"}}, "UpdateItem"
+            )
         item = self.items.setdefault((Key["PK"], Key["SK"]), {"PK": Key["PK"], "SK": Key["SK"]})
         expression = kwargs.get("UpdateExpression", "")
         values = kwargs.get("ExpressionAttributeValues") or {}
@@ -224,3 +232,32 @@ def test_delete_mcp_server_idempotent(fake_table: _FakeTable) -> None:
     storage.delete_mcp_server(user_id="u", server_id="never-existed")
     # second call must also not raise
     storage.delete_mcp_server(user_id="u", server_id="never-existed")
+
+
+def test_update_mcp_server_swallows_lost_race(fake_table: _FakeTable) -> None:
+    """If the MCPSERVER row is deleted between the route's existence
+    check and the update, DynamoDB returns a ConditionalCheckFailed
+    error (the ``attribute_exists(PK)`` guard). The helper logs +
+    swallows so no ghost row gets created."""
+    # Row never existed — the guard should fire.
+    storage.update_mcp_server(
+        user_id="u",
+        server_id="ghost",
+        name="X",
+        globally_enabled=False,
+    )
+    # No ghost row was created.
+    assert storage.get_mcp_server(user_id="u", server_id="ghost") is None
+
+
+def test_set_mcp_server_auth_status_swallows_lost_race(fake_table: _FakeTable) -> None:
+    """Same guard on the auth_status path — without it, a concurrent
+    delete during a chat turn's EXPIRED flip would resurrect the row
+    as a partial item containing only auth_status / updated_at, which
+    would crash subsequent get / list calls."""
+    storage.set_mcp_server_auth_status(
+        user_id="u",
+        server_id="ghost",
+        status=MCPServerAuthStatus.EXPIRED,
+    )
+    assert storage.get_mcp_server(user_id="u", server_id="ghost") is None
