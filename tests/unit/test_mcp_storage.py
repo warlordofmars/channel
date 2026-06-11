@@ -37,9 +37,7 @@ class _FakeTable:
         if condition == "attribute_exists(PK)" and existing is None:
             from botocore.exceptions import ClientError
 
-            raise ClientError(
-                {"Error": {"Code": "ConditionalCheckFailedException"}}, "UpdateItem"
-            )
+            raise ClientError({"Error": {"Code": "ConditionalCheckFailedException"}}, "UpdateItem")
         item = self.items.setdefault((Key["PK"], Key["SK"]), {"PK": Key["PK"], "SK": Key["SK"]})
         expression = kwargs.get("UpdateExpression", "")
         values = kwargs.get("ExpressionAttributeValues") or {}

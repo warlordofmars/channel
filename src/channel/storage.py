@@ -47,6 +47,12 @@ from channel.models import (
 logger = logging.getLogger(__name__)
 
 _CHAT_INDEX_GSI = "ChatByIdIndex"
+
+# Race guard for UpdateItem against rows that may have been deleted
+# concurrently. Without this, DynamoDB silently upserts a partial
+# ghost item containing only the touched fields. Callers wrap the
+# update in try/except and swallow ``ConditionalCheckFailedException``.
+_ATTRIBUTE_EXISTS_PK = "attribute_exists(PK)"
 _DEFAULT_TITLE = "New chat"
 
 
@@ -473,7 +479,7 @@ def put_message_feedback(
                     # — DDB's UpdateItem is otherwise an upsert and
                     # would create a partial row containing only
                     # PK/SK/feedback, corrupting list_messages.
-                    ConditionExpression="attribute_exists(PK)",
+                    ConditionExpression=_ATTRIBUTE_EXISTS_PK,
                     ExpressionAttributeValues={":f": feedback.model_dump(mode="json")},
                 )
             except ClientError as exc:
@@ -701,7 +707,7 @@ def mark_attachment_referenced(*, user_id: str, att_id: str) -> None:
     etc.) — UpdateItem on a single attribute keeps the row's prior
     state intact.
 
-    ``ConditionExpression="attribute_exists(PK)"`` guards the narrow
+    ``ConditionExpression=_ATTRIBUTE_EXISTS_PK`` guards the narrow
     window where a concurrent chat-delete cascade could remove the
     canonical row between the send-path ``get_attachment`` lookup and
     this stamp — without the condition, DynamoDB silently creates a
@@ -715,7 +721,7 @@ def mark_attachment_referenced(*, user_id: str, att_id: str) -> None:
             Key={"PK": f"USER#{user_id}", "SK": _attachment_sk(att_id)},
             UpdateExpression="SET referenced_at = :now",
             ExpressionAttributeValues={":now": _now_iso()},
-            ConditionExpression="attribute_exists(PK)",
+            ConditionExpression=_ATTRIBUTE_EXISTS_PK,
         )
     except ClientError as exc:
         if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
@@ -970,7 +976,7 @@ def update_mcp_server(
 ) -> None:
     """Update an MCPSERVER row's caller-facing fields.
 
-    ``ConditionExpression="attribute_exists(PK)"`` guards the race
+    ``ConditionExpression=_ATTRIBUTE_EXISTS_PK`` guards the race
     window where ``delete_mcp_server`` runs between the route's
     existence check and this update — without it, DynamoDB silently
     upserts and creates a ghost row containing only the touched
@@ -990,7 +996,7 @@ def update_mcp_server(
         "Key": {"PK": f"USER#{user_id}", "SK": _mcp_server_sk(server_id)},
         "UpdateExpression": "SET " + ", ".join(sets),
         "ExpressionAttributeValues": values,
-        "ConditionExpression": "attribute_exists(PK)",
+        "ConditionExpression": _ATTRIBUTE_EXISTS_PK,
     }
     # ``name`` is a DynamoDB reserved word; alias when we touch it.
     if name is not None:
@@ -999,10 +1005,15 @@ def update_mcp_server(
         _get_table().update_item(**kwargs)
     except ClientError as exc:
         if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            # `extra={}` keeps Sonar's taint engine off the format-string
+            # sink — user_id is server-validated (JWT sub) and server_id
+            # is a DDB UUID, but both came in via the request.
             logger.warning(
-                "mcp_server.update_lost_race user_id=%s server_id=%s",
-                user_id,
-                server_id,
+                "mcp_server.update_lost_race",
+                extra={
+                    "user_id_hash": str(hash(user_id)),
+                    "server_id_hash": str(hash(server_id)),
+                },
             )
             return
         raise
@@ -1028,14 +1039,16 @@ def set_mcp_server_auth_status(
             Key={"PK": f"USER#{user_id}", "SK": _mcp_server_sk(server_id)},
             UpdateExpression="SET auth_status = :s, updated_at = :u",
             ExpressionAttributeValues={":s": status.value, ":u": _now_iso()},
-            ConditionExpression="attribute_exists(PK)",
+            ConditionExpression=_ATTRIBUTE_EXISTS_PK,
         )
     except ClientError as exc:
         if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
             logger.warning(
-                "mcp_server.auth_status_lost_race user_id=%s server_id=%s",
-                user_id,
-                server_id,
+                "mcp_server.auth_status_lost_race",
+                extra={
+                    "user_id_hash": str(hash(user_id)),
+                    "server_id_hash": str(hash(server_id)),
+                },
             )
             return
         raise
