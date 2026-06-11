@@ -36,6 +36,7 @@ from mcp.shared.auth import (
 
 from channel import storage
 from channel.mcp import crypto
+from channel.mcp.url_guard import validate_mcp_server_url
 from channel.models import MCPServer
 
 # Discovery endpoint suffixes (RFC 8414 / RFC 9728).
@@ -76,7 +77,17 @@ async def discover_resource_metadata(server_url: str) -> ProtectedResourceMetada
 
 
 async def discover_auth_server_metadata(auth_server_url: str) -> OAuthMetadata:
-    """Fetch RFC 8414 authorization-server metadata."""
+    """Fetch RFC 8414 authorization-server metadata.
+
+    The authorization-server URL is supplied (transitively) by the user-
+    registered MCP server's resource metadata. Re-validate the scheme +
+    host before issuing the network call — a misconfigured or hostile
+    server could advertise ``http://`` or a loopback address as its
+    authorization endpoint, and Channel would otherwise POST auth
+    codes / refresh tokens over plaintext or into the Lambda's internal
+    network.
+    """
+    validate_mcp_server_url(auth_server_url)
     origin = _origin_of(auth_server_url)
     url = origin + _AS_PATH
     async with httpx.AsyncClient(
@@ -100,7 +111,13 @@ async def register_dynamic_client(
     and stored on the MCPSERVER row. Public-client posture
     (``token_endpoint_auth_method = "none"``) — Channel uses PKCE so no
     client secret is required.
+
+    Validates the ``registration_endpoint`` URL — it came from
+    ``OAuthMetadata.registration_endpoint`` which is supplied by the
+    auth server's discovery response and could otherwise carry a
+    plaintext / internal-network URL.
     """
+    validate_mcp_server_url(registration_endpoint)
     body = {
         "redirect_uris": [redirect_uri],
         "token_endpoint_auth_method": "none",
@@ -126,7 +143,13 @@ def build_authorization_url(
     code_challenge: str,
     scopes: list[str] | None = None,
 ) -> str:
-    """Build the RFC 6749 §4.1.1 authorization URL with PKCE S256."""
+    """Build the RFC 6749 §4.1.1 authorization URL with PKCE S256.
+
+    Validates the ``authorization_endpoint`` — Channel redirects the
+    browser here, and a plaintext / internal-network endpoint would
+    leak the OAuth flow.
+    """
+    validate_mcp_server_url(authorization_endpoint)
     params: list[tuple[str, str]] = [
         ("response_type", "code"),
         ("client_id", client_id),
@@ -149,7 +172,14 @@ async def exchange_code(
     code: str,
     code_verifier: str,
 ) -> OAuthToken:
-    """Exchange an auth code for tokens (RFC 6749 §4.1.3 + PKCE)."""
+    """Exchange an auth code for tokens (RFC 6749 §4.1.3 + PKCE).
+
+    Validates the ``token_endpoint`` — it came from
+    ``OAuthMetadata.token_endpoint`` which is supplied by the auth
+    server's discovery response. POSTing an authorization code over
+    plaintext (or to an internal-network address) would leak it.
+    """
+    validate_mcp_server_url(token_endpoint)
     data = {
         "grant_type": "authorization_code",
         "code": code,
@@ -176,7 +206,13 @@ async def refresh_token(
     client_id: str,
     refresh_token: str,
 ) -> OAuthToken:
-    """Exchange a refresh token for a fresh access token (RFC 6749 §6)."""
+    """Exchange a refresh token for a fresh access token (RFC 6749 §6).
+
+    Same scheme/host validation as :func:`exchange_code` — a refresh
+    token must not be POSTed over plaintext or to an internal-network
+    address.
+    """
+    validate_mcp_server_url(token_endpoint)
     data = {
         "grant_type": "refresh_token",
         "refresh_token": refresh_token,

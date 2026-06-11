@@ -15,6 +15,19 @@ from channel.mcp import auth as mcp_auth
 from channel.models import MCPServer, MCPServerAuthStatus
 
 
+@pytest.fixture(autouse=True)
+def _public_dns(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub socket.getaddrinfo so the URL guard's DNS lookup doesn't
+    depend on real resolution for synthetic test hostnames."""
+    import socket as _socket
+
+    def fake_getaddrinfo(_host: str, _port: int | None, *_a: Any, **_kw: Any) -> Any:
+        # 8.8.8.8 — globally-routable IPv4, not in any blocked range.
+        return [(2, 1, 6, "", ("8.8.8.8", 0))]
+
+    monkeypatch.setattr(_socket, "getaddrinfo", fake_getaddrinfo)
+
+
 @pytest.fixture
 def fake_async_client(monkeypatch: pytest.MonkeyPatch) -> dict[str, MagicMock]:
     """Stub httpx.AsyncClient so we can intercept the requests this module makes.
@@ -508,3 +521,89 @@ async def test_get_valid_access_token_honors_expires_in_zero(
     # expires_at is approximately now (within 2s). If we had used
     # ``or 3600`` this would land an hour in the future.
     assert refreshed.expires_at - now_before <= 2
+
+
+# ----------------------------------------------------------------
+# Discovery-endpoint scheme/host validation (#207 Copilot review)
+# ----------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_discover_auth_server_metadata_rejects_http_endpoint() -> None:
+    """OAuth metadata endpoint URLs are user-influenced (via the
+    registered MCP server's resource metadata). Any non-https value
+    must be rejected before the network call so auth codes / refresh
+    tokens can't be POSTed over plaintext."""
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc:
+        await mcp_auth.discover_auth_server_metadata("http://hostile.example.com")
+    assert exc.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_register_dynamic_client_rejects_http_endpoint() -> None:
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc:
+        await mcp_auth.register_dynamic_client(
+            registration_endpoint="http://hostile.example.com/register",
+            redirect_uri="https://channel.example.com/auth/mcp/callback",
+        )
+    assert exc.value.status_code == 400
+
+
+def test_build_authorization_url_rejects_http_endpoint() -> None:
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc:
+        mcp_auth.build_authorization_url(
+            authorization_endpoint="http://hostile.example.com/authorize",
+            client_id="dcr-1",
+            redirect_uri="https://channel.example.com/auth/mcp/callback",
+            state="x",
+            code_challenge="x",
+        )
+    assert exc.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_exchange_code_rejects_http_endpoint() -> None:
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc:
+        await mcp_auth.exchange_code(
+            token_endpoint="http://hostile.example.com/token",
+            client_id="dcr-1",
+            redirect_uri="https://channel.example.com/auth/mcp/callback",
+            code="x",
+            code_verifier="x",
+        )
+    assert exc.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_refresh_token_rejects_http_endpoint() -> None:
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc:
+        await mcp_auth.refresh_token(
+            token_endpoint="http://hostile.example.com/token",
+            client_id="dcr-1",
+            refresh_token="x",
+        )
+    assert exc.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_refresh_token_rejects_link_local_endpoint() -> None:
+    """169.254.169.254 (AWS IMDS) must also be blocked, even with https."""
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc:
+        await mcp_auth.refresh_token(
+            token_endpoint="https://169.254.169.254/token",
+            client_id="dcr-1",
+            refresh_token="x",
+        )
+    assert exc.value.status_code == 400
