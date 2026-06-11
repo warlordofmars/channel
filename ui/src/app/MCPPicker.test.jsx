@@ -141,8 +141,8 @@ describe("MCPPicker", () => {
       />,
     );
     fireEvent.click(screen.getByRole("button", { name: /tool servers?\b/i }));
-    const checkbox = screen.getByLabelText(/^Zed$/).querySelector("input");
-    expect(checkbox.disabled).toBe(false);  // currently checked → unselectable allowed
+    const checkbox = screen.getByRole("checkbox", { name: /^Zed$/ });
+    expect(checkbox).not.toBeDisabled();  // currently checked → unselectable allowed
     fireEvent.click(checkbox);
     expect(onChange).toHaveBeenCalledWith({
       mode: "explicit",
@@ -169,8 +169,8 @@ describe("MCPPicker", () => {
       />,
     );
     fireEvent.click(screen.getByRole("button", { name: /tool servers?\b/i }));
-    const checkbox = screen.getByLabelText(/^Zed$/).querySelector("input");
-    expect(checkbox.disabled).toBe(true);
+    const checkbox = screen.getByRole("checkbox", { name: /^Zed$/ });
+    expect(checkbox).toBeDisabled();
   });
 
   it("backdrop click closes the popover", () => {
