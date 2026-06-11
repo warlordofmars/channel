@@ -327,6 +327,51 @@ async def test_get_valid_access_token_raises_when_no_token_row(
 
 
 @pytest.mark.asyncio
+async def test_get_valid_access_token_wraps_non_http_exceptions(
+    storage_table: _FakeTable,
+    fake_crypto: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Discovery / refresh can fail in non-HTTP shapes (pydantic
+    ValidationError on malformed metadata, AttributeError on a missing
+    field, OAuthTokenError, etc.). All of them must surface as
+    MCPAuthFailedError so ``_build_mcp_clients_for_chat``'s narrow
+    handler can skip the server instead of crashing the chat turn."""
+    from channel.mcp.auth import MCPAuthFailedError
+
+    storage.put_mcp_token(
+        user_id="u1",
+        server_id="s1",
+        access_token_ciphertext=b"ENC::stale",
+        refresh_token_ciphertext=b"ENC::ref-1",
+        expires_at=int(time.time()) + 30,
+        granted_scope="read",
+    )
+
+    async def fake_discover(_url: str) -> Any:
+        # Simulates a malformed-metadata path that would surface as a
+        # pydantic ValidationError / ValueError in real usage. Before
+        # this fix only httpx.HTTPError was caught and ValueError would
+        # have crashed the chat turn.
+        raise ValueError("metadata blob is malformed")
+
+    monkeypatch.setattr(mcp_auth, "discover_resource_metadata", fake_discover)
+    server = MCPServer(
+        server_id="s1",
+        user_id="u1",
+        name="Hive",
+        url="https://hive.example.com/mcp",
+        client_id="dcr-1",
+        tool_prefix="hive",
+        auth_status=MCPServerAuthStatus.ACTIVE,
+        created_at="x",
+        updated_at="x",
+    )
+    with pytest.raises(MCPAuthFailedError, match="refresh round-trip"):
+        await mcp_auth.get_valid_access_token(user_id="u1", server=server)
+
+
+@pytest.mark.asyncio
 async def test_get_valid_access_token_raises_when_expired_no_refresh(
     storage_table: _FakeTable, fake_crypto: None
 ) -> None:

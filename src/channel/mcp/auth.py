@@ -248,7 +248,14 @@ async def get_valid_access_token(
             client_id=server.client_id,
             refresh_token=refresh_plain,
         )
-    except httpx.HTTPError as exc:
+    except Exception as exc:
+        # Broad catch on purpose: the chat path only handles
+        # MCPAuthFailedError. Anything else surfacing from the
+        # discovery / refresh sequence — httpx.HTTPError on a network
+        # blip, pydantic ValidationError on malformed metadata,
+        # OAuthTokenError, AttributeError on a missing
+        # token_endpoint — should not crash the streaming generator.
+        # Wrap it and let the chassis log + skip the server.
         raise MCPAuthFailedError(
             f"refresh round-trip failed user={user_id} server={server.server_id}"
         ) from exc
