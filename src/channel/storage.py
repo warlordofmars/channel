@@ -29,6 +29,7 @@ from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 from pydantic import ValidationError
 
+from channel.logging_config import fingerprint_id
 from channel.models import (
     Attachment,
     Chat,
@@ -1011,8 +1012,8 @@ def update_mcp_server(
             logger.warning(
                 "mcp_server.update_lost_race",
                 extra={
-                    "user_id_hash": str(hash(user_id)),
-                    "server_id_hash": str(hash(server_id)),
+                    "user_id_hash": fingerprint_id(user_id),
+                    "server_id_hash": fingerprint_id(server_id),
                 },
             )
             return
@@ -1046,8 +1047,8 @@ def set_mcp_server_auth_status(
             logger.warning(
                 "mcp_server.auth_status_lost_race",
                 extra={
-                    "user_id_hash": str(hash(user_id)),
-                    "server_id_hash": str(hash(server_id)),
+                    "user_id_hash": fingerprint_id(user_id),
+                    "server_id_hash": fingerprint_id(server_id),
                 },
             )
             return

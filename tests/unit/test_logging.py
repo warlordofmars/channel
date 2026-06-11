@@ -83,3 +83,22 @@ def test_format_includes_exception_info():
     assert "error_type" in data
     assert data["error_type"] == "ValueError"
     assert "stack_trace" in data
+
+
+def test_fingerprint_id_is_deterministic_across_processes():
+    """``str(hash(...))`` is salted per process; ``fingerprint_id`` uses
+    SHA-256 so the same input always produces the same hash."""
+    from channel.logging_config import fingerprint_id
+
+    a = fingerprint_id("user-abc")
+    b = fingerprint_id("user-abc")
+    assert a == b
+    # 16 hex chars (truncated SHA-256).
+    assert len(a) == 16
+    assert all(c in "0123456789abcdef" for c in a)
+
+
+def test_fingerprint_id_differs_between_inputs():
+    from channel.logging_config import fingerprint_id
+
+    assert fingerprint_id("u1") != fingerprint_id("u2")

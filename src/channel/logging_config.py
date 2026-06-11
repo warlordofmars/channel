@@ -113,3 +113,22 @@ def set_request_context(request_id: str, client_id: str = "") -> None:
     """Set per-request context variables (call at request boundary)."""
     _request_id_var.set(request_id)
     _client_id_var.set(client_id)
+
+
+def fingerprint_id(value: str) -> str:
+    """Deterministic non-reversible 16-char hex fingerprint for an
+    identifier (user_id, server_id, etc.).
+
+    Used by log calls that want to correlate events across requests
+    or processes without writing raw identifiers into the log sink
+    (Sonar pythonsecurity:S5145 + general PII discipline).
+
+    SHA-256 truncated to 16 hex chars matches the existing pattern in
+    :func:`channel.auth.logout._token_fingerprint`. Python's built-in
+    ``hash()`` is salted per process, so the same input produces
+    different output across cold starts — useless for correlation —
+    which is why this helper exists.
+    """
+    import hashlib
+
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]

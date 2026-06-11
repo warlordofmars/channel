@@ -24,7 +24,6 @@ endpoint shape. Tracked in #114's bonus item (#151).
 
 from __future__ import annotations
 
-import hashlib
 from typing import Any
 
 from fastapi import APIRouter, Depends, Response
@@ -56,8 +55,10 @@ def _token_fingerprint(claims: dict[str, Any]) -> str:
     retired in favour of the explicit ``jti`` claim.
     """
 
+    from channel.logging_config import fingerprint_id  # noqa: PLC0415
+
     source = f"{claims.get('sub', '')}|{claims.get('iat', 0)}|{claims.get('exp', 0)}"
-    return hashlib.sha256(source.encode("utf-8")).hexdigest()[:16]
+    return fingerprint_id(source)
 
 
 @router.post("/auth/logout", status_code=204, include_in_schema=False)

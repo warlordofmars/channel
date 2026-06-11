@@ -45,6 +45,7 @@ from channel.agents.strands_sse import (
 from channel.agents.tool_hooks import clear_cancel_signal, set_cancel_signal
 from channel.agents.tools.clock import current_time
 from channel.api._auth import require_mgmt_user
+from channel.logging_config import fingerprint_id
 from channel.mcp import auth as mcp_auth
 from channel.mcp.auth import MCPAuthFailedError
 from channel.mcp.transports import make_authenticated_transport
@@ -592,8 +593,8 @@ async def _build_mcp_clients_for_chat(
             logger.warning(
                 "mcp.url_revalidation_failed",
                 extra={
-                    "user_id_hash": str(hash(user_id)),
-                    "server_id_hash": str(hash(server.server_id)),
+                    "user_id_hash": fingerprint_id(user_id),
+                    "server_id_hash": fingerprint_id(server.server_id),
                 },
             )
             continue
@@ -607,12 +608,15 @@ async def _build_mcp_clients_for_chat(
             # server-validated identifiers, but Sonar's taint engine
             # treats them as user-controlled because they came in via
             # the request. Logging them via ``extra=`` (structured
-            # payload) bypasses the format-string sink the rule flags.
+            # payload) bypasses the format-string sink the rule flags;
+            # ``fingerprint_id`` is a deterministic SHA-256 truncation
+            # so the hashes are stable across cold starts (unlike the
+            # builtin ``hash()`` which is salted per process).
             logger.warning(
                 "mcp.token_resolution_failed",
                 extra={
-                    "user_id_hash": str(hash(user_id)),
-                    "server_id_hash": str(hash(server.server_id)),
+                    "user_id_hash": fingerprint_id(user_id),
+                    "server_id_hash": fingerprint_id(server.server_id),
                     "exc_type": type(exc).__name__,
                 },
             )
