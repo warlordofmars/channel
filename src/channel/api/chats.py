@@ -84,8 +84,8 @@ def _to_strands_messages(messages: list[Message]) -> list[dict[str, Any]]:
     """Convert stored ``Message`` rows into Strands' ``Messages`` shape.
 
     Strands expects ``[{"role": "user"|"assistant", "content": [{"text": str}]}]``
-    in chronological order. ``storage.list_messages`` returns the same
-    chronological order (``ScanIndexForward=True``), so no reordering.
+    in chronological order. ``storage.list_recent_messages`` returns the
+    same chronological order, so no reordering.
     """
     return [{"role": m.role.value, "content": [{"text": m.text}]} for m in messages]
 
@@ -697,12 +697,14 @@ async def _stream_bedrock_reply(
     effective_effort = effort if effort is not None else prefs.effort
 
     # Load the chat's stored history BEFORE persisting the new user
-    # message so the loaded list is the true prior context. For
-    # regenerate (``persist_user=False``) the trailing message is
+    # message so the loaded list is the true prior context. Must read
+    # the NEWEST window — ``list_messages`` + Limit returns the oldest
+    # N, which silently dropped the recent half of long chats (#244).
+    # For regenerate (``persist_user=False``) the trailing message is
     # already the user turn we're about to re-stream; drop it so
     # Strands doesn't see it twice (once in ``messages=`` history,
     # once via ``stream_async(user_message)``).
-    prior_msgs, _ = storage.list_messages(chat.chat_id, limit=_HISTORY_TURNS_LIMIT, cursor=None)
+    prior_msgs = storage.list_recent_messages(chat.chat_id, limit=_HISTORY_TURNS_LIMIT)
     if not persist_user and prior_msgs and prior_msgs[-1].role == MessageRole.USER:
         prior_msgs = prior_msgs[:-1]
     prior_messages = _to_strands_messages(prior_msgs)
@@ -1075,7 +1077,7 @@ async def regenerate(
 
     storage.delete_last_assistant_message(chat_id)
 
-    msgs, _ = storage.list_messages(chat_id, limit=50, cursor=None)
+    msgs = storage.list_recent_messages(chat_id, limit=50)
     last_user = next((m for m in reversed(msgs) if m.role == MessageRole.USER), None)
     if last_user is None:
         raise HTTPException(

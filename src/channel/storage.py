@@ -248,6 +248,26 @@ def list_messages(
     return msgs, result.get("LastEvaluatedKey")
 
 
+def list_recent_messages(chat_id: str, *, limit: int) -> list[Message]:
+    """Return the most recent ``limit`` messages for a chat, in chronological order.
+
+    Used by the agent-streaming path to seed ``Strands.Agent(messages=...)``
+    and by the regenerate path to find the newest user/assistant turns.
+    Distinct from ``list_messages``, which pages from the OLDEST end for
+    the UI's chronological message-list endpoint — combining that with
+    ``Limit`` silently dropped the recent half of long chats (#244).
+    """
+
+    result = _get_table().query(
+        KeyConditionExpression=(Key("PK").eq(f"CHAT#{chat_id}") & Key("SK").begins_with("MSG#")),
+        Limit=limit,
+        ScanIndexForward=False,  # newest first
+    )
+    msgs = [_message_from_item(item) for item in (result.get("Items") or [])]
+    msgs.reverse()  # back to chronological for Strands
+    return msgs
+
+
 def update_chat_index(
     *,
     user_id: str,
@@ -398,7 +418,10 @@ def delete_last_assistant_message(chat_id: str) -> Message | None:
     messages.  Used by ``POST /api/chats/{id}/regenerate``.
     """
 
-    msgs, _ = list_messages(chat_id, limit=50, cursor=None)
+    # Read from the NEWEST end — ``list_messages`` + Limit returns the
+    # oldest window, which in long chats never contains the last
+    # assistant turn (#244).
+    msgs = list_recent_messages(chat_id, limit=50)
     for msg in reversed(msgs):
         if msg.role == MessageRole.ASSISTANT:
             _get_table().delete_item(
