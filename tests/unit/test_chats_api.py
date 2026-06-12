@@ -565,7 +565,9 @@ def test_post_message_registers_tool_when_flag_on(
     )
     assert response.status_code == 200
     tools = captured["build_agent_kwargs"]["tools"]
-    assert [t.tool_name for t in tools] == tool_names
+    # Order-insensitive: _build_tool_registry documents registration
+    # order as not significant (Strands keys tools by name).
+    assert sorted(t.tool_name for t in tools) == sorted(tool_names)
 
 
 def test_post_message_omits_tools_when_all_flags_off(
