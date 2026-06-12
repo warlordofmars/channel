@@ -33,8 +33,10 @@ error shapes into stable tokens is follow-up work flagged on #232.
 The fetch itself runs on Exa's crawlers, not in this Lambda — a
 user-supplied URL pointing at link-local/loopback targets never
 produces a request from inside our network, so no SSRF allowlist is
-needed here. The ``invalid_url`` check is a UX guard (fail fast with a
-stable token the SPA can render), not a security boundary.
+needed here. The ``invalid_url`` check is mostly a UX guard (fail fast
+with a stable token the SPA can render), with one security-shaped
+rule: userinfo URLs are rejected so embedded credentials never transit
+to Exa — see ``_is_fetchable_url``.
 """
 
 from __future__ import annotations
@@ -42,6 +44,7 @@ from __future__ import annotations
 import functools
 import logging
 import os
+import re
 from collections.abc import Awaitable, Callable
 from typing import Any
 from urllib.parse import urlparse
@@ -77,18 +80,37 @@ def _get_exa_get_contents() -> Callable[..., Awaitable[dict[str, Any]]]:
     return exa_get_contents
 
 
+# Internal whitespace / C0-control characters. ``urlparse`` strips many
+# of these PRE-parse (Python 3.12, WHATWG-aligned), so without an
+# explicit reject the validator would judge a cleaned string while Exa
+# receives the raw one. Outer whitespace is already handled by the
+# ``strip()`` at tool entry; anything matching here is embedded.
+_FORBIDDEN_URL_CHARS_RE = re.compile(r"[\s\x00-\x1f\x7f]")
+
+
 def _is_fetchable_url(url: str) -> bool:
-    """True when ``url`` parses cleanly to an http(s) URL with a host.
+    """True when ``url`` parses cleanly to an http(s) URL with a hostname
+    and no embedded credentials.
 
     ``urlparse`` raises ``ValueError`` on structurally broken inputs
-    (e.g. an unclosed IPv6 bracket); everything else is judged by
-    scheme + netloc so ``ftp://``, ``javascript:``, scheme-relative
-    ``//host/path``, and bare prose all map to ``invalid_url``."""
+    (e.g. an unclosed IPv6 bracket); ``ftp://``, ``javascript:``,
+    scheme-relative ``//host/path``, and bare prose fail the scheme /
+    hostname checks. Userinfo URLs (``https://user:pass@host/…``) are
+    rejected so credentials never transit to Exa — authenticated
+    fetching is out of scope (#232), and this mirrors
+    ``mcp.url_guard.validate_mcp_server_url``'s rule. Requiring
+    ``hostname`` (vs bare ``netloc``) also rejects port-only
+    authorities like ``https://:8080/path``."""
+    if _FORBIDDEN_URL_CHARS_RE.search(url):
+        return False
     try:
         parsed = urlparse(url)
+        hostname = parsed.hostname
     except ValueError:
         return False
-    return parsed.scheme in ("http", "https") and bool(parsed.netloc)
+    if parsed.username or parsed.password:
+        return False
+    return parsed.scheme in ("http", "https") and bool(hostname)
 
 
 @tool

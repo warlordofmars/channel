@@ -139,12 +139,24 @@ async def test_web_fetch_clamps_max_chars_low(monkeypatch):
         "http://",
         "//example.com/page",
         "http://[::1",  # unclosed IPv6 bracket — urlparse raises ValueError
+        # Userinfo URLs: credentials must never transit to Exa —
+        # authenticated fetching is out of scope (#232); mirrors
+        # mcp.url_guard.validate_mcp_server_url's rule.
+        "https://user:pass@example.com/page",
+        "https://token@example.com/page",
+        # Internal whitespace / control chars: urlparse strips many of
+        # them PRE-parse, so without an explicit reject the validator
+        # would judge a cleaned string while Exa receives the raw one.
+        "https://exam ple.com/page",
+        "https://example.com/pa\nth",
+        "https://:8080/page",  # port-only authority — netloc truthy, hostname empty
     ],
 )
 async def test_web_fetch_rejects_invalid_urls(monkeypatch, bad_url):
-    """Malformed / non-http(s) URLs short-circuit to ``invalid_url``
-    BEFORE key resolution or any Exa call — both keys are unset here, so
-    a ``missing_key`` result would mean the validation order regressed."""
+    """Malformed / non-http(s) / credential-bearing URLs short-circuit to
+    ``invalid_url`` BEFORE key resolution or any Exa call — both keys are
+    unset here, so a ``missing_key`` result would mean the validation
+    order regressed."""
     fake_exa = AsyncMock(return_value={"status": "success", "content": []})
     monkeypatch.setattr(
         "channel.agents.tools.web_fetch._get_exa_get_contents",
