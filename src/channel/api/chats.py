@@ -501,7 +501,10 @@ def _build_tool_registry() -> list[Any]:
 
     The deployed envs ship explicit values:
       * ``STARTER_WEB_SEARCH_ENABLED`` — "1" everywhere (kill switch
-        only; default-on posture once deployed)
+        only; default-on posture once deployed). Gates BOTH
+        ``web_search`` and ``web_fetch`` (#232): the pair is backed by
+        the same Exa API key, so one availability signal covers the
+        discover/deep-read pair without a second CDK env var.
       * ``STARTER_CODE_EXEC_ENABLED`` — "1" everywhere (kill switch
         only; default-on posture once deployed)
       * ``STARTER_CLOCK_TOOL_ENABLED`` — "1" in dev, "0" in prod
@@ -513,16 +516,19 @@ def _build_tool_registry() -> list[Any]:
 
     Extracted into a helper in #183 so the unit tests can exercise the
     flag matrix without spinning up the streaming coroutine. The
-    ``web_search`` and ``code_exec`` imports stay lazy (per-call inside
-    the helper) so a stale dev env without ``strands-agents-tools`` /
-    ``boto3`` installed still loads ``chats`` for a smoke test."""
+    ``web_search`` / ``web_fetch`` and ``code_exec`` imports stay lazy
+    (per-call inside the helper) so a stale dev env without
+    ``strands-agents-tools`` / ``boto3`` installed still loads ``chats``
+    for a smoke test."""
     registry: list[Any] = []
     if os.environ.get("STARTER_CLOCK_TOOL_ENABLED") == "1":
         registry.append(current_time)
     if os.environ.get("STARTER_WEB_SEARCH_ENABLED") == "1":
+        from channel.agents.tools.web_fetch import web_fetch  # noqa: PLC0415
         from channel.agents.tools.web_search import web_search  # noqa: PLC0415
 
         registry.append(web_search)
+        registry.append(web_fetch)
     if os.environ.get("STARTER_CODE_EXEC_ENABLED") == "1":
         from channel.agents.tools.code_exec import code_exec  # noqa: PLC0415
 
