@@ -161,6 +161,26 @@ async def test_web_fetch_rejects_invalid_urls(monkeypatch, bad_url):
     fake_exa.assert_not_called()
 
 
+async def test_web_fetch_strips_surrounding_whitespace_before_fetching(monkeypatch):
+    """User-pasted URLs commonly carry stray whitespace. Python 3.12's
+    ``urlparse`` strips it before parsing (so validation already passes),
+    but the string handed to Exa must be the CLEANED one — un-stripped,
+    ``"https://example.com "`` even keeps the trailing space inside
+    ``netloc``. Normalize once at entry (Copilot review, PR #255)."""
+    fake_exa = AsyncMock(return_value={"status": "success", "content": []})
+    monkeypatch.setattr(
+        "channel.agents.tools.web_fetch._get_exa_get_contents",
+        lambda: fake_exa,
+    )
+    monkeypatch.setenv("EXA_API_KEY", "ek-test")
+
+    from channel.agents.tools.web_fetch import web_fetch
+
+    await web_fetch(url="  https://example.com/page  ")
+
+    assert fake_exa.call_args.kwargs["urls"] == ["https://example.com/page"]
+
+
 async def test_web_fetch_accepts_uppercase_scheme(monkeypatch):
     """urlparse lowercases the scheme — ``HTTPS://`` is a valid fetch, not
     an ``invalid_url``."""

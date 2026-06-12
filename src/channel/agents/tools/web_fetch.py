@@ -115,6 +115,12 @@ async def web_fetch(url: str, max_chars: int | None = None) -> dict[str, Any]:
     # only ``await``s tools whose underlying function is a coroutine
     # function — a sync wrapper would ship a coroutine repr to the model.
     #
+    # Normalize once, up front: user-pasted URLs commonly carry stray
+    # whitespace. ``urlparse`` already ignores the padding when judging
+    # validity (Python 3.12 strips it pre-parse), but Exa must receive
+    # the cleaned string — un-stripped, a trailing space even survives
+    # inside ``netloc``.
+    url = url.strip()
     # Validation precedes key resolution deliberately: a malformed URL is
     # diagnosable without credentials, so local devs with no Exa key get
     # the accurate ``invalid_url`` over a misleading ``missing_key``.
