@@ -318,23 +318,6 @@ def test_get_chat_forwards_decoded_before_cursor_to_storage(
     assert captured == {"limit": 50, "before": raw_key}
 
 
-def test_get_chat_rejects_malformed_before_cursor(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A corrupt cursor is a client error, not a 500 — surface 400."""
-    chat = Chat(
-        chat_id="c1",
-        user_id="u-1",
-        title="t",
-        created_at="2026-05-30T00:00:00Z",
-        last_message_at="2026-05-30T00:00:00Z",
-        model_default="m",
-    )
-    monkeypatch.setattr("channel.api.chats.storage.get_chat_by_id", lambda _: chat)
-    response = client.get("/api/chats/c1?before=not-a-valid-cursor%21%21%21")
-    assert response.status_code == 400
-
-
 def _chat_for_cursor_tests(monkeypatch: pytest.MonkeyPatch) -> None:
     chat = Chat(
         chat_id="c1",
@@ -360,52 +343,30 @@ def _cursor_token(payload: Any) -> str:
     return base64.urlsafe_b64encode(raw).decode()
 
 
-def test_get_chat_rejects_non_utf8_base64_cursor(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    "before",
+    [
+        pytest.param("not-a-valid-cursor!!!", id="not-base64"),
+        pytest.param(_cursor_token(b"\xff\xfe\xfa"), id="base64-non-utf8"),
+        pytest.param(_cursor_token([1, 2, 3]), id="decodes-to-non-dict"),
+        pytest.param(
+            _cursor_token({"PK": "CHAT#other", "SK": "MSG#2026#m1"}), id="different-chat-pk"
+        ),
+        pytest.param(_cursor_token({"PK": "CHAT#c1", "SK": "META"}), id="non-message-sk"),
+    ],
+)
+def test_get_chat_rejects_bad_before_cursor(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, before: str
 ) -> None:
-    """A token that is valid base64 but decodes to non-UTF8 bytes must be a
-    400, not a 500. ``UnicodeDecodeError`` subclasses ``ValueError`` so the
-    decoder's ``except (ValueError, binascii.Error)`` already covers it —
-    this pins that contract."""
-    from channel.api.chats import _encode_cursor  # noqa: F401  (kept symmetric)
-
+    """Every malformed or foreign ``before`` cursor is a 400, never a
+    DynamoDB 500. Covers the decode-failure path (``ValueError`` /
+    ``binascii.Error`` — ``UnicodeDecodeError`` subclasses ``ValueError``,
+    so the non-UTF8 case is included) and the shape/scope checks: non-dict,
+    a ``PK`` for a different chat, and an ``SK`` that isn't a ``MSG#`` key.
+    ``_chat_for_cursor_tests`` makes storage raise if ever reached, so a
+    pass proves the cursor was rejected before the DynamoDB call."""
     _chat_for_cursor_tests(monkeypatch)
-    bad = _cursor_token(b"\xff\xfe\xfa")
-    assert client.get(f"/api/chats/c1?before={bad}").status_code == 400
-
-
-def test_get_chat_rejects_cursor_shaped_as_non_dict(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A base64-JSON cursor that decodes to a non-dict (e.g. a list) would
-    raise inside DynamoDB as ``ExclusiveStartKey`` — reject as 400 before
-    it reaches storage."""
-    _chat_for_cursor_tests(monkeypatch)
-    bad = _cursor_token([1, 2, 3])
-    assert client.get(f"/api/chats/c1?before={bad}").status_code == 400
-
-
-def test_get_chat_rejects_cursor_for_a_different_chat(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A well-formed cursor whose ``PK`` belongs to another chat must not be
-    forwarded — DynamoDB would reject the cross-partition ``ExclusiveStartKey``
-    as a 500. The cursor is scoped to its chat; mismatches are 400."""
-    _chat_for_cursor_tests(monkeypatch)
-    foreign = _cursor_token({"PK": "CHAT#other", "SK": "MSG#2026#m1"})
-    assert client.get(f"/api/chats/c1?before={foreign}").status_code == 400
-
-
-def test_get_chat_rejects_cursor_with_non_message_sk(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A cursor with the right ``PK`` but an ``SK`` that isn't a message
-    key (e.g. ``META``) must be a 400 — the cursor is only ever a message
-    row key, and a non-``MSG#`` ``SK`` as ``ExclusiveStartKey`` is a
-    crafted/malformed request, not a real page boundary."""
-    _chat_for_cursor_tests(monkeypatch)
-    bad = _cursor_token({"PK": "CHAT#c1", "SK": "META"})
-    assert client.get(f"/api/chats/c1?before={bad}").status_code == 400
+    assert client.get("/api/chats/c1", params={"before": before}).status_code == 400
 
 
 def test_get_chat_returns_404_for_unknown(
