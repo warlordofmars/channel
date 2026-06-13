@@ -414,13 +414,29 @@ def _encode_cursor(key: Any) -> str:
     return base64.urlsafe_b64encode(json.dumps(key, separators=(",", ":")).encode()).decode()
 
 
-def _decode_cursor(token: str) -> Any:
-    """Inverse of :func:`_encode_cursor`. Raises ``HTTPException(400)`` on a
-    malformed token so a corrupt cursor is a client error, not a 500."""
+def _decode_cursor(token: str, chat_id: str) -> dict[str, Any]:
+    """Inverse of :func:`_encode_cursor`, scoped to ``chat_id``.
+
+    A corrupt or foreign cursor must be a client error (400), never a 500.
+    Three failure modes are folded together: (1) not valid base64-JSON
+    (``ValueError`` — covers ``UnicodeDecodeError`` for non-UTF8 bytes,
+    since it subclasses ``ValueError`` — and ``binascii.Error``); (2) the
+    decoded value isn't a ``{PK, SK}`` key dict; (3) the ``PK`` belongs to
+    a different chat — a cross-partition ``ExclusiveStartKey`` would
+    otherwise reach DynamoDB and raise a ``ValidationException`` (500). The
+    cursor is opaque to clients and only ever issued by this endpoint for
+    this chat, so any deviation is a malformed request."""
     try:
-        return json.loads(base64.urlsafe_b64decode(token.encode()))
+        key = json.loads(base64.urlsafe_b64decode(token.encode()))
     except (ValueError, binascii.Error) as exc:
         raise HTTPException(status_code=400, detail="invalid cursor") from exc
+    if (
+        not isinstance(key, dict)
+        or key.get("PK") != f"CHAT#{chat_id}"
+        or not isinstance(key.get("SK"), str)
+    ):
+        raise HTTPException(status_code=400, detail="invalid cursor")
+    return key
 
 
 @router.get("/{chat_id}")
@@ -440,7 +456,7 @@ async def get_chat(
     """
 
     chat = await _load_owned_chat(chat_id, claims["sub"])
-    decoded = _decode_cursor(before) if before else None
+    decoded = _decode_cursor(before, chat_id) if before else None
     messages, older = storage.list_messages_page(chat_id, limit=limit, before=decoded)
     return {
         "chat": chat.model_dump(),

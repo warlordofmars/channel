@@ -1116,6 +1116,54 @@ describe("useChatStream", () => {
     expect(result.current.hasOlder).toBe(false);
   });
 
+  it("loadOlder for a previous chat does not corrupt the new chat after switching (#270)", async () => {
+    // c1 initial load → an older page is available.
+    api.getChat.mockResolvedValueOnce({
+      chat: { chat_id: "c1" },
+      messages: [{ msg_id: "c1-newest", role: "user", text: "a" }],
+      older_cursor: "cur-1",
+    });
+    const { result, rerender } = renderHook(({ id }) => useChatStream(id), {
+      initialProps: { id: "c1" },
+    });
+    await waitFor(() => expect(result.current.status).toBe("idle"));
+
+    // Start loadOlder for c1 but hold the fetch open with a deferred promise.
+    let resolveOlder;
+    api.getChat.mockReturnValueOnce(
+      new Promise((res) => {
+        resolveOlder = res;
+      }),
+    );
+    let pending;
+    act(() => {
+      pending = result.current.loadOlder();
+    });
+
+    // Switch to c2 while c1's older-page fetch is still in flight.
+    api.getChat.mockResolvedValueOnce({
+      chat: { chat_id: "c2" },
+      messages: [{ msg_id: "c2-only", role: "user", text: "b" }],
+      older_cursor: null,
+    });
+    rerender({ id: "c2" });
+    await waitFor(() =>
+      expect(result.current.turns.map((t) => t.msg_id)).toEqual(["c2-only"]),
+    );
+
+    // The stale c1 older-page now resolves — it must NOT touch c2's turns.
+    await act(async () => {
+      resolveOlder({
+        chat: { chat_id: "c1" },
+        messages: [{ msg_id: "c1-older", role: "user", text: "stale" }],
+        older_cursor: null,
+      });
+      await pending;
+    });
+
+    expect(result.current.turns.map((t) => t.msg_id)).toEqual(["c2-only"]);
+  });
+
   it("loadOlder is a no-op when there is no older page", async () => {
     api.getChat.mockResolvedValue({
       chat: { chat_id: "c1" },

@@ -8,6 +8,7 @@ claims dict.
 
 from __future__ import annotations
 
+import base64
 import json
 from typing import Any
 
@@ -285,7 +286,7 @@ def test_get_chat_encodes_older_cursor_when_more_messages_exist(
 
     body = client.get("/api/chats/c1").json()
     assert isinstance(body["older_cursor"], str) and body["older_cursor"]
-    assert _decode_cursor(body["older_cursor"]) == raw_key
+    assert _decode_cursor(body["older_cursor"], "c1") == raw_key
 
 
 def test_get_chat_forwards_decoded_before_cursor_to_storage(
@@ -332,6 +333,61 @@ def test_get_chat_rejects_malformed_before_cursor(
     monkeypatch.setattr("channel.api.chats.storage.get_chat_by_id", lambda _: chat)
     response = client.get("/api/chats/c1?before=not-a-valid-cursor%21%21%21")
     assert response.status_code == 400
+
+
+def _chat_for_cursor_tests(monkeypatch: pytest.MonkeyPatch) -> None:
+    chat = Chat(
+        chat_id="c1",
+        user_id="u-1",
+        title="t",
+        created_at="2026-05-30T00:00:00Z",
+        last_message_at="2026-05-30T00:00:00Z",
+        model_default="m",
+    )
+    monkeypatch.setattr("channel.api.chats.storage.get_chat_by_id", lambda _: chat)
+    # If a bad cursor ever reaches storage, fail loudly rather than 500-on-DDB.
+    monkeypatch.setattr(
+        "channel.api.chats.storage.list_messages_page",
+        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("storage reached with bad cursor")),
+    )
+
+
+def test_get_chat_rejects_non_utf8_base64_cursor(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A token that is valid base64 but decodes to non-UTF8 bytes must be a
+    400, not a 500. ``UnicodeDecodeError`` subclasses ``ValueError`` so the
+    decoder's ``except (ValueError, binascii.Error)`` already covers it —
+    this pins that contract."""
+    from channel.api.chats import _encode_cursor  # noqa: F401  (kept symmetric)
+
+    _chat_for_cursor_tests(monkeypatch)
+    bad = base64.urlsafe_b64encode(b"\xff\xfe\xfa").decode()
+    assert client.get(f"/api/chats/c1?before={bad}").status_code == 400
+
+
+def test_get_chat_rejects_cursor_shaped_as_non_dict(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A base64-JSON cursor that decodes to a non-dict (e.g. a list) would
+    raise inside DynamoDB as ``ExclusiveStartKey`` — reject as 400 before
+    it reaches storage."""
+    _chat_for_cursor_tests(monkeypatch)
+    bad = base64.urlsafe_b64encode(json.dumps([1, 2, 3]).encode()).decode()
+    assert client.get(f"/api/chats/c1?before={bad}").status_code == 400
+
+
+def test_get_chat_rejects_cursor_for_a_different_chat(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A well-formed cursor whose ``PK`` belongs to another chat must not be
+    forwarded — DynamoDB would reject the cross-partition ``ExclusiveStartKey``
+    as a 500. The cursor is scoped to its chat; mismatches are 400."""
+    _chat_for_cursor_tests(monkeypatch)
+    foreign = base64.urlsafe_b64encode(
+        json.dumps({"PK": "CHAT#other", "SK": "MSG#2026#m1"}).encode()
+    ).decode()
+    assert client.get(f"/api/chats/c1?before={foreign}").status_code == 400
 
 
 def test_get_chat_returns_404_for_unknown(

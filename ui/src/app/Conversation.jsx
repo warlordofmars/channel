@@ -406,11 +406,30 @@ export default function Conversation() {
       .catch(function onModelsFetchError() { setModels([]); });
   }, []);
 
-  // Auto-scroll to the bottom on any turns change (catches each stream tick).
+  // #270: when "Load earlier messages" prepends an older page,
+  // `handleLoadEarlier` records the scroll height just before the turns
+  // grow at the TOP. The auto-scroll effect reads it and keeps the
+  // reader's position (scrollTop += height delta) instead of snapping to
+  // the bottom, which would defeat backward pagination.
+  const prependAnchorRef = useRef(null);
+
+  // Auto-scroll to the bottom on any turns change (catches each stream
+  // tick) — EXCEPT right after an older page is prepended, where we
+  // preserve the reader's position.
   useEffect(function autoScrollOnTurns() {
     const el = ref.current;
-    el.scrollTop = el.scrollHeight;
+    if (prependAnchorRef.current != null) {
+      el.scrollTop += el.scrollHeight - prependAnchorRef.current;
+      prependAnchorRef.current = null;
+    } else {
+      el.scrollTop = el.scrollHeight;
+    }
   }, [turns]);
+
+  function handleLoadEarlier() {
+    prependAnchorRef.current = ref.current.scrollHeight;
+    loadOlder();
+  }
 
   // First-message kick-off from route state. ChatHome stashes the user's
   // initial message in `location.state.firstMessage`; we forward it once
@@ -456,7 +475,7 @@ export default function Conversation() {
             <button
               type="button"
               className="load-earlier"
-              onClick={() => loadOlder()}
+              onClick={handleLoadEarlier}
             >
               Load earlier messages
             </button>

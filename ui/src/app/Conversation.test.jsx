@@ -139,6 +139,41 @@ describe("Conversation", () => {
     ).toBeNull();
   });
 
+  it("keeps the prepended older page visible after Load earlier (no snap-to-bottom) (#270)", () => {
+    // Click sets the prepend anchor; the next turns change must take the
+    // position-preserving branch of the auto-scroll effect rather than
+    // scrolling to the bottom.
+    const ret = mockStream({
+      turns: [{ msg_id: "m2", role: "user", text: "newer" }],
+      hasOlder: true,
+    });
+    // A fresh element each time — passing the same reference to rerender
+    // makes React bail out (referential equality) and skip the re-render.
+    const tree = () => (
+      <MemoryRouter initialEntries={["/app/c/c1"]}>
+        <Routes>
+          <Route path="/app/c/:id" element={<Conversation />} />
+        </Routes>
+      </MemoryRouter>
+    );
+    const { rerender } = render(tree());
+    fireEvent.click(
+      screen.getByRole("button", { name: /load earlier messages/i }),
+    );
+    // Older page lands: an older turn is prepended at the head.
+    useChatStreamModule.useChatStream.mockReturnValue({
+      ...ret,
+      turns: [
+        { msg_id: "m1", role: "user", text: "older" },
+        { msg_id: "m2", role: "user", text: "newer" },
+      ],
+      hasOlder: false,
+    });
+    rerender(tree());
+    expect(screen.getByText("older")).toBeTruthy();
+    expect(screen.getByText("newer")).toBeTruthy();
+  });
+
   it("renders an assistant turn with model label and markdown", () => {
     mockStream({
       turns: [

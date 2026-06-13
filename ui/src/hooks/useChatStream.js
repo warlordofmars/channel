@@ -99,6 +99,10 @@ export function useChatStream(chatId, { onTitleSuggested } = {}) {
     }
     loadedChatIdRef.current = chatId;
     setOlderCursor(null);
+    // A backward-page fetch from the previous chat may still be in flight;
+    // clear the in-flight guard so the new chat isn't blocked by it, and
+    // loadOlder's post-await chat-match check drops that stale response.
+    loadingOlderRef.current = false;
     let cancelled = false;
     setStatus("loading-history");
     api
@@ -404,6 +408,9 @@ export function useChatStream(chatId, { onTitleSuggested } = {}) {
       const { messages, older_cursor: older } = await api.getChat(chatId, {
         before: olderCursor,
       });
+      // The user may have switched chats while this fetch was in flight;
+      // applying the older page now would corrupt the new chat's history.
+      if (loadedChatIdRef.current !== chatId) return;
       setTurns((prev) => [...messages, ...prev]);
       setOlderCursor(older ?? null);
     } finally {
