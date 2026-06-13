@@ -29,6 +29,7 @@ from channel.storage import (
     get_chat_by_id,
     list_chats_for_user,
     list_messages,
+    list_messages_page,
     list_recent_messages,
     patch_chat,
     put_message,
@@ -418,6 +419,70 @@ def test_list_recent_messages_returns_all_when_chat_is_shorter_than_limit(
     msgs = list_recent_messages(chat.chat_id, limit=10)
 
     assert [m.text for m in msgs] == ["one", "two"]
+
+
+def test_list_messages_page_returns_newest_limit_chronologically(table: FakeTable) -> None:
+    """The conversation view must load the NEWEST page (#270).
+
+    ``list_messages`` + ``Limit`` returns the OLDEST N (which silently
+    dropped the recent half of long chats); ``list_messages_page`` reads
+    from the newest end and re-sorts chronologically for display. The
+    returned cursor is non-None when older messages remain.
+    """
+    chat = create_chat(user_id="u-1", title=None, model_default="m")
+    for i in range(7):
+        put_message(chat_id=chat.chat_id, role=MessageRole.USER, text=f"msg-{i}", model=None)
+
+    msgs, older = list_messages_page(chat.chat_id, limit=3)
+
+    assert [m.text for m in msgs] == ["msg-4", "msg-5", "msg-6"]
+    assert older is not None  # 4 older messages remain
+
+
+def test_list_messages_page_no_cursor_when_chat_fits_one_page(table: FakeTable) -> None:
+    chat = create_chat(user_id="u-1", title=None, model_default="m")
+    put_message(chat_id=chat.chat_id, role=MessageRole.USER, text="one", model=None)
+    put_message(chat_id=chat.chat_id, role=MessageRole.ASSISTANT, text="two", model="m")
+
+    msgs, older = list_messages_page(chat.chat_id, limit=10)
+
+    assert [m.text for m in msgs] == ["one", "two"]
+    assert older is None
+
+
+def test_list_messages_page_cursor_chains_backward_to_start(table: FakeTable) -> None:
+    """Paging with the returned ``before`` cursor walks toward the chat
+    start; reassembling the pages reconstructs the full chat oldest→newest,
+    and the cursor goes ``None`` once the first message is reached."""
+    chat = create_chat(user_id="u-1", title=None, model_default="m")
+    for i in range(5):
+        put_message(chat_id=chat.chat_id, role=MessageRole.USER, text=f"m{i}", model=None)
+
+    page1, c1 = list_messages_page(chat.chat_id, limit=2)
+    page2, c2 = list_messages_page(chat.chat_id, limit=2, before=c1)
+    page3, c3 = list_messages_page(chat.chat_id, limit=2, before=c2)
+
+    assert [m.text for m in page1] == ["m3", "m4"]  # newest page, chronological
+    assert [m.text for m in page2] == ["m1", "m2"]  # next older page
+    assert [m.text for m in page3] == ["m0"]  # oldest remaining
+    assert c3 is None
+    assert [m.text for m in (page3 + page2 + page1)] == ["m0", "m1", "m2", "m3", "m4"]
+
+
+def test_list_recent_messages_matches_first_page_of_list_messages_page(
+    table: FakeTable,
+) -> None:
+    """``list_recent_messages`` is the cursorless newest-N read; it must
+    agree with ``list_messages_page``'s first page so the agent feed and
+    the UI's initial load see the same recent window (#270)."""
+    chat = create_chat(user_id="u-1", title=None, model_default="m")
+    for i in range(6):
+        put_message(chat_id=chat.chat_id, role=MessageRole.USER, text=f"r{i}", model=None)
+
+    recent = list_recent_messages(chat.chat_id, limit=4)
+    page, _ = list_messages_page(chat.chat_id, limit=4)
+
+    assert [m.text for m in recent] == [m.text for m in page]
 
 
 def test_list_messages_paginates_with_cursor(table: FakeTable) -> None:

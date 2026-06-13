@@ -34,6 +34,22 @@ function makeMockResponseBody(events) {
   });
 }
 
+// Build a getChat response page. Keeps the #270 backward-pagination
+// tests from repeating the same {chat, messages, older_cursor} literal.
+function chatPage(messages, olderCursor = null, chatId = "c1") {
+  return { chat: { chat_id: chatId }, messages, older_cursor: olderCursor };
+}
+
+// Mount the hook for a chat whose initial page is already queued on the
+// getChat mock, and wait for history load to settle.
+async function mountLoaded(id = "c1") {
+  const view = renderHook(({ id }) => useChatStream(id), {
+    initialProps: { id },
+  });
+  await waitFor(() => expect(view.result.current.status).toBe("idle"));
+  return view;
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
 });
@@ -43,7 +59,7 @@ describe("useChatStream", () => {
     api.getChat.mockResolvedValue({
       chat: { chat_id: "c1" },
       messages: [{ msg_id: "m1", role: "user", text: "hello" }],
-      next_cursor: null,
+      older_cursor: null,
     });
 
     const { result } = renderHook(() => useChatStream("c1"));
@@ -63,7 +79,7 @@ describe("useChatStream", () => {
     api.getChat.mockResolvedValue({
       chat: { chat_id: "c1" },
       messages: [],
-      next_cursor: null,
+      older_cursor: null,
     });
     api.streamMessage.mockResolvedValue({
       ok: true,
@@ -107,7 +123,7 @@ describe("useChatStream", () => {
     api.getChat.mockResolvedValue({
       chat: { chat_id: "c1" },
       messages: [],
-      next_cursor: null,
+      older_cursor: null,
     });
     api.streamMessage.mockRejectedValue(new Error("500"));
 
@@ -132,7 +148,7 @@ describe("useChatStream", () => {
     api.getChat.mockResolvedValue({
       chat: { chat_id: "c1" },
       messages: [{ msg_id: "m1", role: "user", text: "hello" }],
-      next_cursor: null,
+      older_cursor: null,
     });
     const { result, rerender } = renderHook(({ id }) => useChatStream(id), {
       initialProps: { id: "c1" },
@@ -149,7 +165,7 @@ describe("useChatStream", () => {
     api.getChat.mockResolvedValue({
       chat: { chat_id: "c1" },
       messages: [],
-      next_cursor: null,
+      older_cursor: null,
     });
     let capturedSignal = null;
     // Hang the stream so the controller is still active when we abort.
@@ -197,7 +213,7 @@ describe("useChatStream", () => {
     api.getChat.mockResolvedValue({
       chat: { chat_id: "c1" },
       messages: [],
-      next_cursor: null,
+      older_cursor: null,
     });
     const { result } = renderHook(() => useChatStream("c1"));
     // Should not throw.
@@ -226,7 +242,7 @@ describe("useChatStream", () => {
     api.getChat.mockResolvedValueOnce({
       chat: { chat_id: "c2" },
       messages: [{ msg_id: "m2", role: "user", text: "second" }],
-      next_cursor: null,
+      older_cursor: null,
     });
 
     const { result, rerender } = renderHook(({ id }) => useChatStream(id), {
@@ -239,7 +255,7 @@ describe("useChatStream", () => {
       resolveFirst({
         chat: { chat_id: "c1" },
         messages: [{ msg_id: "stale", role: "user", text: "stale" }],
-        next_cursor: null,
+        older_cursor: null,
       });
     });
     await waitFor(() => expect(result.current.status).toBe("idle"));
@@ -260,7 +276,7 @@ describe("useChatStream", () => {
     api.getChat.mockResolvedValueOnce({
       chat: { chat_id: "c2" },
       messages: [],
-      next_cursor: null,
+      older_cursor: null,
     });
 
     const { result, rerender } = renderHook(({ id }) => useChatStream(id), {
@@ -281,7 +297,7 @@ describe("useChatStream", () => {
     api.getChat.mockResolvedValue({
       chat: { chat_id: "c1" },
       messages: [],
-      next_cursor: null,
+      older_cursor: null,
     });
     api.streamMessage.mockResolvedValue({
       ok: true,
@@ -323,7 +339,7 @@ describe("useChatStream", () => {
     api.getChat.mockResolvedValue({
       chat: { chat_id: "c1" },
       messages: [],
-      next_cursor: null,
+      older_cursor: null,
     });
     api.streamMessage.mockResolvedValue({
       ok: true,
@@ -360,7 +376,7 @@ describe("useChatStream", () => {
     api.getChat.mockResolvedValue({
       chat: { chat_id: "c1" },
       messages: [],
-      next_cursor: null,
+      older_cursor: null,
     });
     api.streamMessage.mockResolvedValue({
       ok: true,
@@ -385,7 +401,7 @@ describe("useChatStream", () => {
     api.getChat.mockResolvedValue({
       chat: { chat_id: "c1" },
       messages: [],
-      next_cursor: null,
+      older_cursor: null,
     });
     api.streamMessage.mockResolvedValue({
       ok: true,
@@ -426,7 +442,7 @@ describe("useChatStream", () => {
     api.getChat.mockResolvedValue({
       chat: { chat_id: "c1" },
       messages: [],
-      next_cursor: null,
+      older_cursor: null,
     });
     api.streamMessage.mockResolvedValue({
       ok: true,
@@ -467,7 +483,7 @@ describe("useChatStream", () => {
     api.getChat.mockResolvedValueOnce({
       chat: { chat_id: "c1" },
       messages: [],
-      next_cursor: null,
+      older_cursor: null,
     });
 
     // Construct a never-completing stream so we can observe abort.
@@ -491,7 +507,7 @@ describe("useChatStream", () => {
     api.getChat.mockResolvedValueOnce({
       chat: { chat_id: "c2" },
       messages: [],
-      next_cursor: null,
+      older_cursor: null,
     });
 
     const { result, rerender } = renderHook(({ id }) => useChatStream(id), {
@@ -526,7 +542,7 @@ describe("useChatStream", () => {
     api.getChat.mockResolvedValue({
       chat: { chat_id: "c1" },
       messages: [{ msg_id: "history-1", role: "user", text: "earlier" }],
-      next_cursor: null,
+      older_cursor: null,
     });
     api.streamMessage.mockResolvedValue({
       ok: true,
@@ -573,7 +589,7 @@ describe("useChatStream", () => {
         { msg_id: "u1", role: "user", text: "hi" },
         { msg_id: "a1", role: "assistant", text: "first reply" },
       ],
-      next_cursor: null,
+      older_cursor: null,
     });
     api.regenerate.mockResolvedValue({
       ok: true,
@@ -620,7 +636,7 @@ describe("useChatStream", () => {
     api.getChat.mockResolvedValue({
       chat: { chat_id: "c1" },
       messages: [],
-      next_cursor: null,
+      older_cursor: null,
     });
     api.regenerate.mockRejectedValue(new Error("500"));
 
@@ -646,7 +662,7 @@ describe("useChatStream", () => {
     api.getChat.mockResolvedValue({
       chat: { chat_id: "c1" },
       messages: [],
-      next_cursor: null,
+      older_cursor: null,
     });
     api.regenerate.mockResolvedValue({
       ok: true,
@@ -728,7 +744,7 @@ describe("useChatStream", () => {
       resolveHistory({
         chat: { chat_id: "c1" },
         messages: [{ msg_id: "hist-1", role: "user", text: "old" }],
-        next_cursor: null,
+        older_cursor: null,
       });
     });
 
@@ -768,7 +784,7 @@ describe("useChatStream", () => {
     api.getChat.mockResolvedValue({
       chat: { chat_id: "c1" },
       messages: history,
-      next_cursor: null,
+      older_cursor: null,
     });
     api.streamMessage.mockResolvedValue({
       ok: true,
@@ -1053,12 +1069,12 @@ describe("useChatStream", () => {
       .mockResolvedValueOnce({
         chat: { chat_id: "c1" },
         messages: [{ msg_id: "old", role: "user", text: "old" }],
-        next_cursor: null,
+        older_cursor: null,
       })
       .mockResolvedValueOnce({
         chat: { chat_id: "c2" },
         messages: [{ msg_id: "new", role: "user", text: "new" }],
-        next_cursor: null,
+        older_cursor: null,
       });
 
     const { result, rerender } = renderHook(({ id }) => useChatStream(id), {
@@ -1070,5 +1086,109 @@ describe("useChatStream", () => {
     rerender({ id: "c2" });
     await waitFor(() => expect(result.current.status).toBe("idle"));
     expect(result.current.turns[0].msg_id).toBe("new");
+  });
+
+  it("exposes hasOlder=false when the initial load returns no older_cursor", async () => {
+    api.getChat.mockResolvedValue(
+      chatPage([{ msg_id: "m1", role: "user", text: "hello" }]),
+    );
+
+    const { result } = await mountLoaded();
+    expect(result.current.hasOlder).toBe(false);
+  });
+
+  it("loadOlder prepends the previous page and advances the cursor (#270)", async () => {
+    // Initial load: newest page with an older_cursor → hasOlder true.
+    api.getChat.mockResolvedValueOnce(
+      chatPage([{ msg_id: "m3", role: "user", text: "newest" }], "cur-1"),
+    );
+
+    const { result } = await mountLoaded();
+    expect(result.current.hasOlder).toBe(true);
+    expect(result.current.turns.map((t) => t.msg_id)).toEqual(["m3"]);
+
+    // Older page: prepended above the current head; no further cursor.
+    api.getChat.mockResolvedValueOnce(
+      chatPage([
+        { msg_id: "m1", role: "user", text: "oldest" },
+        { msg_id: "m2", role: "assistant", text: "older" },
+      ]),
+    );
+
+    await act(async () => {
+      await result.current.loadOlder();
+    });
+
+    expect(api.getChat).toHaveBeenLastCalledWith("c1", { before: "cur-1" });
+    expect(result.current.turns.map((t) => t.msg_id)).toEqual(["m1", "m2", "m3"]);
+    expect(result.current.hasOlder).toBe(false);
+  });
+
+  it("loadOlder for a previous chat does not corrupt the new chat after switching (#270)", async () => {
+    // c1 initial load → an older page is available.
+    api.getChat.mockResolvedValueOnce(
+      chatPage([{ msg_id: "c1-newest", role: "user", text: "a" }], "cur-1"),
+    );
+    const { result, rerender } = await mountLoaded("c1");
+
+    // Start loadOlder for c1 but hold the fetch open with a deferred promise.
+    let resolveOlder;
+    api.getChat.mockReturnValueOnce(
+      new Promise((res) => {
+        resolveOlder = res;
+      }),
+    );
+    let pending;
+    act(() => {
+      pending = result.current.loadOlder();
+    });
+
+    // Switch to c2 while c1's older-page fetch is still in flight.
+    api.getChat.mockResolvedValueOnce(
+      chatPage([{ msg_id: "c2-only", role: "user", text: "b" }], null, "c2"),
+    );
+    rerender({ id: "c2" });
+    await waitFor(() =>
+      expect(result.current.turns.map((t) => t.msg_id)).toEqual(["c2-only"]),
+    );
+
+    // The stale c1 older-page now resolves — it must NOT touch c2's turns.
+    await act(async () => {
+      resolveOlder(chatPage([{ msg_id: "c1-older", role: "user", text: "stale" }]));
+      await pending;
+    });
+
+    expect(result.current.turns.map((t) => t.msg_id)).toEqual(["c2-only"]);
+  });
+
+  it("loadOlder swallows fetch errors so a fire-and-forget call can't reject (#270)", async () => {
+    api.getChat.mockResolvedValueOnce(
+      chatPage([{ msg_id: "m1", role: "user", text: "a" }], "cur-1"),
+    );
+    const { result } = await mountLoaded();
+
+    api.getChat.mockRejectedValueOnce(new Error("network"));
+    await act(async () => {
+      await expect(result.current.loadOlder()).resolves.toBeUndefined();
+    });
+
+    // Current turns stay usable and the cursor is unchanged (retryable).
+    expect(result.current.turns.map((t) => t.msg_id)).toEqual(["m1"]);
+    expect(result.current.hasOlder).toBe(true);
+  });
+
+  it("loadOlder is a no-op when there is no older page", async () => {
+    api.getChat.mockResolvedValue(
+      chatPage([{ msg_id: "m1", role: "user", text: "hello" }]),
+    );
+
+    const { result } = await mountLoaded();
+    api.getChat.mockClear();
+
+    await act(async () => {
+      await result.current.loadOlder();
+    });
+
+    expect(api.getChat).not.toHaveBeenCalled();
   });
 });

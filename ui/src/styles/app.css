@@ -417,6 +417,17 @@ html.is-electron-mac .sb-top {
 /* ---------- conversation ---------- */
 .convo { flex: 1; overflow-y: auto; min-height: 0; }
 .convo-inner { max-width: 720px; margin: 0 auto; padding: 16px 24px 40px; display: flex; flex-direction: column; gap: 28px; }
+.load-earlier {
+  align-self: center;
+  padding: 6px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  background: var(--raised);
+  color: var(--ink-soft);
+  font-size: 13px;
+  cursor: pointer;
+}
+.load-earlier:hover { background: var(--hover); color: var(--ink); }
 .turn { display: flex; flex-direction: column; gap: 8px; }
 .turn.user { align-items: flex-end; }
 .bubble {

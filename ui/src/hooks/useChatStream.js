@@ -70,6 +70,13 @@ export function useChatStream(chatId, { onTitleSuggested } = {}) {
   const [error, setError] = useState(null);
   const abortRef = useRef(null);
 
+  // #270: the initial load fetches the NEWEST page; `olderCursor` is the
+  // opaque token for the next OLDER page (null once the chat start is
+  // reached). `loadOlder()` pages backward and prepends. The ref guards
+  // against overlapping older-page fetches.
+  const [olderCursor, setOlderCursor] = useState(null);
+  const loadingOlderRef = useRef(false);
+
   // Tracks the chatId of the most-recently-applied history install.
   // Used to distinguish a real chatId change (user clicked a different
   // chat in the sidebar — clear stale turns) from React StrictMode dev
@@ -91,16 +98,22 @@ export function useChatStream(chatId, { onTitleSuggested } = {}) {
       setTurns([]);
     }
     loadedChatIdRef.current = chatId;
+    setOlderCursor(null);
+    // A backward-page fetch from the previous chat may still be in flight;
+    // clear the in-flight guard so the new chat isn't blocked by it, and
+    // loadOlder's post-await chat-match check drops that stale response.
+    loadingOlderRef.current = false;
     let cancelled = false;
     setStatus("loading-history");
     api
       .getChat(chatId)
-      .then(({ messages }) => {
+      .then(({ messages, older_cursor: older }) => {
         if (cancelled) return;
         // Only install loaded history if the caller hasn't already
         // pushed optimistic turns (the first-message-creates-chat flow
         // calls send() during the same mount).
         setTurns((prev) => (prev.length === 0 ? messages : prev));
+        setOlderCursor(older ?? null);
         setStatus("idle");
       })
       .catch((err) => {
@@ -384,5 +397,40 @@ export function useChatStream(chatId, { onTitleSuggested } = {}) {
     abortRef.current?.abort();
   }, []);
 
-  return { turns, send, regenerate, abort, status, error };
+  // #270: fetch the previous (older) page and prepend it above the
+  // current head. No-op when there's no older page or a fetch is already
+  // in flight. Older-page messages are chronological and all precede the
+  // current head, so a plain prepend keeps the list ordered.
+  const loadOlder = useCallback(async () => {
+    if (!chatId || !olderCursor || loadingOlderRef.current) return;
+    loadingOlderRef.current = true;
+    try {
+      const { messages, older_cursor: older } = await api.getChat(chatId, {
+        before: olderCursor,
+      });
+      // The user may have switched chats while this fetch was in flight;
+      // applying the older page now would corrupt the new chat's history.
+      if (loadedChatIdRef.current !== chatId) return;
+      setTurns((prev) => [...messages, ...prev]);
+      setOlderCursor(older ?? null);
+    } catch {
+      // Loading older history is non-fatal: the current turns stay usable
+      // and the cursor is unchanged, so the user can retry. Swallow so the
+      // fire-and-forget caller (the "Load earlier" button) doesn't surface
+      // an unhandled promise rejection.
+    } finally {
+      loadingOlderRef.current = false;
+    }
+  }, [chatId, olderCursor]);
+
+  return {
+    turns,
+    send,
+    regenerate,
+    abort,
+    status,
+    error,
+    loadOlder,
+    hasOlder: olderCursor != null,
+  };
 }

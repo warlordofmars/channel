@@ -127,15 +127,15 @@ describe("chats wrappers", () => {
 
   describe("getChat", () => {
     it("GETs by id with default limit=200", async () => {
-      mockOk({ chat: {}, messages: [], next_cursor: null });
+      mockOk({ chat: {}, messages: [], older_cursor: null });
       await getChat("c1");
       expect(fetchMock.mock.calls[0][0]).toBe("/api/chats/c1?limit=200");
     });
 
-    it("includes cursor when provided", async () => {
+    it("includes the before cursor when provided", async () => {
       mockOk({});
-      await getChat("c1", { cursor: "x" });
-      expect(fetchMock.mock.calls[0][0]).toBe("/api/chats/c1?limit=200&cursor=x");
+      await getChat("c1", { before: "x" });
+      expect(fetchMock.mock.calls[0][0]).toBe("/api/chats/c1?limit=200&before=x");
     });
 
     it("throws on 404", async () => {

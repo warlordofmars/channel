@@ -248,23 +248,48 @@ def list_messages(
     return msgs, result.get("LastEvaluatedKey")
 
 
+def list_messages_page(
+    chat_id: str, *, limit: int, before: Any | None = None
+) -> tuple[list[Message], Any | None]:
+    """Return one page of messages newest-first-paginated but returned in
+    chronological order, for the UI conversation view (#270).
+
+    Unlike ``list_messages`` (oldest-first forward paging), this reads from
+    the NEWEST end so the initial conversation load always includes the
+    most recent turns — ``list_messages`` + ``Limit`` returns the oldest N,
+    which left long chats (>``limit`` messages) showing only their oldest
+    window while the recent turns were unreachable from the SPA.
+
+    ``before`` is the opaque cursor returned by a prior call; passing it
+    fetches the next OLDER page (the SPA prepends each older page above the
+    current head). The returned cursor is ``None`` once the start of the
+    chat is reached.
+    """
+    kwargs: dict[str, Any] = {
+        "KeyConditionExpression": (Key("PK").eq(f"CHAT#{chat_id}") & Key("SK").begins_with("MSG#")),
+        "Limit": limit,
+        "ScanIndexForward": False,  # newest first
+    }
+    if before:
+        kwargs["ExclusiveStartKey"] = before
+    result = _get_table().query(**kwargs)
+    msgs = [_message_from_item(item) for item in (result.get("Items") or [])]
+    msgs.reverse()  # newest-first page → chronological for display
+    return msgs, result.get("LastEvaluatedKey")
+
+
 def list_recent_messages(chat_id: str, *, limit: int) -> list[Message]:
     """Return the most recent ``limit`` messages for a chat, in chronological order.
 
     Used by the agent-streaming path to seed ``Strands.Agent(messages=...)``
     and by the regenerate path to find the newest user/assistant turns.
-    Distinct from ``list_messages``, which pages from the OLDEST end for
-    the UI's chronological message-list endpoint — combining that with
-    ``Limit`` silently dropped the recent half of long chats (#244).
+    The cursorless newest-N read — the first page of ``list_messages_page``
+    — distinct from ``list_messages``, which pages from the OLDEST end and
+    combining that with ``Limit`` silently dropped the recent half of long
+    chats (#244).
     """
 
-    result = _get_table().query(
-        KeyConditionExpression=(Key("PK").eq(f"CHAT#{chat_id}") & Key("SK").begins_with("MSG#")),
-        Limit=limit,
-        ScanIndexForward=False,  # newest first
-    )
-    msgs = [_message_from_item(item) for item in (result.get("Items") or [])]
-    msgs.reverse()  # back to chronological for Strands
+    msgs, _ = list_messages_page(chat_id, limit=limit)
     return msgs
 
 

@@ -304,7 +304,7 @@ export default function Conversation() {
   const navigate = useNavigate();
   const chats = useChats();
   const currentChat = chats.chats.find((c) => c.chat_id === chatId) ?? null;
-  const { turns, send, regenerate, status } = useChatStream(chatId, {
+  const { turns, send, regenerate, status, loadOlder, hasOlder } = useChatStream(chatId, {
     // Phase 7d: backend auto-titles fresh chats after the first reply
     // and emits a ``title_suggested`` SSE event. Update the sidebar
     // immediately (server already persisted via storage.patch_chat).
@@ -406,11 +406,39 @@ export default function Conversation() {
       .catch(function onModelsFetchError() { setModels([]); });
   }, []);
 
-  // Auto-scroll to the bottom on any turns change (catches each stream tick).
+  // #270: when "Load earlier messages" prepends an older page,
+  // `handleLoadEarlier` records the scroll height just before the turns
+  // grow at the TOP. The auto-scroll effect reads it and keeps the
+  // reader's position (scrollTop += height delta) instead of snapping to
+  // the bottom, which would defeat backward pagination.
+  const prependAnchorRef = useRef(null);
+  const prevFirstIdRef = useRef(null);
+
+  // Auto-scroll to the bottom on any turns change (catches each stream
+  // tick) — EXCEPT right after an older page is prepended, where we
+  // preserve the reader's position. A prepend is the only case where the
+  // head turn changes while an anchor is set; a no-op/failed Load-earlier
+  // click leaves the head unchanged, so we still scroll to the bottom and
+  // always clear the anchor so a stale one can't hijack a later tail
+  // change.
   useEffect(function autoScrollOnTurns() {
     const el = ref.current;
-    el.scrollTop = el.scrollHeight;
+    const firstId = turns.length ? turns[0].msg_id : null;
+    const prepended =
+      prependAnchorRef.current != null && firstId !== prevFirstIdRef.current;
+    prevFirstIdRef.current = firstId;
+    if (prepended) {
+      el.scrollTop += el.scrollHeight - prependAnchorRef.current;
+    } else {
+      el.scrollTop = el.scrollHeight;
+    }
+    prependAnchorRef.current = null;
   }, [turns]);
+
+  function handleLoadEarlier() {
+    prependAnchorRef.current = ref.current.scrollHeight;
+    loadOlder();
+  }
 
   // First-message kick-off from route state. ChatHome stashes the user's
   // initial message in `location.state.firstMessage`; we forward it once
@@ -451,6 +479,15 @@ export default function Conversation() {
             <div className="convo-error" role="alert">
               Something went wrong loading this conversation.
             </div>
+          )}
+          {hasOlder && (
+            <button
+              type="button"
+              className="load-earlier"
+              onClick={handleLoadEarlier}
+            >
+              Load earlier messages
+            </button>
           )}
           {turns.map((t, i) => {
             const isLast = i === turns.length - 1;

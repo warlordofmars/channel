@@ -43,9 +43,11 @@ export async function listChats({ limit = 50, cursor = null } = {}) {
   return response.json();
 }
 
-export async function getChat(chatId, { limit = 200, cursor = null } = {}) {
+export async function getChat(chatId, { limit = 200, before = null } = {}) {
+  // Loads the NEWEST `limit` messages; `before` is the opaque cursor from
+  // a prior response's `older_cursor`, paging toward the chat start (#270).
   const qs = new URLSearchParams({ limit: String(limit) });
-  if (cursor) qs.set("cursor", cursor);
+  if (before) qs.set("before", before);
   const response = await fetch(`${BASE}/api/chats/${chatId}?${qs}`, {
     headers: authHeader(),
   });

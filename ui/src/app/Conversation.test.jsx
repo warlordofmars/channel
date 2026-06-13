@@ -54,21 +54,27 @@ function mockStream(overrides = {}) {
     abort: vi.fn(),
     status: "idle",
     error: null,
+    loadOlder: vi.fn(),
+    hasOlder: false,
     ...overrides,
   };
   useChatStreamModule.useChatStream.mockReturnValue(ret);
   return ret;
 }
 
-function renderAt(path, state) {
-  const entry = state ? { pathname: path, state } : path;
-  return render(
+function conversationTree(entry) {
+  return (
     <MemoryRouter initialEntries={[entry]}>
       <Routes>
         <Route path="/app/c/:id" element={<Conversation />} />
       </Routes>
-    </MemoryRouter>,
+    </MemoryRouter>
   );
+}
+
+function renderAt(path, state) {
+  const entry = state ? { pathname: path, state } : path;
+  return render(conversationTree(entry));
 }
 
 describe("Conversation", () => {
@@ -118,6 +124,75 @@ describe("Conversation", () => {
     expect(document.body.querySelector(".turn.user .bubble").textContent).toBe(
       "hello world",
     );
+  });
+
+  it("shows 'Load earlier messages' only when hasOlder, and calls loadOlder on click (#270)", () => {
+    const loadOlder = vi.fn();
+    mockStream({ hasOlder: true, loadOlder });
+    renderAt("/app/c/c1");
+    const btn = screen.getByRole("button", { name: /load earlier messages/i });
+    fireEvent.click(btn);
+    expect(loadOlder).toHaveBeenCalledTimes(1);
+  });
+
+  it("hides 'Load earlier messages' when there is no older history", () => {
+    mockStream({ hasOlder: false });
+    renderAt("/app/c/c1");
+    expect(
+      screen.queryByRole("button", { name: /load earlier messages/i }),
+    ).toBeNull();
+  });
+
+  it("keeps the prepended older page visible after Load earlier (no snap-to-bottom) (#270)", () => {
+    // Click sets the prepend anchor; the next turns change must take the
+    // position-preserving branch of the auto-scroll effect rather than
+    // scrolling to the bottom.
+    const ret = mockStream({
+      turns: [{ msg_id: "m2", role: "user", text: "newer" }],
+      hasOlder: true,
+    });
+    // A fresh element each time — passing the same reference to rerender
+    // makes React bail out (referential equality) and skip the re-render.
+    const { rerender } = render(conversationTree("/app/c/c1"));
+    fireEvent.click(
+      screen.getByRole("button", { name: /load earlier messages/i }),
+    );
+    // Older page lands: an older turn is prepended at the head.
+    useChatStreamModule.useChatStream.mockReturnValue({
+      ...ret,
+      turns: [
+        { msg_id: "m1", role: "user", text: "older" },
+        { msg_id: "m2", role: "user", text: "newer" },
+      ],
+      hasOlder: false,
+    });
+    rerender(conversationTree("/app/c/c1"));
+    expect(screen.getByText("older")).toBeTruthy();
+    expect(screen.getByText("newer")).toBeTruthy();
+  });
+
+  it("a no-op Load earlier followed by a new tail message does not hijack scrolling (#270)", () => {
+    // Click sets the prepend anchor, but loadOlder no-ops (head unchanged).
+    // The next tail message must take the scroll-to-bottom branch, not the
+    // position-preserving one, and the stale anchor must be cleared.
+    const ret = mockStream({
+      turns: [{ msg_id: "m1", role: "user", text: "head" }],
+      hasOlder: true,
+    });
+    const { rerender } = render(conversationTree("/app/c/c1"));
+    fireEvent.click(
+      screen.getByRole("button", { name: /load earlier messages/i }),
+    );
+    // A new assistant turn arrives at the TAIL — head id is unchanged.
+    useChatStreamModule.useChatStream.mockReturnValue({
+      ...ret,
+      turns: [
+        { msg_id: "m1", role: "user", text: "head" },
+        { msg_id: "m2", role: "assistant", text: "tail" },
+      ],
+    });
+    rerender(conversationTree("/app/c/c1"));
+    expect(screen.getByText("tail")).toBeTruthy();
   });
 
   it("renders an assistant turn with model label and markdown", () => {

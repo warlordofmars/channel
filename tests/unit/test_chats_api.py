@@ -8,6 +8,7 @@ claims dict.
 
 from __future__ import annotations
 
+import base64
 import json
 from typing import Any
 
@@ -229,7 +230,7 @@ def test_get_chat_returns_chat_and_messages(
     def fake_get(chat_id: str) -> Chat | None:
         return chat if chat_id == "c1" else None
 
-    def fake_msgs(chat_id: str, *, limit: int, cursor: str | None):
+    def fake_msgs(chat_id: str, *, limit: int, before: Any | None):
         return (
             [
                 Message(
@@ -244,14 +245,128 @@ def test_get_chat_returns_chat_and_messages(
         )
 
     monkeypatch.setattr("channel.api.chats.storage.get_chat_by_id", fake_get)
-    monkeypatch.setattr("channel.api.chats.storage.list_messages", fake_msgs)
+    monkeypatch.setattr("channel.api.chats.storage.list_messages_page", fake_msgs)
 
     response = client.get("/api/chats/c1")
     body = response.json()
     assert response.status_code == 200
     assert body["chat"]["chat_id"] == "c1"
     assert body["messages"][0]["text"] == "hi"
-    assert body["next_cursor"] is None
+    assert body["older_cursor"] is None
+
+
+def test_get_chat_encodes_older_cursor_when_more_messages_exist(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When ``list_messages_page`` returns a DynamoDB ``LastEvaluatedKey``,
+    the endpoint serializes it to an opaque string that round-trips back to
+    the same dict — the raw dict can't survive a query-string param, which
+    is why the pre-#270 ``next_cursor`` (never exercised by the SPA) was
+    effectively broken."""
+    from channel.api.chats import _decode_cursor
+
+    chat = Chat(
+        chat_id="c1",
+        user_id="u-1",
+        title="t",
+        created_at="2026-05-30T00:00:00Z",
+        last_message_at="2026-05-30T00:00:00Z",
+        model_default="m",
+    )
+    raw_key = {"PK": "CHAT#c1", "SK": "MSG#2026-06-01T00:00:00Z#m9"}
+
+    def fake_page(chat_id: str, *, limit: int, before: Any | None):
+        return (
+            [Message(chat_id="c1", msg_id="m9", role=MessageRole.USER, text="hi", created_at="t")],
+            raw_key,
+        )
+
+    monkeypatch.setattr("channel.api.chats.storage.get_chat_by_id", lambda _: chat)
+    monkeypatch.setattr("channel.api.chats.storage.list_messages_page", fake_page)
+
+    body = client.get("/api/chats/c1").json()
+    assert isinstance(body["older_cursor"], str) and body["older_cursor"]
+    assert _decode_cursor(body["older_cursor"], "c1") == raw_key
+
+
+def test_get_chat_forwards_decoded_before_cursor_to_storage(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``?before=<encoded>`` decodes back to the dict handed to storage,
+    and ``limit`` is forwarded."""
+    from channel.api.chats import _encode_cursor
+
+    chat = Chat(
+        chat_id="c1",
+        user_id="u-1",
+        title="t",
+        created_at="2026-05-30T00:00:00Z",
+        last_message_at="2026-05-30T00:00:00Z",
+        model_default="m",
+    )
+    raw_key = {"PK": "CHAT#c1", "SK": "MSG#2026-06-01T00:00:00Z#m5"}
+    captured: dict[str, Any] = {}
+
+    def fake_page(chat_id: str, *, limit: int, before: Any | None):
+        captured.update({"limit": limit, "before": before})
+        return ([], None)
+
+    monkeypatch.setattr("channel.api.chats.storage.get_chat_by_id", lambda _: chat)
+    monkeypatch.setattr("channel.api.chats.storage.list_messages_page", fake_page)
+
+    client.get(f"/api/chats/c1?limit=50&before={_encode_cursor(raw_key)}")
+    assert captured == {"limit": 50, "before": raw_key}
+
+
+def _chat_for_cursor_tests(monkeypatch: pytest.MonkeyPatch) -> None:
+    chat = Chat(
+        chat_id="c1",
+        user_id="u-1",
+        title="t",
+        created_at="2026-05-30T00:00:00Z",
+        last_message_at="2026-05-30T00:00:00Z",
+        model_default="m",
+    )
+    monkeypatch.setattr("channel.api.chats.storage.get_chat_by_id", lambda _: chat)
+    # If a bad cursor ever reaches storage, fail loudly rather than 500-on-DDB.
+    monkeypatch.setattr(
+        "channel.api.chats.storage.list_messages_page",
+        lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("storage reached with bad cursor")),
+    )
+
+
+def _cursor_token(payload: Any) -> str:
+    """Encode a `before` cursor the way the SPA round-trips it, for the
+    malformed-cursor tests. Accepts a JSON-serializable object, or raw
+    ``bytes`` for the non-UTF8 case."""
+    raw = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
+    return base64.urlsafe_b64encode(raw).decode()
+
+
+@pytest.mark.parametrize(
+    "before",
+    [
+        pytest.param("not-a-valid-cursor!!!", id="not-base64"),
+        pytest.param(_cursor_token(b"\xff\xfe\xfa"), id="base64-non-utf8"),
+        pytest.param(_cursor_token([1, 2, 3]), id="decodes-to-non-dict"),
+        pytest.param(
+            _cursor_token({"PK": "CHAT#other", "SK": "MSG#2026#m1"}), id="different-chat-pk"
+        ),
+        pytest.param(_cursor_token({"PK": "CHAT#c1", "SK": "META"}), id="non-message-sk"),
+    ],
+)
+def test_get_chat_rejects_bad_before_cursor(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, before: str
+) -> None:
+    """Every malformed or foreign ``before`` cursor is a 400, never a
+    DynamoDB 500. Covers the decode-failure path (``ValueError`` /
+    ``binascii.Error`` — ``UnicodeDecodeError`` subclasses ``ValueError``,
+    so the non-UTF8 case is included) and the shape/scope checks: non-dict,
+    a ``PK`` for a different chat, and an ``SK`` that isn't a ``MSG#`` key.
+    ``_chat_for_cursor_tests`` makes storage raise if ever reached, so a
+    pass proves the cursor was rejected before the DynamoDB call."""
+    _chat_for_cursor_tests(monkeypatch)
+    assert client.get("/api/chats/c1", params={"before": before}).status_code == 400
 
 
 def test_get_chat_returns_404_for_unknown(
@@ -2458,7 +2573,7 @@ def test_delete_chat_404s_on_cross_user(monkeypatch: pytest.MonkeyPatch) -> None
         app.dependency_overrides[require_mgmt_user] = _stub_owner
         owner_client = TestClient(app)
         monkeypatch.setattr(
-            "channel.api.chats.storage.list_messages", lambda *_a, **_kw: ([], None)
+            "channel.api.chats.storage.list_messages_page", lambda *_a, **_kw: ([], None)
         )
         ok = owner_client.get("/api/chats/c-del-2")
         assert ok.status_code == 200

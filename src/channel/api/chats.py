@@ -10,6 +10,9 @@ so chat existence isn't leaked.
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
+import json
 import logging
 import os
 import re
@@ -403,21 +406,63 @@ async def _load_owned_chat(chat_id: str, user_id: str) -> Chat:
     return chat
 
 
+def _encode_cursor(key: Any) -> str:
+    """Serialize a DynamoDB ``LastEvaluatedKey`` dict to an opaque,
+    URL-safe token. The raw dict can't survive a query-string param —
+    the pre-#270 ``next_cursor`` returned it raw and was never exercised
+    because the SPA never paginated."""
+    return base64.urlsafe_b64encode(json.dumps(key, separators=(",", ":")).encode()).decode()
+
+
+def _decode_cursor(token: str, chat_id: str) -> dict[str, Any]:
+    """Inverse of :func:`_encode_cursor`, scoped to ``chat_id``.
+
+    A corrupt or foreign cursor must be a client error (400), never a 500.
+    Three failure modes are folded together: (1) not valid base64-JSON
+    (``ValueError`` — covers ``UnicodeDecodeError`` for non-UTF8 bytes,
+    since it subclasses ``ValueError`` — and ``binascii.Error``); (2) the
+    decoded value isn't a ``{PK, SK}`` key dict; (3) the ``PK`` belongs to
+    a different chat — a cross-partition ``ExclusiveStartKey`` would
+    otherwise reach DynamoDB and raise a ``ValidationException`` (500). The
+    cursor is opaque to clients and only ever issued by this endpoint for
+    this chat, so any deviation is a malformed request."""
+    try:
+        key = json.loads(base64.urlsafe_b64decode(token.encode()))
+    except (ValueError, binascii.Error) as exc:
+        raise HTTPException(status_code=400, detail="invalid cursor") from exc
+    if (
+        not isinstance(key, dict)
+        or key.get("PK") != f"CHAT#{chat_id}"
+        or not isinstance(key.get("SK"), str)
+        or not key["SK"].startswith("MSG#")
+    ):
+        raise HTTPException(status_code=400, detail="invalid cursor")
+    return key
+
+
 @router.get("/{chat_id}")
 async def get_chat(
     chat_id: str = Path(...),
     limit: int = 200,
-    cursor: str | None = None,
+    before: str | None = None,
     claims: dict[str, Any] = Depends(require_mgmt_user),
 ) -> dict[str, Any]:
-    """Get a chat's metadata and a page of messages."""
+    """Get a chat's metadata and a page of messages.
+
+    Loads the NEWEST ``limit`` messages (chronologically ordered) so the
+    conversation view always opens at the live tail (#270). ``before`` is
+    the opaque cursor from a prior response's ``older_cursor`` — passing it
+    fetches the next OLDER page, which the SPA prepends above the current
+    head. ``older_cursor`` is ``None`` once the chat start is reached.
+    """
 
     chat = await _load_owned_chat(chat_id, claims["sub"])
-    messages, next_cursor = storage.list_messages(chat_id, limit=limit, cursor=cursor)
+    decoded = _decode_cursor(before, chat_id) if before else None
+    messages, older = storage.list_messages_page(chat_id, limit=limit, before=decoded)
     return {
         "chat": chat.model_dump(),
         "messages": [m.model_dump(mode="json") for m in messages],
-        "next_cursor": next_cursor,
+        "older_cursor": _encode_cursor(older) if older else None,
     }
 
 
