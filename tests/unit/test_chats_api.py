@@ -515,31 +515,34 @@ def test_post_message_falls_back_to_prefs_effort_when_payload_omits_it(
 
 
 # Tool flags currently mounted on the chassis. Each row is
-# ``(env_var, tool_name)``. The two parametrized tests below assert that
-# (a) flipping any one flag on registers exactly its matching tool and
-# (b) leaving all flags off keeps the tools list empty. The PARSING
-# rule is "anything other than '1' is disabled" — so unset env vars
-# in local dev / tests omit the tool, which is what these tests
+# ``(env_var, [tool_names])``. The two parametrized tests below assert
+# that (a) flipping any one flag on registers exactly its matching
+# tools and (b) leaving all flags off keeps the tools list empty. The
+# PARSING rule is "anything other than '1' is disabled" — so unset env
+# vars in local dev / tests omit the tool, which is what these tests
 # exercise. Per-env DEFAULTS (see ``infra/stacks/channel_stack.py``):
 # ``current_time`` is "0" in prod / "1" in dev (smoke-test only,
 # strategy spec policy P2); ``web_search`` ships "1" in all deployed
 # envs (kill-switch on default-on); ``code_exec`` ships "1" in all
-# deployed envs (kill-switch on default-on).
-_TOOL_FLAGS: list[tuple[str, str]] = [
-    ("STARTER_CLOCK_TOOL_ENABLED", "current_time"),
-    ("STARTER_WEB_SEARCH_ENABLED", "web_search"),
-    ("STARTER_CODE_EXEC_ENABLED", "code_exec"),
+# deployed envs (kill-switch on default-on). ``web_fetch`` rides
+# ``STARTER_WEB_SEARCH_ENABLED`` rather than its own flag — both tools
+# are backed by the same Exa API key, so one availability signal
+# covers the discover/deep-read pair (#232).
+_TOOL_FLAGS: list[tuple[str, list[str]]] = [
+    ("STARTER_CLOCK_TOOL_ENABLED", ["current_time"]),
+    ("STARTER_WEB_SEARCH_ENABLED", ["web_search", "web_fetch"]),
+    ("STARTER_CODE_EXEC_ENABLED", ["code_exec"]),
 ]
 
 
-@pytest.mark.parametrize(("env_var", "tool_name"), _TOOL_FLAGS)
+@pytest.mark.parametrize(("env_var", "tool_names"), _TOOL_FLAGS)
 def test_post_message_registers_tool_when_flag_on(
     env_var: str,
-    tool_name: str,
+    tool_names: list[str],
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``<flag>=1`` → matching tool registered; all other flags off.
+    """``<flag>=1`` → matching tools registered; all other flags off.
 
     Verifies isolation: flipping flag A on must not also pull in tool
     B. The "all others off" precondition is enforced by clearing every
@@ -563,8 +566,9 @@ def test_post_message_registers_tool_when_flag_on(
     )
     assert response.status_code == 200
     tools = captured["build_agent_kwargs"]["tools"]
-    assert len(tools) == 1
-    assert tools[0].tool_name == tool_name
+    # Order-insensitive: _build_tool_registry documents registration
+    # order as not significant (Strands keys tools by name).
+    assert sorted(t.tool_name for t in tools) == sorted(tool_names)
 
 
 def test_post_message_omits_tools_when_all_flags_off(
@@ -628,6 +632,40 @@ def test_tool_registry_excludes_code_exec_when_flag_off(
 
     registry = _build_tool_registry()
     assert code_exec not in registry
+
+
+def test_tool_registry_includes_web_fetch_when_web_search_flag_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``STARTER_WEB_SEARCH_ENABLED=1`` registers ``web_fetch`` alongside
+    ``web_search`` — the pair shares one flag because both are backed by
+    the same Exa API key (#232)."""
+    from channel.agents.tools.web_fetch import web_fetch
+
+    monkeypatch.setenv("STARTER_WEB_SEARCH_ENABLED", "1")
+    monkeypatch.delenv("STARTER_CLOCK_TOOL_ENABLED", raising=False)
+    monkeypatch.delenv("STARTER_CODE_EXEC_ENABLED", raising=False)
+
+    from channel.api.chats import _build_tool_registry
+
+    registry = _build_tool_registry()
+    assert web_fetch in registry
+
+
+def test_tool_registry_excludes_web_fetch_when_flag_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``STARTER_WEB_SEARCH_ENABLED`` unset → ``web_fetch`` NOT registered."""
+    from channel.agents.tools.web_fetch import web_fetch
+
+    monkeypatch.delenv("STARTER_WEB_SEARCH_ENABLED", raising=False)
+    monkeypatch.delenv("STARTER_CLOCK_TOOL_ENABLED", raising=False)
+    monkeypatch.delenv("STARTER_CODE_EXEC_ENABLED", raising=False)
+
+    from channel.api.chats import _build_tool_registry
+
+    registry = _build_tool_registry()
+    assert web_fetch not in registry
 
 
 def test_regenerate_forwards_payload_effort_to_build_agent(
