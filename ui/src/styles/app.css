@@ -421,7 +421,7 @@ html.is-electron-mac .sb-top {
   align-self: center;
   padding: 6px 16px;
   border: 1px solid var(--border);
-  border-radius: var(--radius-pill, 999px);
+  border-radius: var(--r-pill);
   background: var(--raised);
   color: var(--ink-soft);
   font-size: 13px;
