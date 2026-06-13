@@ -29,6 +29,7 @@ from channel.storage import (
     get_chat_by_id,
     list_chats_for_user,
     list_messages,
+    list_recent_messages,
     patch_chat,
     put_message,
     update_chat_index,
@@ -390,6 +391,35 @@ def test_list_messages_returns_chronological_order(table: FakeTable) -> None:
     assert [m.text for m in msgs] == ["one", "two"]
 
 
+def test_list_recent_messages_returns_newest_n_in_chronological_order(
+    table: FakeTable,
+) -> None:
+    """The agent-history feed must get the NEWEST N messages (#244).
+
+    ``list_messages`` + ``Limit`` returns the oldest N; the helper under
+    test reads from the newest end and re-sorts chronologically.
+    """
+    chat = create_chat(user_id="u-1", title=None, model_default="m")
+    for i in range(7):
+        put_message(chat_id=chat.chat_id, role=MessageRole.USER, text=f"msg-{i}", model=None)
+
+    msgs = list_recent_messages(chat.chat_id, limit=3)
+
+    assert [m.text for m in msgs] == ["msg-4", "msg-5", "msg-6"]
+
+
+def test_list_recent_messages_returns_all_when_chat_is_shorter_than_limit(
+    table: FakeTable,
+) -> None:
+    chat = create_chat(user_id="u-1", title=None, model_default="m")
+    put_message(chat_id=chat.chat_id, role=MessageRole.USER, text="one", model=None)
+    put_message(chat_id=chat.chat_id, role=MessageRole.ASSISTANT, text="two", model="m")
+
+    msgs = list_recent_messages(chat.chat_id, limit=10)
+
+    assert [m.text for m in msgs] == ["one", "two"]
+
+
 def test_list_messages_paginates_with_cursor(table: FakeTable) -> None:
     """Walk through 5 messages two-at-a-time, verifying cursor round-trips.
 
@@ -521,6 +551,29 @@ def test_delete_last_assistant_message_drops_only_the_assistant_row(
 
     msgs, _ = list_messages(chat.chat_id, limit=10, cursor=None)
     assert [m.role for m in msgs] == [MessageRole.USER]
+
+
+def test_delete_last_assistant_message_targets_true_last_in_long_chat(
+    table: FakeTable,
+) -> None:
+    """In a chat longer than the helper's read window, the ACTUAL newest
+    assistant turn must be deleted — not the newest within the oldest-50
+    window (#244).
+    """
+    chat = create_chat(user_id="u", title=None, model_default="m")
+    for i in range(30):
+        put_message(chat_id=chat.chat_id, role=MessageRole.USER, text=f"u-{i}", model=None)
+        put_message(chat_id=chat.chat_id, role=MessageRole.ASSISTANT, text=f"a-{i}", model="m")
+
+    deleted = delete_last_assistant_message(chat.chat_id)
+
+    assert deleted is not None and deleted.text == "a-29"
+    remaining_texts = {
+        item["text"]
+        for item in table.items.values()
+        if item["PK"] == f"CHAT#{chat.chat_id}" and item.get("role") == "assistant"
+    }
+    assert "a-29" not in remaining_texts and len(remaining_texts) == 29
 
 
 def test_delete_last_assistant_message_returns_none_when_no_assistant_rows(

@@ -365,8 +365,8 @@ def test_post_message_returns_sse_via_strands(
     # _stream_bedrock_reply now loads prior history to seed the agent —
     # stub it to "no prior context".
     monkeypatch.setattr(
-        "channel.api.chats.storage.list_messages",
-        lambda *_a, **_kw: ([], None),
+        "channel.api.chats.storage.list_recent_messages",
+        lambda *_a, **_kw: [],
     )
 
     # Fake Strands Agent that yields a deterministic event sequence.
@@ -443,8 +443,8 @@ def _stub_storage_for_one_turn(
     )
     monkeypatch.setattr("channel.api.chats.storage.update_chat_index", lambda **_: None)
     monkeypatch.setattr(
-        "channel.api.chats.storage.list_messages",
-        lambda *_a, **_kw: ([], None),
+        "channel.api.chats.storage.list_recent_messages",
+        lambda *_a, **_kw: [],
     )
     monkeypatch.setattr(
         "channel.api.chats.storage.get_prefs",
@@ -457,6 +457,7 @@ def _fake_streaming_agent_factory(captured: dict[str, Any]):
     """Return a build_agent stub that records its kwargs and yields a tiny stream."""
 
     async def fake_stream(self, prompt):
+        captured["prompt"] = prompt
         yield {"event": {"contentBlockDelta": {"delta": {"text": "hi"}}}}
         yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
         yield {"event": {"metadata": {"usage": {"inputTokens": 1, "outputTokens": 1}}}}
@@ -707,8 +708,8 @@ def test_regenerate_forwards_payload_effort_to_build_agent(
         created_at="t",
     )
     monkeypatch.setattr(
-        "channel.api.chats.storage.list_messages",
-        lambda *_a, **_kw: ([user_msg], None),
+        "channel.api.chats.storage.list_recent_messages",
+        lambda *_a, **_kw: [user_msg],
     )
     monkeypatch.setattr(
         "channel.api.chats.storage.get_prefs",
@@ -727,6 +728,136 @@ def test_regenerate_forwards_payload_effort_to_build_agent(
     )
     assert response.status_code == 200
     assert captured["build_agent_kwargs"]["effort"] == "High"
+
+
+# ---------------------------------------------------------------------------
+# Long-chat history window (#244)
+# ---------------------------------------------------------------------------
+
+
+def _stub_storage_with_history(monkeypatch: pytest.MonkeyPatch, history: list[Message]) -> Chat:
+    """Stub the storage boundary with semantics-faithful history reads.
+
+    ``list_messages`` pages from the OLDEST end (ascending SK + ``Limit``)
+    while ``list_recent_messages`` returns the NEWEST ``limit`` rows in
+    chronological order — mirroring real DynamoDB behaviour so these
+    regression tests fail if a call site reads from the wrong end (#244).
+    """
+
+    chat = Chat(
+        chat_id="c1",
+        user_id="u-1",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="claude-sonnet-4-6",
+        message_count=len(history),
+    )
+    monkeypatch.setattr("channel.api.chats.storage.get_chat_by_id", lambda _: chat)
+    monkeypatch.setattr(
+        "channel.api.chats.storage.put_message",
+        lambda **kwargs: Message(
+            chat_id=kwargs["chat_id"],
+            msg_id="m",
+            role=kwargs["role"],
+            text=kwargs["text"],
+            model=kwargs.get("model"),
+            created_at="t",
+        ),
+    )
+    monkeypatch.setattr("channel.api.chats.storage.update_chat_index", lambda **_: None)
+    monkeypatch.setattr(
+        "channel.api.chats.storage.list_messages",
+        lambda _cid, *, limit, cursor: (history[:limit], None),
+    )
+    monkeypatch.setattr(
+        "channel.api.chats.storage.list_recent_messages",
+        lambda _cid, *, limit: history[-limit:],
+    )
+    return chat
+
+
+def test_post_message_feeds_newest_history_window_to_agent(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Streaming a chat with > 100 prior messages must seed Strands with
+    the most recent 100 turns, NOT the oldest 100 (#244)."""
+
+    history = [
+        Message(
+            chat_id="c1",
+            msg_id=f"m{i}",
+            role=MessageRole.USER if i % 2 == 0 else MessageRole.ASSISTANT,
+            text=f"turn-{i}",
+            model=None,
+            created_at=f"t{i:04d}",
+        )
+        for i in range(120)
+    ]
+    _stub_storage_with_history(monkeypatch, history)
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        "channel.api.chats.build_agent",
+        _fake_streaming_agent_factory(captured),
+    )
+
+    response = client.post(
+        "/api/chats/c1/messages",
+        json={"message": "hi", "model": "claude-sonnet-4-6"},
+    )
+    assert response.status_code == 200
+
+    texts = [m["content"][0]["text"] for m in captured["build_agent_kwargs"]["prior_messages"]]
+    assert len(texts) == 100
+    assert texts[0] == "turn-20"
+    assert texts[-1] == "turn-119"
+
+
+def test_regenerate_picks_true_last_user_message_in_long_chat(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regenerate on a chat with > 50 messages must re-stream from the
+    chat's ACTUAL last user message, not the most-recent user turn within
+    the oldest-50 window (#244)."""
+
+    history: list[Message] = []
+    for i in range(30):
+        history.append(
+            Message(
+                chat_id="c1",
+                msg_id=f"u{i}",
+                role=MessageRole.USER,
+                text=f"u-{i}",
+                model=None,
+                created_at=f"t{2 * i:04d}",
+            )
+        )
+        history.append(
+            Message(
+                chat_id="c1",
+                msg_id=f"a{i}",
+                role=MessageRole.ASSISTANT,
+                text=f"a-{i}",
+                model="m",
+                created_at=f"t{2 * i + 1:04d}",
+            )
+        )
+    _stub_storage_with_history(monkeypatch, history)
+    monkeypatch.setattr(
+        "channel.api.chats.storage.delete_last_assistant_message",
+        lambda _cid: None,
+    )
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        "channel.api.chats.build_agent",
+        _fake_streaming_agent_factory(captured),
+    )
+
+    response = client.post("/api/chats/c1/regenerate", json={"model": "claude-sonnet-4-6"})
+    assert response.status_code == 200
+    assert captured["prompt"] == "u-29"
 
 
 # ---------------------------------------------------------------------------
@@ -1329,8 +1460,8 @@ def _stub_first_round_trip_chat(monkeypatch: pytest.MonkeyPatch) -> Chat:
     )
     monkeypatch.setattr("channel.api.chats.storage.update_chat_index", lambda **_: None)
     monkeypatch.setattr(
-        "channel.api.chats.storage.list_messages",
-        lambda *_a, **_kw: ([], None),
+        "channel.api.chats.storage.list_recent_messages",
+        lambda *_a, **_kw: [],
     )
     return chat
 
@@ -1406,8 +1537,8 @@ def test_post_message_skips_titler_on_non_first_round_trip(
     )
     monkeypatch.setattr("channel.api.chats.storage.update_chat_index", lambda **_: None)
     monkeypatch.setattr(
-        "channel.api.chats.storage.list_messages",
-        lambda *_a, **_kw: ([], None),
+        "channel.api.chats.storage.list_recent_messages",
+        lambda *_a, **_kw: [],
     )
 
     titler_built: list[bool] = []
@@ -1569,8 +1700,8 @@ def _stub_existing_chat(monkeypatch: pytest.MonkeyPatch) -> Chat:
     )
     monkeypatch.setattr("channel.api.chats.storage.update_chat_index", lambda **_: None)
     monkeypatch.setattr(
-        "channel.api.chats.storage.list_messages",
-        lambda *_a, **_kw: ([], None),
+        "channel.api.chats.storage.list_recent_messages",
+        lambda *_a, **_kw: [],
     )
     return chat
 
@@ -1890,8 +2021,8 @@ def test_post_message_seeds_agent_with_prior_chat_history(
         ),
     ]
     monkeypatch.setattr(
-        "channel.api.chats.storage.list_messages",
-        lambda *_a, **_kw: (prior, None),
+        "channel.api.chats.storage.list_recent_messages",
+        lambda *_a, **_kw: prior,
     )
 
     captured: dict[str, Any] = {}
@@ -1969,8 +2100,8 @@ def test_regenerate_drops_trailing_user_from_seeded_history(
         ),
     ]
     monkeypatch.setattr(
-        "channel.api.chats.storage.list_messages",
-        lambda *_a, **_kw: (prior, None),
+        "channel.api.chats.storage.list_recent_messages",
+        lambda *_a, **_kw: prior,
     )
 
     captured: dict[str, Any] = {}
@@ -2081,8 +2212,8 @@ def test_post_message_stores_result_on_fresh_idempotency_key(
     )
     monkeypatch.setattr("channel.api.chats.storage.update_chat_index", lambda **_: None)
     monkeypatch.setattr(
-        "channel.api.chats.storage.list_messages",
-        lambda *_a, **_kw: ([], None),
+        "channel.api.chats.storage.list_recent_messages",
+        lambda *_a, **_kw: [],
     )
     # Fresh key — reserve returns None.
     monkeypatch.setattr("channel.api.chats.storage.reserve_idempotency_key", lambda **_: None)
@@ -2161,19 +2292,16 @@ def test_regenerate_drops_last_assistant_and_restreams(
         lambda chat_id: deleted_calls.append(chat_id),
     )
     monkeypatch.setattr(
-        "channel.api.chats.storage.list_messages",
-        lambda *_a, **_kw: (
-            [
-                Message(
-                    chat_id="c1",
-                    msg_id="u-1",
-                    role=MessageRole.USER,
-                    text="redo",
-                    created_at="t",
-                )
-            ],
-            None,
-        ),
+        "channel.api.chats.storage.list_recent_messages",
+        lambda *_a, **_kw: [
+            Message(
+                chat_id="c1",
+                msg_id="u-1",
+                role=MessageRole.USER,
+                text="redo",
+                created_at="t",
+            )
+        ],
     )
 
     async def fake_stream(self, prompt):
@@ -2236,7 +2364,7 @@ def test_regenerate_returns_400_when_no_user_messages(
         ),
     )
     monkeypatch.setattr("channel.api.chats.storage.delete_last_assistant_message", lambda _: None)
-    monkeypatch.setattr("channel.api.chats.storage.list_messages", lambda *_a, **_kw: ([], None))
+    monkeypatch.setattr("channel.api.chats.storage.list_recent_messages", lambda *_a, **_kw: [])
 
     response = client.post("/api/chats/c1/regenerate", json={})
     assert response.status_code == 400
@@ -3049,7 +3177,7 @@ def _stub_send_path_for_attachments(
     }
 
     monkeypatch.setattr("channel.api.chats.storage.get_chat_by_id", lambda _: chat)
-    monkeypatch.setattr("channel.api.chats.storage.list_messages", lambda *_a, **_kw: ([], None))
+    monkeypatch.setattr("channel.api.chats.storage.list_recent_messages", lambda *_a, **_kw: [])
     monkeypatch.setattr("channel.api.chats.storage.update_chat_index", lambda **_: None)
 
     # Resolve attachments by id — return None for ids not in `owned`.
@@ -3439,8 +3567,8 @@ def test_regenerate_emits_sse_attachment_error_on_failed_verify(
         created_at="t",
     )
     monkeypatch.setattr(
-        "channel.api.chats.storage.list_messages",
-        lambda *_a, **_kw: ([prior_user], None),
+        "channel.api.chats.storage.list_recent_messages",
+        lambda *_a, **_kw: [prior_user],
     )
     monkeypatch.setattr(
         "channel.api.chats.storage.delete_last_assistant_message",
@@ -3484,8 +3612,8 @@ def test_regenerate_replays_attachments_from_prior_user_turn(
         created_at="t",
     )
     monkeypatch.setattr(
-        "channel.api.chats.storage.list_messages",
-        lambda *_a, **_kw: ([prior_user], None),
+        "channel.api.chats.storage.list_recent_messages",
+        lambda *_a, **_kw: [prior_user],
     )
     monkeypatch.setattr(
         "channel.api.chats.storage.delete_last_assistant_message", lambda *_a, **_kw: None
