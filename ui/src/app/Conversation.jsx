@@ -304,7 +304,7 @@ export default function Conversation() {
   const navigate = useNavigate();
   const chats = useChats();
   const currentChat = chats.chats.find((c) => c.chat_id === chatId) ?? null;
-  const { turns, send, regenerate, status } = useChatStream(chatId, {
+  const { turns, send, regenerate, status, loadOlder, hasOlder } = useChatStream(chatId, {
     // Phase 7d: backend auto-titles fresh chats after the first reply
     // and emits a ``title_suggested`` SSE event. Update the sidebar
     // immediately (server already persisted via storage.patch_chat).
@@ -451,6 +451,15 @@ export default function Conversation() {
             <div className="convo-error" role="alert">
               Something went wrong loading this conversation.
             </div>
+          )}
+          {hasOlder && (
+            <button
+              type="button"
+              className="load-earlier"
+              onClick={() => loadOlder()}
+            >
+              Load earlier messages
+            </button>
           )}
           {turns.map((t, i) => {
             const isLast = i === turns.length - 1;

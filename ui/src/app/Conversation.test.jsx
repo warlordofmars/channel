@@ -54,6 +54,8 @@ function mockStream(overrides = {}) {
     abort: vi.fn(),
     status: "idle",
     error: null,
+    loadOlder: vi.fn(),
+    hasOlder: false,
     ...overrides,
   };
   useChatStreamModule.useChatStream.mockReturnValue(ret);
@@ -118,6 +120,23 @@ describe("Conversation", () => {
     expect(document.body.querySelector(".turn.user .bubble").textContent).toBe(
       "hello world",
     );
+  });
+
+  it("shows 'Load earlier messages' only when hasOlder, and calls loadOlder on click (#270)", () => {
+    const loadOlder = vi.fn();
+    mockStream({ hasOlder: true, loadOlder });
+    renderAt("/app/c/c1");
+    const btn = screen.getByRole("button", { name: /load earlier messages/i });
+    fireEvent.click(btn);
+    expect(loadOlder).toHaveBeenCalledTimes(1);
+  });
+
+  it("hides 'Load earlier messages' when there is no older history", () => {
+    mockStream({ hasOlder: false });
+    renderAt("/app/c/c1");
+    expect(
+      screen.queryByRole("button", { name: /load earlier messages/i }),
+    ).toBeNull();
   });
 
   it("renders an assistant turn with model label and markdown", () => {
