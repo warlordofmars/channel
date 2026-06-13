@@ -390,6 +390,20 @@ def test_get_chat_rejects_cursor_for_a_different_chat(
     assert client.get(f"/api/chats/c1?before={foreign}").status_code == 400
 
 
+def test_get_chat_rejects_cursor_with_non_message_sk(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cursor with the right ``PK`` but an ``SK`` that isn't a message
+    key (e.g. ``META``) must be a 400 — the cursor is only ever a message
+    row key, and a non-``MSG#`` ``SK`` as ``ExclusiveStartKey`` is a
+    crafted/malformed request, not a real page boundary."""
+    _chat_for_cursor_tests(monkeypatch)
+    bad = base64.urlsafe_b64encode(
+        json.dumps({"PK": "CHAT#c1", "SK": "META"}).encode()
+    ).decode()
+    assert client.get(f"/api/chats/c1?before={bad}").status_code == 400
+
+
 def test_get_chat_returns_404_for_unknown(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

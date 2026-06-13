@@ -174,6 +174,37 @@ describe("Conversation", () => {
     expect(screen.getByText("newer")).toBeTruthy();
   });
 
+  it("a no-op Load earlier followed by a new tail message does not hijack scrolling (#270)", () => {
+    // Click sets the prepend anchor, but loadOlder no-ops (head unchanged).
+    // The next tail message must take the scroll-to-bottom branch, not the
+    // position-preserving one, and the stale anchor must be cleared.
+    const ret = mockStream({
+      turns: [{ msg_id: "m1", role: "user", text: "head" }],
+      hasOlder: true,
+    });
+    const tree = () => (
+      <MemoryRouter initialEntries={["/app/c/c1"]}>
+        <Routes>
+          <Route path="/app/c/:id" element={<Conversation />} />
+        </Routes>
+      </MemoryRouter>
+    );
+    const { rerender } = render(tree());
+    fireEvent.click(
+      screen.getByRole("button", { name: /load earlier messages/i }),
+    );
+    // A new assistant turn arrives at the TAIL — head id is unchanged.
+    useChatStreamModule.useChatStream.mockReturnValue({
+      ...ret,
+      turns: [
+        { msg_id: "m1", role: "user", text: "head" },
+        { msg_id: "m2", role: "assistant", text: "tail" },
+      ],
+    });
+    rerender(tree());
+    expect(screen.getByText("tail")).toBeTruthy();
+  });
+
   it("renders an assistant turn with model label and markdown", () => {
     mockStream({
       turns: [

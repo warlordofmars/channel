@@ -413,6 +413,11 @@ export function useChatStream(chatId, { onTitleSuggested } = {}) {
       if (loadedChatIdRef.current !== chatId) return;
       setTurns((prev) => [...messages, ...prev]);
       setOlderCursor(older ?? null);
+    } catch {
+      // Loading older history is non-fatal: the current turns stay usable
+      // and the cursor is unchanged, so the user can retry. Swallow so the
+      // fire-and-forget caller (the "Load earlier" button) doesn't surface
+      // an unhandled promise rejection.
     } finally {
       loadingOlderRef.current = false;
     }

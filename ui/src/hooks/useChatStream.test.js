@@ -1164,6 +1164,25 @@ describe("useChatStream", () => {
     expect(result.current.turns.map((t) => t.msg_id)).toEqual(["c2-only"]);
   });
 
+  it("loadOlder swallows fetch errors so a fire-and-forget call can't reject (#270)", async () => {
+    api.getChat.mockResolvedValueOnce({
+      chat: { chat_id: "c1" },
+      messages: [{ msg_id: "m1", role: "user", text: "a" }],
+      older_cursor: "cur-1",
+    });
+    const { result } = renderHook(() => useChatStream("c1"));
+    await waitFor(() => expect(result.current.status).toBe("idle"));
+
+    api.getChat.mockRejectedValueOnce(new Error("network"));
+    await act(async () => {
+      await expect(result.current.loadOlder()).resolves.toBeUndefined();
+    });
+
+    // Current turns stay usable and the cursor is unchanged (retryable).
+    expect(result.current.turns.map((t) => t.msg_id)).toEqual(["m1"]);
+    expect(result.current.hasOlder).toBe(true);
+  });
+
   it("loadOlder is a no-op when there is no older page", async () => {
     api.getChat.mockResolvedValue({
       chat: { chat_id: "c1" },

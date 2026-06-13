@@ -434,6 +434,7 @@ def _decode_cursor(token: str, chat_id: str) -> dict[str, Any]:
         not isinstance(key, dict)
         or key.get("PK") != f"CHAT#{chat_id}"
         or not isinstance(key.get("SK"), str)
+        or not key["SK"].startswith("MSG#")
     ):
         raise HTTPException(status_code=400, detail="invalid cursor")
     return key

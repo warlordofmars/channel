@@ -412,18 +412,27 @@ export default function Conversation() {
   // reader's position (scrollTop += height delta) instead of snapping to
   // the bottom, which would defeat backward pagination.
   const prependAnchorRef = useRef(null);
+  const prevFirstIdRef = useRef(null);
 
   // Auto-scroll to the bottom on any turns change (catches each stream
   // tick) — EXCEPT right after an older page is prepended, where we
-  // preserve the reader's position.
+  // preserve the reader's position. A prepend is the only case where the
+  // head turn changes while an anchor is set; a no-op/failed Load-earlier
+  // click leaves the head unchanged, so we still scroll to the bottom and
+  // always clear the anchor so a stale one can't hijack a later tail
+  // change.
   useEffect(function autoScrollOnTurns() {
     const el = ref.current;
-    if (prependAnchorRef.current != null) {
+    const firstId = turns.length ? turns[0].msg_id : null;
+    const prepended =
+      prependAnchorRef.current != null && firstId !== prevFirstIdRef.current;
+    prevFirstIdRef.current = firstId;
+    if (prepended) {
       el.scrollTop += el.scrollHeight - prependAnchorRef.current;
-      prependAnchorRef.current = null;
     } else {
       el.scrollTop = el.scrollHeight;
     }
+    prependAnchorRef.current = null;
   }, [turns]);
 
   function handleLoadEarlier() {
