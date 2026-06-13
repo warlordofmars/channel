@@ -398,9 +398,7 @@ def test_get_chat_rejects_cursor_with_non_message_sk(
     row key, and a non-``MSG#`` ``SK`` as ``ExclusiveStartKey`` is a
     crafted/malformed request, not a real page boundary."""
     _chat_for_cursor_tests(monkeypatch)
-    bad = base64.urlsafe_b64encode(
-        json.dumps({"PK": "CHAT#c1", "SK": "META"}).encode()
-    ).decode()
+    bad = base64.urlsafe_b64encode(json.dumps({"PK": "CHAT#c1", "SK": "META"}).encode()).decode()
     assert client.get(f"/api/chats/c1?before={bad}").status_code == 400
 
 
