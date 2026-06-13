@@ -493,8 +493,10 @@ async def delete_chat(
 def _build_tool_registry() -> list[Any]:
     """Assemble the per-turn tool registry from env-var kill switches.
 
-    Each tool's registration is gated by its own ``STARTER_<NAME>_ENABLED``
-    flag. The code treats anything other than ``"1"`` as disabled —
+    Each tool's registration is gated by a ``STARTER_<NAME>_ENABLED``
+    flag — one flag per tool, except ``web_fetch``, which rides
+    ``STARTER_WEB_SEARCH_ENABLED`` alongside ``web_search`` (see
+    below). The code treats anything other than ``"1"`` as disabled —
     so an unset flag in a stale dev env (e.g. someone running tests
     without the CDK env vars wired up) results in the tool being
     silently omitted rather than crashing on import.
