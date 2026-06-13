@@ -352,6 +352,14 @@ def _chat_for_cursor_tests(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+def _cursor_token(payload: Any) -> str:
+    """Encode a `before` cursor the way the SPA round-trips it, for the
+    malformed-cursor tests. Accepts a JSON-serializable object, or raw
+    ``bytes`` for the non-UTF8 case."""
+    raw = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
+    return base64.urlsafe_b64encode(raw).decode()
+
+
 def test_get_chat_rejects_non_utf8_base64_cursor(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -362,7 +370,7 @@ def test_get_chat_rejects_non_utf8_base64_cursor(
     from channel.api.chats import _encode_cursor  # noqa: F401  (kept symmetric)
 
     _chat_for_cursor_tests(monkeypatch)
-    bad = base64.urlsafe_b64encode(b"\xff\xfe\xfa").decode()
+    bad = _cursor_token(b"\xff\xfe\xfa")
     assert client.get(f"/api/chats/c1?before={bad}").status_code == 400
 
 
@@ -373,7 +381,7 @@ def test_get_chat_rejects_cursor_shaped_as_non_dict(
     raise inside DynamoDB as ``ExclusiveStartKey`` — reject as 400 before
     it reaches storage."""
     _chat_for_cursor_tests(monkeypatch)
-    bad = base64.urlsafe_b64encode(json.dumps([1, 2, 3]).encode()).decode()
+    bad = _cursor_token([1, 2, 3])
     assert client.get(f"/api/chats/c1?before={bad}").status_code == 400
 
 
@@ -384,9 +392,7 @@ def test_get_chat_rejects_cursor_for_a_different_chat(
     forwarded — DynamoDB would reject the cross-partition ``ExclusiveStartKey``
     as a 500. The cursor is scoped to its chat; mismatches are 400."""
     _chat_for_cursor_tests(monkeypatch)
-    foreign = base64.urlsafe_b64encode(
-        json.dumps({"PK": "CHAT#other", "SK": "MSG#2026#m1"}).encode()
-    ).decode()
+    foreign = _cursor_token({"PK": "CHAT#other", "SK": "MSG#2026#m1"})
     assert client.get(f"/api/chats/c1?before={foreign}").status_code == 400
 
 
@@ -398,7 +404,7 @@ def test_get_chat_rejects_cursor_with_non_message_sk(
     row key, and a non-``MSG#`` ``SK`` as ``ExclusiveStartKey`` is a
     crafted/malformed request, not a real page boundary."""
     _chat_for_cursor_tests(monkeypatch)
-    bad = base64.urlsafe_b64encode(json.dumps({"PK": "CHAT#c1", "SK": "META"}).encode()).decode()
+    bad = _cursor_token({"PK": "CHAT#c1", "SK": "META"})
     assert client.get(f"/api/chats/c1?before={bad}").status_code == 400
 
 

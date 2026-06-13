@@ -62,15 +62,19 @@ function mockStream(overrides = {}) {
   return ret;
 }
 
-function renderAt(path, state) {
-  const entry = state ? { pathname: path, state } : path;
-  return render(
+function conversationTree(entry) {
+  return (
     <MemoryRouter initialEntries={[entry]}>
       <Routes>
         <Route path="/app/c/:id" element={<Conversation />} />
       </Routes>
-    </MemoryRouter>,
+    </MemoryRouter>
   );
+}
+
+function renderAt(path, state) {
+  const entry = state ? { pathname: path, state } : path;
+  return render(conversationTree(entry));
 }
 
 describe("Conversation", () => {
@@ -149,14 +153,7 @@ describe("Conversation", () => {
     });
     // A fresh element each time — passing the same reference to rerender
     // makes React bail out (referential equality) and skip the re-render.
-    const tree = () => (
-      <MemoryRouter initialEntries={["/app/c/c1"]}>
-        <Routes>
-          <Route path="/app/c/:id" element={<Conversation />} />
-        </Routes>
-      </MemoryRouter>
-    );
-    const { rerender } = render(tree());
+    const { rerender } = render(conversationTree("/app/c/c1"));
     fireEvent.click(
       screen.getByRole("button", { name: /load earlier messages/i }),
     );
@@ -169,7 +166,7 @@ describe("Conversation", () => {
       ],
       hasOlder: false,
     });
-    rerender(tree());
+    rerender(conversationTree("/app/c/c1"));
     expect(screen.getByText("older")).toBeTruthy();
     expect(screen.getByText("newer")).toBeTruthy();
   });
@@ -182,14 +179,7 @@ describe("Conversation", () => {
       turns: [{ msg_id: "m1", role: "user", text: "head" }],
       hasOlder: true,
     });
-    const tree = () => (
-      <MemoryRouter initialEntries={["/app/c/c1"]}>
-        <Routes>
-          <Route path="/app/c/:id" element={<Conversation />} />
-        </Routes>
-      </MemoryRouter>
-    );
-    const { rerender } = render(tree());
+    const { rerender } = render(conversationTree("/app/c/c1"));
     fireEvent.click(
       screen.getByRole("button", { name: /load earlier messages/i }),
     );
@@ -201,7 +191,7 @@ describe("Conversation", () => {
         { msg_id: "m2", role: "assistant", text: "tail" },
       ],
     });
-    rerender(tree());
+    rerender(conversationTree("/app/c/c1"));
     expect(screen.getByText("tail")).toBeTruthy();
   });
 
