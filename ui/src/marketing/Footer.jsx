@@ -37,6 +37,9 @@ export default function Footer() {
           {features}
           {models}
           <Link to="/pricing">Pricing</Link>
+          {/* /docs/ is VitePress, outside the SPA route tree — plain <a> for
+              full-page navigation (a <Link> would route client-side and fail). */}
+          <a href="/docs/">Docs</a>
           <Link to="/app">Open app</Link>
         </div>
         <div className="foot-col">

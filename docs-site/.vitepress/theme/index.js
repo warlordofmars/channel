@@ -9,8 +9,15 @@ export default {
   // right of the VitePress navbar.
   Layout() {
     return h(DefaultTheme.Layout, null, {
+      // Order: Product · Models · Pricing · Download · Docs (active) · Sign in.
+      // The marketing links are plain <a> outside /docs/, so the capture-phase
+      // click handler in enhanceApp() forces a real full-page navigation.
       "nav-bar-content-after": () =>
         h("div", { class: "docs-nav-group" }, [
+          h("a", { href: "/product", class: "docs-nav-link" }, "Product"),
+          h("a", { href: "/models", class: "docs-nav-link" }, "Models"),
+          h("a", { href: "/pricing", class: "docs-nav-link" }, "Pricing"),
+          h("a", { href: "/download", class: "docs-nav-link" }, "Download"),
           h(
             "a",
             { href: "/docs/", class: "docs-nav-link docs-nav-link--active" },
@@ -20,6 +27,10 @@ export default {
         ]),
       "nav-screen-content-after": () =>
         h("div", { class: "docs-screen-group" }, [
+          h("a", { href: "/product", class: "docs-screen-nav-link" }, "Product"),
+          h("a", { href: "/models", class: "docs-screen-nav-link" }, "Models"),
+          h("a", { href: "/pricing", class: "docs-screen-nav-link" }, "Pricing"),
+          h("a", { href: "/download", class: "docs-screen-nav-link" }, "Download"),
           h(
             "a",
             {
