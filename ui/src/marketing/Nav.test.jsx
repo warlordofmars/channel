@@ -46,6 +46,22 @@ describe("Nav", () => {
     expect(screen.getByRole("link", { name: "Models" }).className).not.toContain("on");
   });
 
+  it("renders a Docs link to /docs/ outside the SPA route tree (#231)", () => {
+    renderNavAt("/");
+    const docs = screen.getByRole("link", { name: "Docs" });
+    expect(docs.getAttribute("href")).toBe("/docs/");
+    expect(docs.tagName).toBe("A");
+    // Not active on a marketing route.
+    expect(docs.className).not.toContain("on");
+  });
+
+  it("marks the Docs link active on a /docs path (parity no-op) (#231)", () => {
+    // No SPA route is /docs today, but the active-state check is kept for
+    // parity; MemoryRouter exercises the startsWith('/docs') branch.
+    renderNavAt("/docs/getting-started");
+    expect(screen.getByRole("link", { name: "Docs" }).className).toContain("on");
+  });
+
   it("renders a Sign in link pointing at /app", () => {
     renderNavAt("/");
     expect(screen.getByRole("link", { name: "Sign in" }).getAttribute("href")).toBe("/app");

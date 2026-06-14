@@ -27,6 +27,12 @@ export default function Nav() {
           <Link to="/product" className={pathname === "/product" ? "on" : ""}>Product</Link>
           <Link to="/models" className={pathname === "/models" ? "on" : ""}>Models</Link>
           <Link to="/pricing" className={pathname === "/pricing" ? "on" : ""}>Pricing</Link>
+          {/* /docs/ is served by VitePress outside the SPA route tree, so this
+              is a plain <a> (full-page navigation). A React Router <Link> would
+              try client-side routing into a route that doesn't exist. The
+              active class is a no-op today (the SPA never renders /docs) but
+              kept for parity with the other links. */}
+          <a href="/docs/" className={pathname.startsWith("/docs") ? "on" : ""}>Docs</a>
           <Link to="/download" className={pathname === "/download" ? "on" : ""}>Download</Link>
         </nav>
         <div className="nav-right">

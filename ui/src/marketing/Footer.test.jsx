@@ -52,4 +52,11 @@ describe("Footer", () => {
       expect(screen.getByRole("link", { name }).getAttribute("href")).toBe("/download");
     }
   });
+
+  it("renders a Docs link to /docs/ as a plain <a> outside the SPA (#231)", () => {
+    renderFooterAt("/");
+    const docs = screen.getByRole("link", { name: "Docs" });
+    expect(docs.getAttribute("href")).toBe("/docs/");
+    expect(docs.tagName).toBe("A");
+  });
 });
