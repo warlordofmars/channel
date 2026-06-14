@@ -1055,13 +1055,14 @@ function handler(event) {
         return request;
     }
 
-    // /docs or /docs/ → redirect to the first doc page
+    // /docs or /docs/ → serve the docs homepage. Rewrite (not redirect)
+    // to /docs/index.html, which VitePress builds from docs-site/index.md.
+    // A previous 302 pointed at a getting-started directory path VitePress
+    // never produces (no index.html there), so it fell through to the S3
+    // 404 → SPA-index fallback and served the marketing app (#230).
     if (uri === '/docs' || uri === '/docs/') {
-        return {
-            statusCode: 302,
-            statusDescription: 'Found',
-            headers: { location: { value: '/docs/getting-started/' } }
-        };
+        request.uri = '/docs/index.html';
+        return request;
     }
 
     // /docs/<path>/ → /docs/<path>.html  (trailing slash, no extension)

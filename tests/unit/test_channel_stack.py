@@ -562,3 +562,27 @@ def test_api_lambda_has_code_exec_env_vars(dev_template):
     env_vars = api_fn["Properties"]["Environment"]["Variables"]
     assert "STARTER_CODE_EXEC_LAMBDA_ARN" in env_vars
     assert env_vars.get("STARTER_CODE_EXEC_ENABLED") == "1"
+
+
+def _docs_rewrite_function_code(template: assertions.Template) -> str:
+    """Return the inline JS of the ``/docs`` CloudFront rewrite function."""
+    funcs = template.find_resources("AWS::CloudFront::Function")
+    for fn in funcs.values():
+        code = fn["Properties"].get("FunctionCode", "")
+        if "/docs" in code:
+            return code
+    raise AssertionError("docs CloudFront rewrite function not found in template")
+
+
+def test_docs_root_rewrites_to_index_not_redirect_to_missing_path(dev_template):
+    """#230: ``/docs`` and ``/docs/`` must REWRITE to ``/docs/index.html``
+    (which VitePress builds from ``docs-site/index.md``), not 302-redirect
+    to ``/docs/getting-started/`` — VitePress never produces a
+    ``getting-started/index.html``, so the old redirect fell through to the
+    S3 404 → SPA-index fallback and served the marketing app at a docs URL.
+    """
+    code = _docs_rewrite_function_code(dev_template)
+    # The landing page is served by rewriting to the real built file.
+    assert "/docs/index.html" in code
+    # The broken redirect target must be gone.
+    assert "/docs/getting-started/" not in code
