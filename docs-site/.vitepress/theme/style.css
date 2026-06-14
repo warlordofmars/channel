@@ -1,56 +1,91 @@
 /* ============================================================
-   Brand colour — orange, matching marketing site (#e8a020)
+   Channel docs theme — palette matched to the marketing site.
+   Values mirror ui/src/styles/channel.css (OKLCH warm-neutral +
+   terracotta accent), replacing VitePress's default navy + amber.
+
+   Everything (incl. the navbar) is theme-aware via the --vp-c-*
+   tokens below, so light mode gets a light navbar + warm off-white
+   canvas and dark mode gets the warm-charcoal canvas — matching the
+   marketing site in both appearances.
    ============================================================ */
 
-/* ============================================================
-   Navbar height — 56px to match marketing site (h-14 / 56px)
-   VitePress default is 64px.
-   ============================================================ */
+@import url('https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+
 :root {
+  /* 56px to match the marketing nav (h-14); VitePress default is 64px. */
   --vp-nav-height: 56px;
-}
 
-/* ============================================================
-   Typography — system-ui to match marketing site font stack
-   ============================================================ */
-:root {
-  --vp-font-family-base: system-ui, -apple-system, sans-serif;
-  --vp-font-family-mono: ui-monospace, "SFMono-Regular", "Menlo", monospace;
-}
+  /* Fonts — match marketing (Hanken Grotesk + JetBrains Mono). */
+  --vp-font-family-base: 'Hanken Grotesk', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --vp-font-family-mono: 'JetBrains Mono', ui-monospace, 'SFMono-Regular', 'Menlo', monospace;
 
-:root {
-  --vp-c-brand-1: #e8a020;
-  --vp-c-brand-2: #f5a623;
-  --vp-c-brand-3: #d4891a;
-  --vp-c-brand-soft: rgba(232, 160, 32, 0.14);
+  /* ── Light theme — marketing [data-theme="light"] tokens ── */
+  --vp-c-bg:       oklch(0.972 0.006 78);   /* canvas */
+  --vp-c-bg-alt:   oklch(0.951 0.008 74);   /* surface / sidebar */
+  --vp-c-bg-soft:  oklch(0.978 0.006 78);   /* raised-2 / code + custom blocks */
+  --vp-c-bg-elv:   oklch(0.993 0.004 82);   /* raised / search modal */
+
+  --vp-c-text-1:   oklch(0.285 0.012 55);   /* ink */
+  --vp-c-text-2:   oklch(0.470 0.012 58);   /* ink-soft */
+  --vp-c-text-3:   oklch(0.605 0.010 62);   /* ink-faint */
+
+  --vp-c-border:   oklch(0.880 0.008 70);
+  --vp-c-divider:  oklch(0.918 0.006 74);   /* border-soft */
+  --vp-c-gutter:   oklch(0.918 0.006 74);
+
+  --vp-c-brand-1:  oklch(0.470 0.120 42);   /* accent-ink — readable link on light */
+  --vp-c-brand-2:  oklch(0.585 0.130 42);   /* accent */
+  --vp-c-brand-3:  oklch(0.585 0.130 42);   /* accent — solid button bg */
+  --vp-c-brand-soft: oklch(0.930 0.038 52); /* accent-soft */
 
   --vp-button-brand-border: transparent;
-  --vp-button-brand-text: #fff;
-  --vp-button-brand-bg: #e8a020;
+  --vp-button-brand-text: oklch(0.985 0.01 80);      /* on-accent */
+  --vp-button-brand-bg: oklch(0.585 0.130 42);
   --vp-button-brand-hover-border: transparent;
-  --vp-button-brand-hover-text: #fff;
-  --vp-button-brand-hover-bg: #f5a623;
+  --vp-button-brand-hover-text: oklch(0.985 0.01 80);
+  --vp-button-brand-hover-bg: oklch(0.640 0.130 42);
   --vp-button-brand-active-border: transparent;
-  --vp-button-brand-active-text: #fff;
-  --vp-button-brand-active-bg: #d4891a;
+  --vp-button-brand-active-text: oklch(0.985 0.01 80);
+  --vp-button-brand-active-bg: oklch(0.540 0.130 42);
 
-  /* Override nav background variable used by VitePress */
-  --vp-nav-bg-color: #1a1a2e;
-  --vp-nav-screen-bg-color: #1a1a2e;
+  --vp-nav-bg-color: var(--vp-c-bg);
+  --vp-nav-screen-bg-color: var(--vp-c-bg);
 }
 
 .dark {
-  --vp-c-brand-1: #f5a623;
-  --vp-c-brand-2: #e8a020;
-  --vp-c-brand-3: #cc8010;
-  --vp-c-brand-soft: rgba(245, 166, 35, 0.16);
+  /* ── Dark theme — marketing [data-theme="dark"] tokens ── */
+  --vp-c-bg:       oklch(0.183 0.007 58);   /* canvas (warm charcoal) */
+  --vp-c-bg-alt:   oklch(0.223 0.008 56);   /* surface / sidebar */
+  --vp-c-bg-soft:  oklch(0.235 0.008 56);   /* raised-2 / code + custom blocks */
+  --vp-c-bg-elv:   oklch(0.258 0.008 56);   /* raised / search modal */
 
-  --vp-nav-bg-color: #1a1a2e;
-  --vp-nav-screen-bg-color: #1a1a2e;
+  --vp-c-text-1:   oklch(0.925 0.008 82);   /* ink */
+  --vp-c-text-2:   oklch(0.720 0.008 76);   /* ink-soft */
+  --vp-c-text-3:   oklch(0.560 0.008 70);   /* ink-faint */
+
+  --vp-c-border:   oklch(0.322 0.008 60);
+  --vp-c-divider:  oklch(0.285 0.008 58);   /* border-soft */
+  --vp-c-gutter:   oklch(0.285 0.008 58);
+
+  --vp-c-brand-1:  oklch(0.760 0.110 42);   /* accent-ink — light terracotta link */
+  --vp-c-brand-2:  oklch(0.670 0.120 42);   /* accent */
+  --vp-c-brand-3:  oklch(0.670 0.120 42);
+  --vp-c-brand-soft: oklch(0.330 0.052 46); /* accent-soft */
+
+  --vp-button-brand-text: oklch(0.18 0.01 50);       /* on-accent — dark ink on terracotta */
+  --vp-button-brand-bg: oklch(0.670 0.120 42);
+  --vp-button-brand-hover-text: oklch(0.18 0.01 50);
+  --vp-button-brand-hover-bg: oklch(0.720 0.120 42);
+  --vp-button-brand-active-text: oklch(0.18 0.01 50);
+  --vp-button-brand-active-bg: oklch(0.620 0.120 42);
+
+  --vp-nav-bg-color: var(--vp-c-bg);
+  --vp-nav-screen-bg-color: var(--vp-c-bg);
 }
 
 /* ============================================================
-   Navbar — always dark navy (#1a1a2e), matching marketing site
+   Navbar — solid canvas (var(--vp-c-bg)), theme-aware, matching the
+   marketing site (light navbar in light mode, charcoal in dark).
 
    VitePress navbar internals (1.6.x):
    - Background is on .VPNavBar directly (not ::before)
@@ -62,8 +97,8 @@
 
 /* Base — covers mobile and all initial states */
 .VPNavBar {
-  background-color: #1a1a2e !important;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08) !important;
+  background-color: var(--vp-c-bg) !important;
+  border-bottom: 1px solid var(--vp-c-divider) !important;
 }
 
 /* Explicitly cover every dynamic class combination */
@@ -71,33 +106,33 @@
 .VPNavBar.has-sidebar,
 .VPNavBar.home.top,
 .VPNavBar.screen-open {
-  background-color: #1a1a2e !important;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08) !important;
+  background-color: var(--vp-c-bg) !important;
+  border-bottom: 1px solid var(--vp-c-divider) !important;
 }
 
-/* Desktop — VitePress overrides to transparent; re-apply dark navy */
+/* Desktop — VitePress overrides to transparent; re-apply the canvas bg */
 @media (min-width: 960px) {
   .VPNavBar,
   .VPNavBar:not(.home),
   .VPNavBar:not(.has-sidebar):not(.home.top),
   .VPNavBar.home.top {
-    background-color: #1a1a2e !important;
+    background-color: var(--vp-c-bg) !important;
   }
 
   /* content-body is the right-side container on desktop */
   .VPNavBar .content-body {
-    background-color: #1a1a2e !important;
+    background-color: var(--vp-c-bg) !important;
   }
 
   .VPNavBar:not(.has-sidebar):not(.home.top) .content-body {
-    background-color: #1a1a2e !important;
+    background-color: var(--vp-c-bg) !important;
   }
 }
 
 /* Navbar text and links */
 /* Logo wordmark — matches marketing site: bold 20px, 1px letter-spacing */
 .VPNavBarTitle .title {
-  color: #fff !important;
+  color: var(--vp-c-text-1) !important;
   font-size: 20px !important;
   font-weight: 700 !important;
   letter-spacing: 1px !important;
@@ -111,13 +146,13 @@
 
 /* "Docs" nav link — matches marketing site style */
 .VPNavBarMenuLink {
-  color: rgba(255, 255, 255, 0.75) !important;
+  color: var(--vp-c-text-2) !important;
   font-size: 14px !important;
 }
 
 .VPNavBarMenuLink:hover,
 .VPNavBarMenuLink.active {
-  color: #fff !important;
+  color: var(--vp-c-text-1) !important;
   background-color: transparent !important;
 }
 
@@ -211,7 +246,7 @@
   padding-bottom: 2px;
   font-size: 14px;
   font-weight: 500;
-  color: rgba(255, 255, 255, 0.75);
+  color: var(--vp-c-text-2);
   text-decoration: none;
   white-space: nowrap;
   border-bottom: 2px solid transparent;
@@ -219,12 +254,12 @@
 }
 
 .docs-nav-link:hover {
-  color: #fff;
+  color: var(--vp-c-text-1);
 }
 
 .docs-nav-link--active {
-  color: #fff;
-  border-bottom-color: #e8a020;
+  color: var(--vp-c-text-1);
+  border-bottom-color: var(--vp-c-brand-1);
 }
 
 .docs-signin-btn {
@@ -233,8 +268,8 @@
   padding: 6px 16px;
   font-size: 14px;
   font-weight: 500;
-  color: rgba(255, 255, 255, 0.8);
-  border: 1px solid rgba(255, 255, 255, 0.6);
+  color: var(--vp-c-text-2);
+  border: 1px solid var(--vp-c-border);
   border-radius: 6px;
   text-decoration: none;
   white-space: nowrap;
@@ -242,8 +277,8 @@
 }
 
 .docs-signin-btn:hover {
-  color: #fff;
-  border-color: #fff;
+  color: var(--vp-c-text-1);
+  border-color: var(--vp-c-text-1);
 }
 
 /* Mobile drawer — matches the management app/marketing drawer exactly:
@@ -269,7 +304,7 @@
   bottom: auto !important;
   transform: none !important;
   overflow: visible !important;
-  background-color: #1a1a2e !important;
+  background-color: var(--vp-c-bg) !important;
 }
 
 .VPNavScreen .VPNavScreenMenu,
@@ -293,7 +328,7 @@
   font-size: 16px !important;
   line-height: 1.4 !important;
   font-weight: 500;
-  color: rgba(255, 255, 255, 0.85);
+  color: var(--vp-c-text-1);
   text-decoration: none;
   border-radius: 6px;
   border-left: 2px solid transparent;
@@ -303,14 +338,14 @@
 
 .docs-screen-nav-link:hover,
 .docs-screen-nav-link:focus {
-  color: #fff;
-  background-color: rgba(255, 255, 255, 0.05) !important;
+  color: var(--vp-c-text-1);
+  background-color: var(--vp-c-bg-soft) !important;
 }
 
 /* Current-page indicator — matches marketing's 2px orange left border
    (no background fill). */
 .docs-screen-nav-link--active {
-  border-left-color: #e8a020 !important;
+  border-left-color: var(--vp-c-brand-1) !important;
 }
 
 /* Show the VitePress appearance (dark/light) toggle in the navbar at every
@@ -326,34 +361,34 @@
 }
 
 .VPNavBarSocialLinks .VPSocialLink {
-  color: rgba(255, 255, 255, 0.6) !important;
+  color: var(--vp-c-text-3) !important;
 }
 
 .VPNavBarSocialLinks .VPSocialLink:hover {
-  color: #fff !important;
+  color: var(--vp-c-text-1) !important;
 }
 
 /* Hamburger (mobile) */
 .VPNavBarHamburger .top,
 .VPNavBarHamburger .middle,
 .VPNavBarHamburger .bottom {
-  background-color: rgba(255, 255, 255, 0.85) !important;
+  background-color: var(--vp-c-text-1) !important;
 }
 
 /* Local search button */
 .VPNavBarSearch .DocSearch-Button {
-  background-color: rgba(255, 255, 255, 0.08) !important;
-  border-color: rgba(255, 255, 255, 0.15) !important;
+  background-color: var(--vp-c-bg-soft) !important;
+  border-color: var(--vp-c-border) !important;
 }
 
 .VPNavBarSearch .DocSearch-Button-Placeholder,
 .VPNavBarSearch .DocSearch-Button .DocSearch-Search-Icon {
-  color: rgba(255, 255, 255, 0.55) !important;
+  color: var(--vp-c-text-3) !important;
 }
 
 .VPNavBarSearch .DocSearch-Button-Keys .DocSearch-Button-Key {
-  color: rgba(255, 255, 255, 0.45) !important;
-  border-color: rgba(255, 255, 255, 0.2) !important;
+  color: var(--vp-c-text-3) !important;
+  border-color: var(--vp-c-border) !important;
   box-shadow: none !important;
 }
 
@@ -375,25 +410,26 @@
 }
 
 /* ============================================================
-   Home page hero — gradient matching marketing site
+   Home page hero — warm canvas matching the marketing home
+   (flat, theme-aware) instead of the old blue gradient.
    ============================================================ */
 .VPHero {
-  background: linear-gradient(135deg, #1a1a2e 0%, #16213e 60%, #0f3460 100%);
+  background: var(--vp-c-bg);
   padding-bottom: 80px;
 }
 
-/* Hero name — plain white instead of default gradient */
+/* Hero name — solid ink (theme-aware) instead of the default gradient. */
 :root {
-  --vp-home-hero-name-color: #fff;
+  --vp-home-hero-name-color: var(--vp-c-text-1);
   --vp-home-hero-name-background: none;
 }
 
 .VPHero .text {
-  color: rgba(255, 255, 255, 0.9) !important;
+  color: var(--vp-c-text-1) !important;
 }
 
 .VPHero .tagline {
-  color: rgba(255, 255, 255, 0.62) !important;
+  color: var(--vp-c-text-2) !important;
 }
 
 /* ============================================================
@@ -420,14 +456,14 @@
    muted text, thin top border, compact padding.
    ============================================================ */
 .VPFooter {
-  border-top: 1px solid rgba(255, 255, 255, 0.08) !important;
+  border-top: 1px solid var(--vp-c-divider) !important;
   padding: 12px 24px !important;
 }
 
 .VPFooter .message,
 .VPFooter .copyright {
   font-size: 12px !important;
-  color: rgba(255, 255, 255, 0.45) !important;
+  color: var(--vp-c-text-3) !important;
 }
 
 /* ============================================================
