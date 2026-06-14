@@ -22,6 +22,7 @@ import dataclasses
 import functools
 import os
 import secrets
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -111,7 +112,7 @@ def decode_jwt(token_str: str) -> dict[str, Any]:
     return jwt.decode(token_str, _jwt_secret(), algorithms=[JWT_ALGORITHM], issuer=ISSUER)
 
 
-MGMT_JWT_TTL_SECONDS = 28800  # 8 hours
+MGMT_JWT_TTL_SECONDS = 2_592_000  # 30 days (revocable via the #240 jti denylist)
 
 
 def issue_mgmt_jwt(user: Any) -> str:
@@ -138,6 +139,10 @@ def issue_mgmt_jwt(user: Any) -> str:
         if not isinstance(user, dict)
         else user.get("role", "user"),
         "typ": "mgmt",
+        # Unique per-token id so an individual session can be revoked
+        # (logout / stolen-laptop) via the DENY#{jti} denylist — the
+        # safety valve the 30-day TTL relies on (#240).
+        "jti": uuid.uuid4().hex,
         "iat": now,
         "exp": now + MGMT_JWT_TTL_SECONDS,
     }

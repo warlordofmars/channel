@@ -26,7 +26,9 @@ from channel.models import MessageRole
 from channel.storage import (
     create_chat,
     delete_last_assistant_message,
+    deny_jti,
     get_chat_by_id,
+    is_jti_denied,
     list_chats_for_user,
     list_messages,
     list_messages_page,
@@ -1704,3 +1706,47 @@ def test_get_s3_client_uses_sigv4(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
     client = storage._get_s3_client()
     assert client.meta.config.signature_version == "s3v4"
+
+
+# ---------------------------------------------------------------------------
+# JTI revocation denylist (#240)
+# ---------------------------------------------------------------------------
+
+
+def test_is_jti_denied_returns_false_when_row_absent(table: FakeTable) -> None:
+    assert is_jti_denied("never-revoked") is False
+
+
+def test_deny_jti_writes_denylist_row_then_is_denied(table: FakeTable) -> None:
+    exp = 1_700_000_000
+    deny_jti("tok-jti-1", exp=exp)
+
+    stored = table.items[("DENY#tok-jti-1", "META")]
+    assert stored["type"] == "DENY"
+    # ttl == the denied token's own exp so DDB TTL prunes the row exactly
+    # when the token would have expired anyway.
+    assert stored["ttl"] == exp
+    # revoked_at is a recorded ISO-8601 timestamp, not blank.
+    assert stored["revoked_at"]
+    assert is_jti_denied("tok-jti-1") is True
+
+
+def test_deny_jti_is_idempotent(table: FakeTable) -> None:
+    # Re-revoking the same JTI must not raise (a logout retry is harmless).
+    deny_jti("tok-jti-2", exp=1_700_000_000)
+    deny_jti("tok-jti-2", exp=1_700_000_000)
+    assert is_jti_denied("tok-jti-2") is True
+
+
+def test_is_jti_denied_isolates_by_jti(table: FakeTable) -> None:
+    deny_jti("tok-A", exp=1_700_000_000)
+    assert is_jti_denied("tok-A") is True
+    assert is_jti_denied("tok-B") is False
+
+
+def test_is_jti_denied_uses_strongly_consistent_read(table: FakeTable) -> None:
+    # Revocation is a read-after-write check (logout writes the DENY row,
+    # the next request reads it), so it must use a strongly-consistent
+    # read rather than race DynamoDB's eventual-consistency window.
+    is_jti_denied("tok-consistency")
+    assert table.last_get_item_kwargs.get("ConsistentRead") is True

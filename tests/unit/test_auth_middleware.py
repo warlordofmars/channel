@@ -68,3 +68,25 @@ def test_require_admin_rejects_non_admin():
     token = _user_token()
     resp = _client.get("/admin-only", headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 403
+
+
+def test_require_mgmt_user_rejects_revoked_jti(monkeypatch):
+    """A token whose jti was revoked at logout is rejected with 401 (#240)."""
+    monkeypatch.setattr("channel.api._auth.is_jti_denied", lambda _jti: True, raising=False)
+    resp = _client.get("/me", headers={"Authorization": f"Bearer {_user_token()}"})
+    assert resp.status_code == 401
+
+
+def test_require_mgmt_user_skips_denylist_when_no_jti(monkeypatch):
+    """A (legacy) token without a jti claim never triggers the denylist read (#240)."""
+
+    def _no_jti_claims(_token: str) -> dict:
+        return {"sub": "u3", "email": "x@y.com", "role": "user", "typ": "mgmt"}
+
+    def _boom(_jti: str) -> bool:
+        raise AssertionError("is_jti_denied must not be called when jti is absent")
+
+    monkeypatch.setattr("channel.api._auth.decode_mgmt_jwt", _no_jti_claims)
+    monkeypatch.setattr("channel.api._auth.is_jti_denied", _boom, raising=False)
+    resp = _client.get("/me", headers={"Authorization": "Bearer x"})
+    assert resp.status_code == 200

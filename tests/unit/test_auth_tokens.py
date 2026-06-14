@@ -57,6 +57,30 @@ def test_decode_mgmt_jwt_rejects_bearer_token():
         decode_mgmt_jwt(encoded)
 
 
+def test_issue_mgmt_jwt_includes_jti_claim():
+    """Every mgmt JWT carries a unique 32-char hex jti so it can be revoked (#240)."""
+    user = {"user_id": "u1", "email": "a@b.com", "display_name": "Alice", "role": "user"}
+    claims = decode_mgmt_jwt(issue_mgmt_jwt(user))
+    jti = claims["jti"]
+    assert len(jti) == 32
+    assert all(c in "0123456789abcdef" for c in jti)
+
+
+def test_issue_mgmt_jwt_jti_is_unique_per_token():
+    """Two tokens for the same user get distinct jtis (revoking one leaves the other)."""
+    user = {"user_id": "u1", "email": "a@b.com", "display_name": "Alice", "role": "user"}
+    a = decode_mgmt_jwt(issue_mgmt_jwt(user))["jti"]
+    b = decode_mgmt_jwt(issue_mgmt_jwt(user))["jti"]
+    assert a != b
+
+
+def test_issue_mgmt_jwt_ttl_is_30_days():
+    """TTL bumped from 8h to 30 days for Slack-like multi-week sessions (#240)."""
+    user = {"user_id": "u1", "email": "a@b.com", "display_name": "Alice", "role": "user"}
+    claims = decode_mgmt_jwt(issue_mgmt_jwt(user))
+    assert claims["exp"] - claims["iat"] == 2_592_000
+
+
 def test_token_dataclass_is_valid():
     token = make_bearer_token("c", "read", ttl_seconds=60)
     assert isinstance(token, Token)

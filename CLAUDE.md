@@ -145,6 +145,12 @@ require a valid Bearer mgmt JWT. JWT validation enforces `iss`,
 - User items: `PK=USER#{user_id}`, `SK=META`
 - Mgmt state items: `PK=MGMT_STATE#{state}`, `SK=META`
   (TTL enabled, used for the Google OAuth state parameter)
+- JWT revocation denylist items: `PK=DENY#{jti}`, `SK=META`
+  (point-read keyed by the mgmt JWT's `jti`; written on `/auth/logout`,
+  checked in `require_mgmt_user` on every authenticated request so a
+  revoked session is rejected; `ttl` = the denied token's own `exp` so
+  the row self-prunes exactly when the token would have expired anyway,
+  keeping the denylist bounded by the live-token set — #240)
 - Chat-index items: `PK=USER#{user_id}`, `SK=CHAT#{created_at}#{chat_id}`
   (one row per chat; sortable so the Recents query is a single
   `Query(ScanIndexForward=False)`; also projects onto `ChatByIdIndex`)
