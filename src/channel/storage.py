@@ -1194,3 +1194,47 @@ def put_chat_mcp_settings(settings: ChatMCPSettings) -> None:
             "updated_at": _now_iso(),
         }
     )
+
+
+def deny_jti(jti: str, exp: int) -> None:
+    """Add a management-JWT ``jti`` to the revocation denylist (#240).
+
+    Writes a ``PK=DENY#{jti}, SK=META`` row whose DynamoDB ``ttl`` is the
+    denied token's own ``exp``: the row self-prunes exactly when the token
+    would have expired anyway, so the denylist stays bounded by the set of
+    currently-live tokens rather than growing unbounded. A plain
+    ``PutItem`` is naturally idempotent — re-revoking the same ``jti``
+    (e.g. a logout retry) overwrites the row harmlessly.
+    """
+
+    _get_table().put_item(
+        Item={
+            "PK": f"DENY#{jti}",
+            "SK": "META",
+            "type": "DENY",
+            "revoked_at": _now_iso(),
+            "ttl": exp,
+        }
+    )
+
+
+def is_jti_denied(jti: str) -> bool:
+    """Return ``True`` if ``jti`` has been revoked via :func:`deny_jti`.
+
+    A single **strongly-consistent** point ``GetItem``: revocation must
+    observe the ``DENY`` row written by the *immediately* preceding logout,
+    so an eventually-consistent read's replication window cannot briefly
+    admit a just-revoked token (the same read-after-write reason
+    :func:`get_prefs` reads consistently).
+
+    ``require_mgmt_user`` only reaches this for tokens that already passed
+    ``exp`` validation, so a row whose ``ttl`` has lapsed but which
+    DynamoDB has not yet swept is never consulted here — the JWT itself
+    would have been rejected first.
+    """
+
+    resp = _get_table().get_item(
+        Key={"PK": f"DENY#{jti}", "SK": "META"},
+        ConsistentRead=True,
+    )
+    return "Item" in resp

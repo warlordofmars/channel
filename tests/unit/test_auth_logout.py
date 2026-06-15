@@ -191,3 +191,66 @@ def test_token_fingerprint_handles_missing_claims() -> None:
 
     fp = _token_fingerprint({})
     assert len(fp) == 16
+
+
+def test_logout_revokes_jti_on_denylist(
+    monkeypatch: pytest.MonkeyPatch,
+    captured_audit_events: list[dict[str, Any]],
+) -> None:
+    """Logout adds the token's jti to the denylist with its exp as the TTL (#240)."""
+
+    denied: list[tuple[str, int]] = []
+
+    def _fake_decode(_token: str) -> dict[str, Any]:
+        return {
+            "sub": "user@example.com",
+            "email": "user@example.com",
+            "role": "user",
+            "iat": 1700000000,
+            "exp": 1700028800,
+            "typ": "mgmt",
+            "jti": "tok-abc-123",
+        }
+
+    monkeypatch.setattr("channel.api._auth.decode_mgmt_jwt", _fake_decode)
+    monkeypatch.setattr("channel.auth.logout.deny_jti", lambda jti, exp: denied.append((jti, exp)))
+
+    resp = _client.post("/auth/logout", headers={"Authorization": "Bearer x"})
+    assert resp.status_code == 204
+    assert denied == [("tok-abc-123", 1700028800)]
+
+
+def test_logout_swallows_denylist_write_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    captured_audit_events: list[dict[str, Any]],
+) -> None:
+    """A denylist-write failure is logged but must not break the visible logout."""
+
+    def _raise(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("DDB transiently unavailable")
+
+    monkeypatch.setattr("channel.auth.logout.deny_jti", _raise)
+    resp = _client.post("/auth/logout", headers=_auth_headers())
+    assert resp.status_code == 204
+
+
+def test_second_request_with_revoked_token_is_401(
+    monkeypatch: pytest.MonkeyPatch,
+    captured_audit_events: list[dict[str, Any]],
+) -> None:
+    """End-to-end revoke-on-logout: the same token is 401 after logout (#240).
+
+    Drives the real ``require_mgmt_user`` + real ``mgmt_logout`` through a
+    shared in-memory denylist so the wiring (logout writes → next request
+    reads) is proven without DynamoDB.
+    """
+
+    revoked: set[str] = set()
+    monkeypatch.setattr("channel.auth.logout.deny_jti", lambda jti, _exp: revoked.add(jti))
+    monkeypatch.setattr("channel.api._auth.is_jti_denied", lambda jti: jti in revoked)
+
+    headers = _auth_headers()
+    first = _client.post("/auth/logout", headers=headers)
+    assert first.status_code == 204
+    second = _client.post("/auth/logout", headers=headers)
+    assert second.status_code == 401

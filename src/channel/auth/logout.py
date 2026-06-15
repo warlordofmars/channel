@@ -3,23 +3,24 @@
 Management session logout endpoint.
 
 Exposes ``POST /auth/logout`` for the management UI. The endpoint validates
-the bearer mgmt JWT, writes an ``auth.logout`` audit entry, and returns 204.
+the bearer mgmt JWT, revokes it via the JTI denylist, writes an
+``auth.logout`` audit entry, and returns 204.
 
-The endpoint does **not** invalidate the JWT — there is no JTI denylist
-today and mgmt tokens remain valid until their 8h ``exp``. Logout's
-purpose is twofold:
+Logout is a true server-side revocation point (#240): it adds the token's
+``jti`` to the ``DENY#{jti}`` denylist (TTL = the token's own ``exp``), so
+the now-30-day token is rejected by ``require_mgmt_user`` on every
+subsequent request rather than remaining valid until expiry. The endpoint
+stays JWT-authenticated, so logging out proves the caller controls the
+token being revoked. Logout's other jobs:
 
 1. Record operator intent in the immutable audit log so a stolen-laptop
    event has a server-side signal for remediation.
 2. Pair with the SPA's local-storage clear so the user-visible UX behaves
-   as "I'm signed out" even though the cookie-less bearer token cannot
-   be revoked from the server side without a denylist.
+   as "I'm signed out".
 
-A future-aware-of: a TTL'd JTI denylist (``DENY#{jti}`` with TTL = JWT
-remaining lifetime) would convert this endpoint into a true revocation
-point. The audit-log entry already carries a fingerprint of the
-presented JWT, so a denylist add can be retrofitted without changing the
-endpoint shape. Tracked in #114's bonus item (#151).
+Both the denylist write and the audit write are best-effort: a failure is
+logged loudly but never strands the visible logout (the SPA's local token
+clear runs regardless of the response status).
 """
 
 from __future__ import annotations
@@ -30,7 +31,7 @@ from fastapi import APIRouter, Depends, Response
 
 from channel.api._auth import require_mgmt_user
 from channel.logging_config import get_logger
-from channel.storage import put_audit_event
+from channel.storage import deny_jti, put_audit_event
 
 router = APIRouter(tags=["mgmt-auth"])
 logger = get_logger(__name__)
@@ -88,11 +89,19 @@ async def mgmt_logout(
         "token_fingerprint": fingerprint,
     }
     if jti := claims.get("jti"):
-        # Mgmt JWTs do not currently include a jti claim, but future
-        # tokens (post-#114) may — capture it when present so the
-        # forthcoming denylist can correlate logout events to issued
-        # tokens directly.
         details["jti"] = jti
+        # Revoke this token server-side so its (now 30-day) TTL cannot
+        # outlive the user's intent to log out (#240). Best-effort,
+        # mirroring the audit write below: a denylist-write failure is
+        # logged loudly but must not strand the user mid-logout. The
+        # endpoint stays JWT-authenticated, so logging out proves the
+        # caller controls the token being revoked.
+        try:
+            deny_jti(jti, claims["exp"])
+        except Exception:
+            logger.exception(
+                "auth.logout denylist write failed for token_fingerprint=%s", fingerprint
+            )
 
     try:
         put_audit_event(
