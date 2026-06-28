@@ -4,14 +4,14 @@ dynamic = ["version"]
 description = "AI agent chat backend on AWS (Lambda, React, CDK)"
 requires-python = ">=3.10"
 dependencies = [
-    "aiohttp>=3.14.0",
+    "aiohttp>=3.14.1",
     "aws-embedded-metrics>=3.5.0",
     "boto3>=1.42.78",
     "fastapi>=0.135.2",
     "httpx>=0.28.1",
     "pydantic>=2.12.5",
     "python-jose[cryptography]>=3.5.0",
-    "python-multipart>=0.0.22",
+    "python-multipart>=0.0.30",
     "strands-agents>=1.0.0,<2",
     "strands-agents-tools>=0.2.0,<1",
     "uvicorn[standard]>=0.42.0",
