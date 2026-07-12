@@ -449,6 +449,13 @@ re-derive these during design review — cite them.
   ADR-0009 (recall pool budget) and the existing drop in
   `src/channel/agents/memory.py:240` (`_payload_from_messages` strips
   `toolUse` / `toolResult` content blocks before serializing).
+- **The code-exec sandbox has zero network egress.** The
+  `CodeExecLambda` runs in a dedicated PRIVATE_ISOLATED VPC (no IGW,
+  no NAT, no VPC endpoints) with a zero-egress security group; IAM
+  remains the data-plane boundary. Don't add NAT, VPC endpoints, or
+  egress rules to the sandbox without a design review — the isolation
+  closes the prompt-injection → code-exec → exfiltration trifecta.
+  Threat model: `docs/security/threat-model-code-exec.md` (#249).
 - **Tool integrations use Strands' native `BedrockModel` + `MCPClient` +
   tool hooks.** Don't build a parallel tool-calling shim. Verified in
   Strands 1.41.0: `strands/types/tools.py` (`ToolUse` / `ToolResult`),

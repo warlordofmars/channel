@@ -65,9 +65,11 @@ def code_exec(code: str) -> dict[str, Any]:
 
     Use when you need to compute, transform data, analyze a CSV, plot
     something, or run a quick simulation. The environment has numpy,
-    pandas, matplotlib, requests, httpx, python-dateutil pre-installed.
-    (scipy was excluded from v1 — the full sci-stack exceeded Lambda's
-    250 MB unzipped limit; can move to a Lambda layer if needed.)
+    pandas, matplotlib, python-dateutil pre-installed (requests and
+    httpx are importable too, but there is no network — see Network
+    below). (scipy was excluded from v1 — the full sci-stack exceeded
+    Lambda's 250 MB unzipped limit; can move to a Lambda layer if
+    needed.)
 
     To show a plot or other image to the user, save it to
     ``/tmp/<name>.png`` (or .jpg). The Channel UI automatically
@@ -78,14 +80,16 @@ def code_exec(code: str) -> dict[str, Any]:
     Just save the file and describe what it shows. Up to 3 images
     per call, 1 MB each. PNG and JPG only.
 
-    Network: outbound internet IS reachable from this sandbox (the
-    Lambda runs outside any VPC, so AWS's managed runtime grants
-    egress). What's NOT reachable is anything in Channel's IAM scope
-    — DynamoDB, S3, Bedrock, Secrets, SSM — all blocked at the role
-    level. Prefer to NOT call external APIs unless the user asked
-    you to; treat outbound network as an explicit user-consented
-    capability. Hard isolation behind a no-egress VPC is tracked as
-    a follow-up.
+    Network: NO outbound network access. The sandbox runs in an
+    isolated VPC with no internet gateway, no NAT, and a zero-egress
+    security group. Network attempts (requests / httpx / urllib /
+    raw sockets / pip install) do NOT fail fast — connects hang
+    until their socket timeout or the 270-second execution cap, so
+    a stray HTTP call can burn the entire budget and return nothing.
+    NEVER attempt network access from this sandbox; if you need web
+    content, fetch it with your other tools and pass the data in as
+    a literal. Channel's data plane (DynamoDB, S3, Bedrock, Secrets,
+    SSM) is additionally blocked at the IAM role level.
     Filesystem: writable ``/tmp`` only; wiped between calls.
     Timeout: 270 seconds.
     stdout cap: 20 KB; stderr cap: 5 KB.
