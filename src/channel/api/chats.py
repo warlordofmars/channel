@@ -893,6 +893,11 @@ async def _stream_bedrock_reply(
         tools=tool_registry,
     )
     accumulated: list[str] = []
+    # Running character total for the observability lines (#212).
+    # Maintained incrementally rather than summed on demand — the
+    # heartbeat fires inside the stream loop, and re-summing the whole
+    # list there would be O(n^2) over a long stream's lifetime.
+    accumulated_chars = 0
     stop_reason = "end_turn"
     input_tokens = 0
     output_tokens = 0
@@ -962,12 +967,13 @@ async def _stream_bedrock_reply(
             kind, payload = translate_event(event)
             if kind == "delta":
                 accumulated.append(payload)
+                accumulated_chars += len(payload)
                 if heartbeat and len(accumulated) % 50 == 0:
                     logger.info(
                         "chat_stream_heartbeat chat_id=%s delta_count=%d char_len=%d",
                         chat.chat_id,
                         len(accumulated),
-                        sum(len(chunk) for chunk in accumulated),
+                        accumulated_chars,
                     )
                 yield sse_delta(payload)
             elif kind == "stop":
@@ -1024,7 +1030,7 @@ async def _stream_bedrock_reply(
             fingerprint_id(claims["sub"]),
             stream_error[0],
             len(accumulated),
-            sum(len(chunk) for chunk in accumulated),
+            accumulated_chars,
             exc_info=True,
         )
     finally:
@@ -1085,7 +1091,7 @@ async def _stream_bedrock_reply(
         "chat_stream_complete chat_id=%s total_deltas=%d total_chars=%d stop_reason=%s input_tokens=%d output_tokens=%d",
         chat.chat_id,
         len(accumulated),
-        sum(len(chunk) for chunk in accumulated),
+        accumulated_chars,
         stop_reason,
         input_tokens,
         output_tokens,
