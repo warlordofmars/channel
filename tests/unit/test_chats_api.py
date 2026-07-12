@@ -1663,6 +1663,9 @@ def test_post_message_skips_titler_on_non_first_round_trip(
     )
 
     async def fake_stream(self, prompt):
+        # A non-empty main reply keeps the #212 empty-stream detector
+        # from aborting the turn before the block under test runs.
+        yield {"event": {"contentBlockDelta": {"delta": {"text": "Reply"}}}}
         yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
 
     class FakeAgent:
@@ -1693,6 +1696,9 @@ def test_post_message_titler_failure_is_swallowed_and_stream_completes(
     )
 
     async def fake_stream(self, prompt):
+        # A non-empty main reply keeps the #212 empty-stream detector
+        # from aborting the turn before the block under test runs.
+        yield {"event": {"contentBlockDelta": {"delta": {"text": "Reply"}}}}
         yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
 
     class FakeAgent:
@@ -1734,6 +1740,9 @@ def test_post_message_respects_auto_title_kill_switch(
     )
 
     async def fake_stream(self, prompt):
+        # A non-empty main reply keeps the #212 empty-stream detector
+        # from aborting the turn before the block under test runs.
+        yield {"event": {"contentBlockDelta": {"delta": {"text": "Reply"}}}}
         yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
 
     class FakeAgent:
@@ -1763,6 +1772,9 @@ def test_post_message_titler_empty_response_swallows_without_patch(
     )
 
     async def fake_stream(self, prompt):
+        # A non-empty main reply keeps the #212 empty-stream detector
+        # from aborting the turn before the block under test runs.
+        yield {"event": {"contentBlockDelta": {"delta": {"text": "Reply"}}}}
         yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
 
     class FakeAgent:
@@ -2152,6 +2164,9 @@ def test_post_message_seeds_agent_with_prior_chat_history(
     captured: dict[str, Any] = {}
 
     async def fake_stream(self, prompt):
+        # A non-empty main reply keeps the #212 empty-stream detector
+        # from aborting the turn before the block under test runs.
+        yield {"event": {"contentBlockDelta": {"delta": {"text": "Reply"}}}}
         yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
 
     class FakeAgent:
@@ -2231,6 +2246,9 @@ def test_regenerate_drops_trailing_user_from_seeded_history(
     captured: dict[str, Any] = {}
 
     async def fake_stream(self, prompt):
+        # A non-empty main reply keeps the #212 empty-stream detector
+        # from aborting the turn before the block under test runs.
+        yield {"event": {"contentBlockDelta": {"delta": {"text": "Reply"}}}}
         yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
 
     class FakeAgent:
@@ -2842,6 +2860,9 @@ def test_titler_records_failure_when_only_preamble_emitted(
     )
 
     async def fake_main_stream(self, prompt):
+        # A non-empty main reply keeps the #212 empty-stream detector
+        # from aborting the turn before the block under test runs.
+        yield {"event": {"contentBlockDelta": {"delta": {"text": "Reply"}}}}
         yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
 
     class FakeAgent:
@@ -2882,6 +2903,9 @@ def test_titler_outer_except_catches_unrelated_errors(
     )
 
     async def fake_main_stream(self, prompt):
+        # A non-empty main reply keeps the #212 empty-stream detector
+        # from aborting the turn before the block under test runs.
+        yield {"event": {"contentBlockDelta": {"delta": {"text": "Reply"}}}}
         yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
 
     class FakeAgent:
