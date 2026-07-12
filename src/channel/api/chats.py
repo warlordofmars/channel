@@ -36,6 +36,7 @@ from channel.agents.strands_sse import (
     sse_attachment_error,
     sse_delta,
     sse_done,
+    sse_error,
     sse_follow_ups_suggested,
     sse_title_suggested,
     sse_tool_error,
@@ -691,6 +692,85 @@ async def _build_mcp_clients_for_chat(
     return clients
 
 
+# ----------------------------------------------------------------
+# Stream-failure classification (#212)
+# ----------------------------------------------------------------
+
+# Substring → (code, user-safe message, retryable). Matched against the
+# exception class name AND (for botocore ``ClientError`` shapes) the
+# service error code, walking the ``__cause__`` / ``__context__`` chain
+# because Strands wraps boto3 errors before they reach the stream loop.
+# Raw exception text NEVER reaches the client — see ``sse_error``.
+#
+# First match wins (per chain link, in tuple order) — keep needles
+# non-overlapping when extending. The bare "Timeout" needle is
+# deliberately broad: ReadTimeoutError / ConnectTimeoutError /
+# TimeoutError all reduce to "the model took too long" from the user's
+# perspective.
+_STREAM_ERROR_MAP: tuple[tuple[str, str, str, bool], ...] = (
+    (
+        "ValidationException",
+        "bedrock_validation",
+        "The model rejected the request — the message or its attachments may be too large. Try shortening it.",
+        False,
+    ),
+    (
+        "ThrottlingException",
+        "bedrock_throttled",
+        "The model is at capacity right now. Try again in a moment.",
+        True,
+    ),
+    (
+        "Timeout",
+        "bedrock_timeout",
+        "The model took too long to respond. Try again.",
+        True,
+    ),
+)
+_STREAM_ERROR_FALLBACK: tuple[str, str, bool] = (
+    "internal",
+    "Something went wrong while generating the reply. Try again.",
+    True,
+)
+
+# Empty terminal stream (#212): Bedrock/Strands completed "cleanly" but
+# produced zero output text. Distinct code so the SPA can say "the model
+# returned nothing" rather than a generic failure.
+_STREAM_EMPTY_RESPONSE: tuple[str, str, bool] = (
+    "empty_response",
+    "The model returned an empty reply. Try again.",
+    True,
+)
+
+
+def _classify_stream_exception(exc: BaseException) -> tuple[str, str, bool]:
+    """Map a Strands/Bedrock stream exception to ``(code, message, retryable)``.
+
+    Walks the exception chain (``__cause__`` falling back to
+    ``__context__``) so a boto3 ``ClientError`` wrapped by Strands still
+    classifies. The ``seen`` guard breaks reference cycles in
+    pathological chains.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        names = [type(current).__name__]
+        # botocore ClientError carries the service error code in
+        # ``response["Error"]["Code"]`` — the class name alone is just
+        # ``ClientError`` (or a subclass), so check both.
+        response = getattr(current, "response", None)
+        if isinstance(response, dict):
+            error_code = (response.get("Error") or {}).get("Code")
+            if error_code:
+                names.append(str(error_code))
+        for needle, code, message, retryable in _STREAM_ERROR_MAP:
+            if any(needle in name for name in names):
+                return (code, message, retryable)
+        current = current.__cause__ or current.__context__
+    return _STREAM_ERROR_FALLBACK
+
+
 async def _stream_bedrock_reply(
     *,
     chat: Chat,
@@ -813,6 +893,11 @@ async def _stream_bedrock_reply(
         tools=tool_registry,
     )
     accumulated: list[str] = []
+    # Running character total for the observability lines (#212).
+    # Maintained incrementally rather than summed on demand — the
+    # heartbeat fires inside the stream loop, and re-summing the whole
+    # list there would be O(n^2) over a long stream's lifetime.
+    accumulated_chars = 0
     stop_reason = "end_turn"
     input_tokens = 0
     output_tokens = 0
@@ -833,6 +918,32 @@ async def _stream_bedrock_reply(
     user_payload: Any = (
         [*content_blocks, {"text": user_message}] if content_blocks else user_message
     )
+
+    # #212 observability point 1/3: the streaming path used to be
+    # completely dark between "headers sent" and "stream closed" — the
+    # 2026-06-06 hang was undiagnosable from logs. One INFO line before
+    # the loop states what the turn is working with.
+    logger.info(
+        "chat_stream_start chat_id=%s user=%s model=%s prior_messages=%d attachment_blocks=%d",
+        chat.chat_id,
+        fingerprint_id(claims["sub"]),
+        resolved_model,
+        len(prior_messages),
+        len(content_blocks),
+    )
+    # #212 observability point 2/3: opt-in periodic heartbeat inside the
+    # loop (every 50 deltas). Off by default — Sonnet streams emit
+    # thousands of deltas per turn and the log volume isn't worth it
+    # outside an active investigation.
+    heartbeat = os.environ.get("STARTER_STREAM_HEARTBEAT_ENABLED", "0") == "1"
+
+    # #212 failure capture: when the Strands loop raises (or terminates
+    # empty), the frames to emit are staged here and yielded AFTER the
+    # ``finally`` block has released the agent — yielding from inside an
+    # ``except`` in an async generator interacts badly with client
+    # disconnects (a ``GeneratorExit`` at that yield would mask the
+    # original error).
+    stream_error: tuple[str, str, bool] | None = None
 
     # Cancel-signal lifecycle (#181 PR-2, revised in Copilot round-3):
     # if the SSE client disconnects mid-stream FastAPI raises
@@ -856,6 +967,14 @@ async def _stream_bedrock_reply(
             kind, payload = translate_event(event)
             if kind == "delta":
                 accumulated.append(payload)
+                accumulated_chars += len(payload)
+                if heartbeat and len(accumulated) % 50 == 0:
+                    logger.info(
+                        "chat_stream_heartbeat chat_id=%s delta_count=%d char_len=%d",
+                        chat.chat_id,
+                        len(accumulated),
+                        accumulated_chars,
+                    )
                 yield sse_delta(payload)
             elif kind == "stop":
                 stop_reason = payload["stop_reason"]
@@ -897,6 +1016,23 @@ async def _stream_bedrock_reply(
     except (asyncio.CancelledError, GeneratorExit):
         set_cancel_signal(chat.chat_id)
         raise
+    except Exception as exc:
+        # #212 — before this handler existed, any Strands/Bedrock
+        # exception propagated out of this generator, FastAPI closed the
+        # SSE connection "cleanly" (HTTP 200, no terminal frame), and the
+        # SPA's in-flight state never resolved. Classify → log with full
+        # traceback → stage user-safe error + done frames (emitted after
+        # the ``finally`` releases the agent).
+        stream_error = _classify_stream_exception(exc)
+        logger.error(
+            "chat_stream_failed chat_id=%s user=%s code=%s delta_count=%d char_len=%d",
+            chat.chat_id,
+            fingerprint_id(claims["sub"]),
+            stream_error[0],
+            len(accumulated),
+            accumulated_chars,
+            exc_info=True,
+        )
     finally:
         # #207 — Strands' MCPClient holds a background thread + httpx
         # client that must be released when the turn ends. agent.cleanup()
@@ -909,6 +1045,57 @@ async def _stream_bedrock_reply(
         cleanup = getattr(agent, "cleanup", None)
         if cleanup is not None:
             cleanup()  # pragma: no cover - exercised by real Strands Agent only
+
+    # #212 — empty terminal stream: Bedrock/Strands completed "cleanly"
+    # (no exception, stop_reason end_turn) but produced zero output
+    # text. This is the exact undiagnosable shape from the 2026-06-06
+    # incident: HTTP 200, empty SSE body, no error, SPA stuck. Surface
+    # it as an error rather than persisting a blank assistant turn.
+    if stream_error is None and not accumulated and stop_reason == "end_turn":
+        stream_error = _STREAM_EMPTY_RESPONSE
+        logger.error(
+            "chat_stream_empty chat_id=%s user=%s stop_reason=%s input_tokens=%d output_tokens=%d",
+            chat.chat_id,
+            fingerprint_id(claims["sub"]),
+            stop_reason,
+            input_tokens,
+            output_tokens,
+        )
+
+    if stream_error is not None:
+        code, user_safe_message, retryable = stream_error
+        # The user turn stays persisted (Retry re-streams from it via
+        # the regenerate path); the assistant turn is NOT persisted and
+        # the chat index is NOT updated — a failed turn must not leave a
+        # blank assistant row behind. ``done`` carries an empty msg_id
+        # (nothing was persisted) and stop_reason="error" so the SPA's
+        # done-handler resolves the in-flight state; ``state`` is left
+        # without ``assistant_msg_id`` so post_message skips the
+        # idempotency store and a client retry with the same key
+        # re-executes instead of replaying the failure.
+        yield sse_error(code=code, message=user_safe_message, retryable=retryable)
+        yield sse_done(
+            msg_id="",
+            seq=1,
+            model=resolved_model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            stop_reason="error",
+        )
+        return
+
+    # #212 observability point 3/3: terminal INFO line with the loop's
+    # aggregate counters — the next incident is diagnosable from logs
+    # without a redeploy.
+    logger.info(
+        "chat_stream_complete chat_id=%s total_deltas=%d total_chars=%d stop_reason=%s input_tokens=%d output_tokens=%d",
+        chat.chat_id,
+        len(accumulated),
+        accumulated_chars,
+        stop_reason,
+        input_tokens,
+        output_tokens,
+    )
 
     assistant_text = "".join(accumulated)
     state["assistant_text"] = assistant_text
@@ -1128,9 +1315,18 @@ async def regenerate(
     chat = await _load_owned_chat(chat_id, claims["sub"])
     model = payload.model or chat.model_default or _DEFAULT_MODEL
 
-    storage.delete_last_assistant_message(chat_id)
-
+    # #212 — only drop the trailing assistant turn when the chat
+    # actually ends with one. After a failed stream (error frame,
+    # assistant turn never persisted) the tail is the orphaned USER
+    # turn; an unconditional "delete the most recent assistant message"
+    # would then destroy the PREVIOUS turn's reply. The error chip's
+    # Retry affordance reuses this endpoint, so the guard is
+    # load-bearing for the recovery path.
     msgs = storage.list_recent_messages(chat_id, limit=50)
+    if msgs and msgs[-1].role == MessageRole.ASSISTANT:
+        storage.delete_last_assistant_message(chat_id)
+        msgs = msgs[:-1]
+
     last_user = next((m for m in reversed(msgs) if m.role == MessageRole.USER), None)
     if last_user is None:
         raise HTTPException(
