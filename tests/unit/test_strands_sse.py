@@ -866,3 +866,33 @@ def test_sse_tool_finished_omits_kind_and_payload_when_unset():
     text = out.decode()
     assert "kind" not in text
     assert "payload" not in text
+
+
+def test_sse_error_shape():
+    """``error`` frame (#212) round-trips through the SSE byte format."""
+    from channel.agents.strands_sse import sse_error
+
+    raw = sse_error(
+        code="bedrock_throttled",
+        message="The model is at capacity right now. Try again in a moment.",
+        retryable=True,
+    )
+    assert raw.startswith(b"data: ")
+    assert raw.endswith(b"\n\n")
+    payload = json.loads(raw[6:-2])
+    assert payload == {
+        "type": "error",
+        "code": "bedrock_throttled",
+        "message": "The model is at capacity right now. Try again in a moment.",
+        "retryable": True,
+    }
+
+
+def test_sse_error_truncates_message_at_500():
+    """Defense in depth: the emitter caps ``message`` at the wire boundary."""
+    from channel.agents.strands_sse import sse_error
+
+    raw = sse_error(code="internal", message="x" * 600, retryable=False)
+    payload = json.loads(raw[6:-2])
+    assert len(payload["message"]) == 500
+    assert payload["retryable"] is False
