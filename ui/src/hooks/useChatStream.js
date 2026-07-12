@@ -50,12 +50,21 @@ function patchToolStep(turns, tempAsstId, toolUseId, patch) {
 // re-stream. The recovery affordance is the Composer restoring the
 // original input (send() resolves `{ accepted: false }`).
 function sendRefusalError(status, detail) {
+  // The too-long copy applies only to the Pydantic `string_too_long`
+  // failure on the `message` field (max_length=100_000 in
+  // SendMessageRequest) — NOT to every 422 that mentions `message`:
+  // the field also carries min_length=1, so e.g. `string_too_short`
+  // would be misdescribed as too long. Anything else falls through to
+  // the generic copy.
   const messageTooLong =
     status === 413 ||
     (status === 422 &&
       Array.isArray(detail) &&
       detail.some(
-        (item) => Array.isArray(item?.loc) && item.loc.includes("message"),
+        (item) =>
+          item?.type === "string_too_long" &&
+          Array.isArray(item?.loc) &&
+          item.loc.includes("message"),
       ));
   if (messageTooLong) {
     return {

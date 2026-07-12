@@ -1422,10 +1422,30 @@ describe("useChatStream", () => {
       });
     });
 
-    it("maps a 422 whose validation array is not about `message` to the generic chip", async () => {
+    it("maps a 422 whose validation array is not a too-long `message` to the generic chip", async () => {
       const { view } = await sendRefused(422, [
+        // Wrong type on the right field.
         { type: "missing", loc: ["body", "model"], msg: "Field required" },
-        { msg: "no loc on this item" },
+        // Right type on the wrong field.
+        { type: "string_too_long", loc: ["body", "title"], msg: "too long" },
+        // Right type, malformed loc.
+        { type: "string_too_long", msg: "no loc on this item" },
+      ]);
+      expect(view.result.current.turns.at(-1).streamError).toMatchObject({
+        code: "send_failed",
+        message: "Couldn't send. Please try again.",
+      });
+    });
+
+    it("maps a 422 `string_too_short` on `message` to the generic chip, not the too-long copy", async () => {
+      // SendMessageRequest.message also carries min_length=1 — a
+      // too-short failure must not claim the message was too long.
+      const { view } = await sendRefused(422, [
+        {
+          type: "string_too_short",
+          loc: ["body", "message"],
+          msg: "String should have at least 1 character",
+        },
       ]);
       expect(view.result.current.turns.at(-1).streamError).toMatchObject({
         code: "send_failed",
