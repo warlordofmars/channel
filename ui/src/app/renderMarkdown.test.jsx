@@ -111,6 +111,26 @@ describe("renderMarkdown", () => {
     expect(boxes[1].checked).toBe(false);
   });
 
+  it("renders a single \\n as a <br> line break (remark-breaks)", () => {
+    const { container } = wrap(renderMarkdown("line one\nline two", false));
+    // Both lines stay in one paragraph, separated by a hard break.
+    const ps = container.querySelectorAll("p");
+    expect(ps.length).toBe(1);
+    expect(ps[0].querySelector("br")).toBeTruthy();
+    expect(ps[0].textContent).toContain("line one");
+    expect(ps[0].textContent).toContain("line two");
+  });
+
+  it("still renders \\n\\n as separate <p> paragraphs", () => {
+    const { container } = wrap(renderMarkdown("para one\n\npara two", false));
+    const ps = container.querySelectorAll("p");
+    expect(ps.length).toBe(2);
+    expect(ps[0].textContent).toBe("para one");
+    expect(ps[1].textContent).toBe("para two");
+    // No <br> injected — paragraph breaks are unchanged by remark-breaks.
+    expect(container.querySelector("br")).toBeNull();
+  });
+
   it("appends a blinking .cursor span when streaming", () => {
     const { container } = wrap(renderMarkdown("partial", true));
     expect(container.querySelector(".cursor")).toBeTruthy();
