@@ -701,6 +701,12 @@ async def _build_mcp_clients_for_chat(
 # service error code, walking the ``__cause__`` / ``__context__`` chain
 # because Strands wraps boto3 errors before they reach the stream loop.
 # Raw exception text NEVER reaches the client — see ``sse_error``.
+#
+# First match wins (per chain link, in tuple order) — keep needles
+# non-overlapping when extending. The bare "Timeout" needle is
+# deliberately broad: ReadTimeoutError / ConnectTimeoutError /
+# TimeoutError all reduce to "the model took too long" from the user's
+# perspective.
 _STREAM_ERROR_MAP: tuple[tuple[str, str, str, bool], ...] = (
     (
         "ValidationException",

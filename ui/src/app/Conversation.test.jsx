@@ -1649,6 +1649,31 @@ describe("Conversation", () => {
       expect(screen.queryByRole("button", { name: "Good" })).toBeNull();
     });
 
+    it("omits Retry when the failure is not retryable", () => {
+      mockStream({
+        turns: [
+          { msg_id: "u1", role: "user", text: "q" },
+          {
+            msg_id: "tmp-a-1",
+            client_msg_id: "tmp-a-1",
+            role: "assistant",
+            text: "",
+            streaming: false,
+            streamError: {
+              code: "bedrock_validation",
+              message: "Too large. Try shortening it.",
+              retryable: false,
+            },
+          },
+        ],
+      });
+      renderAt("/app/c/c1");
+      // Re-sending the same oversized input would fail identically —
+      // the chip renders without the Retry affordance.
+      expect(screen.getByRole("alert").textContent).toContain("Too large.");
+      expect(screen.queryByRole("button", { name: /retry/i })).toBeNull();
+    });
+
     it("omits Retry on an errored turn that is not the last turn", () => {
       mockStream({
         turns: [

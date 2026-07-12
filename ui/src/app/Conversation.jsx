@@ -558,7 +558,12 @@ export default function Conversation() {
                     <span className="stream-error-msg">
                       Couldn&apos;t complete reply — {t.streamError.message}
                     </span>
-                    {retryEnabled && (
+                    {/* Retry only when the failure is actually retryable —
+                        bedrock_validation ("message too large") would fail
+                        identically on resend. `!== false` treats a missing
+                        flag as retryable (defensive for frame shapes that
+                        predate the field). */}
+                    {retryEnabled && t.streamError.retryable !== false && (
                       <button
                         type="button"
                         className="stream-error-retry"
