@@ -15,6 +15,26 @@ function authHeader() {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
+// ---- Errors ----------------------------------------------------------------
+
+/**
+ * Error subclass for wrappers whose callers need to branch on the HTTP
+ * status (#211). Carries the parsed FastAPI error body's `detail`
+ * field — a string for plain HTTPExceptions, an array for Pydantic
+ * validation errors — or null when the error body wasn't JSON (e.g. an
+ * HTML 413 page from a proxy). The message keeps the legacy
+ * `"<operation> <status>"` shape so existing callers matching on it
+ * are unaffected.
+ */
+export class ApiError extends Error {
+  constructor(operation, status, detail = null) {
+    super(`${operation} ${status}`);
+    this.name = "ApiError";
+    this.status = status;
+    this.detail = detail;
+  }
+}
+
 // ---- Chats ----------------------------------------------------------------
 //
 // Named-export wrappers for the chats endpoints. Task 14 (useChatList) and
@@ -84,7 +104,18 @@ export async function streamMessage(
     body: JSON.stringify({ message, model, effort, attachments }),
     signal,
   });
-  if (!response.ok) throw new Error(`streamMessage ${response.status}`);
+  if (!response.ok) {
+    // #211: surface the status + FastAPI error detail so useChatStream
+    // can map the refusal (422 validation, 413 too large, 401/403 auth)
+    // to a user-safe message instead of eating it.
+    let detail = null;
+    try {
+      detail = (await response.json()).detail ?? null;
+    } catch {
+      /* non-JSON error body (proxy HTML, empty) — status alone must do */
+    }
+    throw new ApiError("streamMessage", response.status, detail);
+  }
   return response;
 }
 

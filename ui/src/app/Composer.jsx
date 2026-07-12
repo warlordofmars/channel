@@ -32,6 +32,13 @@ function nextTempId() {
   return `pending-${_tempIdCounter}`;
 }
 
+// #211: a rejected onSend promise (e.g. ChatHome's createChat failing)
+// is, from the Composer's seat, the same outcome as a refused send —
+// the message was not consumed, so the input should be restored.
+function refusalOutcome() {
+  return { accepted: false };
+}
+
 /**
  * Map an attachment MIME to the matching ``Icon.jsx`` glyph name.
  * Falls back to the generic ``"file"`` glyph for unknown types so a
@@ -347,22 +354,46 @@ const Composer = forwardRef(function Composer(
   const attachedOnly = atts.filter((a) => a.status === "attached");
   const canSend = !anyAttaching && (text.trim() !== "" || attachedOnly.length > 0);
 
-  function submit() {
+  async function submit() {
     if (!canSend) return;
     stopDictation();
     // canSend already guarantees text.trim() || attachedOnly.length > 0,
     // so the OR fallback always lands on a non-empty body.
     const body =
       text.trim() || "Take a look at the attached files.";
-    onSend(
-      body,
-      attachedOnly.map((a) => ({ id: a.id })),
-    );
+    const prevText = text;
+    const sentAtts = attachedOnly;
+    // Invoke synchronously (callers rely on onSend firing during the
+    // click tick) but funnel a synchronous throw into the same
+    // rejected-promise path as an async failure, so the
+    // .catch(refusalOutcome) below restores the input either way
+    // instead of letting submit() reject unhandled.
+    let result;
+    try {
+      result = onSend(
+        body,
+        sentAtts.map((a) => ({ id: a.id })),
+      );
+    } catch (err) {
+      result = Promise.reject(err);
+    }
     setText("");
     setAtts([]);
     setAttachError(null);
     fileRefsRef.current.clear();
     requestAnimationFrame(grow);
+    // #211: a send refused before streaming started (422 too-long, 413,
+    // auth, network) resolves to `{ accepted: false }` (see
+    // useChatStream.send). Restore the user's input so the paste isn't
+    // lost — unless the user already typed or attached something new
+    // while the refusal was in flight (don't clobber), and not for
+    // user-initiated aborts (nothing to recover).
+    const outcome = await Promise.resolve(result).catch(refusalOutcome);
+    if (outcome && outcome.accepted === false && !outcome.aborted) {
+      setText((current) => (current === "" ? prevText : current));
+      setAtts((current) => (current.length === 0 ? sentAtts : current));
+      requestAnimationFrame(grow);
+    }
   }
 
   function onKeyDown(e) {
