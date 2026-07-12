@@ -1191,4 +1191,175 @@ describe("useChatStream", () => {
 
     expect(api.getChat).not.toHaveBeenCalled();
   });
+
+  // --- stream-failure surfacing (#212) ---
+
+  // Like makeMockResponseBody, but the stream errors (instead of
+  // closing) after the queued events drain — simulates a network drop
+  // or an intentional AbortController.abort() mid-stream.
+  function makeFailingBody(events, err) {
+    const encoder = new TextEncoder();
+    const chunks = events.map((e) => `data: ${JSON.stringify(e)}\n\n`);
+    let i = 0;
+    return new ReadableStream({
+      pull(controller) {
+        if (i >= chunks.length) {
+          controller.error(err);
+          return;
+        }
+        controller.enqueue(encoder.encode(chunks[i]));
+        i += 1;
+      },
+    });
+  }
+
+  it("marks the turn errored and idles on an `error` frame, keeping partial text", async () => {
+    api.getChat.mockResolvedValue(chatPage([]));
+    api.streamMessage.mockResolvedValue({
+      ok: true,
+      body: makeMockResponseBody([
+        { type: "user_persisted", msg_id: "user-1", seq: 0 },
+        { type: "delta", text: "par" },
+        {
+          type: "error",
+          code: "bedrock_throttled",
+          message: "Busy.",
+          retryable: true,
+        },
+        {
+          type: "done",
+          msg_id: "",
+          seq: 1,
+          model: "m",
+          input_tokens: 0,
+          output_tokens: 0,
+          stop_reason: "error",
+        },
+      ]),
+    });
+
+    const { result } = await mountLoaded();
+    await act(async () => {
+      await result.current.send({ message: "hi", model: "m", effort: "med" });
+    });
+
+    const asst = result.current.turns[1];
+    expect(asst.streaming).toBe(false);
+    expect(asst.streamError).toEqual({
+      code: "bedrock_throttled",
+      message: "Busy.",
+      retryable: true,
+    });
+    expect(asst.text).toBe("par");
+    // The error-path `done` carries msg_id: "" (nothing persisted) —
+    // the temp id must survive so the turn keeps a usable React key.
+    expect(asst.msg_id).toMatch(/^tmp-a-/);
+    expect(result.current.status).toBe("idle");
+  });
+
+  it("treats a clean EOF without a terminal frame as connection_lost", async () => {
+    api.getChat.mockResolvedValue(chatPage([]));
+    api.streamMessage.mockResolvedValue({
+      ok: true,
+      body: makeMockResponseBody([
+        { type: "user_persisted", msg_id: "user-1", seq: 0 },
+        { type: "delta", text: "Hel" },
+      ]),
+    });
+
+    const { result } = await mountLoaded();
+    await act(async () => {
+      await result.current.send({ message: "hi", model: "m", effort: "med" });
+    });
+
+    const asst = result.current.turns[1];
+    expect(asst.streaming).toBe(false);
+    expect(asst.streamError).toMatchObject({
+      code: "connection_lost",
+      retryable: true,
+    });
+    expect(result.current.status).toBe("idle");
+  });
+
+  it("treats a mid-stream reader failure as connection_lost", async () => {
+    api.getChat.mockResolvedValue(chatPage([]));
+    api.streamMessage.mockResolvedValue({
+      ok: true,
+      body: makeFailingBody(
+        [{ type: "delta", text: "x" }],
+        new Error("network reset"),
+      ),
+    });
+
+    const { result } = await mountLoaded();
+    await act(async () => {
+      await result.current.send({ message: "hi", model: "m", effort: "med" });
+    });
+
+    const asst = result.current.turns[1];
+    expect(asst.streaming).toBe(false);
+    expect(asst.streamError).toMatchObject({ code: "connection_lost" });
+    expect(result.current.status).toBe("idle");
+  });
+
+  it("stays silent when the reader rejects with AbortError (user-initiated)", async () => {
+    const abortErr = Object.assign(new Error("aborted"), {
+      name: "AbortError",
+    });
+    api.getChat.mockResolvedValue(chatPage([]));
+    api.streamMessage.mockResolvedValue({
+      ok: true,
+      body: makeFailingBody([{ type: "delta", text: "x" }], abortErr),
+    });
+
+    const { result } = await mountLoaded();
+    await act(async () => {
+      await result.current.send({ message: "hi", model: "m", effort: "med" });
+    });
+
+    const asst = result.current.turns[1];
+    expect(asst.streamError).toBeUndefined();
+    expect(asst.streaming).toBe(true);
+    expect(result.current.status).toBe("streaming");
+  });
+
+  it("marks the regenerated turn errored on an `error` frame", async () => {
+    api.getChat.mockResolvedValue(
+      chatPage([
+        { msg_id: "u1", role: "user", text: "q" },
+        { msg_id: "a1", role: "assistant", text: "old" },
+      ]),
+    );
+    api.regenerate.mockResolvedValue({
+      ok: true,
+      body: makeMockResponseBody([
+        {
+          type: "error",
+          code: "internal",
+          message: "Something went wrong.",
+          retryable: true,
+        },
+        {
+          type: "done",
+          msg_id: "",
+          seq: 1,
+          model: "m",
+          input_tokens: 0,
+          output_tokens: 0,
+          stop_reason: "error",
+        },
+      ]),
+    });
+
+    const { result } = await mountLoaded();
+    await act(async () => {
+      await result.current.regenerate({});
+    });
+
+    const last = result.current.turns[result.current.turns.length - 1];
+    expect(last.role).toBe("assistant");
+    expect(last.streaming).toBe(false);
+    expect(last.streamError).toMatchObject({ code: "internal" });
+    expect(result.current.status).toBe("idle");
+  });
 });

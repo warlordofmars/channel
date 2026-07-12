@@ -297,6 +297,12 @@ function ToolStepList({ steps, expanded, onToggle }) {
  * Message-actions row (copy/retry/thumbs) is rendered per assistant
  * turn once that turn is no longer streaming. Buttons are no-ops at
  * Phase 7a.
+ *
+ * #212: a turn carrying `streamError` (SSE `error` frame or unexpected
+ * EOF — see useChatStream) renders an error chip with the user-safe
+ * message instead of the actions row; on the last turn the chip also
+ * offers Retry, which reuses the regenerate path (the user turn is
+ * already persisted server-side).
  */
 export default function Conversation() {
   const { id: chatId } = useParams();
@@ -547,7 +553,24 @@ export default function Conversation() {
                     </div>
                   </div>
                 )}
-                {!t.streaming && (
+                {t.streamError && (
+                  <div className="stream-error" role="alert">
+                    <span className="stream-error-msg">
+                      Couldn&apos;t complete reply — {t.streamError.message}
+                    </span>
+                    {retryEnabled && (
+                      <button
+                        type="button"
+                        className="stream-error-retry"
+                        onClick={onRetry}
+                      >
+                        <Icon name="refresh" size={14} />
+                        Retry
+                      </button>
+                    )}
+                  </div>
+                )}
+                {!t.streaming && !t.streamError && (
                   <div className="msg-actions">
                     <CopyButton text={t.text} />
                     <button

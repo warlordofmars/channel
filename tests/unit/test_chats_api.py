@@ -1982,6 +1982,9 @@ def test_post_message_follow_ups_empty_result_records_failure(
     )
 
     async def fake_main(self, prompt):
+        # A non-empty main reply keeps the #212 empty-stream detector
+        # from aborting the turn before the follow-ups block runs.
+        yield {"event": {"contentBlockDelta": {"delta": {"text": "Reply"}}}}
         yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
 
     class FakeAgent:
@@ -2015,6 +2018,9 @@ def test_post_message_follow_ups_caps_at_three_suggestions(
     )
 
     async def fake_main(self, prompt):
+        # A non-empty main reply keeps the #212 empty-stream detector
+        # from aborting the turn before the follow-ups block runs.
+        yield {"event": {"contentBlockDelta": {"delta": {"text": "Reply"}}}}
         yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
 
     class FakeAgent:
@@ -2075,6 +2081,9 @@ def test_post_message_follow_ups_salvages_partial_output_on_max_tokens(
     )
 
     async def fake_main(self, prompt):
+        # A non-empty main reply keeps the #212 empty-stream detector
+        # from aborting the turn before the follow-ups block runs.
+        yield {"event": {"contentBlockDelta": {"delta": {"text": "Reply"}}}}
         yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
 
     class FakeAgent:
@@ -2406,6 +2415,8 @@ def test_regenerate_drops_last_assistant_and_restreams(
         "channel.api.chats.storage.delete_last_assistant_message",
         lambda chat_id: deleted_calls.append(chat_id),
     )
+    # #212 — the tail-guard only deletes when the chat actually ends
+    # with an assistant turn, so the seeded history must end with one.
     monkeypatch.setattr(
         "channel.api.chats.storage.list_recent_messages",
         lambda *_a, **_kw: [
@@ -2415,7 +2426,15 @@ def test_regenerate_drops_last_assistant_and_restreams(
                 role=MessageRole.USER,
                 text="redo",
                 created_at="t",
-            )
+            ),
+            Message(
+                chat_id="c1",
+                msg_id="a-1",
+                role=MessageRole.ASSISTANT,
+                text="old reply",
+                model="m",
+                created_at="t2",
+            ),
         ],
     )
 
@@ -3743,3 +3762,370 @@ def test_regenerate_replays_attachments_from_prior_user_turn(
     assert any("[attachment_1: r.pdf" in (b.get("text") or "") for b in blocks)
     # Sanitised — Bedrock's document.name rejects periods (#179).
     assert any(b.get("document", {}).get("name") == "r pdf" for b in blocks)
+
+
+# ---------------------------------------------------------------------------
+# Stream-failure surfacing (#212)
+# ---------------------------------------------------------------------------
+
+
+def _stub_storage_capturing_persistence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[list[Message], list[dict[str, Any]]]:
+    """Stub the streaming-path storage boundary, capturing writes.
+
+    Returns ``(persisted_messages, update_index_calls)`` so tests can
+    assert what did / did not reach DynamoDB. ``message_count=2`` keeps
+    the auto-titler block from firing.
+    """
+    chat = Chat(
+        chat_id="c1",
+        user_id="u-1",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="claude-sonnet-4-6",
+        message_count=2,
+    )
+    monkeypatch.setattr("channel.api.chats.storage.get_chat_by_id", lambda _: chat)
+
+    persisted: list[Message] = []
+
+    def fake_put(**kwargs: Any) -> Message:
+        msg = Message(
+            chat_id=kwargs["chat_id"],
+            msg_id=f"m-{len(persisted)}",
+            role=kwargs["role"],
+            text=kwargs["text"],
+            model=kwargs.get("model"),
+            created_at="t",
+        )
+        persisted.append(msg)
+        return msg
+
+    monkeypatch.setattr("channel.api.chats.storage.put_message", fake_put)
+
+    index_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "channel.api.chats.storage.update_chat_index",
+        lambda **kw: index_calls.append(kw),
+    )
+    monkeypatch.setattr(
+        "channel.api.chats.storage.list_recent_messages",
+        lambda *_a, **_kw: [],
+    )
+    return persisted, index_calls
+
+
+def _sse_events(body: str) -> list[dict[str, Any]]:
+    """Parse an SSE response body into its JSON event payloads."""
+    return [
+        json.loads(frame.removeprefix("data: "))
+        for frame in body.split("\n\n")
+        if frame.startswith("data: ")
+    ]
+
+
+def test_post_message_stream_exception_emits_error_then_done(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Strands stream exception surfaces as ``error`` + ``done`` frames
+    instead of a silent clean-EOF (#212), persists no assistant turn,
+    and never leaks the raw exception text to the client."""
+
+    persisted, index_calls = _stub_storage_capturing_persistence(monkeypatch)
+
+    stored_idempotency: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "channel.api.chats.storage.reserve_idempotency_key",
+        lambda **_kw: None,
+    )
+    monkeypatch.setattr(
+        "channel.api.chats.storage.store_idempotency_result",
+        lambda **kw: stored_idempotency.append(kw),
+    )
+
+    async def fake_stream(self, prompt):
+        yield {"event": {"contentBlockDelta": {"delta": {"text": "partial"}}}}
+        raise RuntimeError("raw boto3 detail that must not leak")
+
+    class FakeAgent:
+        stream_async = fake_stream
+
+    monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
+
+    response = client.post(
+        "/api/chats/c1/messages",
+        json={"message": "hi", "model": "claude-sonnet-4-6"},
+        headers={"Idempotency-Key": "k-1"},
+    )
+    assert response.status_code == 200
+    events = _sse_events(response.text)
+
+    error = next(e for e in events if e["type"] == "error")
+    assert error["code"] == "internal"
+    assert error["retryable"] is True
+    assert "boto3" not in response.text
+
+    done = next(e for e in events if e["type"] == "done")
+    assert done["stop_reason"] == "error"
+    assert done["msg_id"] == ""
+    # error precedes done so the SPA marks the turn before it resolves.
+    types = [e["type"] for e in events]
+    assert types.index("error") < types.index("done")
+
+    # User turn persisted; assistant turn NOT persisted; index untouched;
+    # no idempotency replay stored (a retry must re-execute).
+    assert [m.role for m in persisted] == [MessageRole.USER]
+    assert index_calls == []
+    assert stored_idempotency == []
+
+
+def test_post_message_empty_stream_emits_empty_response_error(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The 2026-06-06 incident shape — stream completes 'cleanly' with
+    zero output — now surfaces ``empty_response`` instead of a blank
+    assistant turn (#212)."""
+
+    persisted, index_calls = _stub_storage_capturing_persistence(monkeypatch)
+
+    async def fake_stream(self, prompt):
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+        yield {"event": {"metadata": {"usage": {"inputTokens": 9, "outputTokens": 0}}}}
+
+    class FakeAgent:
+        stream_async = fake_stream
+
+    monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
+
+    response = client.post(
+        "/api/chats/c1/messages",
+        json={"message": "hi", "model": "claude-sonnet-4-6"},
+    )
+    assert response.status_code == 200
+    events = _sse_events(response.text)
+
+    error = next(e for e in events if e["type"] == "error")
+    assert error["code"] == "empty_response"
+    assert error["retryable"] is True
+
+    done = next(e for e in events if e["type"] == "done")
+    assert done["stop_reason"] == "error"
+
+    assert [m.role for m in persisted] == [MessageRole.USER]
+    assert index_calls == []
+
+
+def test_post_message_empty_stream_with_non_end_turn_stop_is_not_flagged(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The empty-stream detector is scoped to ``end_turn`` exactly (per
+    the #212 fix plan) — a zero-delta ``max_tokens`` stop passes through
+    the normal persistence path."""
+
+    persisted, _index_calls = _stub_storage_capturing_persistence(monkeypatch)
+
+    async def fake_stream(self, prompt):
+        yield {"event": {"messageStop": {"stopReason": "max_tokens"}}}
+
+    class FakeAgent:
+        stream_async = fake_stream
+
+    monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
+
+    response = client.post(
+        "/api/chats/c1/messages",
+        json={"message": "hi", "model": "claude-sonnet-4-6"},
+    )
+    assert response.status_code == 200
+    events = _sse_events(response.text)
+    assert not any(e["type"] == "error" for e in events)
+    done = next(e for e in events if e["type"] == "done")
+    assert done["stop_reason"] == "max_tokens"
+    assert [m.role for m in persisted] == [MessageRole.USER, MessageRole.ASSISTANT]
+
+
+def test_post_message_stream_heartbeat_logs_when_enabled(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Opt-in heartbeat (#212 observability point 2/3) logs every 50
+    deltas; the start / complete lines (points 1 and 3) always fire.
+
+    The module-level ``logger`` is mocked directly rather than using
+    ``caplog`` because the channel logger sets ``propagate = False``
+    once ``configure_logging`` has run in the test session (same
+    workaround as ``test_tool_hooks``)."""
+    from unittest.mock import MagicMock  # noqa: PLC0415
+
+    monkeypatch.setenv("STARTER_STREAM_HEARTBEAT_ENABLED", "1")
+    _stub_storage_capturing_persistence(monkeypatch)
+
+    mock_logger = MagicMock()
+    monkeypatch.setattr("channel.api.chats.logger", mock_logger)
+
+    async def fake_stream(self, prompt):
+        for _ in range(50):
+            yield {"event": {"contentBlockDelta": {"delta": {"text": "x"}}}}
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+
+    class FakeAgent:
+        stream_async = fake_stream
+
+    monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
+
+    response = client.post(
+        "/api/chats/c1/messages",
+        json={"message": "hi", "model": "claude-sonnet-4-6"},
+    )
+    assert response.status_code == 200
+
+    info_templates = [call.args[0] for call in mock_logger.info.call_args_list]
+    start = next(t for t in info_templates if t.startswith("chat_stream_start"))
+    assert "chat_id=%s" in start
+    heartbeats = [
+        call
+        for call in mock_logger.info.call_args_list
+        if call.args[0].startswith("chat_stream_heartbeat")
+    ]
+    # Exactly one heartbeat for a 50-delta stream (fires at delta 50).
+    assert len(heartbeats) == 1
+    assert heartbeats[0].args[2] == 50  # delta_count
+    complete = next(
+        call
+        for call in mock_logger.info.call_args_list
+        if call.args[0].startswith("chat_stream_complete")
+    )
+    assert complete.args[2] == 50  # total_deltas
+    # No error line on the happy path.
+    assert not mock_logger.error.called
+
+
+def test_classify_stream_exception_maps_known_names() -> None:
+    from channel.api.chats import _classify_stream_exception
+
+    validation = type("ValidationException", (Exception,), {})()
+    code, message, retryable = _classify_stream_exception(validation)
+    assert code == "bedrock_validation"
+    assert retryable is False
+    assert "too large" in message
+
+    throttled = type("ThrottlingException", (Exception,), {})()
+    assert _classify_stream_exception(throttled)[0] == "bedrock_throttled"
+    assert _classify_stream_exception(throttled)[2] is True
+
+    timeout = type("ReadTimeoutError", (Exception,), {})()
+    assert _classify_stream_exception(timeout)[0] == "bedrock_timeout"
+
+
+def test_classify_stream_exception_reads_botocore_error_code() -> None:
+    """botocore ``ClientError`` carries the service code in
+    ``response["Error"]["Code"]`` — the class name alone is generic."""
+    from channel.api.chats import _classify_stream_exception
+
+    client_error = type("ClientError", (Exception,), {})()
+    client_error.response = {"Error": {"Code": "ThrottlingException"}}
+    assert _classify_stream_exception(client_error)[0] == "bedrock_throttled"
+
+
+def test_classify_stream_exception_walks_cause_chain() -> None:
+    """Strands wraps boto3 errors; the classifier follows ``__cause__``
+    (and falls back to ``__context__``) to find the root."""
+    from channel.api.chats import _classify_stream_exception
+
+    root = type("ValidationException", (Exception,), {})()
+    wrapper = RuntimeError("strands wrapper")
+    wrapper.__cause__ = root
+    assert _classify_stream_exception(wrapper)[0] == "bedrock_validation"
+
+    context_only = RuntimeError("strands wrapper")
+    context_only.__context__ = type("ThrottlingException", (Exception,), {})()
+    assert _classify_stream_exception(context_only)[0] == "bedrock_throttled"
+
+
+def test_classify_stream_exception_falls_back_to_internal() -> None:
+    from channel.api.chats import _classify_stream_exception
+
+    code, message, retryable = _classify_stream_exception(ValueError("nope"))
+    assert code == "internal"
+    assert retryable is True
+    assert "nope" not in message
+
+
+def test_classify_stream_exception_survives_cyclic_chain() -> None:
+    """A pathological ``__cause__`` cycle must terminate (seen-guard)."""
+    from channel.api.chats import _classify_stream_exception
+
+    a = RuntimeError("a")
+    b = RuntimeError("b")
+    a.__cause__ = b
+    b.__cause__ = a
+    assert _classify_stream_exception(a)[0] == "internal"
+
+
+def test_regenerate_skips_assistant_delete_when_tail_is_user(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Retry-after-failure shape (#212): the failed turn persisted only
+    the user message, so the chat tail is a USER turn. Regenerate must
+    NOT delete the most recent assistant message — that would destroy
+    the PREVIOUS turn's reply."""
+
+    chat = Chat(
+        chat_id="c1",
+        user_id="u-1",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="claude-sonnet-4-6",
+        message_count=2,
+    )
+    monkeypatch.setattr("channel.api.chats.storage.get_chat_by_id", lambda _: chat)
+
+    deleted_calls: list[str] = []
+    monkeypatch.setattr(
+        "channel.api.chats.storage.delete_last_assistant_message",
+        lambda chat_id: deleted_calls.append(chat_id),
+    )
+    monkeypatch.setattr(
+        "channel.api.chats.storage.list_recent_messages",
+        lambda *_a, **_kw: [
+            Message(chat_id="c1", msg_id="u1", role=MessageRole.USER, text="q1", created_at="t1"),
+            Message(
+                chat_id="c1",
+                msg_id="a1",
+                role=MessageRole.ASSISTANT,
+                text="prior reply",
+                model="m",
+                created_at="t2",
+            ),
+            Message(
+                chat_id="c1", msg_id="u2", role=MessageRole.USER, text="failed q", created_at="t3"
+            ),
+        ],
+    )
+    monkeypatch.setattr(
+        "channel.api.chats.storage.put_message",
+        lambda **kw: Message(
+            chat_id=kw["chat_id"],
+            msg_id="m-new",
+            role=kw["role"],
+            text=kw["text"],
+            model=kw.get("model"),
+            created_at="t9",
+        ),
+    )
+    monkeypatch.setattr("channel.api.chats.storage.update_chat_index", lambda **_: None)
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        "channel.api.chats.build_agent",
+        _fake_streaming_agent_factory(captured),
+    )
+
+    response = client.post("/api/chats/c1/regenerate", json={})
+    assert response.status_code == 200
+    assert deleted_calls == []
+    # Re-streams from the orphaned user turn.
+    assert captured["prompt"] == "failed q"

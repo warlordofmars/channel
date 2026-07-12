@@ -512,6 +512,31 @@ html.is-electron-mac .sb-top {
 .assistant-head .mdl { font-size: 11px; font-family: var(--font-mono); color: var(--ink-faint); }
 .msg-actions { display: flex; gap: 2px; margin-top: 4px; }
 
+/* stream-failure chip (#212) — rendered under an assistant turn when
+   the SSE stream emits an `error` frame or closes without a terminal
+   frame. Mirrors the .attach-error danger palette. */
+.stream-error {
+  display: flex; align-items: center; gap: 10px;
+  margin-top: 8px; padding: 8px 12px;
+  border: 1px solid var(--danger);
+  border-radius: var(--r-sm);
+  background: var(--danger-soft);
+  color: var(--danger); font-size: 13px;
+}
+.stream-error-msg { flex: 1; min-width: 0; }
+.stream-error-retry {
+  appearance: none; background: transparent;
+  border: 1px solid var(--danger); border-radius: var(--r-pill);
+  padding: 3px 10px; cursor: pointer;
+  color: var(--danger); font-size: 12.5px; font-weight: 600;
+  display: inline-flex; align-items: center; gap: 5px;
+  flex-shrink: 0;
+}
+.stream-error-retry:hover {
+  background: var(--danger);
+  color: var(--canvas);
+}
+
 /* follow-up chip row — appears below the last assistant turn when the
    backend supplies suggestions via the `follow_ups_suggested` SSE event. */
 .followups { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 4px; }

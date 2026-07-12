@@ -138,6 +138,26 @@ export function useChatStream(chatId, { onTitleSuggested } = {}) {
     prevChatIdRef.current = chatId;
   }
 
+  // #212: resolve the in-flight assistant turn into an errored,
+  // non-streaming state. Keyed off the STABLE `client_msg_id` (see the
+  // #221 rationale on patchToolStep) so the patch lands whether or not
+  // a `done` frame already swapped `msg_id`. Status returns to "idle"
+  // (NOT "error" — that state is reserved for history-load / pre-stream
+  // failures and renders a whole-pane banner) so the Composer is
+  // interactive again; the error itself is surfaced per-turn via the
+  // `streamError` field, which Conversation renders as an error chip
+  // with a Retry affordance.
+  function markStreamError(tempAsstId, streamError) {
+    setTurns((prev) =>
+      prev.map((t) =>
+        t.client_msg_id === tempAsstId
+          ? { ...t, streaming: false, streamError }
+          : t,
+      ),
+    );
+    setStatus("idle");
+  }
+
   // Hook-local SSE reader loop. Shared by send() and regenerate().
   //
   // tempUserId is optional: regenerate doesn't add a temp user row (the
@@ -146,13 +166,22 @@ export function useChatStream(chatId, { onTitleSuggested } = {}) {
   // (should it arrive anyway) is a no-op because no row matches.
   //
   // try/catch wraps the loop because AbortController.abort() (from
-  // chatId change or unmount) causes reader.read() to reject. The
-  // abort is user-initiated so we bail out silently — state remains
-  // in whatever partial form it reached.
+  // chatId change or unmount) causes reader.read() to reject. An
+  // AbortError is user-initiated so we bail out silently; any OTHER
+  // reader failure (network drop mid-stream, proxy reset) falls
+  // through to the #212 unexpected-EOF check below and surfaces as a
+  // `connection_lost` stream error.
   async function readSse(response, tempAsstId, tempUserId) {
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     const sse = makeSseDecoder();
+    // #212: `sawTerminal` records that the stream reached a protocol-
+    // level terminal frame (`done` or `error`). A stream that closes
+    // without one — the 2026-06-06 hang shape: HTTP 200, empty SSE
+    // body, clean EOF — previously left the in-flight state stuck
+    // forever.
+    let sawTerminal = false;
+    let aborted = false;
     try {
       while (true) {
         const { value, done } = await reader.read();
@@ -176,12 +205,16 @@ export function useChatStream(chatId, { onTitleSuggested } = {}) {
               ),
             );
           } else if (event.type === "done") {
+            sawTerminal = true;
             setTurns((prev) =>
               prev.map((t) =>
                 t.msg_id === tempAsstId
                   ? {
                       ...t,
-                      msg_id: event.msg_id,
+                      // #212: an error-path `done` carries an empty
+                      // msg_id (nothing was persisted) — keep the temp
+                      // id so the turn keeps a usable React key.
+                      ...(event.msg_id && { msg_id: event.msg_id }),
                       streaming: false,
                       model: event.model,
                       input_tokens: event.input_tokens,
@@ -191,6 +224,17 @@ export function useChatStream(chatId, { onTitleSuggested } = {}) {
               ),
             );
             setStatus("idle");
+          } else if (event.type === "error") {
+            // #212: protocol-level stream failure. The backend emits
+            // this ahead of a `done` frame with stop_reason="error";
+            // mark the turn errored here so the chip renders even if
+            // that trailing `done` never arrives.
+            sawTerminal = true;
+            markStreamError(tempAsstId, {
+              code: event.code,
+              message: event.message,
+              retryable: event.retryable,
+            });
           } else if (event.type === "title_suggested") {
             // Phase 7d: backend emits this after the first round-trip
             // on a fresh chat. Caller decides what to do with the title
@@ -285,10 +329,26 @@ export function useChatStream(chatId, { onTitleSuggested } = {}) {
           }
         }
       }
-    } catch {
-      // Reader aborted or errored — bail out silently. Abort is
-      // user-initiated (chatId change / unmount / explicit abort()),
-      // so no error surface needed.
+    } catch (err) {
+      // AbortError is user-initiated (chatId change / unmount /
+      // explicit abort()) — bail out silently, no error surface. Any
+      // other reader failure falls through to the unexpected-EOF check
+      // below and surfaces as `connection_lost` (#212).
+      if (err?.name === "AbortError") {
+        aborted = true;
+      }
+    }
+    // #212: unexpected EOF — the stream ended (clean close OR reader
+    // failure) without a terminal `done` / `error` frame. This is the
+    // catch-all for failure modes the backend hasn't wired into the
+    // `error` frame yet; without it the in-flight state never resolves
+    // and the user must reload to escape.
+    if (!aborted && !sawTerminal) {
+      markStreamError(tempAsstId, {
+        code: "connection_lost",
+        message: "The connection closed before the reply completed. Try again.",
+        retryable: true,
+      });
     }
   }
 
