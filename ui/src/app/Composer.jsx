@@ -363,10 +363,20 @@ const Composer = forwardRef(function Composer(
       text.trim() || "Take a look at the attached files.";
     const prevText = text;
     const sentAtts = attachedOnly;
-    const result = onSend(
-      body,
-      sentAtts.map((a) => ({ id: a.id })),
-    );
+    // Invoke synchronously (callers rely on onSend firing during the
+    // click tick) but funnel a synchronous throw into the same
+    // rejected-promise path as an async failure, so the
+    // .catch(refusalOutcome) below restores the input either way
+    // instead of letting submit() reject unhandled.
+    let result;
+    try {
+      result = onSend(
+        body,
+        sentAtts.map((a) => ({ id: a.id })),
+      );
+    } catch (err) {
+      result = Promise.reject(err);
+    }
     setText("");
     setAtts([]);
     setAttachError(null);

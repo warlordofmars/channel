@@ -1198,6 +1198,20 @@ describe("Composer", () => {
       expect(ta.value).toBe("hello");
     });
 
+    it("restores the input when onSend throws synchronously", async () => {
+      const onSend = vi.fn(() => {
+        throw new Error("sync boom");
+      });
+      render(<Composer {...defaultProps({ onSend })} />);
+      const ta = screen.getByRole("textbox");
+      fireEvent.change(ta, { target: { value: "hello" } });
+      await act(async () => {
+        fireEvent.click(screen.getByTitle("Send"));
+      });
+      expect(onSend).toHaveBeenCalledTimes(1);
+      expect(ta.value).toBe("hello");
+    });
+
     it("restores attachment chips on refusal", async () => {
       const onSend = vi.fn().mockResolvedValue({ accepted: false });
       render(<Composer {...defaultProps({ onSend })} />);
