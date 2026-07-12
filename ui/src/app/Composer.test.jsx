@@ -1117,4 +1117,126 @@ describe("Composer", () => {
       });
     });
   });
+
+  // #211: the send path resolves { accepted: false } when the POST was
+  // refused before streaming (422 too-long, 413, auth, network). The
+  // Composer restores the cleared input so the user's paste isn't lost.
+  describe("#211 — restore input when the send is refused", () => {
+    // Settle a picked file's attach pipeline (all api mocks resolve).
+    async function settlePipeline() {
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0));
+      });
+    }
+
+    it("restores the text when onSend resolves { accepted: false }", async () => {
+      const onSend = vi.fn().mockResolvedValue({ accepted: false });
+      render(<Composer {...defaultProps({ onSend })} />);
+      const ta = screen.getByRole("textbox");
+      fireEvent.change(ta, { target: { value: "way too long paste" } });
+      await act(async () => {
+        fireEvent.click(screen.getByTitle("Send"));
+      });
+      expect(onSend).toHaveBeenCalledWith("way too long paste", []);
+      expect(ta.value).toBe("way too long paste");
+    });
+
+    it("does not clobber text the user typed while the refusal was in flight", async () => {
+      let resolveSend;
+      const onSend = vi.fn(
+        () =>
+          new Promise((resolve) => {
+            resolveSend = resolve;
+          }),
+      );
+      render(<Composer {...defaultProps({ onSend })} />);
+      const ta = screen.getByRole("textbox");
+      fireEvent.change(ta, { target: { value: "first paste" } });
+      fireEvent.click(screen.getByTitle("Send"));
+      // Cleared optimistically…
+      expect(ta.value).toBe("");
+      // …user starts a new draft before the refusal lands.
+      fireEvent.change(ta, { target: { value: "second draft" } });
+      await act(async () => {
+        resolveSend({ accepted: false });
+      });
+      expect(ta.value).toBe("second draft");
+    });
+
+    it("leaves the input cleared when onSend resolves { accepted: true }", async () => {
+      const onSend = vi.fn().mockResolvedValue({ accepted: true });
+      render(<Composer {...defaultProps({ onSend })} />);
+      const ta = screen.getByRole("textbox");
+      fireEvent.change(ta, { target: { value: "hello" } });
+      await act(async () => {
+        fireEvent.click(screen.getByTitle("Send"));
+      });
+      expect(ta.value).toBe("");
+    });
+
+    it("leaves the input cleared on a user-initiated abort", async () => {
+      const onSend = vi
+        .fn()
+        .mockResolvedValue({ accepted: false, aborted: true });
+      render(<Composer {...defaultProps({ onSend })} />);
+      const ta = screen.getByRole("textbox");
+      fireEvent.change(ta, { target: { value: "hello" } });
+      await act(async () => {
+        fireEvent.click(screen.getByTitle("Send"));
+      });
+      expect(ta.value).toBe("");
+    });
+
+    it("restores the input when onSend rejects (e.g. chat creation failed)", async () => {
+      const onSend = vi.fn().mockRejectedValue(new Error("createChat 500"));
+      render(<Composer {...defaultProps({ onSend })} />);
+      const ta = screen.getByRole("textbox");
+      fireEvent.change(ta, { target: { value: "hello" } });
+      await act(async () => {
+        fireEvent.click(screen.getByTitle("Send"));
+      });
+      expect(ta.value).toBe("hello");
+    });
+
+    it("restores attachment chips on refusal", async () => {
+      const onSend = vi.fn().mockResolvedValue({ accepted: false });
+      render(<Composer {...defaultProps({ onSend })} />);
+      await pickFiles([makeFile("spec.pdf", "application/pdf", 1024)]);
+      await settlePipeline();
+      expect(screen.getByTitle("Send").disabled).toBe(false);
+      await act(async () => {
+        fireEvent.click(screen.getByTitle("Send"));
+      });
+      expect(onSend).toHaveBeenCalledWith(
+        "Take a look at the attached files.",
+        [{ id: "att-mock" }],
+      );
+      // Chip restored after the refusal.
+      const chip = screen.getByText("spec.pdf").closest(".attach-chip");
+      expect(chip.getAttribute("data-status")).toBe("attached");
+    });
+
+    it("does not overwrite attachments added while the refusal was in flight", async () => {
+      let resolveSend;
+      const onSend = vi.fn(
+        () =>
+          new Promise((resolve) => {
+            resolveSend = resolve;
+          }),
+      );
+      render(<Composer {...defaultProps({ onSend })} />);
+      await pickFiles([makeFile("first.pdf", "application/pdf", 1024)]);
+      await settlePipeline();
+      fireEvent.click(screen.getByTitle("Send"));
+      expect(screen.queryByText("first.pdf")).toBeNull();
+      // A new file arrives before the refusal lands.
+      await pickFiles([makeFile("second.pdf", "application/pdf", 1024)]);
+      await settlePipeline();
+      await act(async () => {
+        resolveSend({ accepted: false });
+      });
+      expect(screen.queryByText("first.pdf")).toBeNull();
+      expect(screen.getByText("second.pdf")).toBeTruthy();
+    });
+  });
 });

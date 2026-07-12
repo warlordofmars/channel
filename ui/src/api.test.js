@@ -1,6 +1,7 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  ApiError,
   createChat,
   deleteChat,
   deleteMCPServer,
@@ -247,6 +248,41 @@ describe("chats wrappers", () => {
       await expect(streamMessage("c1", { message: "hi" })).rejects.toThrow(
         /streamMessage 500/,
       );
+    });
+
+    it("attaches status + parsed FastAPI detail to the thrown error (#211)", async () => {
+      const detail = [
+        { type: "string_too_long", loc: ["body", "message"], msg: "too long" },
+      ];
+      fetchMock.mockResolvedValue({
+        ok: false,
+        status: 422,
+        json: () => Promise.resolve({ detail }),
+      });
+      const err = await streamMessage("c1", { message: "hi" }).catch((e) => e);
+      expect(err).toBeInstanceOf(ApiError);
+      expect(err.message).toBe("streamMessage 422");
+      expect(err.status).toBe(422);
+      expect(err.detail).toEqual(detail);
+    });
+
+    it("defaults detail to null when the error body has no detail key (#211)", async () => {
+      mockFail(500);
+      const err = await streamMessage("c1", { message: "hi" }).catch((e) => e);
+      expect(err.status).toBe(500);
+      expect(err.detail).toBeNull();
+    });
+
+    it("leaves detail null when the error body is not JSON (#211)", async () => {
+      fetchMock.mockResolvedValue({
+        ok: false,
+        status: 413,
+        json: () => Promise.reject(new Error("not json")),
+      });
+      const err = await streamMessage("c1", { message: "hi" }).catch((e) => e);
+      expect(err).toBeInstanceOf(ApiError);
+      expect(err.status).toBe(413);
+      expect(err.detail).toBeNull();
     });
   });
 

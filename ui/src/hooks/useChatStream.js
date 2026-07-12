@@ -1,6 +1,7 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
 import { useCallback, useEffect, useRef, useState } from "react";
 import * as api from "../api.js";
+import { TOKEN_KEY } from "../lib/auth.js";
 import { makeSseDecoder } from "../lib/sseParser.js";
 
 // #181 PR-3: in-place patch of one toolStep on the in-flight assistant
@@ -41,6 +42,42 @@ function patchToolStep(turns, tempAsstId, toolUseId, patch) {
   return next;
 }
 
+// #211: map a send POST that was refused before any SSE frame arrived
+// (4xx validation, auth failure, network error) onto the user-safe
+// per-turn `streamError` shape introduced by #212/#310. Every refusal
+// is non-retryable via the chip's regenerate path — the user turn was
+// never persisted server-side, so regenerate would have nothing to
+// re-stream. The recovery affordance is the Composer restoring the
+// original input (send() resolves `{ accepted: false }`).
+function sendRefusalError(status, detail) {
+  const messageTooLong =
+    status === 413 ||
+    (status === 422 &&
+      Array.isArray(detail) &&
+      detail.some(
+        (item) => Array.isArray(item?.loc) && item.loc.includes("message"),
+      ));
+  if (messageTooLong) {
+    return {
+      code: "message_too_long",
+      message: "Your message is too long. Please shorten it and try again.",
+      retryable: false,
+    };
+  }
+  if (status === 401 || status === 403) {
+    return {
+      code: "session_expired",
+      message: "Your session expired. Please sign in again.",
+      retryable: false,
+    };
+  }
+  return {
+    code: "send_failed",
+    message: "Couldn't send. Please try again.",
+    retryable: false,
+  };
+}
+
 /**
  * Real SSE-driven chat hook. Loads chat history on mount, optimistically
  * renders new turns on send, parses streamed deltas, and finalises turns
@@ -50,8 +87,21 @@ function patchToolStep(turns, tempAsstId, toolUseId, patch) {
  *   - "idle"             — no in-flight work
  *   - "loading-history"  — initial GET /api/chats/{id} in flight
  *   - "streaming"        — POST /api/chats/{id}/messages SSE active
- *   - "error"            — last history-load or send failed; `error`
- *                          holds the Error
+ *   - "error"            — history load failed; `error` holds the
+ *                          Error. Send failures do NOT use this state
+ *                          (#211) — they surface per-turn via
+ *                          `streamError` so the Composer stays
+ *                          interactive.
+ *
+ * `send()` resolves to an outcome object the Composer branches on:
+ *   - `{ accepted: true }`            — the POST was accepted and the
+ *                                       stream ran (possibly erroring
+ *                                       later; that's the #212 surface)
+ *   - `{ accepted: false }`           — refused before streaming (4xx /
+ *                                       network); the caller should
+ *                                       restore the user's input
+ *   - `{ accepted: false, aborted: true }` — user-initiated abort;
+ *                                       nothing to surface or restore
  *
  * Returns `{ turns, send, abort, status, error }`. `turns` is an array
  * of `{ msg_id, role, text, ...flags }`; the assistant turn carries
@@ -142,11 +192,11 @@ export function useChatStream(chatId, { onTitleSuggested } = {}) {
   // non-streaming state. Keyed off the STABLE `client_msg_id` (see the
   // #221 rationale on patchToolStep) so the patch lands whether or not
   // a `done` frame already swapped `msg_id`. Status returns to "idle"
-  // (NOT "error" — that state is reserved for history-load / pre-stream
-  // failures and renders a whole-pane banner) so the Composer is
-  // interactive again; the error itself is surfaced per-turn via the
-  // `streamError` field, which Conversation renders as an error chip
-  // with a Retry affordance.
+  // (NOT "error" — that state is reserved for history-load failures
+  // and renders a whole-pane banner) so the Composer is interactive
+  // again; the error itself is surfaced per-turn via the `streamError`
+  // field, which Conversation renders as an error chip with a Retry
+  // affordance.
   function markStreamError(tempAsstId, streamError) {
     setTurns((prev) =>
       prev.map((t) =>
@@ -154,6 +204,26 @@ export function useChatStream(chatId, { onTitleSuggested } = {}) {
           ? { ...t, streaming: false, streamError }
           : t,
       ),
+    );
+    setStatus("idle");
+  }
+
+  // #211: the send POST was refused before any SSE frame (4xx /
+  // network failure). Nothing was persisted server-side, so the
+  // optimistic user row comes OUT of the transcript (its text goes
+  // back to the Composer via send()'s `{ accepted: false }` result)
+  // and the assistant row flips to a non-retryable error chip. The
+  // `sendRejected` flag lets the next send() sweep the stale chip away
+  // (auto-dismiss on the next attempt).
+  function markSendRejected(tempUserId, tempAsstId, streamError) {
+    setTurns((prev) =>
+      prev
+        .filter((t) => t.msg_id !== tempUserId)
+        .map((t) =>
+          t.client_msg_id === tempAsstId
+            ? { ...t, streaming: false, streamError, sendRejected: true }
+            : t,
+        ),
     );
     setStatus("idle");
   }
@@ -354,12 +424,14 @@ export function useChatStream(chatId, { onTitleSuggested } = {}) {
 
   const send = useCallback(
     async ({ message, model, effort, attachments }) => {
-      if (!chatId) return;
+      if (!chatId) return { accepted: false };
       setError(null);
       const tempUserId = `tmp-u-${crypto.randomUUID()}`;
       const tempAsstId = `tmp-a-${crypto.randomUUID()}`;
       setTurns((prev) => [
-        ...prev,
+        // #211: sweep any prior send-refusal chip — the new attempt
+        // replaces it (auto-dismiss on next send).
+        ...prev.filter((t) => !t.sendRejected),
         { msg_id: tempUserId, role: "user", text: message, pending: true },
         {
           // #221 fix: client_msg_id is the STABLE lookup key for tool
@@ -393,12 +465,40 @@ export function useChatStream(chatId, { onTitleSuggested } = {}) {
           signal: controller.signal,
         });
       } catch (err) {
-        setError(err);
-        setStatus("error");
-        return;
+        if (err?.name === "AbortError") {
+          // User-initiated (chatId switch / unmount) — drop the
+          // optimistic rows silently; nothing to surface or restore.
+          setTurns((prev) =>
+            prev.filter(
+              (t) =>
+                t.msg_id !== tempUserId && t.client_msg_id !== tempAsstId,
+            ),
+          );
+          setStatus("idle");
+          return { accepted: false, aborted: true };
+        }
+        // #211: the POST was refused (422 validation, 413 too large,
+        // 401/403 auth, 5xx, network drop). Previously this path set
+        // the whole-pane "error" status and left the assistant row
+        // streaming forever; now it rolls the user row back and renders
+        // the per-turn chip, keeping the Composer interactive.
+        markSendRejected(
+          tempUserId,
+          tempAsstId,
+          sendRefusalError(err?.status, err?.detail),
+        );
+        if (err?.status === 401) {
+          // Session is dead — mirror Sidebar.signOut's local clear +
+          // redirect, minus the /auth/logout audit POST (the token is
+          // already rejected, so that call would just 401 too).
+          localStorage.removeItem(TOKEN_KEY);
+          globalThis.location.assign("/app/login");
+        }
+        return { accepted: false };
       }
 
       await readSse(response, tempAsstId, tempUserId);
+      return { accepted: true };
     },
     [chatId],
   );
