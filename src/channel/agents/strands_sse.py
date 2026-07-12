@@ -380,6 +380,37 @@ def sse_done(
     )
 
 
+def sse_error(*, code: str, message: str, retryable: bool) -> bytes:
+    """Emit an ``error`` SSE event (#212).
+
+    Protocol-level error surface for the chat stream. Before this frame
+    existed, any Strands/Bedrock failure propagated out of the router's
+    generator and FastAPI closed the SSE connection cleanly — HTTP 200,
+    empty tail, no terminal event — leaving the SPA's in-flight state
+    stuck forever.
+
+    The router emits this frame, then a ``done`` frame with
+    ``stop_reason="error"``, so the SPA's existing done-handler still
+    resolves the in-flight state even before it learns the ``error``
+    shape.
+
+    ``code`` is a stable machine-readable identifier the SPA can branch
+    on (``bedrock_validation`` / ``bedrock_throttled`` /
+    ``bedrock_timeout`` / ``empty_response`` / ``internal``).
+    ``message`` is user-safe copy — NEVER raw boto3 / exception text
+    (that stays in the server logs). Capped at ``_SUMMARY_MAX`` as
+    defense in depth at the bytes-on-the-wire boundary.
+    """
+    return _sse(
+        {
+            "type": "error",
+            "code": code,
+            "message": message[:_SUMMARY_MAX],
+            "retryable": retryable,
+        }
+    )
+
+
 _ARGS_PREVIEW_MAX = 200
 _SUMMARY_MAX = 500
 

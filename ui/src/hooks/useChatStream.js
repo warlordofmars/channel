@@ -1,6 +1,7 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
 import { useCallback, useEffect, useRef, useState } from "react";
 import * as api from "../api.js";
+import { TOKEN_KEY } from "../lib/auth.js";
 import { makeSseDecoder } from "../lib/sseParser.js";
 
 // #181 PR-3: in-place patch of one toolStep on the in-flight assistant
@@ -41,6 +42,51 @@ function patchToolStep(turns, tempAsstId, toolUseId, patch) {
   return next;
 }
 
+// #211: map a send POST that was refused before any SSE frame arrived
+// (4xx validation, auth failure, network error) onto the user-safe
+// per-turn `streamError` shape introduced by #212/#310. Every refusal
+// is non-retryable via the chip's regenerate path — the user turn was
+// never persisted server-side, so regenerate would have nothing to
+// re-stream. The recovery affordance is the Composer restoring the
+// original input (send() resolves `{ accepted: false }`).
+function sendRefusalError(status, detail) {
+  // The too-long copy applies only to the Pydantic `string_too_long`
+  // failure on the `message` field (max_length=100_000 in
+  // SendMessageRequest) — NOT to every 422 that mentions `message`:
+  // the field also carries min_length=1, so e.g. `string_too_short`
+  // would be misdescribed as too long. Anything else falls through to
+  // the generic copy.
+  const messageTooLong =
+    status === 413 ||
+    (status === 422 &&
+      Array.isArray(detail) &&
+      detail.some(
+        (item) =>
+          item?.type === "string_too_long" &&
+          Array.isArray(item?.loc) &&
+          item.loc.includes("message"),
+      ));
+  if (messageTooLong) {
+    return {
+      code: "message_too_long",
+      message: "Your message is too long. Please shorten it and try again.",
+      retryable: false,
+    };
+  }
+  if (status === 401 || status === 403) {
+    return {
+      code: "session_expired",
+      message: "Your session expired. Please sign in again.",
+      retryable: false,
+    };
+  }
+  return {
+    code: "send_failed",
+    message: "Couldn't send. Please try again.",
+    retryable: false,
+  };
+}
+
 /**
  * Real SSE-driven chat hook. Loads chat history on mount, optimistically
  * renders new turns on send, parses streamed deltas, and finalises turns
@@ -50,8 +96,21 @@ function patchToolStep(turns, tempAsstId, toolUseId, patch) {
  *   - "idle"             — no in-flight work
  *   - "loading-history"  — initial GET /api/chats/{id} in flight
  *   - "streaming"        — POST /api/chats/{id}/messages SSE active
- *   - "error"            — last history-load or send failed; `error`
- *                          holds the Error
+ *   - "error"            — history load failed; `error` holds the
+ *                          Error. Send failures do NOT use this state
+ *                          (#211) — they surface per-turn via
+ *                          `streamError` so the Composer stays
+ *                          interactive.
+ *
+ * `send()` resolves to an outcome object the Composer branches on:
+ *   - `{ accepted: true }`            — the POST was accepted and the
+ *                                       stream ran (possibly erroring
+ *                                       later; that's the #212 surface)
+ *   - `{ accepted: false }`           — refused before streaming (4xx /
+ *                                       network); the caller should
+ *                                       restore the user's input
+ *   - `{ accepted: false, aborted: true }` — user-initiated abort;
+ *                                       nothing to surface or restore
  *
  * Returns `{ turns, send, abort, status, error }`. `turns` is an array
  * of `{ msg_id, role, text, ...flags }`; the assistant turn carries
@@ -138,6 +197,46 @@ export function useChatStream(chatId, { onTitleSuggested } = {}) {
     prevChatIdRef.current = chatId;
   }
 
+  // #212: resolve the in-flight assistant turn into an errored,
+  // non-streaming state. Keyed off the STABLE `client_msg_id` (see the
+  // #221 rationale on patchToolStep) so the patch lands whether or not
+  // a `done` frame already swapped `msg_id`. Status returns to "idle"
+  // (NOT "error" — that state is reserved for history-load failures
+  // and renders a whole-pane banner) so the Composer is interactive
+  // again; the error itself is surfaced per-turn via the `streamError`
+  // field, which Conversation renders as an error chip with a Retry
+  // affordance.
+  function markStreamError(tempAsstId, streamError) {
+    setTurns((prev) =>
+      prev.map((t) =>
+        t.client_msg_id === tempAsstId
+          ? { ...t, streaming: false, streamError }
+          : t,
+      ),
+    );
+    setStatus("idle");
+  }
+
+  // #211: the send POST was refused before any SSE frame (4xx /
+  // network failure). Nothing was persisted server-side, so the
+  // optimistic user row comes OUT of the transcript (its text goes
+  // back to the Composer via send()'s `{ accepted: false }` result)
+  // and the assistant row flips to a non-retryable error chip. The
+  // `sendRejected` flag lets the next send() sweep the stale chip away
+  // (auto-dismiss on the next attempt).
+  function markSendRejected(tempUserId, tempAsstId, streamError) {
+    setTurns((prev) =>
+      prev
+        .filter((t) => t.msg_id !== tempUserId)
+        .map((t) =>
+          t.client_msg_id === tempAsstId
+            ? { ...t, streaming: false, streamError, sendRejected: true }
+            : t,
+        ),
+    );
+    setStatus("idle");
+  }
+
   // Hook-local SSE reader loop. Shared by send() and regenerate().
   //
   // tempUserId is optional: regenerate doesn't add a temp user row (the
@@ -146,13 +245,22 @@ export function useChatStream(chatId, { onTitleSuggested } = {}) {
   // (should it arrive anyway) is a no-op because no row matches.
   //
   // try/catch wraps the loop because AbortController.abort() (from
-  // chatId change or unmount) causes reader.read() to reject. The
-  // abort is user-initiated so we bail out silently — state remains
-  // in whatever partial form it reached.
+  // chatId change or unmount) causes reader.read() to reject. An
+  // AbortError is user-initiated so we bail out silently; any OTHER
+  // reader failure (network drop mid-stream, proxy reset) falls
+  // through to the #212 unexpected-EOF check below and surfaces as a
+  // `connection_lost` stream error.
   async function readSse(response, tempAsstId, tempUserId) {
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     const sse = makeSseDecoder();
+    // #212: `sawTerminal` records that the stream reached a protocol-
+    // level terminal frame (`done` or `error`). A stream that closes
+    // without one — the 2026-06-06 hang shape: HTTP 200, empty SSE
+    // body, clean EOF — previously left the in-flight state stuck
+    // forever.
+    let sawTerminal = false;
+    let aborted = false;
     try {
       while (true) {
         const { value, done } = await reader.read();
@@ -176,12 +284,16 @@ export function useChatStream(chatId, { onTitleSuggested } = {}) {
               ),
             );
           } else if (event.type === "done") {
+            sawTerminal = true;
             setTurns((prev) =>
               prev.map((t) =>
                 t.msg_id === tempAsstId
                   ? {
                       ...t,
-                      msg_id: event.msg_id,
+                      // #212: an error-path `done` carries an empty
+                      // msg_id (nothing was persisted) — keep the temp
+                      // id so the turn keeps a usable React key.
+                      ...(event.msg_id && { msg_id: event.msg_id }),
                       streaming: false,
                       model: event.model,
                       input_tokens: event.input_tokens,
@@ -191,6 +303,17 @@ export function useChatStream(chatId, { onTitleSuggested } = {}) {
               ),
             );
             setStatus("idle");
+          } else if (event.type === "error") {
+            // #212: protocol-level stream failure. The backend emits
+            // this ahead of a `done` frame with stop_reason="error";
+            // mark the turn errored here so the chip renders even if
+            // that trailing `done` never arrives.
+            sawTerminal = true;
+            markStreamError(tempAsstId, {
+              code: event.code,
+              message: event.message,
+              retryable: event.retryable,
+            });
           } else if (event.type === "title_suggested") {
             // Phase 7d: backend emits this after the first round-trip
             // on a fresh chat. Caller decides what to do with the title
@@ -285,21 +408,39 @@ export function useChatStream(chatId, { onTitleSuggested } = {}) {
           }
         }
       }
-    } catch {
-      // Reader aborted or errored — bail out silently. Abort is
-      // user-initiated (chatId change / unmount / explicit abort()),
-      // so no error surface needed.
+    } catch (err) {
+      // AbortError is user-initiated (chatId change / unmount /
+      // explicit abort()) — bail out silently, no error surface. Any
+      // other reader failure falls through to the unexpected-EOF check
+      // below and surfaces as `connection_lost` (#212).
+      if (err?.name === "AbortError") {
+        aborted = true;
+      }
+    }
+    // #212: unexpected EOF — the stream ended (clean close OR reader
+    // failure) without a terminal `done` / `error` frame. This is the
+    // catch-all for failure modes the backend hasn't wired into the
+    // `error` frame yet; without it the in-flight state never resolves
+    // and the user must reload to escape.
+    if (!aborted && !sawTerminal) {
+      markStreamError(tempAsstId, {
+        code: "connection_lost",
+        message: "The connection closed before the reply completed. Try again.",
+        retryable: true,
+      });
     }
   }
 
   const send = useCallback(
     async ({ message, model, effort, attachments }) => {
-      if (!chatId) return;
+      if (!chatId) return { accepted: false };
       setError(null);
       const tempUserId = `tmp-u-${crypto.randomUUID()}`;
       const tempAsstId = `tmp-a-${crypto.randomUUID()}`;
       setTurns((prev) => [
-        ...prev,
+        // #211: sweep any prior send-refusal chip — the new attempt
+        // replaces it (auto-dismiss on next send).
+        ...prev.filter((t) => !t.sendRejected),
         { msg_id: tempUserId, role: "user", text: message, pending: true },
         {
           // #221 fix: client_msg_id is the STABLE lookup key for tool
@@ -333,12 +474,40 @@ export function useChatStream(chatId, { onTitleSuggested } = {}) {
           signal: controller.signal,
         });
       } catch (err) {
-        setError(err);
-        setStatus("error");
-        return;
+        if (err?.name === "AbortError") {
+          // User-initiated (chatId switch / unmount) — drop the
+          // optimistic rows silently; nothing to surface or restore.
+          setTurns((prev) =>
+            prev.filter(
+              (t) =>
+                t.msg_id !== tempUserId && t.client_msg_id !== tempAsstId,
+            ),
+          );
+          setStatus("idle");
+          return { accepted: false, aborted: true };
+        }
+        // #211: the POST was refused (422 validation, 413 too large,
+        // 401/403 auth, 5xx, network drop). Previously this path set
+        // the whole-pane "error" status and left the assistant row
+        // streaming forever; now it rolls the user row back and renders
+        // the per-turn chip, keeping the Composer interactive.
+        markSendRejected(
+          tempUserId,
+          tempAsstId,
+          sendRefusalError(err?.status, err?.detail),
+        );
+        if (err?.status === 401) {
+          // Session is dead — mirror Sidebar.signOut's local clear +
+          // redirect, minus the /auth/logout audit POST (the token is
+          // already rejected, so that call would just 401 too).
+          localStorage.removeItem(TOKEN_KEY);
+          globalThis.location.assign("/app/login");
+        }
+        return { accepted: false };
       }
 
       await readSse(response, tempAsstId, tempUserId);
+      return { accepted: true };
     },
     [chatId],
   );

@@ -28,6 +28,7 @@ from aws_cdk import aws_cloudfront_origins as origins
 from aws_cdk import aws_cloudwatch as cw
 from aws_cdk import aws_cloudwatch_actions as cw_actions
 from aws_cdk import aws_dynamodb as dynamodb
+from aws_cdk import aws_ec2 as ec2
 from aws_cdk import aws_iam as iam
 from aws_cdk import aws_kms as kms
 from aws_cdk import aws_lambda as lambda_
@@ -617,22 +618,74 @@ class ChannelStack(cdk.Stack):
             ],
         )
 
-        # ─── Code-exec sandbox (#183) ─────────────────────────────────
-        # Separate Lambda with its own IAM role. The IAM boundary is
-        # the load-bearing isolation: AWSLambdaBasicExecutionRole only
-        # (CloudWatch Logs writes) — no DynamoDB, S3, Bedrock, Secrets,
-        # or SSM grants. Even if user code escapes the subprocess
-        # (it shouldn't), the sandbox can't reach Channel data.
+        # ─── Code-exec sandbox (#183, network isolation #249) ────────
+        # Separate Lambda with its own IAM role. Two independent
+        # boundaries:
         #
-        # Network: this Lambda is NOT in a VPC. The AWS Lambda default
-        # for non-VPC functions is outbound internet via AWS's managed
-        # runtime — so the sandbox CAN make external HTTP requests.
-        # That gap is documented in code_exec.py's docstring and the
-        # tool nudges the model away from gratuitous outbound calls.
-        # Hard no-egress isolation is a follow-up (place the Lambda in
-        # private subnets with no NAT route + security group with
-        # egress disabled). Tracked separately; not blocking v1.
+        # 1. IAM — AWSLambdaBasicExecutionRole (CloudWatch Logs
+        #    writes) plus AWSLambdaVPCAccessExecutionRole (ENI
+        #    lifecycle for the VPC attachment; ec2:*NetworkInterface*
+        #    only) — no DynamoDB, S3, Bedrock, Secrets, or SSM
+        #    grants. Even if user code escapes the subprocess (it
+        #    shouldn't), the sandbox can't reach Channel data.
+        # 2. Network (#249) — the Lambda runs in a dedicated
+        #    PRIVATE_ISOLATED VPC: no internet gateway, no NAT, no
+        #    VPC endpoints, plus a security group with zero egress
+        #    rules as defense in depth. Untrusted content (web
+        #    search #182, MCP #207, attachments) can steer the model
+        #    into code-exec; without this, that code had outbound
+        #    internet — the prompt-injection → code-exec →
+        #    exfiltration trifecta. Threat model:
+        #    docs/security/threat-model-code-exec.md.
+        #
+        # CloudWatch logging still works — Lambda logs through the
+        # service plane, not the VPC network path. SnapStart is
+        # compatible with VPC (not on the documented incompatibility
+        # list: provisioned concurrency, EFS, >512 MB ephemeral).
         # SnapStart on published versions masks the sci-stack imports.
+        #
+        # AZs are pinned explicitly (never a context lookup): the
+        # region defaults to us-east-1 in infra/app.py (overridable
+        # via `-c region=`, though CloudFront/WAF cert handling
+        # assumes us-east-1 in practice), and letting ec2.Vpc resolve
+        # AZs would trigger an account-scoped context provider call
+        # in `inv synth` and write the account id into
+        # infra/cdk.context.json. The `{region}a`/`{region}b` suffixes
+        # exist in every standard region; revisit if this ever deploys
+        # to an opt-in region with remapped AZs.
+        sandbox_vpc = ec2.Vpc(
+            self,
+            "CodeExecVpc",
+            availability_zones=[f"{self.region}a", f"{self.region}b"],
+            subnet_configuration=[
+                ec2.SubnetConfiguration(
+                    name="CodeExecIsolated",
+                    subnet_type=ec2.SubnetType.PRIVATE_ISOLATED,
+                )
+            ],
+        )
+        NagSuppressions.add_resource_suppressions(
+            sandbox_vpc,
+            [
+                NagPackSuppression(
+                    id="AwsSolutions-VPC7",
+                    reason=(
+                        "Zero-egress isolated VPC for the code-exec sandbox: "
+                        "no IGW, no NAT, no VPC endpoints, and the only "
+                        "attached workload carries a zero-egress security "
+                        "group — there is no network traffic to log. Flow "
+                        "Logs would add cost for an empty channel."
+                    ),
+                ),
+            ],
+        )
+        sandbox_sg = ec2.SecurityGroup(
+            self,
+            "CodeExecSandboxSg",
+            vpc=sandbox_vpc,
+            allow_all_outbound=False,  # zero egress rules — #249
+            description="Zero-egress SG for the code-exec sandbox (#249)",
+        )
         sandbox_role = iam.Role(
             self,
             "CodeExecLambdaRole",
@@ -640,6 +693,14 @@ class ChannelStack(cdk.Stack):
             managed_policies=[
                 iam.ManagedPolicy.from_aws_managed_policy_name(
                     "service-role/AWSLambdaBasicExecutionRole"
+                ),
+                # ENI create/describe/delete for the #249 VPC
+                # attachment. CDK only auto-attaches this when it
+                # creates the function's role itself; this role is
+                # explicit, so the attachment must be too. Grants
+                # ec2:*NetworkInterface* actions only — no data access.
+                iam.ManagedPolicy.from_aws_managed_policy_name(
+                    "service-role/AWSLambdaVPCAccessExecutionRole"
                 ),
             ],
         )
@@ -682,6 +743,9 @@ class ChannelStack(cdk.Stack):
             snap_start=lambda_.SnapStartConf.ON_PUBLISHED_VERSIONS,
             environment={"PYTHONHASHSEED": "0"},
             log_retention=logs.RetentionDays.ONE_WEEK,
+            vpc=sandbox_vpc,
+            vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_ISOLATED),
+            security_groups=[sandbox_sg],
         )
 
         api_fn = lambda_.Function(

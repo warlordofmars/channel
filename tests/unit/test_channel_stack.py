@@ -20,6 +20,7 @@ configuration that the agent-safe checklist + spec Risk #5 require:
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -505,13 +506,21 @@ def test_sandbox_lambda_role_has_no_data_access(dev_template):
     )
     sandbox_role_logical_id, sandbox_role = sandbox_role_entries[0]
 
-    # Verify the role has only the basic-execution managed policy.
+    # Verify the role has exactly the two expected managed policies:
+    # basic execution (CloudWatch Logs) plus VPC access (ENI lifecycle
+    # for the #249 isolated-VPC attachment — attached explicitly in
+    # the stack because CDK only auto-attaches it on roles it creates;
+    # grants ec2:*NetworkInterface* only, no data access).
     managed = sandbox_role["Properties"].get("ManagedPolicyArns", [])
-    assert len(managed) == 1, (
-        f"sandbox role must have exactly 1 managed policy, found {len(managed)}"
+    assert len(managed) == 2, (
+        f"sandbox role must have exactly 2 managed policies, found {len(managed)}"
     )
-    assert "AWSLambdaBasicExecutionRole" in _flatten_intrinsic(managed[0]), (
-        "sandbox role's managed policy must be AWSLambdaBasicExecutionRole"
+    flattened = [_flatten_intrinsic(m) for m in managed]
+    assert any("AWSLambdaBasicExecutionRole" in f for f in flattened), (
+        "sandbox role must carry AWSLambdaBasicExecutionRole"
+    )
+    assert any("AWSLambdaVPCAccessExecutionRole" in f for f in flattened), (
+        "sandbox role must carry AWSLambdaVPCAccessExecutionRole (ENI lifecycle)"
     )
 
     # Check no inline policies on the role grant data-access actions.
@@ -562,6 +571,119 @@ def test_api_lambda_has_code_exec_env_vars(dev_template):
     env_vars = api_fn["Properties"]["Environment"]["Variables"]
     assert "STARTER_CODE_EXEC_LAMBDA_ARN" in env_vars
     assert env_vars.get("STARTER_CODE_EXEC_ENABLED") == "1"
+
+
+# ----------------------------------------------------------------
+# Code-exec sandbox network isolation (#249)
+# ----------------------------------------------------------------
+
+
+def _sandbox_function(template_json: dict) -> dict:
+    """Return the CodeExecLambda function resource from a template dict.
+
+    Located by logical-ID prefix (consistent with the sandbox-role
+    lookup in ``test_sandbox_lambda_role_has_no_data_access``) — logical
+    IDs are always plain strings, while property values like
+    ``FunctionName`` can be CloudFormation intrinsics."""
+    sandbox = [
+        r
+        for k, r in template_json["Resources"].items()
+        if r["Type"] == "AWS::Lambda::Function" and k.startswith("CodeExecLambda")
+    ]
+    assert len(sandbox) == 1, "expected exactly one CodeExecLambda"
+    return sandbox[0]
+
+
+def test_sandbox_lambda_attached_to_vpc_with_zero_egress_sg(dev_template):
+    """#249 — the code-exec Lambda must carry a ``VpcConfig`` wiring it
+    into the isolated sandbox VPC, with the zero-egress security group
+    as its ONLY security group."""
+    template = dev_template.to_json()
+    vpc_config = _sandbox_function(template)["Properties"].get("VpcConfig")
+    assert vpc_config, "CodeExecLambda must have a VpcConfig (#249 egress isolation)"
+    assert len(vpc_config.get("SubnetIds", [])) >= 2, (
+        "CodeExecLambda must span at least two isolated subnets"
+    )
+    assert len(vpc_config.get("SecurityGroupIds", [])) == 1, (
+        "CodeExecLambda must use exactly one (zero-egress) security group"
+    )
+
+
+def test_sandbox_vpc_subnets_are_isolated_with_no_internet_path(dev_template):
+    """#249 — the sandbox VPC's subnets are PRIVATE_ISOLATED, and the
+    template contains no internet path at all: no internet gateway, no
+    NAT gateway, no elastic IP, and no route entries (isolated subnets
+    carry only the implicit ``local`` route)."""
+    template = dev_template.to_json()
+    # The internet-path ban is intentionally template-global: today the
+    # sandbox VPC is the ONLY VPC in the stack, so any of these types
+    # appearing anywhere means an egress path exists. If a second,
+    # legitimately-internet-connected VPC ever lands, this must be
+    # re-scoped deliberately (a conscious security decision), not
+    # loosened in passing.
+    resource_types = {r["Type"] for r in template["Resources"].values()}
+    for forbidden in (
+        "AWS::EC2::InternetGateway",
+        "AWS::EC2::VPCGatewayAttachment",
+        "AWS::EC2::NatGateway",
+        "AWS::EC2::EIP",
+        "AWS::EC2::Route",
+    ):
+        assert forbidden not in resource_types, (
+            f"{forbidden} must not exist — the sandbox VPC is PRIVATE_ISOLATED "
+            "(no IGW, no NAT, no routes). See #249."
+        )
+
+    # Scope the subnet assertions to the sandbox VPC's own subnets
+    # (logical-ID prefix ``CodeExecVpc``) so an unrelated future VPC
+    # can't produce false failures here.
+    subnets = [
+        r
+        for k, r in template["Resources"].items()
+        if r["Type"] == "AWS::EC2::Subnet" and k.startswith("CodeExecVpc")
+    ]
+    assert len(subnets) == 2, "expected the sandbox VPC's two isolated subnets"
+    for subnet in subnets:
+        tags = {t["Key"]: t["Value"] for t in subnet["Properties"].get("Tags", [])}
+        assert tags.get("aws-cdk:subnet-type") == "Isolated", (
+            "every sandbox VPC subnet must be PRIVATE_ISOLATED (#249)"
+        )
+        assert subnet["Properties"].get("MapPublicIpOnLaunch") is False
+
+
+def test_sandbox_security_group_has_no_egress_rules(dev_template):
+    """#249 — the sandbox security group is created with
+    ``allow_all_outbound=False`` and NO egress rules added. CDK
+    synthesizes that as the canonical no-op ICMP 'Disallow all traffic'
+    placeholder (CloudFormation restores allow-all when the egress list
+    is empty, so CDK pins an unmatchable rule instead). Assert the
+    placeholder is the ONLY egress entry and nothing adds a real rule."""
+    template = dev_template.to_json()
+    # Select the sandbox SG by logical-ID prefix so an unrelated future
+    # SG can't produce false failures here.
+    sg_entries = [
+        (k, r)
+        for k, r in template["Resources"].items()
+        if r["Type"] == "AWS::EC2::SecurityGroup" and k.startswith("CodeExecSandboxSg")
+    ]
+    assert len(sg_entries) == 1, "expected exactly one CodeExecSandboxSg"
+    sg_logical_id, sg = sg_entries[0]
+    egress = sg["Properties"].get("SecurityGroupEgress", [])
+    assert len(egress) == 1, "sandbox SG must have exactly the no-op egress entry"
+    rule = egress[0]
+    assert rule["CidrIp"] == "255.255.255.255/32"
+    assert rule["IpProtocol"] == "icmp"
+    # No ingress either — nothing initiates connections INTO the sandbox.
+    assert not sg["Properties"].get("SecurityGroupIngress")
+    # No standalone rule resources may widen THIS SG after the fact —
+    # check any SecurityGroupEgress/Ingress resource that references the
+    # sandbox SG's logical id (Ref or Fn::GetAtt both serialize it).
+    for k, r in template["Resources"].items():
+        if r["Type"] not in ("AWS::EC2::SecurityGroupEgress", "AWS::EC2::SecurityGroupIngress"):
+            continue
+        assert sg_logical_id not in json.dumps(r), (
+            f"standalone rule resource {k} must not target the sandbox SG (#249)"
+        )
 
 
 def _docs_rewrite_function_code(template: assertions.Template) -> str:

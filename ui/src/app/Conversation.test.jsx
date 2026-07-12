@@ -1613,4 +1613,88 @@ describe("Conversation", () => {
       expect(screen.getByText("42")).toBeInTheDocument();
     });
   });
+
+  describe("stream-failure chip (#212)", () => {
+    it("renders the chip with Retry on the last errored turn and hides msg-actions", () => {
+      const stream = mockStream({
+        turns: [
+          { msg_id: "u1", role: "user", text: "q" },
+          {
+            msg_id: "tmp-a-1",
+            client_msg_id: "tmp-a-1",
+            role: "assistant",
+            text: "",
+            streaming: false,
+            streamError: {
+              code: "bedrock_throttled",
+              message: "Busy.",
+              retryable: true,
+            },
+          },
+        ],
+      });
+      renderAt("/app/c/c1");
+
+      const chip = screen.getByRole("alert");
+      expect(chip.textContent).toContain("Couldn't complete reply — Busy.");
+
+      // Retry reuses the regenerate path (the user turn is already
+      // persisted server-side; nothing to re-send).
+      fireEvent.click(screen.getByRole("button", { name: /retry/i }));
+      expect(stream.regenerate).toHaveBeenCalledWith({});
+
+      // msg-actions row is suppressed for errored turns — Copy /
+      // thumbs would act on an unpersisted temp msg_id.
+      expect(screen.queryByRole("button", { name: "Copy" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Good" })).toBeNull();
+    });
+
+    it("omits Retry when the failure is not retryable", () => {
+      mockStream({
+        turns: [
+          { msg_id: "u1", role: "user", text: "q" },
+          {
+            msg_id: "tmp-a-1",
+            client_msg_id: "tmp-a-1",
+            role: "assistant",
+            text: "",
+            streaming: false,
+            streamError: {
+              code: "bedrock_validation",
+              message: "Too large. Try shortening it.",
+              retryable: false,
+            },
+          },
+        ],
+      });
+      renderAt("/app/c/c1");
+      // Re-sending the same oversized input would fail identically —
+      // the chip renders without the Retry affordance.
+      expect(screen.getByRole("alert").textContent).toContain("Too large.");
+      expect(screen.queryByRole("button", { name: /retry/i })).toBeNull();
+    });
+
+    it("omits Retry on an errored turn that is not the last turn", () => {
+      mockStream({
+        turns: [
+          {
+            msg_id: "tmp-a-1",
+            client_msg_id: "tmp-a-1",
+            role: "assistant",
+            text: "",
+            streaming: false,
+            streamError: {
+              code: "internal",
+              message: "Went wrong.",
+              retryable: true,
+            },
+          },
+          { msg_id: "u2", role: "user", text: "follow-up" },
+        ],
+      });
+      renderAt("/app/c/c1");
+      expect(screen.getByRole("alert").textContent).toContain("Went wrong.");
+      expect(screen.queryByRole("button", { name: /retry/i })).toBeNull();
+    });
+  });
 });

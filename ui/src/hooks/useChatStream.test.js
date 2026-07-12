@@ -1,5 +1,5 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { renderHook, act, waitFor } from "@testing-library/react";
 
 vi.mock("../api.js", () => ({
@@ -9,6 +9,7 @@ vi.mock("../api.js", () => ({
 }));
 
 import * as api from "../api.js";
+import { TOKEN_KEY } from "../lib/auth.js";
 import { useChatStream } from "./useChatStream.js";
 
 // jsdom in vitest 1+ ships crypto.randomUUID, but guard for older envs.
@@ -119,24 +120,9 @@ describe("useChatStream", () => {
     });
   });
 
-  it("sets error status when the server returns non-ok", async () => {
-    api.getChat.mockResolvedValue({
-      chat: { chat_id: "c1" },
-      messages: [],
-      older_cursor: null,
-    });
-    api.streamMessage.mockRejectedValue(new Error("500"));
-
-    const { result } = renderHook(() => useChatStream("c1"));
-    await waitFor(() => expect(result.current.status).toBe("idle"));
-
-    await act(async () => {
-      await result.current.send({ message: "hi", model: "m", effort: "med" });
-    });
-
-    expect(result.current.status).toBe("error");
-    expect(result.current.error).toBeInstanceOf(Error);
-  });
+  // NB: "server returns non-ok on send" no longer flips status to
+  // "error" — #211 surfaces send refusals per-turn instead. See the
+  // "#211 — send refused before streaming" describe block below.
 
   it("sets status='error' when history fetch fails", async () => {
     api.getChat.mockRejectedValue(new Error("boom"));
@@ -1190,5 +1176,411 @@ describe("useChatStream", () => {
     });
 
     expect(api.getChat).not.toHaveBeenCalled();
+  });
+
+  // --- stream-failure surfacing (#212) ---
+
+  // Like makeMockResponseBody, but the stream errors (instead of
+  // closing) after the queued events drain — simulates a network drop
+  // or an intentional AbortController.abort() mid-stream.
+  function makeFailingBody(events, err) {
+    const encoder = new TextEncoder();
+    const chunks = events.map((e) => `data: ${JSON.stringify(e)}\n\n`);
+    let i = 0;
+    return new ReadableStream({
+      pull(controller) {
+        if (i >= chunks.length) {
+          controller.error(err);
+          return;
+        }
+        controller.enqueue(encoder.encode(chunks[i]));
+        i += 1;
+      },
+    });
+  }
+
+  it("marks the turn errored and idles on an `error` frame, keeping partial text", async () => {
+    api.getChat.mockResolvedValue(chatPage([]));
+    api.streamMessage.mockResolvedValue({
+      ok: true,
+      body: makeMockResponseBody([
+        { type: "user_persisted", msg_id: "user-1", seq: 0 },
+        { type: "delta", text: "par" },
+        {
+          type: "error",
+          code: "bedrock_throttled",
+          message: "Busy.",
+          retryable: true,
+        },
+        {
+          type: "done",
+          msg_id: "",
+          seq: 1,
+          model: "m",
+          input_tokens: 0,
+          output_tokens: 0,
+          stop_reason: "error",
+        },
+      ]),
+    });
+
+    const { result } = await mountLoaded();
+    await act(async () => {
+      await result.current.send({ message: "hi", model: "m", effort: "med" });
+    });
+
+    const asst = result.current.turns[1];
+    expect(asst.streaming).toBe(false);
+    expect(asst.streamError).toEqual({
+      code: "bedrock_throttled",
+      message: "Busy.",
+      retryable: true,
+    });
+    expect(asst.text).toBe("par");
+    // The error-path `done` carries msg_id: "" (nothing persisted) —
+    // the temp id must survive so the turn keeps a usable React key.
+    expect(asst.msg_id).toMatch(/^tmp-a-/);
+    expect(result.current.status).toBe("idle");
+  });
+
+  it("treats a clean EOF without a terminal frame as connection_lost", async () => {
+    api.getChat.mockResolvedValue(chatPage([]));
+    api.streamMessage.mockResolvedValue({
+      ok: true,
+      body: makeMockResponseBody([
+        { type: "user_persisted", msg_id: "user-1", seq: 0 },
+        { type: "delta", text: "Hel" },
+      ]),
+    });
+
+    const { result } = await mountLoaded();
+    await act(async () => {
+      await result.current.send({ message: "hi", model: "m", effort: "med" });
+    });
+
+    const asst = result.current.turns[1];
+    expect(asst.streaming).toBe(false);
+    expect(asst.streamError).toMatchObject({
+      code: "connection_lost",
+      retryable: true,
+    });
+    expect(result.current.status).toBe("idle");
+  });
+
+  it("treats a mid-stream reader failure as connection_lost", async () => {
+    api.getChat.mockResolvedValue(chatPage([]));
+    api.streamMessage.mockResolvedValue({
+      ok: true,
+      body: makeFailingBody(
+        [{ type: "delta", text: "x" }],
+        new Error("network reset"),
+      ),
+    });
+
+    const { result } = await mountLoaded();
+    await act(async () => {
+      await result.current.send({ message: "hi", model: "m", effort: "med" });
+    });
+
+    const asst = result.current.turns[1];
+    expect(asst.streaming).toBe(false);
+    expect(asst.streamError).toMatchObject({ code: "connection_lost" });
+    expect(result.current.status).toBe("idle");
+  });
+
+  it("stays silent when the reader rejects with AbortError (user-initiated)", async () => {
+    const abortErr = Object.assign(new Error("aborted"), {
+      name: "AbortError",
+    });
+    api.getChat.mockResolvedValue(chatPage([]));
+    api.streamMessage.mockResolvedValue({
+      ok: true,
+      body: makeFailingBody([{ type: "delta", text: "x" }], abortErr),
+    });
+
+    const { result } = await mountLoaded();
+    await act(async () => {
+      await result.current.send({ message: "hi", model: "m", effort: "med" });
+    });
+
+    const asst = result.current.turns[1];
+    expect(asst.streamError).toBeUndefined();
+    expect(asst.streaming).toBe(true);
+    expect(result.current.status).toBe("streaming");
+  });
+
+  it("marks the regenerated turn errored on an `error` frame", async () => {
+    api.getChat.mockResolvedValue(
+      chatPage([
+        { msg_id: "u1", role: "user", text: "q" },
+        { msg_id: "a1", role: "assistant", text: "old" },
+      ]),
+    );
+    api.regenerate.mockResolvedValue({
+      ok: true,
+      body: makeMockResponseBody([
+        {
+          type: "error",
+          code: "internal",
+          message: "Something went wrong.",
+          retryable: true,
+        },
+        {
+          type: "done",
+          msg_id: "",
+          seq: 1,
+          model: "m",
+          input_tokens: 0,
+          output_tokens: 0,
+          stop_reason: "error",
+        },
+      ]),
+    });
+
+    const { result } = await mountLoaded();
+    await act(async () => {
+      await result.current.regenerate({});
+    });
+
+    const last = result.current.turns[result.current.turns.length - 1];
+    expect(last.role).toBe("assistant");
+    expect(last.streaming).toBe(false);
+    expect(last.streamError).toMatchObject({ code: "internal" });
+    expect(result.current.status).toBe("idle");
+  });
+
+  // #211: the POST itself is refused (non-2xx / network) before any SSE
+  // frame. The optimistic user row rolls back, the assistant row flips
+  // to a non-retryable error chip, status returns to idle so the
+  // Composer stays interactive, and send() resolves { accepted: false }
+  // so the Composer restores the input.
+  describe("#211 — send refused before streaming (4xx / network)", () => {
+    // Duck-typed shape matching api.ApiError — api.js is mocked in this
+    // file, so build plain Errors carrying status/detail.
+    function refusalError(status, detail = null) {
+      const err = new Error(`streamMessage ${status}`);
+      err.status = status;
+      err.detail = detail;
+      return err;
+    }
+
+    // Seed one pre-existing history row so markSendRejected's map also
+    // exercises its non-matching branch (history rows pass through
+    // untouched).
+    const priorTurn = { msg_id: "m0", role: "user", text: "earlier" };
+
+    async function sendRefused(status, detail) {
+      api.getChat.mockResolvedValue(chatPage([priorTurn]));
+      api.streamMessage.mockRejectedValue(refusalError(status, detail));
+      const view = await mountLoaded();
+      let outcome;
+      await act(async () => {
+        outcome = await view.result.current.send({
+          message: "hi",
+          model: "m",
+          effort: "med",
+        });
+      });
+      return { view, outcome };
+    }
+
+    afterEach(() => {
+      vi.unstubAllGlobals();
+      localStorage.clear();
+    });
+
+    it("maps 422 with a Pydantic array on `message` to the too-long chip", async () => {
+      const { view, outcome } = await sendRefused(422, [
+        {
+          type: "string_too_long",
+          loc: ["body", "message"],
+          msg: "String should have at most 100000 characters",
+        },
+      ]);
+      expect(outcome).toEqual({ accepted: false });
+      expect(view.result.current.status).toBe("idle");
+      expect(view.result.current.error).toBeNull();
+      // Optimistic user row rolled back; history + the chip row remain.
+      expect(view.result.current.turns).toHaveLength(2);
+      expect(view.result.current.turns[0]).toEqual(priorTurn);
+      const turn = view.result.current.turns.at(-1);
+      expect(turn.role).toBe("assistant");
+      expect(turn.streaming).toBe(false);
+      expect(turn.sendRejected).toBe(true);
+      expect(turn.streamError).toEqual({
+        code: "message_too_long",
+        message: "Your message is too long. Please shorten it and try again.",
+        retryable: false,
+      });
+    });
+
+    it("maps 413 to the too-long chip", async () => {
+      const { view } = await sendRefused(413);
+      expect(view.result.current.turns.at(-1).streamError).toMatchObject({
+        code: "message_too_long",
+        retryable: false,
+      });
+    });
+
+    it("maps a 422 whose validation array is not a too-long `message` to the generic chip", async () => {
+      const { view } = await sendRefused(422, [
+        // Wrong type on the right field.
+        { type: "missing", loc: ["body", "model"], msg: "Field required" },
+        // Right type on the wrong field.
+        { type: "string_too_long", loc: ["body", "title"], msg: "too long" },
+        // Right type, malformed loc.
+        { type: "string_too_long", msg: "no loc on this item" },
+      ]);
+      expect(view.result.current.turns.at(-1).streamError).toMatchObject({
+        code: "send_failed",
+        message: "Couldn't send. Please try again.",
+      });
+    });
+
+    it("maps a 422 `string_too_short` on `message` to the generic chip, not the too-long copy", async () => {
+      // SendMessageRequest.message also carries min_length=1 — a
+      // too-short failure must not claim the message was too long.
+      const { view } = await sendRefused(422, [
+        {
+          type: "string_too_short",
+          loc: ["body", "message"],
+          msg: "String should have at least 1 character",
+        },
+      ]);
+      expect(view.result.current.turns.at(-1).streamError).toMatchObject({
+        code: "send_failed",
+        message: "Couldn't send. Please try again.",
+      });
+    });
+
+    it("maps a 422 with a plain-string detail to the generic chip", async () => {
+      const { view } = await sendRefused(422, "Unprocessable");
+      expect(view.result.current.turns.at(-1).streamError).toMatchObject({
+        code: "send_failed",
+      });
+    });
+
+    it("401 surfaces session-expired, clears the mgmt token, and redirects to login", async () => {
+      const assignSpy = vi.fn();
+      vi.stubGlobal("location", { ...globalThis.location, assign: assignSpy });
+      localStorage.setItem(TOKEN_KEY, "tok-abc");
+      const { view } = await sendRefused(401, "Not authenticated");
+      expect(view.result.current.turns.at(-1).streamError).toMatchObject({
+        code: "session_expired",
+        message: "Your session expired. Please sign in again.",
+      });
+      expect(localStorage.getItem(TOKEN_KEY)).toBeNull();
+      expect(assignSpy).toHaveBeenCalledWith("/app/login");
+    });
+
+    it("403 surfaces session-expired but does NOT log out", async () => {
+      const assignSpy = vi.fn();
+      vi.stubGlobal("location", { ...globalThis.location, assign: assignSpy });
+      localStorage.setItem(TOKEN_KEY, "tok-abc");
+      const { view } = await sendRefused(403, "Forbidden");
+      expect(view.result.current.turns.at(-1).streamError).toMatchObject({
+        code: "session_expired",
+      });
+      expect(localStorage.getItem(TOKEN_KEY)).toBe("tok-abc");
+      expect(assignSpy).not.toHaveBeenCalled();
+    });
+
+    it("maps a 500 to the generic chip", async () => {
+      const { view } = await sendRefused(500, "Internal Server Error");
+      expect(view.result.current.turns.at(-1).streamError).toMatchObject({
+        code: "send_failed",
+      });
+    });
+
+    it("maps a network-level failure (no status) to the generic chip and stays idle", async () => {
+      api.getChat.mockResolvedValue(chatPage([]));
+      api.streamMessage.mockRejectedValue(new Error("network down"));
+      const view = await mountLoaded();
+      let outcome;
+      await act(async () => {
+        outcome = await view.result.current.send({
+          message: "hi",
+          model: "m",
+          effort: "med",
+        });
+      });
+      expect(outcome).toEqual({ accepted: false });
+      expect(view.result.current.status).toBe("idle");
+      expect(view.result.current.error).toBeNull();
+      expect(view.result.current.turns[0].streamError).toMatchObject({
+        code: "send_failed",
+      });
+    });
+
+    it("rolls back both optimistic rows silently when the POST is aborted", async () => {
+      const existing = { msg_id: "m1", role: "user", text: "old" };
+      api.getChat.mockResolvedValue(chatPage([existing]));
+      api.streamMessage.mockRejectedValue(
+        Object.assign(new Error("aborted"), { name: "AbortError" }),
+      );
+      const view = await mountLoaded();
+      let outcome;
+      await act(async () => {
+        outcome = await view.result.current.send({
+          message: "hi",
+          model: "m",
+          effort: "med",
+        });
+      });
+      expect(outcome).toEqual({ accepted: false, aborted: true });
+      expect(view.result.current.status).toBe("idle");
+      expect(view.result.current.turns).toEqual([existing]);
+    });
+
+    it("the next send sweeps a prior refusal chip out of the transcript", async () => {
+      api.getChat.mockResolvedValue(chatPage([]));
+      api.streamMessage.mockRejectedValueOnce(refusalError(413));
+      const view = await mountLoaded();
+      await act(async () => {
+        await view.result.current.send({ message: "big", model: "m", effort: "med" });
+      });
+      expect(view.result.current.turns.some((t) => t.sendRejected)).toBe(true);
+
+      api.streamMessage.mockResolvedValueOnce({
+        ok: true,
+        body: makeMockResponseBody([
+          { type: "user_persisted", msg_id: "u-1", seq: 0 },
+          { type: "delta", text: "ok" },
+          {
+            type: "done",
+            msg_id: "a-1",
+            seq: 1,
+            model: "m",
+            input_tokens: 0,
+            output_tokens: 0,
+            stop_reason: "end_turn",
+          },
+        ]),
+      });
+      let outcome;
+      await act(async () => {
+        outcome = await view.result.current.send({
+          message: "small",
+          model: "m",
+          effort: "med",
+        });
+      });
+      expect(outcome).toEqual({ accepted: true });
+      expect(view.result.current.turns.some((t) => t.sendRejected)).toBe(false);
+      expect(view.result.current.turns.map((t) => t.role)).toEqual([
+        "user",
+        "assistant",
+      ]);
+    });
+
+    it("resolves { accepted: false } without POSTing when chatId is null", async () => {
+      const { result } = renderHook(() => useChatStream(null));
+      let outcome;
+      await act(async () => {
+        outcome = await result.current.send({ message: "hi" });
+      });
+      expect(outcome).toEqual({ accepted: false });
+      expect(api.streamMessage).not.toHaveBeenCalled();
+    });
   });
 });
