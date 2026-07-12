@@ -645,10 +645,14 @@ class ChannelStack(cdk.Stack):
         # SnapStart on published versions masks the sci-stack imports.
         #
         # AZs are pinned explicitly (never a context lookup): the
-        # stack is region-pinned to us-east-1 (CloudFront/WAF certs
-        # require it) and letting ec2.Vpc resolve AZs would trigger
-        # an account-scoped context provider call in `inv synth` and
-        # write the account id into infra/cdk.context.json.
+        # region defaults to us-east-1 in infra/app.py (overridable
+        # via `-c region=`, though CloudFront/WAF cert handling
+        # assumes us-east-1 in practice), and letting ec2.Vpc resolve
+        # AZs would trigger an account-scoped context provider call
+        # in `inv synth` and write the account id into
+        # infra/cdk.context.json. The `{region}a`/`{region}b` suffixes
+        # exist in every standard region; revisit if this ever deploys
+        # to an opt-in region with remapped AZs.
         sandbox_vpc = ec2.Vpc(
             self,
             "CodeExecVpc",
