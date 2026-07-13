@@ -17,9 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   through the #321 pipeline — surfaced via the `asset_created` SSE
   frame + inline card, never as base64 over the wire. Content
   moderation is Bedrock's built-in Nova Canvas RAI filter (a blocked
-  prompt returns `error_type="content_filtered"`); there is no cost
-  gating (billing deferred), only the `STARTER_IMAGE_GEN_ENABLED`
-  kill-switch and an `ImageGenInvocations` EMF counter. The API
+  prompt surfaces over SSE as a `tool_error` with
+  `error_type="content_filtered"`); there is no cost gating (billing
+  deferred), only the `STARTER_IMAGE_GEN_ENABLED` kill-switch and the
+  `ImageGenInvocations` / `ImageGenFailures` EMF counters. The API
   Lambda's IAM role gains `bedrock:InvokeModel` on the Nova Canvas
   foundation model.
 - Asset producers + `asset_created` SSE (#326, epic #321). Chats now

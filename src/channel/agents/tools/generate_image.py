@@ -23,15 +23,19 @@ emits a generic ``tool_finished`` with no payload.
 
 Content moderation is Bedrock's built-in Nova Canvas RAI filter — no
 custom layer (decision 3). A fully-blocked generation returns an empty
-``images`` list with an ``error`` field; that surfaces as a
-``ToolResult``-shaped error with ``error_type="content_filtered"``,
-mirroring ``code_exec``'s error-shape contract so ``translate_event``'s
-reason extraction works.
+``images`` list with an ``error`` field; the tool then returns a
+``ToolResult``-shaped error whose reason token is ``content_filtered``
+(carried in the first content block's ``text``, NOT an ``error_type``
+key on the dict). ``translate_event`` extracts that token into the SSE
+``tool_error`` frame's ``error_type`` field, mirroring ``code_exec``'s
+error-shape contract — so the SPA sees ``error_type="content_filtered"``.
 
 There is NO cost gating — billing is deferred (product decision). The
 only controls are the ``STARTER_IMAGE_GEN_ENABLED`` registration
 kill-switch (gated in ``chats._build_tool_registry``) and the
-``ImageGenInvocations`` EMF counter emitted per invocation.
+``ImageGenInvocations`` / ``ImageGenFailures`` EMF counters
+(``record_image_gen_outcome`` emits the invocation counter on every
+call and the failure counter on each non-success).
 
 NOTE: this module deliberately does NOT use ``from __future__ import
 annotations``. Strands' ``@tool`` decorator validates the injected

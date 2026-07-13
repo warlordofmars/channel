@@ -219,8 +219,11 @@ Everything that creates ASSET rows lives in
   `STARTER_IMAGE_GEN_ENABLED` gates tool registration in
   `chats._build_tool_registry` (default-on in every deployed env; set
   `"0"` to remove the tool). Content moderation is Bedrock's built-in
-  Nova Canvas RAI filter — a blocked prompt surfaces as
-  `error_type="content_filtered"`. No cost gating (billing deferred);
+  Nova Canvas RAI filter — a blocked prompt returns a `ToolResult`
+  error whose reason token `content_filtered` (in `content[0].text`)
+  `translate_event` extracts into the SSE `tool_error` `error_type`, so
+  the SPA sees `error_type="content_filtered"`. No cost gating (billing
+  deferred);
   the only observability is the `ImageGenInvocations` /
   `ImageGenFailures` EMF counters. `STARTER_IMAGE_GEN_MODEL` overrides
   the model id.
