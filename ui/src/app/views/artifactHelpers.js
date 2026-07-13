@@ -1,10 +1,11 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
 
 /**
- * Shared utilities for the Phase 6e views. Ported verbatim from
- * design-sources/app/views.jsx (top of file): `colorFor`, `inkFor`, and
- * `artIcon`. Pure helpers — no React, no DOM — so they live in a `.js`
- * sibling instead of a `.jsx` component.
+ * Shared pure helpers for the asset views. `colorFor` / `inkFor` remain
+ * the project-badge swatch pair (consumed by Projects.jsx +
+ * ProjectDetail.jsx). `artIcon` / `kindLabel` / `formatBytes` /
+ * `relativeTime` back the real Artifacts browse view + ArtifactPanel
+ * (#328). All pure — no React, no DOM — so they live in a `.js` sibling.
  */
 
 /** OKLCH light-band swatch (project card badge background). */
@@ -17,11 +18,71 @@ export function inkFor(h) {
   return `oklch(0.45 0.12 ${h})`;
 }
 
-/** Map an artifact kind to the Icon-set name used as its badge glyph. */
+/**
+ * Map an asset `kind` (`code | document | data | image | diagram`) to the
+ * Icon-set glyph used as its badge. `document` and any unknown kind fall
+ * back to `doc`.
+ */
 export function artIcon(kind) {
-  return kind === "Code" ? "code"
-       : kind === "Chart" ? "customize"
-       : kind === "Interactive" ? "sparkle"
-       : kind === "Data" ? "database"
-       : "doc";
+  switch (kind) {
+    case "code":
+      return "code";
+    case "data":
+      return "database";
+    case "image":
+      return "image";
+    case "diagram":
+      return "customize";
+    default:
+      return "doc";
+  }
+}
+
+/** Title-case a lowercase asset kind for display (`code` → `Code`). */
+export function kindLabel(kind) {
+  if (!kind) return "Asset";
+  return kind.charAt(0).toUpperCase() + kind.slice(1);
+}
+
+const _BYTE_UNITS = ["KB", "MB", "GB", "TB"];
+
+/**
+ * Human-readable byte size. `< 1 KB` renders as bytes; larger sizes step
+ * through KB/MB/GB/TB with one decimal below 10 of a unit. A null /
+ * NaN input renders as an empty string so callers can drop it silently
+ * from a meta line.
+ */
+export function formatBytes(bytes) {
+  if (bytes == null || Number.isNaN(bytes)) return "";
+  if (bytes < 1024) return `${bytes} B`;
+  let val = bytes / 1024;
+  let i = 0;
+  while (val >= 1024 && i < _BYTE_UNITS.length - 1) {
+    val /= 1024;
+    i += 1;
+  }
+  return `${val.toFixed(val < 10 ? 1 : 0)} ${_BYTE_UNITS[i]}`;
+}
+
+/**
+ * Relative time from an ISO timestamp (`created_at`). `now` is injected
+ * for deterministic tests; production callers let it default to
+ * `Date.now()`. An unparseable timestamp renders as an empty string.
+ */
+export function relativeTime(iso, now = Date.now()) {
+  const ts = new Date(iso).getTime();
+  if (Number.isNaN(ts)) return "";
+  const sec = Math.max(0, Math.floor((now - ts) / 1000));
+  if (sec < 45) return "just now";
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const day = Math.floor(hr / 24);
+  if (day < 7) return `${day}d ago`;
+  const wk = Math.floor(day / 7);
+  if (wk < 5) return `${wk}w ago`;
+  const mo = Math.floor(day / 30);
+  if (mo < 12) return `${mo}mo ago`;
+  return `${Math.floor(day / 365)}y ago`;
 }

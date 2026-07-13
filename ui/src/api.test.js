@@ -10,10 +10,12 @@ import {
   getAdminMetricsTimeseries,
   getAdminUser,
   getAdminUsers,
+  getAsset,
   getAssetContent,
   getChat,
   getChatMCPSettings,
   getPrefs,
+  listAssets,
   listChatAssets,
   listChats,
   listMCPServers,
@@ -966,5 +968,107 @@ describe("admin API client", () => {
     expect(err).toBeInstanceOf(ApiError);
     expect(err.status).toBe(422);
     expect(err.detail).toBe("unknown metric");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Assets API client (#328)
+// ---------------------------------------------------------------------------
+
+describe("assets API client", () => {
+  let fetchMock;
+
+  beforeEach(() => {
+    localStorage.setItem("starter_mgmt_token", "test-token");
+    fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  afterEach(() => {
+    localStorage.removeItem("starter_mgmt_token");
+    vi.unstubAllGlobals();
+  });
+
+  describe("listAssets", () => {
+    it("GETs /api/assets with auth and the default limit only", async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ items: [], next_cursor: null }),
+      });
+      const data = await listAssets();
+      const [url, opts] = fetchMock.mock.calls[0];
+      expect(url).toBe("/api/assets?limit=50");
+      expect(opts.headers.Authorization).toBe("Bearer test-token");
+      expect(data).toEqual({ items: [], next_cursor: null });
+    });
+
+    it("includes the cursor in the query string when provided", async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve({ items: [], next_cursor: null }),
+      });
+      await listAssets({ limit: 10, cursor: "abc" });
+      expect(fetchMock.mock.calls[0][0]).toBe("/api/assets?limit=10&cursor=abc");
+    });
+
+    it("throws ApiError carrying the status on a malformed cursor (400)", async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: false,
+        status: 400,
+        json: () => Promise.resolve({ detail: "invalid cursor" }),
+      });
+      const err = await listAssets({ cursor: "bad" }).catch((e) => e);
+      expect(err).toBeInstanceOf(ApiError);
+      expect(err.status).toBe(400);
+    });
+  });
+
+  describe("getAsset", () => {
+    it("GETs the per-chat descriptor with auth", async () => {
+      const cardBody = { asset_id: "as-1", chat_id: "ch-1", kind: "code" };
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve(cardBody),
+      });
+      const data = await getAsset("ch-1", "as-1");
+      const [url, opts] = fetchMock.mock.calls[0];
+      expect(url).toBe("/api/chats/ch-1/assets/as-1");
+      expect(opts.headers.Authorization).toBe("Bearer test-token");
+      expect(data).toEqual(cardBody);
+    });
+
+    it("throws ApiError 404 when the descriptor is gone", async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: false,
+        status: 404,
+        json: () => Promise.resolve({ detail: "Asset not found" }),
+      });
+      const err = await getAsset("ch-1", "missing").catch((e) => e);
+      expect(err).toBeInstanceOf(ApiError);
+      expect(err.status).toBe(404);
+    });
+  });
+
+  describe("getAssetContent", () => {
+    it("GETs the content route and returns the bare Response", async () => {
+      const response = { ok: true, blob: async () => new Blob(["x"]) };
+      fetchMock.mockResolvedValueOnce(response);
+      const result = await getAssetContent("ch-1", "as-1");
+      const [url, opts] = fetchMock.mock.calls[0];
+      expect(url).toBe("/api/chats/ch-1/assets/as-1/content");
+      expect(opts.headers.Authorization).toBe("Bearer test-token");
+      expect(result).toBe(response);
+    });
+
+    it("throws ApiError with the status on a content failure (502)", async () => {
+      fetchMock.mockResolvedValueOnce({
+        ok: false,
+        status: 502,
+        json: () => Promise.resolve({ detail: "Asset content unavailable" }),
+      });
+      const err = await getAssetContent("ch-1", "as-1").catch((e) => e);
+      expect(err).toBeInstanceOf(ApiError);
+      expect(err.status).toBe(502);
+    });
   });
 });
