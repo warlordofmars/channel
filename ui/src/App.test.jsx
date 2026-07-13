@@ -11,6 +11,23 @@ function makeToken({ expOffsetSeconds = 3600, role = "user" } = {}) {
   return `eyJhbGciOiJIUzI1NiJ9.${payload}.sig`;
 }
 
+/**
+ * Stub fetch for the admin-view routing tests (#238): admin endpoints
+ * resolve with `body`; everything else rejects, matching the
+ * no-network status quo the other routing tests run under.
+ */
+function stubAdminFetch(body) {
+  vi.stubGlobal("fetch", vi.fn(function fakeFetch(url) {
+    return String(url).startsWith("/api/admin/users")
+      ? Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve(body),
+        })
+      : Promise.reject(new Error(`unexpected fetch in test: ${url}`));
+  }));
+}
+
 describe("App routing", () => {
   let storage;
 
@@ -136,15 +153,40 @@ describe("App routing", () => {
     expect(screen.queryByRole("heading", { level: 2, name: "Admin" })).toBeNull();
   });
 
-  it.each([
-    ["/app/admin/users",     "admin-users-placeholder"],
-    ["/app/admin/users/u42", "admin-user-detail-placeholder"],
-    ["/app/admin/dashboard", "admin-dashboard-placeholder"],
-  ])("%s renders its placeholder for an admin (#237)", async (path, testid) => {
+  it("/app/admin/users renders the Users view for an admin (#238)", async () => {
     storage[TOKEN_KEY] = makeToken({ role: "admin" });
-    window.history.pushState({}, "", path);
+    stubAdminFetch({ items: [], next_cursor: null });
+    window.history.pushState({}, "", "/app/admin/users");
     await act(async () => render(<App />));
-    expect(screen.getByTestId(testid)).toBeTruthy();
+    expect(screen.getByRole("heading", { level: 2, name: "Users" })).toBeTruthy();
+    expect(screen.queryByTestId("admin-users-placeholder")).toBeNull();
+  });
+
+  it("/app/admin/users/u42 renders the UserDetail view for an admin (#238)", async () => {
+    storage[TOKEN_KEY] = makeToken({ role: "admin" });
+    stubAdminFetch({
+      user: {
+        user_id: "u42",
+        email: "u42@ex.com",
+        created_at: null,
+        last_login_at: null,
+        chat_count: 0,
+        last_chat_at: null,
+      },
+      recent_chats: [],
+      recent_audit_events: [],
+    });
+    window.history.pushState({}, "", "/app/admin/users/u42");
+    await act(async () => render(<App />));
+    expect(screen.getByRole("heading", { level: 2, name: "u42@ex.com" })).toBeTruthy();
+    expect(screen.queryByTestId("admin-user-detail-placeholder")).toBeNull();
+  });
+
+  it("/app/admin/dashboard renders its placeholder for an admin (#237)", async () => {
+    storage[TOKEN_KEY] = makeToken({ role: "admin" });
+    window.history.pushState({}, "", "/app/admin/dashboard");
+    await act(async () => render(<App />));
+    expect(screen.getByTestId("admin-dashboard-placeholder")).toBeTruthy();
   });
 
   it.each([
