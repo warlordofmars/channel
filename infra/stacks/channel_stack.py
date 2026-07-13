@@ -485,6 +485,17 @@ class ChannelStack(cdk.Stack):
             parameter_name=f"/channel/{env_name}/exa-api-key",
         )
         exa_key_param.grant_read(api_role)
+        # #236 — the admin metrics endpoints (/api/admin/metrics/*) read
+        # the Channel-namespace EMF counters back via GetMetricData.
+        # ``resources=["*"]`` IS the minimal grant: GetMetricData supports
+        # no resource types and no condition keys — the
+        # ``cloudwatch:namespace`` condition applies only to PutMetricData
+        # (Service Authorization Reference for Amazon CloudWatch), so the
+        # namespace cannot be pinned in IAM. The read surface is bounded
+        # instead by the server-side metric allowlist in
+        # ``src/channel/api/admin.py`` (admin-JWT-gated endpoints).
+        # Asserted by ``test_api_lambda_role_grants_cloudwatch_read`` in
+        # ``tests/unit/test_channel_stack.py``.
         api_role.add_to_policy(
             iam.PolicyStatement(
                 actions=["cloudwatch:GetMetricData", "cloudwatch:DescribeAlarms"],
