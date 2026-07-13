@@ -1310,9 +1310,17 @@ def get_user_meta(user_id: str) -> dict[str, Any] | None:
     which is every user until the #110 writer ships. The #235 admin
     detail endpoint combines this with the caller's chat-index rows to
     decide 404 (a user with chats but no META row still exists).
+
+    ``ConsistentRead=True`` so a detail request issued immediately
+    after the META row is written can't observe a stale miss and 404 a
+    real (chat-less) user — same read-after-write discipline as
+    :func:`get_prefs` and :func:`is_jti_denied`.
     """
 
-    result = _get_table().get_item(Key={"PK": f"USER#{user_id}", "SK": "META"})
+    result = _get_table().get_item(
+        Key={"PK": f"USER#{user_id}", "SK": "META"},
+        ConsistentRead=True,
+    )
     item: dict[str, Any] | None = result.get("Item")
     return item
 

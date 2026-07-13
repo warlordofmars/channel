@@ -2274,6 +2274,10 @@ def test_get_user_meta_returns_row_when_present(table: FakeTable) -> None:
     assert row is not None
     assert row["email"] == "one@example.com"
     assert row["created_at"] == "2026-01-01T00:00:00+00:00"
+    # Read-after-write: a detail request right after the META write must
+    # not observe a stale miss and 404 a real user (same discipline as
+    # get_prefs / is_jti_denied).
+    assert table.last_get_item_kwargs.get("ConsistentRead") is True
 
 
 def test_get_user_meta_returns_none_when_absent(table: FakeTable) -> None:
