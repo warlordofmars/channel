@@ -55,6 +55,7 @@ describe("Icon", () => {
     "write",
     "learn",
     "settings",
+    "shield",
     "sun",
     "moon",
     "download",

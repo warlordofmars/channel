@@ -28,9 +28,9 @@ vi.mock("../api.js", () => ({
   logout: (...args) => mockApiLogout(...args),
 }));
 
-function makeToken({ email = "ada@example.com", display_name } = {}) {
+function makeToken({ email = "ada@example.com", display_name, role = "user" } = {}) {
   const exp = Math.floor(Date.now() / 1000) + 3600;
-  const claims = { exp, sub: "u1", role: "user", email };
+  const claims = { exp, sub: "u1", role, email };
   if (display_name !== undefined) claims.display_name = display_name;
   const payload = btoa(JSON.stringify(claims));
   return `eyJhbGciOiJIUzI1NiJ9.${payload}.sig`;
@@ -123,6 +123,36 @@ describe("Sidebar", () => {
     expect(screen.getByRole("button", { name: /^projects/i })).toBeTruthy();
     expect(screen.getByRole("button", { name: /^artifacts/i })).toBeTruthy();
     expect(screen.getByRole("button", { name: /^customize/i })).toBeTruthy();
+  });
+
+  it("hides the Admin nav item when the JWT role is user (#237)", () => {
+    renderSidebar();
+    expect(screen.queryByRole("button", { name: /^admin/i })).toBeNull();
+  });
+
+  it("shows the Admin nav item when the JWT role is admin (#237)", () => {
+    storage[TOKEN_KEY] = makeToken({ role: "admin" });
+    renderSidebar();
+    expect(screen.getByRole("button", { name: /^admin/i })).toBeTruthy();
+  });
+
+  it("clicking Admin navigates to /app/admin", () => {
+    storage[TOKEN_KEY] = makeToken({ role: "admin" });
+    let lastPath = null;
+    function PathCatcher() {
+      const { pathname } = useLocation();
+      lastPath = pathname;
+      return null;
+    }
+    render(
+      <MemoryRouter initialEntries={["/app"]}>
+        <Routes>
+          <Route path="*" element={<><Sidebar chats={makeChats()} /><PathCatcher /></>} />
+        </Routes>
+      </MemoryRouter>
+    );
+    fireEvent.click(screen.getByRole("button", { name: /^admin/i }));
+    expect(lastPath).toBe("/app/admin");
   });
 
   it("renders time-grouped recents (Today, Yesterday, …) from the chats prop", () => {
