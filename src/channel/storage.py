@@ -31,6 +31,7 @@ from pydantic import ValidationError
 
 from channel.logging_config import fingerprint_id
 from channel.models import (
+    Asset,
     Attachment,
     Chat,
     ChatMCPMode,
@@ -805,8 +806,20 @@ def get_attachment_bytes(att: Attachment) -> tuple[bytes | None, str | None]:
     HeadObject before.
     """
 
+    return _fetch_s3_object_bytes(bucket=att.s3_bucket, key=att.s3_key)
+
+
+def _fetch_s3_object_bytes(*, bucket: str, key: str) -> tuple[bytes | None, str | None]:
+    """Shared S3 GetObject → ``(bytes, None) | (None, reason)`` core.
+
+    Extracted from :func:`get_attachment_bytes` so :func:`get_asset_bytes`
+    (#324) reuses the identical failure vocabulary — the dedicated
+    ``"S3 object not found"`` reason, the ``S3 error: <code>`` shape,
+    and the mid-read ``StreamingBody`` failure conversion.
+    """
+
     try:
-        response = _get_s3_client().get_object(Bucket=att.s3_bucket, Key=att.s3_key)
+        response = _get_s3_client().get_object(Bucket=bucket, Key=key)
     except ClientError as exc:
         code = exc.response.get("Error", {}).get("Code", "")
         if code in {"404", "NoSuchKey", "NotFound"}:
@@ -913,6 +926,366 @@ def delete_chat_attachments(*, chat_id: str, user_id: str) -> tuple[int, int]:
             continue
         deleted += 1
     return deleted, failed
+
+
+# ----------------------------------------------------------------
+# Assets (#324) — unified chat assets (epic #321)
+# ----------------------------------------------------------------
+
+# Owner-GSI name + page bounds for ``list_assets_by_owner``. Same
+# clamp policy as the #234 admin helpers: default 50, never more
+# than 100.
+_ASSET_OWNER_GSI = "AssetOwnerIndex"
+_ASSET_PAGE_MAX = 100
+_ASSET_DEFAULT_PAGE = 50
+
+# Include-list projection for the owner-GSI browse query — every Asset
+# attribute EXCEPT ``content`` (inline payloads are up to 100 KB each;
+# a browse page must not fetch megabytes of text it will never render).
+# All names are aliased through ExpressionAttributeNames because
+# several (``owner``, ``source``) collide with DynamoDB reserved words.
+_ASSET_LIST_PROJECTION_NAMES = {
+    f"#a{i}": name
+    for i, name in enumerate(
+        (
+            "PK",
+            "SK",
+            "asset_id",
+            "chat_id",
+            "owner",
+            "kind",
+            "title",
+            "mime",
+            "size_bytes",
+            "origin",
+            "source",
+            "s3_bucket",
+            "s3_key",
+            "created_at",
+            "updated_at",
+        )
+    )
+}
+_ASSET_LIST_PROJECTION = ", ".join(_ASSET_LIST_PROJECTION_NAMES)
+
+
+def _asset_sk(created_at: str, asset_id: str) -> str:
+    return f"ASSET#{created_at}#{asset_id}"
+
+
+def _asset_item(asset: Asset) -> dict[str, Any]:
+    """Serialise an Asset to its DDB row shape (#324).
+
+    ``owner_pk`` / ``owner_sk`` project the row onto ``AssetOwnerIndex``
+    for the cross-chat browse view. ``owner`` feeds the GSI key as a
+    single attribute so the workspace-tenancy migration is one value
+    swap (``user_id`` → ``{workspace_id}/{user_id}``), never a second
+    tenancy field. None-valued payload attrs are dropped, mirroring
+    ``_attachment_item``.
+    """
+
+    item = {
+        "PK": f"CHAT#{asset.chat_id}",
+        "SK": _asset_sk(asset.created_at, asset.asset_id),
+        "owner_pk": f"ASSETOWNER#{asset.owner}",
+        "owner_sk": f"{asset.created_at}#{asset.asset_id}",
+        "asset_id": asset.asset_id,
+        "chat_id": asset.chat_id,
+        "owner": asset.owner,
+        "kind": asset.kind,
+        "title": asset.title,
+        "mime": asset.mime,
+        "size_bytes": asset.size_bytes,
+        "origin": asset.origin,
+        "source": asset.source,
+        "content": asset.content,
+        "s3_bucket": asset.s3_bucket,
+        "s3_key": asset.s3_key,
+        "created_at": asset.created_at,
+        "updated_at": asset.updated_at,
+    }
+    return {k: v for k, v in item.items() if v is not None}
+
+
+def _asset_from_item(item: dict[str, Any]) -> Asset:
+    return Asset(
+        asset_id=item["asset_id"],
+        chat_id=item["chat_id"],
+        owner=item["owner"],
+        kind=item["kind"],
+        title=item["title"],
+        mime=item["mime"],
+        size_bytes=int(item["size_bytes"]),
+        origin=item["origin"],
+        source=dict(item["source"]),
+        content=item.get("content"),
+        s3_bucket=item.get("s3_bucket"),
+        s3_key=item.get("s3_key"),
+        created_at=item["created_at"],
+        updated_at=item["updated_at"],
+    )
+
+
+def _iter_chat_asset_items(chat_id: str) -> list[dict[str, Any]]:
+    """Collect every ASSET row in a chat partition (paginated Query).
+
+    Full items (no projection): every caller needs the payload
+    coordinates — ``list_chat_assets`` hydrates models, the cascade
+    needs ``s3_key`` for the S3 side, ``get_asset`` returns the whole
+    asset. Per-chat asset counts are small (issue #324), so collecting
+    the partition into memory is fine.
+    """
+
+    table = _get_table()
+    items: list[dict[str, Any]] = []
+    last_evaluated_key: dict[str, Any] | None = None
+    while True:
+        kwargs: dict[str, Any] = {
+            "KeyConditionExpression": (
+                Key("PK").eq(f"CHAT#{chat_id}") & Key("SK").begins_with("ASSET#")
+            ),
+        }
+        if last_evaluated_key:
+            kwargs["ExclusiveStartKey"] = last_evaluated_key
+        page = table.query(**kwargs)
+        items.extend(page.get("Items") or [])
+        last_evaluated_key = page.get("LastEvaluatedKey")
+        if not last_evaluated_key:
+            return items
+
+
+def put_asset(asset: Asset) -> None:
+    """Persist the ASSET row at ``PK=CHAT#{chat_id}, SK=ASSET#{created_at}#{asset_id}``.
+
+    The producer (#326) constructs the :class:`~channel.models.Asset` —
+    including ``asset_id`` (uuid4) and ``created_at`` / ``updated_at``
+    timestamps — mirroring how the attachments finalize endpoint owns
+    Attachment construction.
+    """
+
+    _get_table().put_item(Item=_asset_item(asset))
+
+
+def get_asset(*, chat_id: str, asset_id: str) -> Asset | None:
+    """Look up one asset by ``(chat_id, asset_id)``. Returns None on miss.
+
+    Queries the chat partition (``begins_with SK, "ASSET#"``) and
+    matches on id rather than requiring ``created_at`` — per-chat asset
+    counts are small, so the partition walk beats carrying a second
+    lookup key through every caller (#324 design).
+    """
+
+    for item in _iter_chat_asset_items(chat_id):
+        if item.get("asset_id") == asset_id:
+            return _asset_from_item(item)
+    return None
+
+
+def list_chat_assets(chat_id: str) -> list[Asset]:
+    """All assets in a chat, oldest first (SK order = chronological).
+
+    Full-fidelity rows (inline ``content`` included) — the per-chat
+    surface is small and #325's content endpoint reads through this
+    path. The cross-chat browse view must use
+    :func:`list_assets_by_owner` instead, which projects ``content``
+    away.
+    """
+
+    return [_asset_from_item(item) for item in _iter_chat_asset_items(chat_id)]
+
+
+def list_assets_by_owner(
+    owner: str,
+    *,
+    limit: int = _ASSET_DEFAULT_PAGE,
+    cursor: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    """Page of an owner's assets across chats, newest first (#324).
+
+    Queries ``AssetOwnerIndex`` (``owner_pk = ASSETOWNER#{owner}``,
+    ``ScanIndexForward=False``). Returns ``(rows, next_cursor)`` where
+    ``rows`` are raw item dicts *without* the inline ``content``
+    attribute (ProjectionExpression keeps up-to-100 KB payloads off the
+    browse hot path — fetch content per asset via :func:`get_asset`)
+    and ``next_cursor`` is the response's ``LastEvaluatedKey`` to feed
+    back in opaquely. Raw dicts rather than models, following the #234
+    admin-helper precedent: the #325 browse endpoint maps these onto
+    card descriptors, and a content-less row cannot hydrate an
+    :class:`~channel.models.Asset` (the model requires exactly one
+    payload form). ``limit`` is clamped to ``[1, _ASSET_PAGE_MAX]``.
+    """
+
+    limit = max(1, min(limit, _ASSET_PAGE_MAX))
+    kwargs: dict[str, Any] = {
+        "IndexName": _ASSET_OWNER_GSI,
+        "KeyConditionExpression": Key("owner_pk").eq(f"ASSETOWNER#{owner}"),
+        "ScanIndexForward": False,
+        "Limit": limit,
+        "ProjectionExpression": _ASSET_LIST_PROJECTION,
+        "ExpressionAttributeNames": dict(_ASSET_LIST_PROJECTION_NAMES),
+    }
+    if cursor:
+        kwargs["ExclusiveStartKey"] = cursor
+    page = _get_table().query(**kwargs)
+    return list(page.get("Items") or []), page.get("LastEvaluatedKey")
+
+
+def delete_asset(asset: Asset) -> None:
+    """Delete one asset: the S3 object (when S3-backed) then the DDB row.
+
+    S3 deletion runs BEFORE the row delete so a partial failure leaves
+    the row in place for the lazy-expiry reap to retry — same ordering
+    rationale as :func:`delete_chat_attachments`. Errors propagate;
+    callers that need best-effort semantics (the cascade, the reap)
+    wrap per-asset.
+    """
+
+    if asset.s3_key is not None:
+        _get_s3_client().delete_object(Bucket=asset.s3_bucket, Key=asset.s3_key)
+    _get_table().delete_item(
+        Key={
+            "PK": f"CHAT#{asset.chat_id}",
+            "SK": _asset_sk(asset.created_at, asset.asset_id),
+        }
+    )
+
+
+def get_asset_bytes(asset: Asset) -> tuple[bytes | None, str | None]:
+    """Fetch an asset's payload bytes (#324), mirroring ``get_attachment_bytes``.
+
+    Inline assets return their ``content`` UTF-8-encoded without
+    touching S3. S3-backed assets share the exact failure vocabulary
+    of :func:`get_attachment_bytes` via :func:`_fetch_s3_object_bytes`
+    — ``(bytes, None)`` on success, ``(None, "<reason>")`` on failure,
+    with the dedicated ``"S3 object not found"`` reason for 404s.
+    """
+
+    if asset.content is not None:
+        return asset.content.encode("utf-8"), None
+    if asset.s3_bucket is None or asset.s3_key is None:
+        # The model's exactly-one-payload validator makes this
+        # unreachable for validated instances; guard anyway so a
+        # ``model_construct``-built or manually-mutated instance fails
+        # loudly in the established (None, reason) shape.
+        return None, "asset has no payload coordinates"
+    return _fetch_s3_object_bytes(bucket=asset.s3_bucket, key=asset.s3_key)
+
+
+def delete_chat_assets(*, chat_id: str) -> tuple[int, int]:
+    """Cascade-delete a chat's ASSET rows + their S3 objects (#324).
+
+    Returns ``(deleted_count, failed_count)``. Mirrors
+    :func:`delete_chat_attachments`: per-asset failures are caught +
+    logged so one bad asset doesn't abort the rest; total failure
+    (the partition Query raising) propagates to the API layer, which
+    wraps the cascade and emits ``ChatDeleteAssetWipeFailures``.
+    Unlike the attachments cascade there is no snapshot indirection —
+    ASSET rows live on the chat partition itself, so the row set IS
+    the delete set. No ``user_id`` parameter for the same reason.
+    """
+
+    deleted = 0
+    failed = 0
+    for item in _iter_chat_asset_items(chat_id):
+        try:
+            asset = _asset_from_item(item)
+        except (ValidationError, KeyError):
+            logger.warning(
+                "asset.cascade_malformed_row chat_id=%s sk=%s",
+                chat_id,
+                item.get("SK"),
+                exc_info=True,
+            )
+            failed += 1
+            continue
+        try:
+            delete_asset(asset)
+        except ClientError as exc:
+            logger.warning(
+                "asset.cascade_delete_failed chat_id=%s asset_id=%s",
+                chat_id,
+                asset.asset_id,
+                extra={
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                },
+                exc_info=True,
+            )
+            failed += 1
+            continue
+        deleted += 1
+    return deleted, failed
+
+
+def reap_orphaned_assets(rows: list[dict[str, Any]]) -> tuple[int, int]:
+    """Best-effort reap of assets whose chat no longer exists (#324, Q5).
+
+    ``rows`` are raw asset item dicts — typically a page from
+    :func:`list_assets_by_owner` that the browse endpoint (#325 / #328)
+    suspects of orphan-hood. Each candidate's chat liveness is
+    (re)verified here via ``ChatByIdIndex`` (:func:`get_chat_by_id`,
+    cached per distinct ``chat_id``) so a caller bug can never reap a
+    living chat's assets. Orphans get the S3-object-then-row delete via
+    :func:`delete_asset`; rows whose chat still lives are skipped and
+    counted in neither bucket.
+
+    Returns ``(reaped, failed)``. Callers report via
+    ``record_asset_lazy_expiry_reaps`` — this helper emits nothing
+    itself, matching the cascade's metrics-at-the-API-layer split.
+    There is no scheduled sweeper in v1; this browse-time reap is the
+    only expiry mechanism unless EMF shows sustained cascade failures.
+    """
+
+    reaped = 0
+    failed = 0
+    liveness: dict[str, bool] = {}
+    for row in rows:
+        try:
+            asset = _asset_from_item(_restore_reap_row(row))
+        except (ValidationError, KeyError):
+            logger.warning("asset.reap_malformed_row sk=%s", row.get("SK"), exc_info=True)
+            failed += 1
+            continue
+        alive = liveness.get(asset.chat_id)
+        if alive is None:
+            alive = get_chat_by_id(asset.chat_id) is not None
+            liveness[asset.chat_id] = alive
+        if alive:
+            continue
+        try:
+            delete_asset(asset)
+        except ClientError as exc:
+            logger.warning(
+                "asset.reap_delete_failed chat_id=%s asset_id=%s",
+                asset.chat_id,
+                asset.asset_id,
+                extra={
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                },
+                exc_info=True,
+            )
+            failed += 1
+            continue
+        reaped += 1
+    return reaped, failed
+
+
+def _restore_reap_row(row: dict[str, Any]) -> dict[str, Any]:
+    """Make a content-projected browse row hydratable for the reap.
+
+    :func:`list_assets_by_owner` strips ``content``, so an inline
+    asset's row arrives with neither payload form and would fail the
+    Asset model's exactly-one-payload validation. The reap only needs
+    the row key + S3 coordinates; substituting an empty ``content``
+    for rows without S3 coordinates satisfies the model without
+    fetching the real payload. Rows that already carry a payload form
+    pass through untouched.
+    """
+
+    if "content" in row or "s3_key" in row:
+        return row
+    return {**row, "content": ""}
 
 
 # ----------------------------------------------------------------

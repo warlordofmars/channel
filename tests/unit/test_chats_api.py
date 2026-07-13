@@ -50,6 +50,12 @@ def _stub_get_prefs(monkeypatch: pytest.MonkeyPatch) -> None:
         lambda **_kwargs: (0, 0),
     )
 
+    # Same for the assets cascade (#324).
+    monkeypatch.setattr(
+        "channel.api.chats.storage.delete_chat_assets",
+        lambda **_kwargs: (0, 0),
+    )
+
     # #207 — default the MCP-registry resolver to "no servers" so legacy
     # chats_api tests that pre-date MCP don't need to stub each call
     # site. Tests exercising MCP-client behaviour override these inline.
@@ -3250,6 +3256,123 @@ def test_delete_chat_swallows_attachment_cascade_exception(
     monkeypatch.setattr("channel.api.chats.record_chat_delete_attachment_wipe_outcome", record)
 
     resp = client.delete("/api/chats/c-cascade-4")
+    assert resp.status_code == 204
+    record.assert_awaited_once_with(success=False)
+
+
+def test_delete_chat_invokes_asset_cascade(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The delete_chat handler MUST call storage.delete_chat_assets with
+    the chat id (#324 — asset rows are chat-partitioned; no user_id)."""
+
+    chat = Chat(
+        chat_id="c-asset-cascade-1",
+        user_id="u-1",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="m",
+    )
+    _stub_delete_handler_storage_and_agentcore(monkeypatch, chat)
+
+    seen: list[dict[str, Any]] = []
+
+    def fake_cascade(**kwargs: Any) -> tuple[int, int]:
+        seen.append(kwargs)
+        return (2, 0)
+
+    monkeypatch.setattr("channel.api.chats.storage.delete_chat_assets", fake_cascade)
+
+    resp = client.delete("/api/chats/c-asset-cascade-1")
+    assert resp.status_code == 204
+    assert seen == [{"chat_id": "c-asset-cascade-1"}]
+
+
+def test_delete_chat_emits_asset_success_metric_when_cascade_clean(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Asset cascade returns (N, 0) → success metric."""
+
+    from unittest.mock import AsyncMock
+
+    chat = Chat(
+        chat_id="c-asset-cascade-2",
+        user_id="u-1",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="m",
+    )
+    _stub_delete_handler_storage_and_agentcore(monkeypatch, chat)
+    monkeypatch.setattr(
+        "channel.api.chats.storage.delete_chat_assets",
+        lambda **_: (2, 0),
+    )
+    record = AsyncMock()
+    monkeypatch.setattr("channel.api.chats.record_chat_delete_asset_wipe_outcome", record)
+
+    resp = client.delete("/api/chats/c-asset-cascade-2")
+    assert resp.status_code == 204
+    record.assert_awaited_once_with(success=True)
+
+
+def test_delete_chat_emits_asset_failure_metric_on_partial_failure(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Asset cascade returns (N, M>0) → failure metric — partial-success
+    counts as failure so alarming triggers on any leftover asset."""
+
+    from unittest.mock import AsyncMock
+
+    chat = Chat(
+        chat_id="c-asset-cascade-3",
+        user_id="u-1",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="m",
+    )
+    _stub_delete_handler_storage_and_agentcore(monkeypatch, chat)
+    monkeypatch.setattr(
+        "channel.api.chats.storage.delete_chat_assets",
+        lambda **_: (1, 1),
+    )
+    record = AsyncMock()
+    monkeypatch.setattr("channel.api.chats.record_chat_delete_asset_wipe_outcome", record)
+
+    resp = client.delete("/api/chats/c-asset-cascade-3")
+    assert resp.status_code == 204
+    record.assert_awaited_once_with(success=False)
+
+
+def test_delete_chat_swallows_asset_cascade_exception(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Asset cascade raising must NOT prevent the 204 — DDB is source of
+    truth for chat existence; orphan assets are the lazy-expiry reap's
+    concern. Failure metric is recorded."""
+
+    from unittest.mock import AsyncMock
+
+    chat = Chat(
+        chat_id="c-asset-cascade-4",
+        user_id="u-1",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="m",
+    )
+    _stub_delete_handler_storage_and_agentcore(monkeypatch, chat)
+
+    def fake_cascade(**_: Any) -> tuple[int, int]:
+        raise RuntimeError("ddb query blew up")
+
+    monkeypatch.setattr("channel.api.chats.storage.delete_chat_assets", fake_cascade)
+    record = AsyncMock()
+    monkeypatch.setattr("channel.api.chats.record_chat_delete_asset_wipe_outcome", record)
+
+    resp = client.delete("/api/chats/c-asset-cascade-4")
     assert resp.status_code == 204
     record.assert_awaited_once_with(success=False)
 

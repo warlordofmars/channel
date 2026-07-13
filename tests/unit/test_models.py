@@ -7,6 +7,8 @@ import pytest
 from pydantic import ValidationError
 
 from channel.models import (
+    ASSET_INLINE_CONTENT_MAX_BYTES,
+    Asset,
     Attachment,
     Chat,
     ChatCreate,
@@ -375,3 +377,110 @@ def test_new_mcp_models_reject_unknown_keys() -> None:
 
     with pytest.raises(ValidationError):
         ChatMCPSettings(chat_id="c", unknown="y")
+
+
+# ----------------------------------------------------------------
+# Asset (#324, epic #321)
+# ----------------------------------------------------------------
+
+
+def _asset_kwargs(**overrides: object) -> dict[str, object]:
+    base: dict[str, object] = {
+        "asset_id": "a-1",
+        "chat_id": "c-1",
+        "owner": "u-1",
+        "kind": "code",
+        "title": "fib.py",
+        "mime": "text/x-python",
+        "size_bytes": 42,
+        "origin": "generated",
+        "source": {"msg_id": "m-1"},
+        "content": "print('hi')",
+        "created_at": "2026-07-13T00:00:00.000000+00:00",
+        "updated_at": "2026-07-13T00:00:00.000000+00:00",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_asset_inline_roundtrip():
+    asset = Asset(**_asset_kwargs())
+    assert asset.content == "print('hi')"
+    assert asset.s3_bucket is None
+    assert asset.s3_key is None
+    assert asset.kind == "code"
+    assert asset.origin == "generated"
+
+
+def test_asset_s3_backed_roundtrip():
+    asset = Asset(
+        **_asset_kwargs(
+            content=None,
+            s3_bucket="channel-attachments",
+            s3_key="assets/chat/c-1/a-1",
+            kind="image",
+            mime="image/png",
+            origin="tool_output",
+            source={"msg_id": "m-1", "tool_use_id": "t-1"},
+        )
+    )
+    assert asset.content is None
+    assert asset.s3_key == "assets/chat/c-1/a-1"
+
+
+def test_asset_rejects_both_payload_forms():
+    with pytest.raises(ValidationError, match="exactly one"):
+        Asset(
+            **_asset_kwargs(
+                s3_bucket="channel-attachments",
+                s3_key="assets/chat/c-1/a-1",
+            )
+        )
+
+
+def test_asset_rejects_neither_payload_form():
+    with pytest.raises(ValidationError, match="exactly one"):
+        Asset(**_asset_kwargs(content=None))
+
+
+@pytest.mark.parametrize(
+    ("bucket", "key"),
+    [("channel-attachments", None), (None, "assets/chat/c-1/a-1")],
+)
+def test_asset_rejects_partial_s3_coordinates(bucket: str | None, key: str | None):
+    with pytest.raises(ValidationError, match="set together"):
+        Asset(**_asset_kwargs(content=None, s3_bucket=bucket, s3_key=key))
+
+
+def test_asset_inline_content_capped_at_100_kb():
+    at_cap = "x" * ASSET_INLINE_CONTENT_MAX_BYTES
+    assert Asset(**_asset_kwargs(content=at_cap)).content == at_cap
+    with pytest.raises(ValidationError, match="inline cap"):
+        Asset(**_asset_kwargs(content=at_cap + "x"))
+
+
+def test_asset_inline_cap_measures_utf8_bytes_not_chars():
+    # é is 2 bytes in UTF-8 — a string under the cap in characters but
+    # over it in bytes must be rejected (DDB item sizing is byte-based).
+    over_in_bytes = "é" * ((ASSET_INLINE_CONTENT_MAX_BYTES // 2) + 1)
+    with pytest.raises(ValidationError, match="inline cap"):
+        Asset(**_asset_kwargs(content=over_in_bytes))
+
+
+@pytest.mark.parametrize("source", [{}, {"msg_id": ""}, {"msg_id": 7}, {"tool_use_id": "t"}])
+def test_asset_requires_source_msg_id(source: dict[str, object]):
+    with pytest.raises(ValidationError, match="msg_id"):
+        Asset(**_asset_kwargs(source=source))
+
+
+def test_asset_rejects_unknown_kind_and_origin():
+    with pytest.raises(ValidationError):
+        Asset(**_asset_kwargs(kind="video"))
+    with pytest.raises(ValidationError):
+        Asset(**_asset_kwargs(origin="imported"))
+
+
+def test_asset_has_no_pinned_attribute():
+    # "Pin to survive chat deletion" is explicitly v2 (John, 2026-07-12).
+    # This pin (pun intended) fails if someone pre-bakes the attribute.
+    assert "pinned" not in Asset.model_fields

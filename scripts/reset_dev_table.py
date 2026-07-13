@@ -5,7 +5,7 @@
 DynamoDB Local (used by ``inv dev``) runs in-memory, so the table
 disappears on every container restart. ``inv dev --seed`` doesn't
 provision the table yet (the flag is a no-op stub). Run this script
-after starting ``inv dev`` to (re)create ``channel`` with all four
+after starting ``inv dev`` to (re)create ``channel`` with all five
 GSIs. The schema itself lives in :mod:`channel._table_schema` and is
 shared with the integration test fixture so the dev table stays in
 lock-step with what the integration tests rely on.
@@ -47,7 +47,7 @@ def main() -> None:
         print(f"{TABLE} did not exist; creating fresh")
 
     provision(ddb, TABLE)
-    print(f"recreated {TABLE} with 4 GSIs (incl. ChatByIdIndex)")
+    print(f"recreated {TABLE} with 5 GSIs (incl. AssetOwnerIndex)")
 
 
 if __name__ == "__main__":

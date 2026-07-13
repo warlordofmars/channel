@@ -30,6 +30,8 @@ ATTRIBUTE_DEFINITIONS: list[dict[str, str]] = [
     {"AttributeName": "GSI3PK", "AttributeType": "S"},
     {"AttributeName": "GSI3SK", "AttributeType": "S"},
     {"AttributeName": "GSI4PK", "AttributeType": "S"},
+    {"AttributeName": "owner_pk", "AttributeType": "S"},
+    {"AttributeName": "owner_sk", "AttributeType": "S"},
 ]
 
 KEY_SCHEMA: list[dict[str, str]] = [
@@ -64,6 +66,18 @@ GLOBAL_SECONDARY_INDEXES: list[dict[str, Any]] = [
         "KeySchema": [
             {"AttributeName": "GSI3PK", "KeyType": "HASH"},
             {"AttributeName": "GSI3SK", "KeyType": "RANGE"},
+        ],
+        "Projection": {"ProjectionType": "ALL"},
+    },
+    {
+        # #324 — cross-chat asset browsing. ``owner_pk`` / ``owner_sk``
+        # (not GSI5PK/SK) match the settled #321 design: the attribute
+        # names carry the ownership semantics that make the
+        # workspace-tenancy migration a one-value swap.
+        "IndexName": "AssetOwnerIndex",
+        "KeySchema": [
+            {"AttributeName": "owner_pk", "KeyType": "HASH"},
+            {"AttributeName": "owner_sk", "KeyType": "RANGE"},
         ],
         "Projection": {"ProjectionType": "ALL"},
     },

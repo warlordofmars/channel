@@ -116,6 +116,37 @@ async def record_chat_delete_attachment_wipe_outcome(success: bool) -> None:
     await emit_metric(metric)
 
 
+async def record_chat_delete_asset_wipe_outcome(success: bool) -> None:
+    """Emit a CloudWatch counter for one chat-delete asset-wipe cascade (#324).
+
+    Counter-only — same cardinality-risk rationale as
+    :func:`record_memory_write_outcome`. ``success=False`` means at
+    least one S3 object or ASSET row deletion failed for the cascade;
+    partial-success cascades count as failures so the metric can drive
+    alarming — the exact ``ChatDeleteAttachmentWipeFailures`` pattern.
+    Per-actor / per-chat / per-asset dimensions are deliberately not
+    accepted.
+    """
+    metric = "ChatDeleteAssetWipeSuccesses" if success else "ChatDeleteAssetWipeFailures"
+    await emit_metric(metric)
+
+
+async def record_asset_lazy_expiry_reaps(reaped: int, failed: int) -> None:
+    """Emit counters for one browse-time lazy-expiry reap pass (#324, Q5).
+
+    ``AssetLazyExpiryReaps`` carries the number of orphaned assets
+    actually reaped (rows + S3 objects); ``AssetLazyExpiryReapFailures``
+    the number that failed. Zero-valued counters are skipped so quiet
+    browse pages emit nothing. Signature accepts only the two ints —
+    same no-dimensions cardinality rule as
+    :func:`record_memory_write_outcome`.
+    """
+    if reaped:
+        await emit_metric("AssetLazyExpiryReaps", value=float(reaped))
+    if failed:
+        await emit_metric("AssetLazyExpiryReapFailures", value=float(failed))
+
+
 async def record_tool_call_outcome(success: bool) -> None:
     """Emit a CloudWatch counter for one tool-call attempt (epic #128).
 

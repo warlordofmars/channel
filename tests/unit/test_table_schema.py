@@ -25,6 +25,8 @@ def test_attribute_definitions_cover_all_pk_sk_and_gsi_keys():
         "GSI3PK",
         "GSI3SK",
         "GSI4PK",
+        "owner_pk",
+        "owner_sk",
     }
     # Every attribute is declared as a string — DDB rejects table creation
     # if a GSI references an attribute with a different scalar type.
@@ -38,9 +40,25 @@ def test_key_schema_is_pk_hash_sk_range():
     ]
 
 
-def test_global_secondary_indexes_named_for_all_four_gsis():
+def test_global_secondary_indexes_named_for_all_five_gsis():
     names = {gsi["IndexName"] for gsi in GLOBAL_SECONDARY_INDEXES}
-    assert names == {"KeyIndex", "TagIndex", "UserEmailIndex", "ChatByIdIndex"}
+    assert names == {
+        "KeyIndex",
+        "TagIndex",
+        "UserEmailIndex",
+        "ChatByIdIndex",
+        "AssetOwnerIndex",
+    }
+
+
+def test_asset_owner_index_keyed_on_owner_pk_and_owner_sk():
+    # #324 — the browse GSI uses the semantic ``owner_pk`` / ``owner_sk``
+    # attribute names (not a GSI5PK slot) per the settled #321 design.
+    gsi = next(g for g in GLOBAL_SECONDARY_INDEXES if g["IndexName"] == "AssetOwnerIndex")
+    assert gsi["KeySchema"] == [
+        {"AttributeName": "owner_pk", "KeyType": "HASH"},
+        {"AttributeName": "owner_sk", "KeyType": "RANGE"},
+    ]
 
 
 def test_user_email_index_is_hash_only():

@@ -56,6 +56,7 @@ from channel.mcp.transports import make_authenticated_transport
 from channel.mcp.url_guard import validate_mcp_server_url
 from channel.metrics import (
     record_auto_title_outcome,
+    record_chat_delete_asset_wipe_outcome,
     record_chat_delete_attachment_wipe_outcome,
     record_chat_delete_memory_wipe_outcome,
     record_followup_outcome,
@@ -533,6 +534,31 @@ async def delete_chat(
             exc_info=True,
         )
         await record_chat_delete_attachment_wipe_outcome(success=False)
+    # #324 — cascade-delete the chat's ASSET rows + their S3 objects
+    # (epic #321). Same best-effort semantics as the two cascades
+    # above: DDB chat row stays the source of truth for chat
+    # existence; leftover assets are the lazy-expiry reap's concern.
+    try:
+        assets_deleted, assets_failed = await asyncio.to_thread(
+            storage.delete_chat_assets,
+            chat_id=chat_id,
+        )
+        await record_chat_delete_asset_wipe_outcome(success=(assets_failed == 0))
+        if assets_failed:
+            logger.warning(
+                "asset.chat_delete_partial_failure chat_id=%s deleted=%d failed=%d",
+                chat_id,
+                assets_deleted,
+                assets_failed,
+            )
+    except Exception as exc:
+        logger.warning(
+            "asset.chat_delete_wipe_failed chat_id=%s",
+            chat_id,
+            extra={"error_type": type(exc).__name__, "error_message": str(exc)},
+            exc_info=True,
+        )
+        await record_chat_delete_asset_wipe_outcome(success=False)
     return Response(status_code=204)
 
 

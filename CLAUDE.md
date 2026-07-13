@@ -171,11 +171,24 @@ require a valid Bearer mgmt JWT. JWT validation enforces `iss`,
   (one optional row per chat; `mode=inherit` means "follow user's
   globally_enabled flags as of now", `mode=explicit` means
   "use exactly this list, ignoring future changes to globally_enabled")
+- Asset items: `PK=CHAT#{chat_id}`, `SK=ASSET#{created_at}#{asset_id}`
+  (one row per chat asset — upload projection, generated artifact, or
+  tool output; mirrors the `MSG#` convention so chat deletion cascades
+  with one partition Query. Inline text ≤ 100 KB lives in the row's
+  `content` attribute; larger text and all binary payloads live in the
+  attachments bucket under `assets/chat/{chat_id}/{asset_id}`. Every
+  row carries `owner_pk=ASSETOWNER#{owner}` /
+  `owner_sk={created_at}#{asset_id}` projecting onto `AssetOwnerIndex`;
+  `owner` is user_id today, `{workspace_id}/{user_id}` when workspaces
+  land — single-attribute migration, never a second tenancy field)
 - GSIs:
   - `UserEmailIndex` — `PK=EMAIL#{email}` (for user lookups by email)
   - `ChatByIdIndex` — `PK=CHAT_ID#{chat_id}`, `SK=META`
     (sparse; only chat-index rows project onto it; used for direct
     chat-id → chat lookups without knowing `created_at`)
+  - `AssetOwnerIndex` — `PK=ASSETOWNER#{owner}`,
+    `SK={created_at}#{asset_id}` (sparse; only asset rows project onto
+    it; powers the cross-chat asset browse view, newest first)
 
 ## AgentCore Memory
 
@@ -691,7 +704,7 @@ uv run inv dev
 uv run python scripts/reset_dev_table.py
 ```
 
-The script drops and recreates the local `channel` table with all four
+The script drops and recreates the local `channel` table with all five
 GSIs (schema lives in `channel._table_schema`, shared with the
 integration test fixture). It provisions schema only — nothing seeds
 demo data.

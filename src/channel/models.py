@@ -146,6 +146,78 @@ class Attachment(BaseModel):
     referenced_at: str | None = None
 
 
+# Inline-content ceiling for Asset rows (#324, epic #321 decision Q2).
+# Text at or under this many UTF-8 bytes lives in the DDB item's
+# ``content`` attribute (comfortably under the 400 KB item cap);
+# anything larger — and ALL binary content — goes to S3.
+ASSET_INLINE_CONTENT_MAX_BYTES = 100 * 1024
+
+
+class Asset(BaseModel):
+    """Unified chat asset row — partition key CHAT#{chat_id} (#324, epic #321).
+
+    One row per asset (upload projection, generated artifact, or tool
+    output) at ``PK=CHAT#{chat_id}, SK=ASSET#{created_at}#{asset_id}``,
+    mirroring the ``MSG#`` convention so the chat-scoped lifetime is
+    structural (the delete cascade is one Query on the chat partition).
+    Every row also projects onto the ``AssetOwnerIndex`` GSI via
+    ``owner_pk=ASSETOWNER#{owner}`` / ``owner_sk={created_at}#{asset_id}``
+    for the cross-chat browse view.
+
+    ``owner`` is the ownership axis feeding the GSI key — today the
+    user_id (JWT ``sub``), later ``{workspace_id}/{user_id}`` when
+    workspaces land. Single-attribute migration by design: do NOT add
+    a second tenancy field (settled in the #321 design review).
+
+    Payload placement is exclusive: inline text ≤
+    :data:`ASSET_INLINE_CONTENT_MAX_BYTES` lives in ``content``;
+    everything larger and all binary content lives in S3 under
+    ``assets/chat/{chat_id}/{asset_id}`` (``s3_bucket`` + ``s3_key``,
+    always set together). Exactly one of the two forms must be present.
+
+    ``source`` stays a free-form dict (``msg_id`` required; optional
+    ``tool_use_id`` / ``fence_index``) per this module's flat-model
+    philosophy — schema evolution without model surgery. There is
+    deliberately no ``pinned`` attribute: "pin to survive chat
+    deletion" is explicitly v2 (John, 2026-07-12).
+    """
+
+    asset_id: str
+    chat_id: str
+    owner: str
+    kind: Literal["code", "document", "data", "image", "diagram"]
+    title: str
+    mime: str
+    size_bytes: int
+    origin: Literal["upload", "generated", "tool_output"]
+    source: dict[str, Any]
+    content: str | None = None
+    s3_bucket: str | None = None
+    s3_key: str | None = None
+    created_at: str
+    updated_at: str
+
+    @model_validator(mode="after")
+    def _validate_payload_and_source(self) -> Asset:
+        if (self.s3_bucket is None) != (self.s3_key is None):
+            raise ValueError("Asset.s3_bucket and Asset.s3_key must be set together")
+        has_inline = self.content is not None
+        has_s3 = self.s3_bucket is not None
+        if has_inline == has_s3:
+            raise ValueError("Asset requires exactly one of inline content or s3_bucket+s3_key")
+        if self.content is not None and (
+            len(self.content.encode("utf-8")) > ASSET_INLINE_CONTENT_MAX_BYTES
+        ):
+            raise ValueError(
+                f"Asset.content exceeds the inline cap of "
+                f"{ASSET_INLINE_CONTENT_MAX_BYTES} bytes — store it in S3 instead"
+            )
+        msg_id = self.source.get("msg_id")
+        if not isinstance(msg_id, str) or not msg_id:
+            raise ValueError("Asset.source must include a non-empty 'msg_id' string")
+        return self
+
+
 class Message(BaseModel):
     """One turn in a chat — partition key CHAT#{chat_id}."""
 

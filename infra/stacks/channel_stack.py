@@ -275,6 +275,19 @@ class ChannelStack(cdk.Stack):
             projection_type=dynamodb.ProjectionType.ALL,
         )
 
+        # GSI 5 — AssetOwnerIndex: cross-chat asset browsing by owner
+        # (#324, epic #321). Attribute names are ``owner_pk`` /
+        # ``owner_sk`` rather than GSI5PK/SK — the settled design keys
+        # the index off a single ``owner`` value so the workspace-
+        # tenancy migration (user_id → {workspace_id}/{user_id}) is a
+        # one-attribute swap with no base-table repartition.
+        table.add_global_secondary_index(
+            index_name="AssetOwnerIndex",
+            partition_key=dynamodb.Attribute(name="owner_pk", type=dynamodb.AttributeType.STRING),
+            sort_key=dynamodb.Attribute(name="owner_sk", type=dynamodb.AttributeType.STRING),
+            projection_type=dynamodb.ProjectionType.ALL,
+        )
+
         # ----------------------------------------------------------------
         # SSM Parameters
         # ----------------------------------------------------------------
@@ -667,6 +680,17 @@ class ChannelStack(cdk.Stack):
         attachments_bucket.grant_put(api_role, "attachments/user/*")
         attachments_bucket.grant_read(api_role, "attachments/user/*")
         attachments_bucket.grant_delete(api_role, "attachments/user/*")
+        # #324 — asset payloads (epic #321) reuse this bucket under the
+        # ``assets/chat/{chat_id}/{asset_id}`` prefix (shared-infra
+        # product decision: no second bucket). Same prefix-scoped
+        # grant discipline; no dedicated tagging statement — assets are
+        # server-created and never carry the ``unreferenced=1``
+        # lifecycle tag that presigned uploads manipulate (grant_put's
+        # standard write action set does bundle s3:PutObjectTagging,
+        # which is harmless here).
+        attachments_bucket.grant_put(api_role, "assets/chat/*")
+        attachments_bucket.grant_read(api_role, "assets/chat/*")
+        attachments_bucket.grant_delete(api_role, "assets/chat/*")
         api_role.add_to_policy(
             iam.PolicyStatement(
                 actions=["s3:PutObjectTagging", "s3:DeleteObjectTagging"],
