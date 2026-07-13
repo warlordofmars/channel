@@ -1,6 +1,7 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
 import React, { useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
+import AssetCard from "./AssetCard.jsx";
 import ChannelMark from "../components/ChannelMark.jsx";
 import ChatHeader from "./ChatHeader.jsx";
 import Composer from "./Composer.jsx";
@@ -38,6 +39,33 @@ function modelLabelFromList(raw, models) {
 }
 
 const COPIED_FEEDBACK_MS = 1500;
+
+// #327: a `kind=code` asset carrying a `source.fence_index` swaps the
+// corresponding fenced code block for its card inline (see
+// renderMarkdown). Every other asset — uploads, code-exec images, and
+// any code asset without a locatable fence — renders as a standalone card
+// below the message.
+function isFenceSwapAsset(a) {
+  return (
+    a.kind === "code" &&
+    a.source != null &&
+    typeof a.source.fence_index === "number"
+  );
+}
+
+// Map<fence_index, asset> for the fenced blocks this turn swaps inline.
+export function codeAssetsByFence(assets) {
+  const map = new Map();
+  for (const a of assets || []) {
+    if (isFenceSwapAsset(a)) map.set(a.source.fence_index, a);
+  }
+  return map;
+}
+
+// The assets rendered as standalone cards under the message.
+export function standaloneAssets(assets) {
+  return (assets || []).filter((a) => !isFenceSwapAsset(a));
+}
 
 /**
  * Copy-to-clipboard helper. Returns a Promise that resolves on success.
@@ -474,7 +502,16 @@ export default function Conversation() {
     composerRef.current?.setText(suggestion);
     composerRef.current?.focus();
   };
-  const noop = () => {};
+  // #327 integration seam: opening an asset card navigates to the browse
+  // route with the asset id in the bookmarkable `?artifact=` search param
+  // (the same param Artifacts.jsx already gates ArtifactPanel on). Sibling
+  // #328 rewrites that view to resolve the id to a persisted asset and
+  // render real content; today it falls through to a closed panel, which
+  // is harmless. Keeping the coupling URL-based (not a shared import)
+  // means #328's concurrent panel rewrite can't break this side.
+  function openAsset(asset) {
+    navigate(`/app/artifacts?artifact=${encodeURIComponent(asset.asset_id)}`);
+  }
 
   return (
     <>
@@ -502,7 +539,9 @@ export default function Conversation() {
             // no-op so the row layout stays consistent.
             const retryEnabled =
               isLast && t.role === "assistant" && !t.streaming;
-            const onRetry = retryEnabled ? () => regenerate({}) : noop;
+            // Only the last settled assistant turn is retryable; older
+            // turns attach `undefined` to the (disabled) Retry button.
+            const onRetry = retryEnabled ? () => regenerate({}) : undefined;
             return t.role === "user" ? (
               <div className="turn user" key={t.msg_id}>
                 {t.atts && t.atts.length > 0 && (
@@ -519,6 +558,9 @@ export default function Conversation() {
                   </div>
                 )}
                 <div className="bubble">{t.text}</div>
+                {standaloneAssets(t.assets).map((a) => (
+                  <AssetCard key={a.asset_id} asset={a} onOpen={openAsset} />
+                ))}
               </div>
             ) : (
               <div
@@ -531,27 +573,21 @@ export default function Conversation() {
                   <span className="nm">Channel</span>
                   <span className="mdl">{modelLabelFromList(t.model, models)}</span>
                 </div>
-                <div className="msg">{renderMarkdown(t.text, t.streaming)}</div>
+                <div className="msg">
+                  {renderMarkdown(t.text, t.streaming, {
+                    codeAssets: codeAssetsByFence(t.assets),
+                    onOpenAsset: openAsset,
+                  })}
+                </div>
+                {standaloneAssets(t.assets).map((a) => (
+                  <AssetCard key={a.asset_id} asset={a} onOpen={openAsset} />
+                ))}
                 {t.toolSteps && t.toolSteps.length > 0 && (
                   <ToolStepList
                     steps={t.toolSteps}
                     expanded={expandedSteps.get(t.toolSteps[0].toolUseId) ?? false}
                     onToggle={() => toggleStepsExpanded(t.toolSteps[0].toolUseId)}
                   />
-                )}
-                {t.artifact && (
-                  <div className="art-inline" onClick={noop}>
-                    <div className="ah">
-                      <span className="ic"><Icon name={t.artifact.ic} size={18} /></span>
-                      <div>
-                        <div className="at">{t.artifact.title}</div>
-                        <div className="as">{t.artifact.kind}</div>
-                      </div>
-                      <span style={{ marginLeft: "auto", color: "var(--ink-faint)" }}>
-                        <Icon name="expand" size={16} />
-                      </span>
-                    </div>
-                  </div>
                 )}
                 {t.streamError && (
                   <div className="stream-error" role="alert">

@@ -45,6 +45,7 @@ vi.mock("../hooks/ChatsContext.jsx", () => ({
 
 import * as useChatStreamModule from "../hooks/useChatStream.js";
 import * as useChatsModule from "../hooks/ChatsContext.jsx";
+import { codeAssetsByFence, standaloneAssets } from "./Conversation.jsx";
 
 function mockStream(overrides = {}) {
   const ret = {
@@ -587,37 +588,117 @@ describe("Conversation", () => {
     });
   });
 
-  it("renders the inline artifact card on assistant turns that carry one", () => {
+  it("renders a standalone asset card on an assistant turn (#327)", () => {
     mockStream({
       turns: [
         {
           msg_id: "a1",
           role: "assistant",
-          text: "see attached",
+          text: "see the figure",
           streaming: false,
-          artifact: { ic: "code", title: "demo.ts", kind: "Code · 12 lines" },
+          assets: [
+            {
+              asset_id: "as-1",
+              msg_id: "a1",
+              kind: "image",
+              title: "Figure 1",
+              size_bytes: 4096,
+              source: { msg_id: "a1", tool_use_id: "t1" },
+            },
+          ],
         },
       ],
     });
     renderAt("/app/c/c1");
-    expect(screen.getByText("demo.ts")).toBeTruthy();
-    expect(screen.getByText("Code · 12 lines")).toBeTruthy();
+    expect(screen.getByText("Figure 1")).toBeTruthy();
+    expect(screen.getByText("image · 4.0 KB")).toBeTruthy();
   });
 
-  it("clicking the inline artifact does not throw", () => {
+  it("renders an upload asset card on a user turn (#327)", () => {
+    mockStream({
+      turns: [
+        {
+          msg_id: "u1",
+          role: "user",
+          text: "have a look",
+          assets: [
+            {
+              asset_id: "up-1",
+              msg_id: "u1",
+              kind: "document",
+              title: "report.pdf",
+              size_bytes: 2048,
+              source: { msg_id: "u1", attachment_id: "att-1" },
+            },
+          ],
+        },
+      ],
+    });
+    renderAt("/app/c/c1");
+    expect(screen.getByText("report.pdf")).toBeTruthy();
+  });
+
+  it("swaps a fenced code block for its card by ordinal (#327)", () => {
     mockStream({
       turns: [
         {
           msg_id: "a1",
           role: "assistant",
-          text: "see attached",
+          text: "```python\nx = 1\ny = 2\n```",
           streaming: false,
-          artifact: { ic: "code", title: "demo.ts", kind: "Code · 12 lines" },
+          assets: [
+            {
+              asset_id: "as-code",
+              msg_id: "a1",
+              kind: "code",
+              title: "snippet.py",
+              size_bytes: 300,
+              source: { msg_id: "a1", fence_index: 0, lang: "python" },
+            },
+          ],
         },
       ],
     });
-    renderAt("/app/c/c1");
-    expect(() => fireEvent.click(screen.getByText("demo.ts"))).not.toThrow();
+    const { container } = renderAt("/app/c/c1");
+    expect(screen.getByText("snippet.py")).toBeTruthy();
+    // The raw fence was swapped — no <pre><code> remains.
+    expect(container.querySelector("pre code")).toBeNull();
+  });
+
+  it("navigates to the browse route when an asset card is clicked (#327)", () => {
+    mockStream({
+      turns: [
+        {
+          msg_id: "a1",
+          role: "assistant",
+          text: "see the figure",
+          streaming: false,
+          assets: [
+            {
+              asset_id: "as-1",
+              msg_id: "a1",
+              kind: "image",
+              title: "Figure 1",
+              size_bytes: 4096,
+              source: { msg_id: "a1" },
+            },
+          ],
+        },
+      ],
+    });
+    render(
+      <MemoryRouter initialEntries={["/app/c/c1"]}>
+        <Routes>
+          <Route path="/app/c/:id" element={<Conversation />} />
+          <Route
+            path="/app/artifacts"
+            element={<div>ARTIFACTS BROWSE ROUTE</div>}
+          />
+        </Routes>
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByText("Figure 1"));
+    expect(screen.getByText("ARTIFACTS BROWSE ROUTE")).toBeTruthy();
   });
 
   it("sends firstMessage from route state on mount", () => {
@@ -1696,5 +1777,44 @@ describe("Conversation", () => {
       expect(screen.getByRole("alert").textContent).toContain("Went wrong.");
       expect(screen.queryByRole("button", { name: /retry/i })).toBeNull();
     });
+  });
+});
+
+describe("asset partition helpers (#327)", () => {
+  const fenceAsset = {
+    asset_id: "c1",
+    kind: "code",
+    source: { fence_index: 2 },
+  };
+  const imageAsset = { asset_id: "i1", kind: "image", source: { msg_id: "m" } };
+  const codeNoSource = { asset_id: "c2", kind: "code" };
+  const codeNoFence = { asset_id: "c3", kind: "code", source: { msg_id: "m" } };
+
+  it("codeAssetsByFence keys fence-swap code assets by ordinal", () => {
+    const map = codeAssetsByFence([fenceAsset, imageAsset]);
+    expect(map.get(2)).toBe(fenceAsset);
+    expect(map.size).toBe(1);
+  });
+
+  it("codeAssetsByFence excludes code assets without a numeric fence_index", () => {
+    expect(codeAssetsByFence([codeNoSource, codeNoFence]).size).toBe(0);
+  });
+
+  it("codeAssetsByFence tolerates undefined", () => {
+    expect(codeAssetsByFence(undefined).size).toBe(0);
+  });
+
+  it("standaloneAssets keeps everything that is not a fence swap", () => {
+    const out = standaloneAssets([
+      fenceAsset,
+      imageAsset,
+      codeNoSource,
+      codeNoFence,
+    ]);
+    expect(out.map((a) => a.asset_id)).toEqual(["i1", "c2", "c3"]);
+  });
+
+  it("standaloneAssets tolerates undefined", () => {
+    expect(standaloneAssets(undefined)).toEqual([]);
   });
 });

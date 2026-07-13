@@ -1,10 +1,21 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
-import { render } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
-import { renderMarkdown } from "./renderMarkdown.jsx";
+import { fireEvent, render } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
+import { renderMarkdown, scanFences } from "./renderMarkdown.jsx";
 
 function wrap(node) {
   return render(<div>{node}</div>);
+}
+
+function codeAsset(fenceIndex, overrides = {}) {
+  return {
+    asset_id: `as-${fenceIndex}`,
+    kind: "code",
+    title: `snippet-${fenceIndex}.py`,
+    size_bytes: 400,
+    source: { fence_index: fenceIndex, lang: "python" },
+    ...overrides,
+  };
 }
 
 describe("renderMarkdown", () => {
@@ -152,5 +163,127 @@ describe("renderMarkdown", () => {
       renderMarkdown("<script>alert('xss')</script> safe", false),
     );
     expect(container.querySelector("script")).toBeNull();
+  });
+});
+
+describe("scanFences", () => {
+  it("enumerates a single fenced block with its char span", () => {
+    const text = "before\n```python\nx = 1\n```\nafter";
+    const fences = scanFences(text);
+    expect(fences).toHaveLength(1);
+    expect(fences[0].fenceIndex).toBe(0);
+    expect(text.slice(fences[0].start, fences[0].end)).toBe(
+      "```python\nx = 1\n```",
+    );
+  });
+
+  it("counts every fence, mermaid and short included, in order", () => {
+    const text = "```mermaid\ngraph TD\n```\n\ntext\n\n```js\na()\n```";
+    const fences = scanFences(text);
+    expect(fences.map((f) => f.fenceIndex)).toEqual([0, 1]);
+  });
+
+  it("captures an unterminated fence through end-of-text", () => {
+    const text = "intro\n```\nno closer here\nstill code";
+    const fences = scanFences(text);
+    expect(fences).toHaveLength(1);
+    expect(text.slice(fences[0].start, fences[0].end)).toBe(
+      "```\nno closer here\nstill code",
+    );
+  });
+
+  it("does not treat fence-like lines inside a body as new openers", () => {
+    const text = "````\n```\ninner\n```\n````";
+    const fences = scanFences(text);
+    // The 4-backtick opener only closes on a 4+ backtick line, so the
+    // inner 3-backtick lines are body, not a second fence.
+    expect(fences).toHaveLength(1);
+  });
+
+  it("returns no fences for plain text", () => {
+    expect(scanFences("just prose\nover two lines")).toEqual([]);
+  });
+});
+
+describe("renderMarkdown — fence → asset-card swap (#327)", () => {
+  it("swaps the matching fence for an AssetCard and drops the code block", () => {
+    const md = "```python\nx = 1\ny = 2\n```";
+    const codeAssets = new Map([[0, codeAsset(0)]]);
+    const { container, getByText } = wrap(
+      renderMarkdown(md, false, { codeAssets, onOpenAsset: vi.fn() }),
+    );
+    expect(container.querySelector(".art-inline")).toBeTruthy();
+    expect(getByText("snippet-0.py")).toBeTruthy();
+    // The raw fenced block is gone — replaced by the card.
+    expect(container.querySelector("pre code")).toBeNull();
+  });
+
+  it("keeps surrounding prose (pre + tail segments) around the card", () => {
+    const md = "intro text\n\n```python\nx = 1\ny = 2\n```\n\noutro text";
+    const codeAssets = new Map([[0, codeAsset(0)]]);
+    const { container, getByText } = wrap(
+      renderMarkdown(md, false, { codeAssets, onOpenAsset: vi.fn() }),
+    );
+    expect(getByText("intro text")).toBeTruthy();
+    expect(getByText("outro text")).toBeTruthy();
+    expect(container.querySelector(".art-inline")).toBeTruthy();
+    expect(container.querySelector("pre code")).toBeNull();
+  });
+
+  it("leaves a non-matching fence rendered as code (no locatable ordinal)", () => {
+    const md = "```python\nx = 1\n```";
+    const codeAssets = new Map([[5, codeAsset(5)]]);
+    const { container } = wrap(
+      renderMarkdown(md, false, { codeAssets, onOpenAsset: vi.fn() }),
+    );
+    expect(container.querySelector(".art-inline")).toBeNull();
+    expect(container.querySelector("pre code")).toBeTruthy();
+  });
+
+  it("swaps only the matching fence and leaves the other as code", () => {
+    const md = "```js\na()\n```\n\nmid\n\n```py\nb = 2\n```";
+    const codeAssets = new Map([[1, codeAsset(1)]]);
+    const { container, getByText } = wrap(
+      renderMarkdown(md, false, { codeAssets, onOpenAsset: vi.fn() }),
+    );
+    // Fence 0 still renders as code; fence 1 became a card.
+    expect(container.querySelector("pre code").textContent).toContain("a()");
+    expect(getByText("snippet-1.py")).toBeTruthy();
+  });
+
+  it("forwards clicks on the swapped card to onOpenAsset", () => {
+    const md = "```python\nx = 1\n```";
+    const asset = codeAsset(0);
+    const onOpenAsset = vi.fn();
+    const { getByRole } = wrap(
+      renderMarkdown(md, false, {
+        codeAssets: new Map([[0, asset]]),
+        onOpenAsset,
+      }),
+    );
+    fireEvent.click(getByRole("button"));
+    expect(onOpenAsset).toHaveBeenCalledWith(asset);
+  });
+
+  it("appends the streaming cursor in the swap path too", () => {
+    const md = "```python\nx = 1\n```";
+    const { container } = wrap(
+      renderMarkdown(md, true, {
+        codeAssets: new Map([[0, codeAsset(0)]]),
+        onOpenAsset: vi.fn(),
+      }),
+    );
+    expect(container.querySelector(".art-inline")).toBeTruthy();
+    expect(container.querySelector(".cursor")).toBeTruthy();
+  });
+
+  it("takes the fast path when the codeAssets map is empty", () => {
+    const md = "```python\nx = 1\n```";
+    const { container } = wrap(
+      renderMarkdown(md, false, { codeAssets: new Map() }),
+    );
+    // Empty map → unchanged single-ReactMarkdown render.
+    expect(container.querySelector("pre code")).toBeTruthy();
+    expect(container.querySelector(".art-inline")).toBeNull();
   });
 });

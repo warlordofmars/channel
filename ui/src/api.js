@@ -152,6 +152,34 @@ export async function submitFeedback(chatId, msgId, { kind, note = null } = {}) 
   if (!response.ok) throw new Error(`submitFeedback ${response.status}`);
 }
 
+// ---- Assets (#325 REST / #327 inline cards) -------------------------------
+//
+// Per-chat asset surface. `listChatAssets` returns the OLDEST-first card
+// descriptors used to reattach inline cards on history load; the SPA
+// groups them by `msg_id`. `getAssetContent` streams the raw bytes for
+// the viewer (blob-URL for images, text for code/data/documents) — it
+// returns the bare `Response` so the caller can read `.blob()` / the
+// stored `Content-Type` header, and throws an `ApiError` carrying the
+// HTTP status so callers can distinguish a gone object (404) from other
+// S3 failures (502) and render a graceful state for each.
+
+export async function listChatAssets(chatId) {
+  const response = await fetch(`${BASE}/api/chats/${chatId}/assets`, {
+    headers: authHeader(),
+  });
+  if (!response.ok) throw new ApiError("listChatAssets", response.status);
+  return response.json();
+}
+
+export async function getAssetContent(chatId, assetId) {
+  const response = await fetch(
+    `${BASE}/api/chats/${chatId}/assets/${assetId}/content`,
+    { headers: authHeader() },
+  );
+  if (!response.ok) throw new ApiError("getAssetContent", response.status);
+  return response;
+}
+
 // ---- Auth ---------------------------------------------------------------
 //
 // POST /auth/logout records an immutable audit-log entry on the server

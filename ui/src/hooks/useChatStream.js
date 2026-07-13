@@ -25,6 +25,53 @@ import { makeSseDecoder } from "../lib/sseParser.js";
 // cloning anything. On no-op (no match) we return early without
 // allocating a throwaway array — tool events fire frequently during
 // streaming so the allocation matters.
+// #327: group asset card descriptors (from GET /api/chats/{id}/assets or
+// the `asset_created` SSE frame) by their `msg_id` so the Conversation
+// view can hang each turn's cards off `turn.assets`. Descriptors missing a
+// `msg_id` are dropped — they can't be attached to a turn.
+export function groupAssetsByMsgId(items) {
+  const byMsg = new Map();
+  for (const a of items || []) {
+    if (!a || !a.msg_id) continue;
+    const list = byMsg.get(a.msg_id);
+    if (list) list.push(a);
+    else byMsg.set(a.msg_id, [a]);
+  }
+  return byMsg;
+}
+
+// #327: attach reattached history assets to their turns. Turns with no
+// assets are returned UNTOUCHED (same reference, no `assets` key) so the
+// no-asset path stays byte-identical to the pre-#327 history shape.
+export function attachAssetsToTurns(messages, items) {
+  const byMsg = groupAssetsByMsgId(items);
+  if (byMsg.size === 0) return messages;
+  return messages.map((m) =>
+    byMsg.has(m.msg_id) ? { ...m, assets: byMsg.get(m.msg_id) } : m,
+  );
+}
+
+// #327: fold one `asset_created` / `asset_updated` descriptor into the
+// matching turn's `assets[]`, keyed by `msg_id`. `asset_created` upserts
+// (replace an existing card with the same `asset_id`, else append);
+// `asset_updated` — reserved/unused in v1 — only replaces a card that
+// already exists and is otherwise ignored, so it can never conjure a
+// phantom card. Non-matching turns are returned unchanged.
+function upsertAsset(turns, eventType, asset) {
+  return turns.map((t) => {
+    if (t.msg_id !== asset.msg_id) return t;
+    const existing = t.assets || [];
+    const idx = existing.findIndex((a) => a.asset_id === asset.asset_id);
+    if (idx !== -1) {
+      const next = [...existing];
+      next[idx] = asset;
+      return { ...t, assets: next };
+    }
+    if (eventType === "asset_updated") return t;
+    return { ...t, assets: [...existing, asset] };
+  });
+}
+
 function patchToolStep(turns, tempAsstId, toolUseId, patch) {
   const turnIdx = turns.findIndex(
     (t) => t.client_msg_id === tempAsstId && t.toolSteps,
@@ -174,6 +221,25 @@ export function useChatStream(chatId, { onTitleSuggested } = {}) {
         setTurns((prev) => (prev.length === 0 ? messages : prev));
         setOlderCursor(older ?? null);
         setStatus("idle");
+        // #327: reattach persisted asset cards opportunistically, kicked
+        // off only AFTER history is on screen so a slow or hung assets
+        // fetch can never delay the transcript (Copilot review on #349).
+        // Fully best-effort — a rejected fetch leaves the transcript
+        // intact. `attachAssetsToTurns` only touches turns whose
+        // persisted msg_id matches, so a concurrent optimistic send
+        // (temp ids) is an untouched no-op.
+        api
+          .listChatAssets(chatId)
+          .then((assetsResp) => {
+            if (cancelled) return;
+            const items = assetsResp?.items;
+            if (items && items.length > 0) {
+              setTurns((prev) => attachAssetsToTurns(prev, items));
+            }
+          })
+          .catch(() => {
+            /* best-effort — history already rendered without cards */
+          });
       })
       .catch((err) => {
         if (cancelled) return;
@@ -332,6 +398,21 @@ export function useChatStream(chatId, { onTitleSuggested } = {}) {
                   : t,
               ),
             );
+          } else if (
+            event.type === "asset_created" ||
+            event.type === "asset_updated"
+          ) {
+            // #327: attach the asset card descriptor to its turn's
+            // `assets[]`, keyed by `msg_id`. Upload-origin frames arrive
+            // AFTER `user_persisted` (the user turn's temp id has already
+            // been swapped to the persisted id, so the match lands on the
+            // user turn); generated frames arrive AFTER `done` (matching
+            // the assistant turn). No payload bytes ride the frame — the
+            // card fetches content lazily via the REST content endpoint.
+            const asset = event.asset;
+            if (asset && asset.msg_id) {
+              setTurns((prev) => upsertAsset(prev, event.type, asset));
+            }
           } else if (event.type === "tool_started") {
             // #181 PR-3: push a new running step onto the in-flight
             // assistant turn's toolSteps array. The active assistant
