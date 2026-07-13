@@ -1066,6 +1066,51 @@ def put_asset(asset: Asset) -> None:
     _get_table().put_item(Item=_asset_item(asset))
 
 
+def put_asset_bytes(*, chat_id: str, asset_id: str, data: bytes, mime: str) -> tuple[str, str]:
+    """Write an asset's payload bytes to S3, returning ``(bucket, key)`` (#326).
+
+    Server-side producer counterpart to the presigned-PUT ingestion
+    path: generated payloads (code-exec images, oversized fence
+    bodies) land under the ``assets/chat/{chat_id}/{asset_id}`` prefix
+    of the existing attachments bucket (epic #321 decision Q2 — no new
+    bucket; prefix-scoped IAM grants landed with #324).
+    ``ServerSideEncryption="aws:kms"`` matches the presign params so
+    every object in the bucket rides the same CMK. No lifecycle
+    ``Tagging`` — assets are chat-scoped rows reaped by the delete
+    cascade / lazy expiry, not by the unreferenced-upload GC rule.
+
+    Errors propagate — callers (``channel.agents.asset_producers``)
+    wrap per-asset for fail-soft isolation.
+    """
+
+    bucket = os.environ["STARTER_ATTACHMENTS_BUCKET"]
+    key = f"assets/chat/{chat_id}/{asset_id}"
+    _get_s3_client().put_object(
+        Bucket=bucket,
+        Key=key,
+        Body=data,
+        ContentType=mime,
+        ServerSideEncryption="aws:kms",
+    )
+    return bucket, key
+
+
+def delete_asset_object(*, bucket: str, key: str) -> None:
+    """Delete one produced S3 object by raw coordinates (#326).
+
+    Compensating cleanup for the producer path: when
+    :func:`put_asset_bytes` succeeded but the subsequent ASSET row
+    write failed, the object has no row — which makes it invisible to
+    both the chat-delete cascade and the lazy-expiry reap (each
+    discovers objects via rows), and the ``assets/chat/*`` prefix has
+    no lifecycle GC tag. Without this delete, transient DynamoDB
+    errors would grow S3 unboundedly. Errors propagate; the caller
+    (``channel.agents.asset_producers``) wraps best-effort.
+    """
+
+    _get_s3_client().delete_object(Bucket=bucket, Key=key)
+
+
 def get_asset(*, chat_id: str, asset_id: str) -> Asset | None:
     """Look up one asset by ``(chat_id, asset_id)``. Returns None on miss.
 

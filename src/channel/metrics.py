@@ -147,6 +147,20 @@ async def record_asset_lazy_expiry_reaps(reaped: int, failed: int) -> None:
         await emit_metric("AssetLazyExpiryReapFailures", value=float(failed))
 
 
+async def record_asset_persist_outcome(success: bool) -> None:
+    """Emit a CloudWatch counter for one asset-persist attempt (#326).
+
+    One count per asset a producer (upload projection, code-exec
+    image, fenced-code extraction) tries to persist. Counter-only —
+    same cardinality-risk rationale as
+    :func:`record_memory_write_outcome`; per-producer breakdowns
+    belong in the structured ``asset.persist_failed`` log lines, not
+    metric dimensions.
+    """
+    metric = "AssetPersistSuccesses" if success else "AssetPersistFailures"
+    await emit_metric(metric)
+
+
 async def record_tool_call_outcome(success: bool) -> None:
     """Emit a CloudWatch counter for one tool-call attempt (epic #128).
 
