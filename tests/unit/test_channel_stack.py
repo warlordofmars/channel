@@ -778,3 +778,53 @@ def test_lambda_asset_exclude_never_matches_bundling_inputs():
         assert "channel/" not in pattern and not pattern.endswith("requirements.txt"), (
             f"exclude pattern {pattern!r} touches the src/channel bundling inputs"
         )
+
+
+def test_lambda_asset_exclude_shields_fingerprint_from_junk_churn(tmp_path):
+    """#316 regression test — exercise CDK's REAL fingerprint machinery
+    (the same ``minimatch``-based walk ``from_asset`` uses) against the
+    actual ``LAMBDA_ASSET_EXCLUDE`` list, on a throwaway mini-tree so the
+    live repo is never mutated (parallel sessions share it):
+
+    1. junk churn under ``.claude/worktrees/`` and cache dirs must NOT
+       move the hash (the exact bug: junk perturbed it AND raced ENOENT);
+    2. a change to any bundling input (``src/channel/**``,
+       ``pyproject.toml``, ``uv.lock``, ``run.sh``,
+       ``src/channel/sandbox/requirements.txt``) MUST move the hash —
+       proving no exclude pattern shadows what the bundlers need.
+    """
+    root = tmp_path / "repo"
+    sandbox = root / "src" / "channel" / "sandbox"
+    sandbox.mkdir(parents=True)
+    (root / "src" / "channel" / "models.py").write_text("x = 1\n")
+    (sandbox / "requirements.txt").write_text("numpy==2.2.6\n")
+    (root / "pyproject.toml").write_text("[project]\n")
+    (root / "uv.lock").write_text("lock\n")
+    (root / "run.sh").write_text("#!/bin/bash\n")
+
+    def fp() -> str:
+        return cdk.FileSystem.fingerprint(str(root), exclude=LAMBDA_ASSET_EXCLUDE)
+
+    baseline = fp()
+
+    # 1. Junk churn at every volatile depth must be invisible to the hash.
+    junk_worktree = root / ".claude" / "worktrees" / "flaketest"
+    junk_worktree.mkdir(parents=True)
+    (junk_worktree / "dummy.txt").write_text("junk\n")
+    (root / "src" / "channel" / "__pycache__").mkdir()
+    (root / "src" / "channel" / "__pycache__" / "models.cpython-312.pyc").write_text("pyc")
+    (root / ".mypy_cache").mkdir()
+    (root / ".mypy_cache" / "state.json").write_text("{}")
+    assert fp() == baseline, "excluded junk paths must not perturb the asset fingerprint"
+
+    # 2. Every bundling input must still be fingerprinted.
+    for bundling_input in (
+        root / "src" / "channel" / "models.py",
+        sandbox / "requirements.txt",
+        root / "pyproject.toml",
+        root / "uv.lock",
+        root / "run.sh",
+    ):
+        before = fp()
+        bundling_input.write_text(bundling_input.read_text() + "# changed\n")
+        assert fp() != before, f"{bundling_input.name} must still move the fingerprint"
