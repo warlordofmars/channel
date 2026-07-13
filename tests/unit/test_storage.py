@@ -9,6 +9,7 @@ counterpart.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pytest
@@ -18,23 +19,28 @@ from boto3.dynamodb.conditions import (
     BeginsWith,
     ConditionBase,
     Equals,
+    GreaterThanEquals,
     Or,
 )
 from botocore.exceptions import ClientError
 
 from channel.models import MessageRole
 from channel.storage import (
+    count_active_users,
     create_chat,
     delete_last_assistant_message,
     deny_jti,
+    derive_users_from_chat_index,
     get_chat_by_id,
     is_jti_denied,
+    list_audit_events_for_actor,
     list_chats_for_user,
     list_messages,
     list_messages_page,
     list_recent_messages,
     patch_chat,
     put_message,
+    scan_users,
     update_chat_index,
 )
 
@@ -86,6 +92,14 @@ def _evaluate_filter(expr: ConditionBase | None, item: dict[str, Any]) -> bool:
     if isinstance(expr, Equals):
         attr, value = expr._values
         return item.get(attr.name) == value
+    if isinstance(expr, BeginsWith):
+        attr, value = expr._values
+        actual = item.get(attr.name)
+        return isinstance(actual, str) and actual.startswith(value)
+    if isinstance(expr, GreaterThanEquals):
+        attr, value = expr._values
+        actual = item.get(attr.name)
+        return actual is not None and actual >= value
     raise NotImplementedError(f"FakeTable filter does not understand {type(expr).__name__}")
 
 
@@ -171,6 +185,44 @@ class FakeTable:
             items = items[:limit]
         if filter_expr is not None:
             items = [i for i in items if _evaluate_filter(filter_expr, i)]
+        result["Items"] = items
+        return result
+
+    def scan(self, **kwargs: Any) -> dict[str, Any]:
+        """Mirror DynamoDB Scan semantics closely enough for #234.
+
+        - Deterministic iteration order (sorted by ``(PK, SK)``) stands
+          in for DynamoDB's stable-but-arbitrary hash order, so cursor
+          round-trips behave like production.
+        - ``Limit`` bounds items *evaluated*; ``FilterExpression`` is
+          applied AFTER the limit window (the wire order), so a page can
+          legitimately return zero matching items plus a cursor.
+        - ``ExclusiveStartKey`` resumes strictly after the given key,
+          including keys synthesized from a mid-page stop.
+        - ``ProjectionExpression`` trims returned attributes (plain
+          comma-separated names only — no ``#alias`` support needed).
+        """
+
+        filter_expr = kwargs.get("FilterExpression")
+        limit = kwargs.get("Limit")
+        exclusive_start = kwargs.get("ExclusiveStartKey")
+        projection = kwargs.get("ProjectionExpression")
+
+        items = sorted(self.items.values(), key=lambda i: (i["PK"], i["SK"]))
+        if exclusive_start is not None:
+            cursor_key = (exclusive_start.get("PK"), exclusive_start.get("SK"))
+            items = [i for i in items if (i["PK"], i["SK"]) > cursor_key]
+
+        result: dict[str, Any] = {}
+        if limit is not None and len(items) > limit:
+            items = items[:limit]
+            last = items[-1]
+            result["LastEvaluatedKey"] = {"PK": last["PK"], "SK": last["SK"]}
+        if filter_expr is not None:
+            items = [i for i in items if _evaluate_filter(filter_expr, i)]
+        if projection is not None:
+            attrs = {a.strip() for a in projection.split(",")}
+            items = [{k: v for k, v in i.items() if k in attrs} for i in items]
         result["Items"] = items
         return result
 
@@ -1750,3 +1802,450 @@ def test_is_jti_denied_uses_strongly_consistent_read(table: FakeTable) -> None:
     # read rather than race DynamoDB's eventual-consistency window.
     is_jti_denied("tok-consistency")
     assert table.last_get_item_kwargs.get("ConsistentRead") is True
+
+
+# ---------------------------------------------------------------------------
+# Admin read helpers (#234) — scan_users / derive_users_from_chat_index /
+# list_audit_events_for_actor / count_active_users
+# ---------------------------------------------------------------------------
+
+
+def _put_user_meta(table: FakeTable, user_id: str, **attrs: Any) -> None:
+    """Seed a USER#META row directly — the #110 writer doesn't exist yet."""
+
+    table.put_item(Item={"PK": f"USER#{user_id}", "SK": "META", "user_id": user_id, **attrs})
+
+
+def _put_audit_row(
+    table: FakeTable,
+    *,
+    actor_id: str,
+    event_type: str,
+    at: datetime,
+    event_id: str,
+) -> dict[str, Any]:
+    """Craft an audit row in the shard for ``at`` (backdating helper)."""
+
+    item = {
+        "PK": f"AUDIT#{at:%Y-%m-%d}#{at:%H}",
+        "SK": f"{int(at.timestamp())}#{event_id}",
+        "event_id": event_id,
+        "event_type": event_type,
+        "actor_id": actor_id,
+        "created_at": at.isoformat(timespec="microseconds"),
+    }
+    table.put_item(Item=item)
+    return item
+
+
+def test_scan_users_empty_table(table: FakeTable) -> None:
+    rows, cursor = scan_users()
+    assert rows == []
+    assert cursor is None
+
+
+def test_scan_users_returns_only_user_meta_rows(table: FakeTable) -> None:
+    """Chat-index / message / PREFS / other SK=META families are all excluded."""
+
+    _put_user_meta(table, "u-1", email="one@example.com")
+    _put_user_meta(table, "u-2", email="two@example.com")
+    # Noise: chat-index row (PK=USER#*, SK=CHAT#*), message row,
+    # PREFS row, and non-USER families whose SK is also META.
+    chat = create_chat(user_id="u-1", title=None, model_default="m")
+    put_message(chat_id=chat.chat_id, role=MessageRole.USER, text="hi", model=None)
+    table.put_item(Item={"PK": "USER#u-1", "SK": "PREFS", "prefs": {}})
+    table.put_item(Item={"PK": "MGMT_STATE#abc", "SK": "META", "ttl": 1})
+    table.put_item(Item={"PK": "DENY#jti-1", "SK": "META", "ttl": 1})
+
+    rows, cursor = scan_users()
+    assert sorted(r["user_id"] for r in rows) == ["u-1", "u-2"]
+    assert cursor is None
+
+
+def test_scan_users_paginates_with_cursor(table: FakeTable) -> None:
+    """Walk 5 users two-at-a-time; every row appears exactly once."""
+
+    for i in range(5):
+        _put_user_meta(table, f"u-{i}")
+
+    seen: list[str] = []
+    cursor: dict[str, Any] | None = None
+    pages = 0
+    while True:
+        rows, cursor = scan_users(cursor=cursor, limit=2)
+        seen.extend(r["user_id"] for r in rows)
+        pages += 1
+        if cursor is None:
+            break
+    assert sorted(seen) == [f"u-{i}" for i in range(5)]
+    assert len(seen) == len(set(seen))  # no duplicates across cursor hops
+    assert pages == 3  # 2 + 2 + 1
+
+
+def test_scan_users_clamps_limit_to_hard_cap(table: FakeTable) -> None:
+    """Caller-supplied limits above 100 are capped (issue #234 soft-cap)."""
+
+    for i in range(101):
+        _put_user_meta(table, f"u-{i:03d}")
+
+    rows, cursor = scan_users(limit=999)
+    assert len(rows) == 100
+    assert cursor is not None
+    rest, cursor = scan_users(cursor=cursor, limit=999)
+    assert len(rest) == 1
+    assert cursor is None
+
+
+def test_scan_users_clamps_limit_floor_to_one(table: FakeTable) -> None:
+    _put_user_meta(table, "u-1")
+    _put_user_meta(table, "u-2")
+    rows, cursor = scan_users(limit=0)
+    assert len(rows) == 1
+    assert cursor is not None
+
+
+def test_scan_users_page_cap_returns_cursor_not_silence(
+    table: FakeTable, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the per-call Scan budget is exhausted before ``limit`` matching
+    rows are found, the helper must surface the resume cursor — callers
+    treat the cursor (not the row count) as the exhaustion signal."""
+
+    from channel import storage
+
+    # One page of two evaluated items per call. The two chat-index rows
+    # sort ahead of the META row (CHAT# < META within the same PK), so
+    # the first call's whole budget is spent on filtered-out noise.
+    monkeypatch.setattr(storage, "_ADMIN_SCAN_PAGE_LIMIT", 2)
+    monkeypatch.setattr(storage, "_ADMIN_SCAN_MAX_PAGES", 1)
+    create_chat(user_id="a-noise", title=None, model_default="m")
+    create_chat(user_id="a-noise", title=None, model_default="m")
+    _put_user_meta(table, "zz-real")
+
+    rows, cursor = scan_users(limit=50)
+    assert rows == []
+    assert cursor is not None
+
+    # Resuming with the returned cursor eventually finds the real row.
+    seen: list[str] = []
+    while cursor is not None:
+        rows, cursor = scan_users(cursor=cursor, limit=50)
+        seen.extend(r["user_id"] for r in rows)
+    assert seen == ["zz-real"]
+
+
+def test_derive_users_empty_table(table: FakeTable) -> None:
+    rows, cursor = derive_users_from_chat_index()
+    assert rows == []
+    assert cursor is None
+
+
+def test_derive_users_aggregates_per_user(table: FakeTable) -> None:
+    """created_at = min, chat_count = rows, last_chat_at = max activity."""
+
+    first = create_chat(user_id="u-a", title=None, model_default="m")
+    second = create_chat(user_id="u-a", title=None, model_default="m")
+    other = create_chat(user_id="u-b", title=None, model_default="m")
+    bumped = "2999-01-01T00:00:00.000000+00:00"
+    update_chat_index(
+        user_id="u-a",
+        chat=first,
+        last_user_preview="hi",
+        delta_count=1,
+        last_message_at=bumped,
+    )
+
+    rows, cursor = derive_users_from_chat_index()
+    assert cursor is None
+    assert [r["user_id"] for r in rows] == ["u-a", "u-b"]  # sorted by user_id
+    ua, ub = rows
+    assert ua["chat_count"] == 2
+    assert ua["created_at"] == min(first.created_at, second.created_at)
+    assert ua["last_chat_at"] == bumped
+    assert ub["chat_count"] == 1
+    assert ub["created_at"] == other.created_at
+    assert ub["last_chat_at"] == other.last_message_at
+
+
+def test_derive_users_paginates_aggregated_list(table: FakeTable) -> None:
+    for uid in ("u-a", "u-b", "u-c"):
+        create_chat(user_id=uid, title=None, model_default="m")
+
+    page1, cursor1 = derive_users_from_chat_index(limit=2)
+    assert [r["user_id"] for r in page1] == ["u-a", "u-b"]
+    assert cursor1 == {"user_id": "u-b"}
+
+    page2, cursor2 = derive_users_from_chat_index(cursor=cursor1, limit=2)
+    assert [r["user_id"] for r in page2] == ["u-c"]
+    assert cursor2 is None
+
+
+def test_derive_users_skips_malformed_rows(table: FakeTable) -> None:
+    """Rows missing user_id or created_at must not corrupt the fold."""
+
+    create_chat(user_id="u-good", title=None, model_default="m")
+    table.put_item(  # no user_id
+        Item={"PK": "USER#u-bad", "SK": "CHAT#2026-01-01#x", "created_at": "2026-01-01"}
+    )
+    table.put_item(  # no created_at
+        Item={"PK": "USER#u-bad2", "SK": "CHAT#2026-01-01#y", "user_id": "u-bad2"}
+    )
+
+    rows, _ = derive_users_from_chat_index()
+    assert [r["user_id"] for r in rows] == ["u-good"]
+
+
+def test_derive_users_falls_back_to_created_at_for_legacy_rows(table: FakeTable) -> None:
+    """Rows that pre-date last_message_at use created_at as the activity mark."""
+
+    table.put_item(
+        Item={
+            "PK": "USER#u-legacy",
+            "SK": "CHAT#2026-01-01T00:00:00#legacy-chat",
+            "user_id": "u-legacy",
+            "created_at": "2026-01-01T00:00:00.000000+00:00",
+        }
+    )
+    rows, _ = derive_users_from_chat_index()
+    assert rows[0]["last_chat_at"] == "2026-01-01T00:00:00.000000+00:00"
+
+
+def test_derive_users_follows_scan_pagination(
+    table: FakeTable, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The internal Scan loop must walk LastEvaluatedKey to exhaustion —
+    a user's chats can span pages, and a partial walk would under-count."""
+
+    from channel import storage
+
+    monkeypatch.setattr(storage, "_ADMIN_SCAN_PAGE_LIMIT", 1)
+    create_chat(user_id="u-a", title=None, model_default="m")
+    create_chat(user_id="u-a", title=None, model_default="m")
+    create_chat(user_id="u-b", title=None, model_default="m")
+
+    rows, _ = derive_users_from_chat_index()
+    assert {r["user_id"]: r["chat_count"] for r in rows} == {"u-a": 2, "u-b": 1}
+
+
+def test_list_audit_events_empty(table: FakeTable) -> None:
+    assert list_audit_events_for_actor("nobody@example.com") == []
+
+
+def test_list_audit_events_filters_by_actor(table: FakeTable) -> None:
+    from channel import storage
+
+    mine = storage.put_audit_event(event_type="auth.login", actor_id="me@example.com")
+    storage.put_audit_event(event_type="auth.login", actor_id="other@example.com")
+
+    events = list_audit_events_for_actor("me@example.com")
+    assert [e["event_id"] for e in events] == [mine["event_id"]]
+
+
+def test_list_audit_events_walks_older_shards_newest_first(table: FakeTable) -> None:
+    """An event two hours back (different shard) is found and ordered after
+    the current-hour event."""
+
+    now = datetime.now(timezone.utc)
+    old = _put_audit_row(
+        table,
+        actor_id="me@example.com",
+        event_type="auth.login",
+        at=now - timedelta(hours=2),
+        event_id="evt-old",
+    )
+    from channel import storage
+
+    fresh = storage.put_audit_event(event_type="auth.login", actor_id="me@example.com")
+
+    events = list_audit_events_for_actor("me@example.com")
+    assert [e["event_id"] for e in events] == [fresh["event_id"], old["event_id"]]
+
+
+def test_list_audit_events_event_type_filter(table: FakeTable) -> None:
+    from channel import storage
+
+    login = storage.put_audit_event(event_type="auth.login", actor_id="me@example.com")
+    storage.put_audit_event(event_type="auth.logout", actor_id="me@example.com")
+
+    events = list_audit_events_for_actor("me@example.com", event_type="auth.login")
+    assert [e["event_id"] for e in events] == [login["event_id"]]
+
+
+def test_list_audit_events_since_filter_excludes_older(table: FakeTable) -> None:
+    now = datetime.now(timezone.utc)
+    _put_audit_row(
+        table,
+        actor_id="me@example.com",
+        event_type="auth.login",
+        at=now - timedelta(hours=2),
+        event_id="evt-old",
+    )
+    from channel import storage
+
+    fresh = storage.put_audit_event(event_type="auth.login", actor_id="me@example.com")
+
+    since = (now - timedelta(hours=1)).isoformat(timespec="microseconds")
+    events = list_audit_events_for_actor("me@example.com", since_iso=since)
+    assert [e["event_id"] for e in events] == [fresh["event_id"]]
+
+
+def test_list_audit_events_since_bounds_shard_walk(
+    table: FakeTable, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """since_iso must shrink the shard fan-out, not just filter rows —
+    an unbounded miss costs 168 empty Queries."""
+
+    calls: list[str] = []
+    original_query = table.query
+
+    def counting_query(**kwargs: Any) -> dict[str, Any]:
+        calls.append("q")
+        return original_query(**kwargs)
+
+    monkeypatch.setattr(table, "query", counting_query)
+    since = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+    list_audit_events_for_actor("me@example.com", since_iso=since)
+    # Current-hour shard only — allow 2 in case the wall clock crosses an
+    # hour boundary between this test's ``since`` and the helper's ``now``.
+    # The point is "about one", not "all 168".
+    assert len(calls) <= 2
+
+
+def test_list_audit_events_shard_walk_capped_at_seven_days(table: FakeTable) -> None:
+    now = datetime.now(timezone.utc)
+    _put_audit_row(
+        table,
+        actor_id="me@example.com",
+        event_type="auth.login",
+        at=now - timedelta(hours=200),
+        event_id="evt-ancient",
+    )
+    assert list_audit_events_for_actor("me@example.com") == []
+
+
+def test_list_audit_events_respects_limit(table: FakeTable) -> None:
+    now = datetime.now(timezone.utc)
+    for i in range(3):
+        _put_audit_row(
+            table,
+            actor_id="me@example.com",
+            event_type="auth.login",
+            at=now - timedelta(hours=i + 1),
+            event_id=f"evt-{i}",
+        )
+    events = list_audit_events_for_actor("me@example.com", limit=2)
+    assert [e["event_id"] for e in events] == ["evt-0", "evt-1"]
+
+
+def test_list_audit_events_follows_query_pagination_within_shard(
+    table: FakeTable, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A filter-thinned Query page must not truncate the shard read."""
+
+    from channel import storage
+
+    monkeypatch.setattr(storage, "_ADMIN_SCAN_PAGE_LIMIT", 1)
+    now = datetime.now(timezone.utc)
+    shard_base = now.replace(minute=30, second=0, microsecond=0)
+    for i in range(3):
+        _put_audit_row(
+            table,
+            actor_id="me@example.com",
+            event_type="auth.login",
+            at=shard_base.replace(second=i),
+            event_id=f"evt-{i}",
+        )
+    events = list_audit_events_for_actor("me@example.com")
+    assert sorted(e["event_id"] for e in events) == ["evt-0", "evt-1", "evt-2"]
+
+
+def test_list_audit_events_accepts_z_suffix_and_naive_since(table: FakeTable) -> None:
+    """The since bound tolerates trailing-Z and naive ISO forms — both are
+    normalized to the stored +00:00 microseconds shape before comparing."""
+
+    from channel import storage
+
+    fresh = storage.put_audit_event(event_type="auth.login", actor_id="me@example.com")
+    now = datetime.now(timezone.utc)
+    z_form = (now - timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    naive_form = (now - timedelta(minutes=5)).replace(tzinfo=None).isoformat()
+
+    for since in (z_form, naive_form):
+        events = list_audit_events_for_actor("me@example.com", since_iso=since)
+        assert [e["event_id"] for e in events] == [fresh["event_id"]]
+
+
+def test_parse_iso_utc_converts_offsets_to_utc() -> None:
+    from channel.storage import _parse_iso_utc
+
+    dt = _parse_iso_utc("2026-07-12T12:00:00+02:00")
+    assert dt.tzinfo == timezone.utc
+    assert dt.hour == 10
+
+
+def test_count_active_users_empty_table(table: FakeTable) -> None:
+    assert count_active_users("2026-01-01T00:00:00+00:00") == 0
+
+
+def test_count_active_users_distinct_within_window(table: FakeTable) -> None:
+    """Two active chats for one user count once; stale users don't count."""
+
+    window = "2500-01-01T00:00:00.000000+00:00"
+    active = "2500-06-01T00:00:00.000000+00:00"
+    for uid, n in (("u-a", 2), ("u-b", 1)):
+        for _ in range(n):
+            chat = create_chat(user_id=uid, title=None, model_default="m")
+            update_chat_index(
+                user_id=uid,
+                chat=chat,
+                last_user_preview="x",
+                delta_count=1,
+                last_message_at=active,
+            )
+    create_chat(user_id="u-stale", title=None, model_default="m")  # last_message_at = now
+
+    assert count_active_users(window) == 2
+
+
+def test_count_active_users_window_boundary_is_inclusive(table: FakeTable) -> None:
+    boundary = "2500-01-01T00:00:00.000000+00:00"
+    chat = create_chat(user_id="u-edge", title=None, model_default="m")
+    update_chat_index(
+        user_id="u-edge",
+        chat=chat,
+        last_user_preview="x",
+        delta_count=1,
+        last_message_at=boundary,
+    )
+    assert count_active_users(boundary) == 1
+
+
+def test_count_active_users_skips_rows_without_user_id(table: FakeTable) -> None:
+    table.put_item(
+        Item={
+            "PK": "USER#u-ghost",
+            "SK": "CHAT#2500-01-01#g",
+            "created_at": "2500-01-01T00:00:00.000000+00:00",
+            "last_message_at": "2500-06-01T00:00:00.000000+00:00",
+        }
+    )
+    assert count_active_users("2500-01-01T00:00:00+00:00") == 0
+
+
+def test_count_active_users_follows_scan_pagination(
+    table: FakeTable, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from channel import storage
+
+    monkeypatch.setattr(storage, "_ADMIN_SCAN_PAGE_LIMIT", 1)
+    active = "2500-06-01T00:00:00.000000+00:00"
+    for uid in ("u-a", "u-b", "u-c"):
+        chat = create_chat(user_id=uid, title=None, model_default="m")
+        update_chat_index(
+            user_id=uid,
+            chat=chat,
+            last_user_preview="x",
+            delta_count=1,
+            last_message_at=active,
+        )
+    assert count_active_users("2500-01-01T00:00:00+00:00") == 3

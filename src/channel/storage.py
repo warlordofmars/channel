@@ -20,11 +20,11 @@ import logging
 import os
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import boto3
-from boto3.dynamodb.conditions import Attr, Key
+from boto3.dynamodb.conditions import Attr, ConditionBase, Key
 from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 from pydantic import ValidationError
@@ -1238,3 +1238,302 @@ def is_jti_denied(jti: str) -> bool:
         ConsistentRead=True,
     )
     return "Item" in resp
+
+
+# ----------------------------------------------------------------
+# Admin read helpers (#234) — minimum-viable admin UI (epic #233)
+# ----------------------------------------------------------------
+
+# Hard cap on caller-supplied page sizes for the admin read helpers.
+# v0.1 soft-cap decision from #234: default 50, never more than 100.
+_ADMIN_PAGE_MAX = 100
+_ADMIN_DEFAULT_PAGE = 50
+
+# Items *evaluated* per DDB request inside the internal Scan / Query
+# loops below. DynamoDB applies ``FilterExpression`` AFTER ``Limit``,
+# so this bounds read cost per round trip, not rows returned.
+# Module-level (not a default arg) so integration tests can shrink it
+# to force real LastEvaluatedKey pagination against DynamoDB Local.
+_ADMIN_SCAN_PAGE_LIMIT = 100
+
+# Per-call bound on the number of Scan round trips ``scan_users`` makes
+# while hunting for sparse USER#META rows. With the page limit above
+# this caps one call at 2 500 evaluated items; the returned cursor lets
+# callers continue. ``derive_users_from_chat_index`` and
+# ``count_active_users`` are exempt — they aggregate, and a partial
+# walk would return silently-wrong numbers (documented per helper).
+_ADMIN_SCAN_MAX_PAGES = 25
+
+# ``list_audit_events_for_actor`` walks at most this many hourly
+# AUDIT#{date}#{hour} shards (168 = 7 days), newest first.
+_AUDIT_SHARD_WALK_MAX_HOURS = 168
+
+
+def _clamp_admin_limit(limit: int) -> int:
+    return max(1, min(limit, _ADMIN_PAGE_MAX))
+
+
+def _parse_iso_utc(value: str) -> datetime:
+    """Parse an ISO-8601 string into an aware UTC datetime.
+
+    Accepts the trailing-``Z`` form (``fromisoformat`` only understands
+    it from Python 3.11; this repo's floor is 3.10) and treats naive
+    timestamps as UTC — matching how every ``created_at`` /
+    ``last_message_at`` in this table is written (``_now_iso``).
+    """
+
+    if value.endswith("Z"):
+        value = value[:-1] + "+00:00"
+    dt = datetime.fromisoformat(value)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _normalize_iso_bound(value: str) -> str:
+    """Normalize a caller-supplied ISO bound to the stored-string shape.
+
+    Timestamps in this table are written by ``_now_iso`` as
+    ``YYYY-MM-DDTHH:MM:SS.ffffff+00:00``. Lexicographic ``>=`` against
+    that shape is only correct when the bound uses the same offset
+    format — a raw ``...Z`` suffix or a non-UTC offset would compare
+    wrongly — so bounds are round-tripped through ``datetime`` first.
+    """
+
+    return _parse_iso_utc(value).isoformat(timespec="microseconds")
+
+
+def scan_users(
+    *,
+    cursor: dict[str, Any] | None = None,
+    limit: int = _ADMIN_DEFAULT_PAGE,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    """Paginated Scan over ``PK=USER#*, SK=META`` user rows (#234).
+
+    Returns ``(rows, next_cursor)`` where ``rows`` are raw item dicts
+    (there is no ``User`` model yet — the #110 writer defines one; the
+    #235 endpoint maps these to its response shape) and ``next_cursor``
+    is an ``ExclusiveStartKey``-shaped dict to feed back in.
+
+    Semantics the #235 endpoint must respect:
+
+    - ``limit`` is clamped to ``[1, _ADMIN_PAGE_MAX]`` (default 50).
+    - **Sparse-tolerant**: until #110 ships the USER#META writer this
+      returns ``[]`` — callers fall back to
+      :func:`derive_users_from_chat_index`.
+    - **The cursor, not the row count, is the exhaustion signal.** A
+      call may return ``([], cursor)``: each call walks at most
+      ``_ADMIN_SCAN_MAX_PAGES`` Scan pages (bounding read cost on a
+      table dominated by non-user rows) and hands back the resume key
+      when the bound is hit before ``limit`` matching rows were found.
+    - When ``limit`` is reached mid-page the cursor is synthesized from
+      the last *returned* row's key — using the response's
+      ``LastEvaluatedKey`` there would silently skip the matching rows
+      in the rest of the evaluated page.
+    """
+
+    limit = _clamp_admin_limit(limit)
+    table = _get_table()
+    rows: list[dict[str, Any]] = []
+    start_key = cursor
+    for _ in range(_ADMIN_SCAN_MAX_PAGES):
+        kwargs: dict[str, Any] = {
+            "FilterExpression": Attr("PK").begins_with("USER#") & Attr("SK").eq("META"),
+            "Limit": _ADMIN_SCAN_PAGE_LIMIT,
+        }
+        if start_key:
+            kwargs["ExclusiveStartKey"] = start_key
+        page = table.scan(**kwargs)
+        for item in page.get("Items") or []:
+            rows.append(item)
+            if len(rows) == limit:
+                return rows, {"PK": item["PK"], "SK": item["SK"]}
+        start_key = page.get("LastEvaluatedKey")
+        if not start_key:
+            return rows, None
+    return rows, start_key
+
+
+def derive_users_from_chat_index(
+    *,
+    cursor: dict[str, Any] | None = None,
+    limit: int = _ADMIN_DEFAULT_PAGE,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    """Derive a user list from chat-index rows while USER#META is sparse (#234).
+
+    Fallback path for the #235 admin user list until the #110 writer
+    ships. Scans ``PK=USER#*, SK=CHAT#...`` chat-index rows and folds
+    them into one row per distinct ``user_id``:
+
+    - ``created_at`` — min of the user's chat ``created_at`` values
+      (earliest sign of life; a floor on the real signup date)
+    - ``chat_count`` — number of chat-index rows (archived included —
+      a user with only archived chats is still a registered user)
+    - ``last_chat_at`` — max ``last_message_at`` across the user's
+      chats (falling back per row to ``created_at`` for legacy rows)
+
+    Returns ``(rows, next_cursor)`` with rows sorted by ``user_id``
+    ascending and ``next_cursor`` of shape ``{"user_id": <last>}``.
+    Pagination is applied to the *aggregated* list in memory: each call
+    walks the chat-index scan to exhaustion, because a user's chats can
+    span Scan pages and a partial walk would return silently-wrong
+    aggregates. O(table) per call is an accepted v0.1 trade-off (tiny
+    user count, per epic #233); ``ProjectionExpression`` keeps the
+    fetched bytes to the three attributes the fold needs.
+    """
+
+    limit = _clamp_admin_limit(limit)
+    table = _get_table()
+    aggregates: dict[str, dict[str, Any]] = {}
+    start_key: dict[str, Any] | None = None
+    while True:
+        kwargs: dict[str, Any] = {
+            "FilterExpression": (Attr("PK").begins_with("USER#") & Attr("SK").begins_with("CHAT#")),
+            "ProjectionExpression": "user_id, created_at, last_message_at",
+            "Limit": _ADMIN_SCAN_PAGE_LIMIT,
+        }
+        if start_key:
+            kwargs["ExclusiveStartKey"] = start_key
+        page = table.scan(**kwargs)
+        for item in page.get("Items") or []:
+            user_id = item.get("user_id")
+            created_at = item.get("created_at")
+            if not user_id or not created_at:
+                # Defensive: a chat-index row is never written without
+                # these (see _chat_index_item), but a malformed row must
+                # not corrupt the whole admin list.
+                continue
+            last_chat_at = item.get("last_message_at") or created_at
+            agg = aggregates.get(user_id)
+            if agg is None:
+                aggregates[user_id] = {
+                    "user_id": user_id,
+                    "created_at": created_at,
+                    "chat_count": 1,
+                    "last_chat_at": last_chat_at,
+                }
+            else:
+                agg["created_at"] = min(agg["created_at"], created_at)
+                agg["chat_count"] += 1
+                agg["last_chat_at"] = max(agg["last_chat_at"], last_chat_at)
+        start_key = page.get("LastEvaluatedKey")
+        if not start_key:
+            break
+    users = sorted(aggregates.values(), key=lambda u: str(u["user_id"]))
+    if cursor is not None:
+        after = str(cursor.get("user_id", ""))
+        users = [u for u in users if str(u["user_id"]) > after]
+    rows = users[:limit]
+    next_cursor = {"user_id": rows[-1]["user_id"]} if len(users) > limit else None
+    return rows, next_cursor
+
+
+def list_audit_events_for_actor(
+    actor_id: str,
+    *,
+    event_type: str | None = None,
+    since_iso: str | None = None,
+    limit: int = _ADMIN_DEFAULT_PAGE,
+) -> list[dict[str, Any]]:
+    """Read audit events for one actor, newest first (#234).
+
+    Walks the hour-sharded ``AUDIT#{date}#{hour}`` partitions from the
+    current hour backwards — one Query per shard, per the fan-out rule
+    in the dynamodb-item skill §4 — capped at
+    ``_AUDIT_SHARD_WALK_MAX_HOURS`` (168 = 7 days). ``actor_id`` and
+    the optional ``event_type`` / ``since_iso`` filters are applied
+    server-side via ``FilterExpression``; each shard's Query loop
+    follows ``LastEvaluatedKey`` so a filter-thinned page can't
+    truncate results. Returns raw item dicts, newest first, at most
+    ``limit`` (clamped to ``[1, _ADMIN_PAGE_MAX]``).
+
+    ``since_iso`` bounds both the row filter (``created_at >= since``)
+    and the shard walk itself — pass it whenever the caller has a
+    window (e.g. #236's ``last_login_at`` derivation), because an
+    unbounded miss (actor with no events) costs 168 empty Queries.
+    """
+
+    limit = _clamp_admin_limit(limit)
+    table = _get_table()
+    now = datetime.now(timezone.utc)
+    oldest = now - timedelta(hours=_AUDIT_SHARD_WALK_MAX_HOURS - 1)
+    since_norm: str | None = None
+    if since_iso is not None:
+        since_dt = _parse_iso_utc(since_iso)
+        since_norm = since_dt.isoformat(timespec="microseconds")
+        oldest = max(oldest, since_dt)
+
+    filter_expr: ConditionBase = Attr("actor_id").eq(actor_id)
+    if event_type is not None:
+        filter_expr = filter_expr & Attr("event_type").eq(event_type)
+    if since_norm is not None:
+        filter_expr = filter_expr & Attr("created_at").gte(since_norm)
+
+    events: list[dict[str, Any]] = []
+    shard_hour = now.replace(minute=0, second=0, microsecond=0)
+    oldest_hour = oldest.replace(minute=0, second=0, microsecond=0)
+    while shard_hour >= oldest_hour:
+        start_key: dict[str, Any] | None = None
+        while True:
+            kwargs: dict[str, Any] = {
+                "KeyConditionExpression": Key("PK").eq(
+                    f"AUDIT#{shard_hour:%Y-%m-%d}#{shard_hour:%H}"
+                ),
+                "FilterExpression": filter_expr,
+                # Newest first within the shard. Lexicographic SK order is
+                # chronological because the ``{unix_ts}#{uuid}`` prefix stays
+                # fixed-width (10 digits) until year 2286.
+                "ScanIndexForward": False,
+                "Limit": _ADMIN_SCAN_PAGE_LIMIT,
+            }
+            if start_key:
+                kwargs["ExclusiveStartKey"] = start_key
+            page = table.query(**kwargs)
+            for item in page.get("Items") or []:
+                events.append(item)
+                if len(events) == limit:
+                    return events
+            start_key = page.get("LastEvaluatedKey")
+            if not start_key:
+                break
+        shard_hour -= timedelta(hours=1)
+    return events
+
+
+def count_active_users(window_start_iso: str) -> int:
+    """Count distinct users with chat activity since ``window_start_iso`` (#234).
+
+    "Active" = owns at least one chat-index row whose
+    ``last_message_at >= window_start_iso`` (the boundary itself
+    counts). The caller picks the window (24h / 7d / 30d for the #236
+    dashboard cards). Full-table Scan folded into a distinct-``user_id``
+    set — like :func:`derive_users_from_chat_index`, the walk runs to
+    exhaustion because a page-capped count would be silently wrong;
+    ``ProjectionExpression`` limits the fetch to ``user_id``.
+    """
+
+    window_norm = _normalize_iso_bound(window_start_iso)
+    table = _get_table()
+    user_ids: set[str] = set()
+    start_key: dict[str, Any] | None = None
+    while True:
+        kwargs: dict[str, Any] = {
+            "FilterExpression": (
+                Attr("PK").begins_with("USER#")
+                & Attr("SK").begins_with("CHAT#")
+                & Attr("last_message_at").gte(window_norm)
+            ),
+            "ProjectionExpression": "user_id",
+            "Limit": _ADMIN_SCAN_PAGE_LIMIT,
+        }
+        if start_key:
+            kwargs["ExclusiveStartKey"] = start_key
+        page = table.scan(**kwargs)
+        for item in page.get("Items") or []:
+            user_id = item.get("user_id")
+            if user_id:
+                user_ids.add(str(user_id))
+        start_key = page.get("LastEvaluatedKey")
+        if not start_key:
+            break
+    return len(user_ids)
