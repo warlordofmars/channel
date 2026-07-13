@@ -50,10 +50,13 @@ export async function findAssetById(assetId, fromCursor = null) {
   let cursor = fromCursor;
   for (;;) {
     const page = await listAssets({ limit: PAGE_LIMIT, cursor });
-    const found = page.items.find((a) => a.asset_id === assetId);
+    const found = (page.items ?? []).find((a) => a.asset_id === assetId);
     if (found) return found;
-    cursor = page.next_cursor ?? null;
-    if (cursor === null) return null;
+    const next = page.next_cursor ?? null;
+    // Stop on exhaustion or a non-advancing cursor — a server that returned
+    // the same cursor would otherwise spin the loop forever.
+    if (next === null || next === cursor) return null;
+    cursor = next;
   }
 }
 
@@ -90,14 +93,16 @@ export default function Artifacts() {
     };
   }, []);
 
-  // Latest browse cursor (the tail past the loaded pages), read by the
-  // chat-less deep-link resolver so it resumes the browse scan instead of
-  // refetching page 1. Held in a ref so pagination changes don't re-run
-  // the deep-link effect (which would flash the panel closed).
-  const browseCursorRef = useRef(null);
-  useEffect(function trackBrowseCursor() {
-    browseCursorRef.current = cursor;
-  }, [cursor]);
+  // Latest browse state (the tail cursor past the loaded pages + whether
+  // the browse is fully drained), read by the chat-less deep-link resolver
+  // so it resumes the scan from the loaded tail — or skips it entirely when
+  // the browse is exhausted and the asset still wasn't found. Held in a ref
+  // so pagination changes don't re-run the deep-link effect (which would
+  // flash the panel closed).
+  const browseStateRef = useRef({ cursor: null, exhausted: false });
+  useEffect(function trackBrowseState() {
+    browseStateRef.current = { cursor, exhausted };
+  }, [cursor, exhausted]);
 
   const openId = params.get(ARTIFACT_PARAM);
   const openChat = params.get(CHAT_PARAM);
@@ -141,9 +146,14 @@ export default function Artifacts() {
     // Clear any prior descriptor before the new fetch so the panel doesn't
     // flash the previously deep-linked asset while this one loads.
     setDeepLinked(null);
+    const { cursor: browseCursor, exhausted: browseExhausted } = browseStateRef.current;
+    // A fully-drained browse that didn't surface the asset (loadedOpen is
+    // false) means it doesn't exist — skip the redundant page-1 refetch.
     const lookup = openChat
       ? getAsset(openChat, openId)
-      : findAssetById(openId, browseCursorRef.current);
+      : browseExhausted
+        ? Promise.resolve(null)
+        : findAssetById(openId, browseCursor);
     lookup
       .then(function onDescriptor(descriptor) {
         if (!cancelled) setDeepLinked(descriptor ?? null);

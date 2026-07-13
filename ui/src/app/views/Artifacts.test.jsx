@@ -143,6 +143,18 @@ describe("findAssetById", () => {
     api.listAssets.mockResolvedValueOnce({ items: [card({ asset_id: "x" })] });
     expect(await findAssetById("missing")).toBeNull();
   });
+
+  it("returns null on a non-advancing cursor instead of looping forever", async () => {
+    // Server keeps returning the same cursor — the guard must break out.
+    api.listAssets.mockResolvedValue({ items: [card({ asset_id: "x" })], next_cursor: "stuck" });
+    expect(await findAssetById("missing", "stuck")).toBeNull();
+    expect(api.listAssets).toHaveBeenCalledTimes(1);
+  });
+
+  it("treats a page with no items field as empty", async () => {
+    api.listAssets.mockResolvedValueOnce({ next_cursor: null });
+    expect(await findAssetById("x")).toBeNull();
+  });
 });
 
 describe("Artifacts", () => {
@@ -330,7 +342,7 @@ describe("Artifacts", () => {
     // there is no chat id to hit the per-chat route with.
     api.listAssets
       .mockResolvedValueOnce({ items: [card({ asset_id: "other" })], next_cursor: "c1" })
-      .mockResolvedValueOnce({ items: [card({ asset_id: "other" })], next_cursor: "c1" })
+      .mockResolvedValueOnce({ items: [card({ asset_id: "other" })], next_cursor: "c2" })
       .mockResolvedValueOnce({
         items: [card({ asset_id: "as-9", chat_id: "ch-9", title: "from-card.md", kind: "document" })],
         next_cursor: null,
@@ -341,11 +353,14 @@ describe("Artifacts", () => {
     expect(screen.getByText("from-card.md")).toBeTruthy();
   });
 
-  it("chat-less deep-link for an unknown asset leaves the panel closed", async () => {
+  it("chat-less deep-link skips the browse search when the browse is exhausted", async () => {
+    // One page, fully drained, asset absent → no findAssetById round-trip.
     api.listAssets.mockResolvedValue({ items: [], next_cursor: null });
     const { container } = renderAt("/app/artifacts?artifact=ghost");
     await screen.findByText(/No artifacts yet/i);
     await waitFor(() => expect(api.listAssets).toHaveBeenCalled());
+    // loadFirstPage only — the exhausted short-circuit skipped findAssetById.
+    expect(api.listAssets).toHaveBeenCalledTimes(1);
     expect(api.getAsset).not.toHaveBeenCalled();
     expect(container.querySelector(".art-panel-wrap")).toBeNull();
   });
