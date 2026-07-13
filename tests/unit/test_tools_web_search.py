@@ -73,7 +73,12 @@ async def test_web_search_passes_text_true_and_livecrawl_fallback_server_side(
     monkeypatch,
 ):
     """``text=True`` + ``livecrawl="fallback"`` are ALWAYS set by the
-    wrapper regardless of caller args — caller can't override them."""
+    wrapper regardless of caller args — caller can't override them.
+
+    The ``livecrawl_timeout`` pin is load-bearing: Exa's
+    ``livecrawlTimeout`` is in MILLISECONDS, so a future
+    "harmonization" back to ``30`` (a 30 ms crawl budget — the #268
+    defect) must fail here, mirroring web_fetch's suite."""
     fake_exa = AsyncMock(return_value={"results": []})
     monkeypatch.setattr(
         "channel.agents.tools.web_search._get_exa_search",
@@ -88,6 +93,7 @@ async def test_web_search_passes_text_true_and_livecrawl_fallback_server_side(
     call_kwargs = fake_exa.call_args.kwargs
     assert call_kwargs["text"] is True
     assert call_kwargs["livecrawl"] == "fallback"
+    assert call_kwargs["livecrawl_timeout"] == 30_000
 
 
 async def test_web_search_passes_query_through(monkeypatch):
