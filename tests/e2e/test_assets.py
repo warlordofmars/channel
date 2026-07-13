@@ -216,11 +216,17 @@ def _uploads_supported(api_url: str, jwt: str) -> bool:
 
 
 async def _open_app(page: Page, ui_url: str, jwt: str) -> None:
-    """Land on /app with the bypass JWT pre-injected into localStorage."""
+    """Land on an authenticated /app route with the bypass JWT pre-injected.
+
+    The post-injection wait excludes ``/app/login`` so a failed token
+    injection — which AuthGate answers by redirecting to the login route —
+    surfaces here directly, instead of downstream as a card/panel wait
+    timeout with a less obvious cause.
+    """
     await page.goto(f"{ui_url}/app")
     await page.evaluate("(t) => window.localStorage.setItem('starter_mgmt_token', t)", jwt)
     await page.goto(f"{ui_url}/app")
-    await page.wait_for_url(lambda url: "/app" in url, timeout=10_000)
+    await page.wait_for_url(lambda url: "/app" in url and "/app/login" not in url, timeout=10_000)
 
 
 async def _wait_for_assistant_idle(page: Page, *, n: int = 1) -> None:
