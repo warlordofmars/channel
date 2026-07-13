@@ -98,6 +98,9 @@ export default function Artifacts() {
       return undefined;
     }
     let cancelled = false;
+    // Clear any prior descriptor before the new fetch so the panel doesn't
+    // flash the previously deep-linked asset while this one loads.
+    setDeepLinked(null);
     getAsset(openChat, openId)
       .then(function onDescriptor(descriptor) {
         if (!cancelled) setDeepLinked(descriptor);

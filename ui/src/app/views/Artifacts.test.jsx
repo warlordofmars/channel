@@ -1,7 +1,7 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 
 vi.mock("../../api.js", () => ({
   listAssets: vi.fn(),
@@ -226,6 +226,42 @@ describe("Artifacts", () => {
     await waitFor(() => expect(container.querySelector(".art-panel-wrap")).toBeTruthy());
     expect(api.getAsset).toHaveBeenCalledWith("ch-9", "as-9");
     expect(screen.getByText("deep.md")).toBeTruthy();
+  });
+
+  it("clears the prior descriptor when switching between deep-links (no stale flash)", async () => {
+    api.listAssets.mockResolvedValue({ items: [], next_cursor: null });
+    const dA = deferred();
+    const dB = deferred();
+    api.getAsset.mockReturnValueOnce(dA.promise).mockReturnValueOnce(dB.promise);
+    function GoB() {
+      const navigate = useNavigate();
+      return (
+        <button type="button" onClick={() => navigate("/app/artifacts?artifact=B&chat=cB")}>
+          go B
+        </button>
+      );
+    }
+    render(
+      <MemoryRouter initialEntries={["/app/artifacts?artifact=A&chat=cA"]}>
+        <Routes>
+          <Route path="/app/artifacts" element={<><Artifacts /><GoB /></>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await act(async () => {
+      dA.resolve(card({ asset_id: "A", chat_id: "cA", title: "Alpha" }));
+      await Promise.resolve();
+    });
+    await screen.findByText("Alpha");
+    // Switch to a second deep link whose descriptor is still in flight.
+    fireEvent.click(screen.getByText("go B"));
+    // The prior descriptor is cleared immediately — no stale "Alpha".
+    await waitFor(() => expect(screen.queryByText("Alpha")).toBeNull());
+    await act(async () => {
+      dB.resolve(card({ asset_id: "B", chat_id: "cB", title: "Bravo" }));
+      await Promise.resolve();
+    });
+    expect(await screen.findByText("Bravo")).toBeTruthy();
   });
 
   it("a failed descriptor fetch on deep-link leaves the panel closed", async () => {
