@@ -1,11 +1,12 @@
 # Copyright (c) 2026 John Carter. All rights reserved.
-"""Admin REST API — user list + user detail (#235, epic #233).
+"""Admin REST API — user list + user detail (#235) + metrics (#236), epic #233.
 
-Read-only operational visibility: who is registered and what their
-signs of life look like. Every route is gated server-side by
-``require_admin`` (JWT ``role == "admin"``) — the SPA's ``/app/admin``
-route shell (#330) client-gates for UX only; **these endpoints are the
-real authorization boundary**.
+Read-only operational visibility: who is registered, what their signs
+of life look like, and how Channel is being used (CloudWatch
+``Channel``-namespace counter readback for the #239 dashboard). Every
+route is gated server-side by ``require_admin`` (JWT ``role ==
+"admin"``) — the SPA's ``/app/admin`` route shell (#330) client-gates
+for UX only; **these endpoints are the real authorization boundary**.
 
 Pagination contract
 -------------------
@@ -35,14 +36,19 @@ import base64
 import binascii
 import json
 import logging
+import math
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
+import boto3
+from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 
 from channel import storage
 from channel.api._auth import require_admin
 from channel.logging_config import fingerprint_id
+from channel.metrics import ENVIRONMENT as _METRICS_ENVIRONMENT
+from channel.metrics import NAMESPACE as _METRICS_NAMESPACE
 from channel.models import Chat
 
 logger = logging.getLogger(__name__)
@@ -65,6 +71,236 @@ _AUDIT_WINDOW_DAYS = 7
 
 _SORTS = ("last_chat_at", "created_at", "email")
 SortField = Literal["last_chat_at", "created_at", "email"]
+
+# ----------------------------------------------------------------
+# Metrics endpoints (#236) — CloudWatch Channel-namespace readback
+# ----------------------------------------------------------------
+
+# Server-side allowlist: every EMF counter Channel emits as of merge
+# time. All are written by ``channel.metrics`` helpers (or ``csp.py``
+# for CSPViolations) with the base ``{"Environment": <env>}`` dimension
+# set, so readback pins that one dimension. Extend this tuple when a
+# new counter ships — nothing here discovers metrics dynamically
+# (ListMetrics is deliberately not called: static allowlist keeps the
+# IAM surface to GetMetricData alone and the input validation exact).
+_METRIC_ALLOWLIST = (
+    "MemoryWriteSuccesses",
+    "MemoryWriteFailures",
+    "RecallSuccesses",
+    "RecallFailures",
+    "AutoTitleSuccesses",
+    "AutoTitleFailures",
+    "ChatDeleteMemoryWipeSuccesses",
+    "ChatDeleteMemoryWipeFailures",
+    "FollowupGenSuccesses",
+    "FollowupGenFailures",
+    "ChatDeleteAttachmentWipeSuccesses",
+    "ChatDeleteAttachmentWipeFailures",
+    "ChatDeleteAssetWipeSuccesses",
+    "ChatDeleteAssetWipeFailures",
+    "AssetLazyExpiryReaps",
+    "AssetLazyExpiryReapFailures",
+    "ToolCallSuccesses",
+    "ToolCallFailures",
+    "CSPViolations",
+)
+
+# Summary windows: response key -> lookback. "today" is a rolling 24h
+# window (not calendar-day) so the three cards share one semantics.
+_SUMMARY_WINDOWS: tuple[tuple[str, timedelta], ...] = (
+    ("today", timedelta(hours=24)),
+    ("7d", timedelta(days=7)),
+    ("30d", timedelta(days=30)),
+)
+
+WindowName = Literal["24h", "7d", "30d"]
+BucketName = Literal["5m", "1h", "1d"]
+
+_WINDOW_DELTAS: dict[str, timedelta] = {
+    "24h": timedelta(hours=24),
+    "7d": timedelta(days=7),
+    "30d": timedelta(days=30),
+}
+# Default bucket per window: 288 / 168 / 30 points respectively —
+# all under the ~300-point response cap the issue fixes.
+_DEFAULT_BUCKET: dict[str, str] = {"24h": "5m", "7d": "1h", "30d": "1d"}
+_BUCKET_SECONDS: dict[str, int] = {"5m": 300, "1h": 3600, "1d": 86400}
+_MAX_TIMESERIES_POINTS = 300
+
+# Module-level cache per the issue: one client per Lambda instance,
+# constructed lazily on first metrics request.
+_cloudwatch_client: Any = None
+
+
+def _get_cloudwatch() -> Any:
+    """Lazily construct and cache the CloudWatch client (module level)."""
+    global _cloudwatch_client
+    if _cloudwatch_client is None:
+        _cloudwatch_client = boto3.client("cloudwatch")
+    return _cloudwatch_client
+
+
+def _metrics_unavailable(exc: Exception) -> HTTPException:
+    """Map a CloudWatch failure to the 503 contract the dashboard renders.
+
+    Throttling, region misconfig, and permission errors all collapse to
+    one structured body — the SPA shows a "metrics unavailable" state
+    (#239) rather than crashing. Details go to the log, not the client.
+    """
+    logger.warning("admin metrics: CloudWatch unavailable: %s", exc)
+    return HTTPException(
+        status_code=503,
+        detail={
+            "error": "metrics_unavailable",
+            "message": "CloudWatch metrics are temporarily unavailable; retry shortly.",
+        },
+    )
+
+
+def _metric_data_queries(names: tuple[str, ...], period_seconds: int) -> list[dict[str, Any]]:
+    """Build GetMetricData queries for ``names``, one Sum series each.
+
+    Every EMF counter carries exactly the ``Environment`` dimension
+    (see ``channel.metrics.emit_metric``), and CloudWatch only matches
+    a metric when the requested dimension set is exact — so the one
+    dimension is pinned here.
+    """
+    return [
+        {
+            "Id": f"m{i}",
+            "MetricStat": {
+                "Metric": {
+                    "Namespace": _METRICS_NAMESPACE,
+                    "MetricName": name,
+                    "Dimensions": [{"Name": "Environment", "Value": _METRICS_ENVIRONMENT}],
+                },
+                "Period": period_seconds,
+                "Stat": "Sum",
+            },
+            "ReturnData": True,
+        }
+        for i, name in enumerate(names)
+    ]
+
+
+def _window_sums(start: datetime, end: datetime) -> dict[str, float]:
+    """Sum every allowlisted counter over ``[start, end]`` in one call.
+
+    The whole window is requested as a single period bucket; CloudWatch
+    may still split it on internal bucket boundaries, so returned values
+    are summed rather than first-item-indexed. Metrics with no data in
+    the window come back with empty ``Values`` and sum to 0.0.
+    """
+    period = int((end - start).total_seconds())
+    resp = _get_cloudwatch().get_metric_data(
+        MetricDataQueries=_metric_data_queries(_METRIC_ALLOWLIST, period),
+        StartTime=start,
+        EndTime=end,
+    )
+    by_id = {r["Id"]: r for r in resp.get("MetricDataResults", [])}
+    return {
+        name: float(sum(by_id.get(f"m{i}", {}).get("Values") or []))
+        for i, name in enumerate(_METRIC_ALLOWLIST)
+    }
+
+
+@router.get("/metrics/summary")
+async def metrics_summary(_claims: dict[str, Any] = Depends(require_admin)) -> dict[str, Any]:
+    """Rollup card data for the admin dashboard (#236, consumed by #239).
+
+    Shape: ``{"today": {...}, "7d": {...}, "30d": {...}}`` where each
+    window object is ``{"active_users": int, "metrics": {name: number}}``
+    covering every allowlisted counter (0.0 when no data). "today" is a
+    rolling 24h window. 503 with a structured body on CloudWatch failure.
+    """
+    now = datetime.now(timezone.utc)
+    out: dict[str, Any] = {}
+    for label, delta in _SUMMARY_WINDOWS:
+        start = now - delta
+        try:
+            counters = _window_sums(start, now)
+        except (BotoCoreError, ClientError) as exc:
+            raise _metrics_unavailable(exc) from exc
+        out[label] = {
+            "active_users": storage.count_active_users(start.isoformat(timespec="microseconds")),
+            "metrics": counters,
+        }
+    return out
+
+
+@router.get("/metrics/timeseries")
+async def metrics_timeseries(
+    metric: str = Query(...),
+    window: WindowName = Query(...),
+    bucket: BucketName | None = Query(default=None),
+    _claims: dict[str, Any] = Depends(require_admin),
+) -> dict[str, Any]:
+    """Single-metric timeseries for the dashboard charts (#236 → #239).
+
+    ``metric`` must be on the server-side allowlist (422 otherwise);
+    ``window`` picks the lookback; ``bucket`` defaults per window
+    (24h→5m, 7d→1h, 30d→1d) and may be overridden as long as the
+    resulting grid stays under the ~300-point cap (422 otherwise).
+
+    Returns ``{"metric", "window", "bucket", "start", "end",
+    "points": [{"t": <ISO-8601 UTC>, "v": <number>}, ...]}`` — a dense
+    ascending grid aligned to bucket boundaries, zero-filled where
+    CloudWatch has no datapoint. 503 with a structured body on
+    CloudWatch failure.
+    """
+    if metric not in _METRIC_ALLOWLIST:
+        raise HTTPException(status_code=422, detail="unknown metric")
+    bucket_name = bucket or _DEFAULT_BUCKET[window]
+    bucket_s = _BUCKET_SECONDS[bucket_name]
+    window_s = int(_WINDOW_DELTAS[window].total_seconds())
+    # Aligning start down to a bucket boundary adds at most one grid
+    # slot beyond window/bucket, so the cap check mirrors that +1.
+    if math.ceil(window_s / bucket_s) + 1 > _MAX_TIMESERIES_POINTS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"window={window} with bucket={bucket_name} exceeds "
+                f"{_MAX_TIMESERIES_POINTS} points; use a coarser bucket"
+            ),
+        )
+    end = datetime.now(timezone.utc)
+    start_epoch = int((end - _WINDOW_DELTAS[window]).timestamp() // bucket_s) * bucket_s
+    start = datetime.fromtimestamp(start_epoch, tz=timezone.utc)
+    try:
+        resp = _get_cloudwatch().get_metric_data(
+            MetricDataQueries=_metric_data_queries((metric,), bucket_s),
+            StartTime=start,
+            EndTime=end,
+            ScanBy="TimestampAscending",
+        )
+    except (BotoCoreError, ClientError) as exc:
+        raise _metrics_unavailable(exc) from exc
+    results = resp.get("MetricDataResults") or [{}]
+    observed: dict[int, float] = {
+        int(ts.timestamp()): float(val)
+        # strict=False: CloudWatch guarantees parallel arrays; if they
+        # ever mismatch, truncating beats a 500 on the dashboard.
+        for ts, val in zip(
+            results[0].get("Timestamps") or [],
+            results[0].get("Values") or [],
+            strict=False,
+        )
+    }
+    points = [
+        {
+            "t": datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat(),
+            "v": observed.get(epoch, 0.0),
+        }
+        for epoch in range(start_epoch, int(end.timestamp()), bucket_s)
+    ]
+    return {
+        "metric": metric,
+        "window": window,
+        "bucket": bucket_name,
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        "points": points,
+    }
 
 
 # ----------------------------------------------------------------

@@ -170,6 +170,48 @@ def test_lambda_role_grants_agentcore_write_and_lookup_actions(dev_template):
     assert not missing, f"AgentCore IAM actions missing from synth: {missing}"
 
 
+def test_api_lambda_role_grants_cloudwatch_read(dev_template):
+    """#236 — the admin metrics endpoints read Channel-namespace EMF
+    counters back via GetMetricData, so the action must be granted on
+    the API Lambda role specifically (role-scoped check — a grant on
+    some other role would not satisfy the endpoints). Resource must be
+    ``"*"``: GetMetricData supports no resource types and no condition
+    keys (``cloudwatch:namespace`` applies only to PutMetricData per
+    the Service Authorization Reference), so the wildcard IS the
+    minimal grant."""
+    template = dev_template.to_json()
+
+    api_role_ids = [
+        k
+        for k, v in template["Resources"].items()
+        if v["Type"] == "AWS::IAM::Role" and k.startswith("ApiLambdaRole")
+    ]
+    assert len(api_role_ids) == 1, f"expected one ApiLambdaRole, found {len(api_role_ids)}"
+    api_role_id = api_role_ids[0]
+
+    found = False
+    for resource in template["Resources"].values():
+        if resource["Type"] != "AWS::IAM::Policy":
+            continue
+        roles = resource["Properties"].get("Roles", [])
+        if not any(isinstance(r, dict) and r.get("Ref") == api_role_id for r in roles):
+            continue
+        for stmt in resource["Properties"]["PolicyDocument"]["Statement"]:
+            actions = stmt.get("Action", [])
+            if isinstance(actions, str):
+                actions = [actions]
+            if "cloudwatch:GetMetricData" in actions:
+                # CDK may emit Resource as a bare string or a
+                # single-element list; accept both shapes.
+                resource = stmt.get("Resource")
+                resources = resource if isinstance(resource, list) else [resource]
+                assert resources == ["*"], (
+                    f"GetMetricData statement resource must be '*', got {resource}"
+                )
+                found = True
+    assert found, "cloudwatch:GetMetricData missing from API Lambda role policies"
+
+
 # ----------------------------------------------------------------
 # Attachments S3 bucket (#173) — epic #109 file attachments + vision
 # ----------------------------------------------------------------
