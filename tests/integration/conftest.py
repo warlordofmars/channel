@@ -16,6 +16,7 @@ import boto3
 import pytest
 
 from channel._table_schema import provision
+from tests.integration._helpers import FakeS3
 
 # Hosts that are safe targets for the destructive drop+recreate in
 # starter_table. Anything else (including hostnames that merely contain
@@ -95,3 +96,13 @@ def starter_table(dynamodb_resource: Any, table_name: str) -> Any:
     table = dynamodb_resource.Table(table_name)
 
     yield table
+
+
+@pytest.fixture
+def fake_s3(monkeypatch: pytest.MonkeyPatch) -> FakeS3:
+    """S3 stub patched over ``storage._get_s3_client`` — one canonical
+    fixture for the attachment-cascade, asset-storage, and asset-API
+    suites (previously three identical per-file copies)."""
+    fake = FakeS3()
+    monkeypatch.setattr("channel.storage._get_s3_client", lambda: fake)
+    return fake

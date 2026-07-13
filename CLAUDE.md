@@ -38,6 +38,7 @@ channel/
 │           ├── main.py        # FastAPI app + routes
 │           ├── _auth.py       # Shared mgmt-JWT dependency for /api/* routes
 │           ├── _debug.py      # /api/_debug/* — dev-only, gated by STARTER_ENABLE_DEBUG_ENDPOINTS
+│           ├── assets.py      # Asset REST surface — per-chat list/get/content/delete + browse
 │           ├── chats.py       # Chat CRUD + SSE streaming + regenerate
 │           ├── models.py      # GET /api/models — server allowlist
 │           └── csp.py         # CSP violation reporting endpoint
