@@ -50,6 +50,7 @@ Required env vars (mirrors the other suites here):
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import os
 import time
@@ -378,9 +379,9 @@ async def test_inline_card_reload_and_panel() -> None:
                 download = await dl_info.value
                 assert download.suggested_filename, "Download produced no filename"
             finally:
-                # ``_delete_chat`` is a sync best-effort helper — call it
-                # directly (a brief blocking teardown), never awaited.
-                _delete_chat(api_url, jwt, chat_id)
+                # ``_delete_chat`` is a sync best-effort helper; run it in a
+                # thread so the teardown never blocks the event loop.
+                await asyncio.to_thread(_delete_chat, api_url, jwt, chat_id)
         finally:
             await browser.close()
 
@@ -430,7 +431,7 @@ async def test_browse_view_and_chatless_deeplink() -> None:
                 head = page.locator(".art-phead .t", has_text=title)
                 await head.wait_for(timeout=_CARD_TIMEOUT_MS)
             finally:
-                _delete_chat(api_url, jwt, chat_id)
+                await asyncio.to_thread(_delete_chat, api_url, jwt, chat_id)
         finally:
             await browser.close()
 
@@ -467,8 +468,12 @@ async def test_upload_projection_creates_asset() -> None:
                 await _wait_for_assistant_idle(page)
 
                 # The upload projection ASSET row exists (origin=upload,
-                # image kind for the PNG) via the REST surface.
-                items = _list_chat_assets(api_url, jwt, chat_id).json()["items"]
+                # image kind for the PNG) via the REST surface. Assert the
+                # HTTP status before parsing so a server-side error surfaces
+                # as a clear status failure, not a downstream KeyError.
+                assets_resp = _list_chat_assets(api_url, jwt, chat_id)
+                assert assets_resp.status_code == 200, assets_resp.text
+                items = assets_resp.json()["items"]
                 uploads = [a for a in items if a["origin"] == "upload"]
                 assert uploads, f"Expected an origin=upload asset; got {items!r}"
                 assert uploads[0]["kind"] == "image", uploads[0]
@@ -476,7 +481,7 @@ async def test_upload_projection_creates_asset() -> None:
                 # And it renders as an inline card in the transcript.
                 await page.locator("button.art-inline").first.wait_for(timeout=_CARD_TIMEOUT_MS)
             finally:
-                _delete_chat(api_url, jwt, chat_id)
+                await asyncio.to_thread(_delete_chat, api_url, jwt, chat_id)
         finally:
             await browser.close()
 
