@@ -51,7 +51,6 @@ Required env vars (mirrors the other suites here):
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import os
 import time
 import uuid
@@ -195,20 +194,26 @@ def _wait_asset_gone_from_browse(api_url: str, jwt: str, asset_id: str) -> None:
 
 
 def _uploads_supported(api_url: str, jwt: str) -> bool:
-    """True when the API can presign an upload (i.e. an attachments bucket
-    is configured). Local ``inv dev`` sets no bucket, so ``presign`` raises
-    ``KeyError`` → 500; the deployed stacks return 200. A clean, env-
-    agnostic gate so the upload flow runs where it can and skips where it
-    can't."""
-    with contextlib.suppress(httpx.HTTPError):
-        resp = httpx.post(
-            f"{api_url}/api/attachments/presign",
-            json={"name": "probe.png", "mime": "image/png", "size_bytes": 128},
-            headers=_auth(jwt),
-            timeout=15.0,
-        )
-        return resp.status_code == 200
-    return False
+    """True when the API can presign an upload (an attachments bucket is
+    configured). Local ``inv dev`` sets no bucket, so ``presign`` raises
+    ``KeyError`` → 500 (the ONLY expected "unsupported" signal); the
+    deployed stacks return 200.
+
+    Any other outcome — a 4xx (the endpoint is wired but the request or the
+    freshly-minted JWT was rejected) or a network error — is unexpected and
+    surfaces rather than silently skipping the test on a real regression
+    (Copilot review).
+    """
+    resp = httpx.post(
+        f"{api_url}/api/attachments/presign",
+        json={"name": "probe.png", "mime": "image/png", "size_bytes": 128},
+        headers=_auth(jwt),
+        timeout=15.0,
+    )
+    if resp.status_code == 500:
+        return False
+    resp.raise_for_status()
+    return True
 
 
 # ----------------------------------------------------------------------
@@ -484,8 +489,10 @@ async def test_upload_projection_creates_asset() -> None:
                 assert uploads, f"Expected an origin=upload asset; got {items!r}"
                 assert uploads[0]["kind"] == "image", uploads[0]
 
-                # And it renders as an inline card in the transcript.
-                await page.locator("button.art-inline").first.wait_for(timeout=_CARD_TIMEOUT_MS)
+                # And THAT upload asset renders as an inline card — match by
+                # title so a different card can't satisfy the wait.
+                upload_card = page.locator("button.art-inline", has_text=uploads[0]["title"])
+                await upload_card.first.wait_for(timeout=_CARD_TIMEOUT_MS)
             finally:
                 await asyncio.to_thread(_delete_chat, api_url, jwt, chat_id)
         finally:
