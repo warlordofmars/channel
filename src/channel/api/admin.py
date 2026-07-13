@@ -13,8 +13,9 @@ Pagination contract
 The #234 storage helpers return DDB-shaped resume cursors and bound
 per-call read cost, but a *sorted* user list cannot be produced from an
 unsorted Scan one page at a time. So the list endpoint materializes the
-full user set per request (walking the storage cursors to exhaustion —
-explicitly sanctioned by the #234 handoff), sorts in memory, and
+full user set per request (walking ``scan_users`` cursors to exhaustion
+— explicitly sanctioned by the #234 handoff — and fetching the chat
+aggregates in one exhaustive ``limit=None`` call), sorts in memory, and
 paginates by offset. The client-facing ``cursor`` is an opaque
 base64url-JSON token ``{"offset": N, "sort": "<sort>"}`` — DDB key
 shapes never leak to clients. O(table)-per-request is the accepted
@@ -105,25 +106,16 @@ def _decode_cursor(token: str, sort: str) -> int:
 
 
 def _walk_chat_aggregates() -> dict[str, dict[str, Any]]:
-    """Full chat-index aggregation keyed by user_id.
+    """Full chat-index aggregation keyed by user_id — one scan.
 
-    ``derive_users_from_chat_index`` walks the chat-index scan to
-    exhaustion internally; the loop here follows its *row* cursor so
-    every aggregated user is collected regardless of page size.
+    ``limit=None`` asks the helper for the complete aggregated list in
+    a single call. Looping its cursor instead would re-run the full
+    chat-index scan once per page (the helper aggregates exhaustively
+    every call), turning one list request into N table scans past 100
+    users — flagged by Copilot review on PR #338.
     """
-    aggregates: dict[str, dict[str, Any]] = {}
-    cursor: dict[str, Any] | None = None
-    for _ in range(_MAX_STORAGE_WALK_CALLS):
-        rows, cursor = storage.derive_users_from_chat_index(cursor=cursor, limit=100)
-        for row in rows:
-            aggregates[str(row["user_id"])] = row
-        if cursor is None:
-            return aggregates
-    logger.warning(
-        "admin user list truncated: derive_users_from_chat_index cursor still live after %d calls",
-        _MAX_STORAGE_WALK_CALLS,
-    )
-    return aggregates
+    rows, _ = storage.derive_users_from_chat_index(limit=None)
+    return {str(row["user_id"]): row for row in rows}
 
 
 def _walk_user_meta_rows() -> list[dict[str, Any]]:

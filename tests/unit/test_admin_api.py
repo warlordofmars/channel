@@ -238,21 +238,27 @@ def test_list_truncates_and_warns_when_walk_cap_hit(
     """
     from unittest.mock import MagicMock
 
+    derive_calls: list[Any] = []
+
+    def fake_derive(**kwargs: Any) -> Any:
+        derive_calls.append(kwargs)
+        return ([], None)
+
     monkeypatch.setattr(
         "channel.api.admin.storage.scan_users",
         lambda **_kw: ([], {"PK": "USER#x", "SK": "META"}),
     )
-    monkeypatch.setattr(
-        "channel.api.admin.storage.derive_users_from_chat_index",
-        lambda **_kw: ([], {"user_id": "x"}),
-    )
+    monkeypatch.setattr("channel.api.admin.storage.derive_users_from_chat_index", fake_derive)
     mock_logger = MagicMock()
     monkeypatch.setattr("channel.api.admin.logger", mock_logger)
     resp = client.get("/api/admin/users", headers=_admin_headers())
     assert resp.status_code == 200
     warnings = [str(call.args[0]) for call in mock_logger.warning.call_args_list]
     assert any("scan_users cursor" in m for m in warnings)
-    assert any("derive_users_from_chat_index cursor" in m for m in warnings)
+    # The derive helper is exhaustive per call — the endpoint must fetch
+    # it exactly once with limit=None (cursor-looping it would re-scan
+    # the chat index per page; Copilot finding on PR #338).
+    assert derive_calls == [{"limit": None}]
 
 
 # ----------------------------------------------------------------

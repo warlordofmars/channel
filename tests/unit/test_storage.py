@@ -1981,6 +1981,22 @@ def test_derive_users_paginates_aggregated_list(table: FakeTable) -> None:
     assert cursor2 is None
 
 
+def test_derive_users_limit_none_returns_full_list_in_one_call(table: FakeTable) -> None:
+    """``limit=None`` disables pagination — the whole aggregate, no cursor.
+
+    Used by the #235 list endpoint, which needs every row for global
+    sorting; cursor-looping would re-run the full chat-index scan per
+    page for data this function already aggregated on the first call.
+    """
+
+    for uid in ("u-a", "u-b", "u-c"):
+        create_chat(user_id=uid, title=None, model_default="m")
+
+    rows, cursor = derive_users_from_chat_index(limit=None)
+    assert [r["user_id"] for r in rows] == ["u-a", "u-b", "u-c"]
+    assert cursor is None
+
+
 def test_derive_users_skips_malformed_rows(table: FakeTable) -> None:
     """Rows missing user_id or created_at must not corrupt the fold."""
 
