@@ -158,11 +158,20 @@ def _classify_client_error(exc: botocore.exceptions.ClientError) -> str:
     small: ``rate_limit`` (throttling), ``model_access_denied`` (the
     account hasn't enabled Nova Canvas — account state, not a code bug),
     and ``generation_failed`` for everything else (validation, service
-    errors)."""
+    errors).
+
+    ``ResourceNotFoundException`` also maps to ``model_access_denied``:
+    Bedrock raises it (not ``AccessDeniedException``) both for an
+    unknown model id AND for a model the account can't currently invoke
+    — including a provider-``LEGACY`` model deactivated after 30 days of
+    disuse ("This Model is marked by provider as Legacy … Please upgrade
+    to an active model"). All of those are account/model-access state
+    the caller resolves by enabling the model, so they share the token
+    rather than degrading to the generic ``generation_failed``."""
     code = (getattr(exc, "response", None) or {}).get("Error", {}).get("Code", "")
     if code in ("ThrottlingException", "TooManyRequestsException"):
         return "rate_limit"
-    if code == "AccessDeniedException":
+    if code in ("AccessDeniedException", "ResourceNotFoundException"):
         return "model_access_denied"
     return "generation_failed"
 

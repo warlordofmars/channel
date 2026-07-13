@@ -120,6 +120,10 @@ def test_title_from_prompt_blank_falls_back():
         ("ThrottlingException", "rate_limit"),
         ("TooManyRequestsException", "rate_limit"),
         ("AccessDeniedException", "model_access_denied"),
+        # Bedrock surfaces a deactivated provider-LEGACY model (and an
+        # unknown model id) as ResourceNotFoundException, not
+        # AccessDeniedException — both are account/model-access state.
+        ("ResourceNotFoundException", "model_access_denied"),
         ("ValidationException", "generation_failed"),
         ("SomethingElse", "generation_failed"),
     ],
