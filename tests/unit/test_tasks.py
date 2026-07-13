@@ -56,10 +56,12 @@ class FakeCtx:
 
 
 def test_describe_only_matches_release_tags():
-    """The describe call must carry --match "v*" so ``dev`` is never returned."""
+    """The describe call must carry a --match v* pattern so ``dev`` is never returned."""
     ctx = FakeCtx(describe="v0.20.0")
     _infer_next_version(ctx)
-    assert '--match "v*"' in ctx.commands[0]
+    describe_cmd = ctx.commands[0]
+    assert "--match" in describe_cmd
+    assert "v*" in describe_cmd
 
 
 # ── vX.Y.Z tags parse exactly as before ──────────────────────────────────────

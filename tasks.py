@@ -59,9 +59,7 @@ def _infer_next_version(ctx):
     ``git describe`` would return ``dev`` and crash the semver parse (#318).
     """
     try:
-        last_tag = ctx.run(
-            'git describe --tags --match "v*" --abbrev=0', hide=True
-        ).stdout.strip()
+        last_tag = ctx.run('git describe --tags --match "v*" --abbrev=0', hide=True).stdout.strip()
     except Exception:
         last_tag = "v0.0.0"
 
