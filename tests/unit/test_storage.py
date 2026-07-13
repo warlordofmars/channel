@@ -32,6 +32,7 @@ from channel.storage import (
     deny_jti,
     derive_users_from_chat_index,
     get_chat_by_id,
+    get_user_meta,
     is_jti_denied,
     list_audit_events_for_actor,
     list_chats_for_user,
@@ -1980,6 +1981,22 @@ def test_derive_users_paginates_aggregated_list(table: FakeTable) -> None:
     assert cursor2 is None
 
 
+def test_derive_users_limit_none_returns_full_list_in_one_call(table: FakeTable) -> None:
+    """``limit=None`` disables pagination — the whole aggregate, no cursor.
+
+    Used by the #235 list endpoint, which needs every row for global
+    sorting; cursor-looping would re-run the full chat-index scan per
+    page for data this function already aggregated on the first call.
+    """
+
+    for uid in ("u-a", "u-b", "u-c"):
+        create_chat(user_id=uid, title=None, model_default="m")
+
+    rows, cursor = derive_users_from_chat_index(limit=None)
+    assert [r["user_id"] for r in rows] == ["u-a", "u-b", "u-c"]
+    assert cursor is None
+
+
 def test_derive_users_skips_malformed_rows(table: FakeTable) -> None:
     """Rows missing user_id or created_at must not corrupt the fold."""
 
@@ -2249,3 +2266,23 @@ def test_count_active_users_follows_scan_pagination(
             last_message_at=active,
         )
     assert count_active_users("2500-01-01T00:00:00+00:00") == 3
+
+
+def test_get_user_meta_returns_row_when_present(table: FakeTable) -> None:
+    _put_user_meta(table, "u-1", email="one@example.com", created_at="2026-01-01T00:00:00+00:00")
+    row = get_user_meta("u-1")
+    assert row is not None
+    assert row["email"] == "one@example.com"
+    assert row["created_at"] == "2026-01-01T00:00:00+00:00"
+    # Read-after-write: a detail request right after the META write must
+    # not observe a stale miss and 404 a real user (same discipline as
+    # get_prefs / is_jti_denied).
+    assert table.last_get_item_kwargs.get("ConsistentRead") is True
+
+
+def test_get_user_meta_returns_none_when_absent(table: FakeTable) -> None:
+    """Every user is META-less until the #110 writer ships — None, not KeyError."""
+
+    # A sibling row under the same PK must not satisfy the point read.
+    create_chat(user_id="u-1", title=None, model_default="m")
+    assert get_user_meta("u-1") is None

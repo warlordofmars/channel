@@ -1303,6 +1303,28 @@ def _normalize_iso_bound(value: str) -> str:
     return _parse_iso_utc(value).isoformat(timespec="microseconds")
 
 
+def get_user_meta(user_id: str) -> dict[str, Any] | None:
+    """Point-read the ``PK=USER#{user_id}, SK=META`` row (#235).
+
+    Returns the raw item dict, or ``None`` when the row is absent —
+    which is every user until the #110 writer ships. The #235 admin
+    detail endpoint combines this with the caller's chat-index rows to
+    decide 404 (a user with chats but no META row still exists).
+
+    ``ConsistentRead=True`` so a detail request issued immediately
+    after the META row is written can't observe a stale miss and 404 a
+    real (chat-less) user — same read-after-write discipline as
+    :func:`get_prefs` and :func:`is_jti_denied`.
+    """
+
+    result = _get_table().get_item(
+        Key={"PK": f"USER#{user_id}", "SK": "META"},
+        ConsistentRead=True,
+    )
+    item: dict[str, Any] | None = result.get("Item")
+    return item
+
+
 def scan_users(
     *,
     cursor: dict[str, Any] | None = None,
@@ -1357,7 +1379,7 @@ def scan_users(
 def derive_users_from_chat_index(
     *,
     cursor: dict[str, Any] | None = None,
-    limit: int = _ADMIN_DEFAULT_PAGE,
+    limit: int | None = _ADMIN_DEFAULT_PAGE,
 ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
     """Derive a user list from chat-index rows while USER#META is sparse (#234).
 
@@ -1380,9 +1402,18 @@ def derive_users_from_chat_index(
     aggregates. O(table) per call is an accepted v0.1 trade-off (tiny
     user count, per epic #233); ``ProjectionExpression`` keeps the
     fetched bytes to the three attributes the fold needs.
+
+    ``limit=None`` disables the in-memory pagination and returns the
+    complete aggregated list with ``next_cursor=None``. Callers that
+    need *every* row (the #235 list endpoint sorts globally before
+    paginating) should use this rather than looping the cursor —
+    each cursor hop re-runs the full chat-index scan, so an N-page
+    cursor walk costs N scans for data this function already had in
+    memory on the first call.
     """
 
-    limit = _clamp_admin_limit(limit)
+    if limit is not None:
+        limit = _clamp_admin_limit(limit)
     table = _get_table()
     aggregates: dict[str, dict[str, Any]] = {}
     start_key: dict[str, Any] | None = None
@@ -1423,6 +1454,8 @@ def derive_users_from_chat_index(
     if cursor is not None:
         after = str(cursor.get("user_id", ""))
         users = [u for u in users if str(u["user_id"]) > after]
+    if limit is None:
+        return users, None
     rows = users[:limit]
     next_cursor = {"user_id": rows[-1]["user_id"]} if len(users) > limit else None
     return rows, next_cursor
