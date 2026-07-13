@@ -45,13 +45,14 @@ logger = logging.getLogger(__name__)
 _NUM_RESULTS_MIN = 1
 _NUM_RESULTS_MAX = 10
 
-# Exa live-crawl timeout — passed as ``livecrawl_timeout`` to
-# ``exa_search``. Long enough for ``livecrawl="fallback"`` to fetch a
-# slow page, short enough that the chassis wall-clock budget (120s)
-# survives multiple search attempts in one chain. Exa's other request
-# phases (index lookup, result assembly) are fast and don't need a
-# separate budget here.
-_EXA_TIMEOUT_SEC = 30
+# Exa's ``livecrawlTimeout`` is in MILLISECONDS (upstream default
+# 10_000 — see ``strands_tools.exa.exa_search``'s docstring; the SDK
+# forwards the value verbatim). 30s gives ``livecrawl="fallback"`` room
+# to fetch a slow uncached page, short enough that the chassis
+# wall-clock budget (120s) survives multiple search attempts in one
+# chain. Exa's other request phases (index lookup, result assembly)
+# are fast and don't need a separate budget here.
+_EXA_LIVECRAWL_TIMEOUT_MS = 30_000
 
 
 def _error_result(error_type: str) -> dict[str, Any]:
@@ -161,7 +162,7 @@ async def web_search(
             exclude_domains=exclude_domains,
             text=True,
             livecrawl="fallback",
-            livecrawl_timeout=_EXA_TIMEOUT_SEC,
+            livecrawl_timeout=_EXA_LIVECRAWL_TIMEOUT_MS,
         )
     except httpx.ReadTimeout:
         logger.warning("web_search.timeout query_len=%d", len(query))
