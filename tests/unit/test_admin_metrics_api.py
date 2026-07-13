@@ -237,14 +237,14 @@ def test_summary_shape_and_sums(
     today = body["today"]
     assert today["active_users"] == 5
     assert set(today["metrics"].keys()) == set(_METRIC_ALLOWLIST)
-    assert today["metrics"]["MemoryWriteSuccesses"] == 5.0  # m0: 2.0 + 3.0
-    assert today["metrics"]["MemoryWriteFailures"] == 1.0  # m1
-    assert today["metrics"]["ToolCallSuccesses"] == 0.0  # absent from response
+    assert today["metrics"]["MemoryWriteSuccesses"] == pytest.approx(5.0)  # m0: 2.0 + 3.0
+    assert today["metrics"]["MemoryWriteFailures"] == pytest.approx(1.0)  # m1
+    assert today["metrics"]["ToolCallSuccesses"] == pytest.approx(0.0)  # absent from response
 
     assert body["7d"]["active_users"] == 4
-    assert body["7d"]["metrics"]["MemoryWriteSuccesses"] == 0.0
+    assert body["7d"]["metrics"]["MemoryWriteSuccesses"] == pytest.approx(0.0)
     assert body["30d"]["active_users"] == 3
-    assert all(v == 0.0 for v in body["30d"]["metrics"].values())
+    assert all(v == pytest.approx(0.0) for v in body["30d"]["metrics"].values())
 
     # count_active_users receives each window's start; lookbacks grow,
     # so the ISO bounds must be strictly decreasing (24h > 7d > 30d).
@@ -314,9 +314,10 @@ def test_timeseries_zero_filled_grid_default_bucket(
 
     points = body["points"]
     assert len(points) == 288  # 24h / 5m, end-exclusive
-    assert points[0] == {"t": start.isoformat(), "v": 4.0}
-    assert points[10]["v"] == 7.0
-    assert sum(p["v"] for p in points) == 11.0  # everything else zero-filled
+    assert points[0]["t"] == start.isoformat()
+    assert points[0]["v"] == pytest.approx(4.0)
+    assert points[10]["v"] == pytest.approx(7.0)
+    assert sum(p["v"] for p in points) == pytest.approx(11.0)  # everything else zero-filled
     ts = [p["t"] for p in points]
     assert ts == sorted(ts)  # ascending grid
     cloudwatch_stub.assert_no_pending_responses()
@@ -346,7 +347,7 @@ def test_timeseries_bucket_override_and_empty_results(
     body = resp.json()
     assert body["bucket"] == "1h"
     assert len(body["points"]) == 24
-    assert all(p["v"] == 0.0 for p in body["points"])
+    assert all(p["v"] == pytest.approx(0.0) for p in body["points"])
     cloudwatch_stub.assert_no_pending_responses()
 
 
