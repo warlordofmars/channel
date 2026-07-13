@@ -97,11 +97,15 @@ export default function ArtifactPanel({ artifact, onClose }) {
   }, []);
 
   useEffect(function fetchAssetContent() {
-    // Both ids are required for the per-chat content route; guard against
-    // a malformed card so we never issue `/api/chats/null/...`.
-    if (!assetId || !chatId) return undefined;
     // Reset the copy affordance whenever the open asset changes.
     setCopied(false);
+    // Both ids are required for the per-chat content route; guard against
+    // a malformed/absent card so we never issue `/api/chats/null/...`, and
+    // clear any stale content left over from a previously-open asset.
+    if (!assetId || !chatId) {
+      setContent({ state: "fallback" });
+      return undefined;
+    }
     if (!TEXT_KINDS.has(kind) && kind !== "image") {
       setContent({ state: "fallback" });
       return undefined;

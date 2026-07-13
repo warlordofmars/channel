@@ -243,6 +243,20 @@ describe("ArtifactPanel — download", () => {
     fireEvent.click(screen.getByTitle("Download"));
     expect(api.getAssetContent).not.toHaveBeenCalled();
   });
+
+  it("clears stale content when switching from a valid to a malformed card", async () => {
+    api.getAssetContent.mockResolvedValue(textResponse("STALE CODE"));
+    const { rerender } = render(
+      <ArtifactPanel artifact={card({ kind: "code", asset_id: "a1", chat_id: "c1" })} onClose={() => {}} />,
+    );
+    await screen.findByText(/STALE CODE/);
+    rerender(
+      <ArtifactPanel artifact={card({ kind: "code", asset_id: "a2", chat_id: null })} onClose={() => {}} />,
+    );
+    // The previous asset's body must not linger under the new header.
+    expect(screen.queryByText(/STALE CODE/)).toBeNull();
+    expect(document.querySelector(".art-fallback")).toBeTruthy();
+  });
 });
 
 describe("ArtifactPanel — close + cancellation", () => {

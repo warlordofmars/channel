@@ -300,6 +300,24 @@ describe("Artifacts", () => {
     expect(api.listAssets).toHaveBeenCalledTimes(2);
   });
 
+  it("ignores a Load more page that resolves after the view unmounts", async () => {
+    const d = deferred();
+    api.listAssets
+      .mockResolvedValueOnce({ items: [card({ title: "page1.py" })], next_cursor: "c1" })
+      .mockReturnValueOnce(d.promise);
+    const { unmount } = renderAt("/app/artifacts");
+    await screen.findByText("page1.py");
+    fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+    unmount();
+    await act(async () => {
+      d.resolve({ items: [card({ asset_id: "as-2" })], next_cursor: null });
+      await Promise.resolve();
+    });
+    // The mounted-ref guards short-circuited both handlers — no
+    // unmounted-component state update, no third fetch.
+    expect(api.listAssets).toHaveBeenCalledTimes(2);
+  });
+
   it("ignores the first page when the view unmounts before it lands", async () => {
     const d = deferred();
     api.listAssets.mockReturnValueOnce(d.promise);

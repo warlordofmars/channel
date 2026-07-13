@@ -1,5 +1,5 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import Icon from "../../components/Icon.jsx";
 import ArtifactPanel from "./ArtifactPanel.jsx";
@@ -52,6 +52,17 @@ export default function Artifacts() {
   const [status, setStatus] = useState("loading"); // loading | ready | error
   const [loadingMore, setLoadingMore] = useState(false);
   const [deepLinked, setDeepLinked] = useState(null);
+
+  // Tracks whether the view is still mounted so the `loadMore` promise
+  // handlers (which live outside an effect and so have no cleanup) don't
+  // set state after the user navigates away mid-fetch.
+  const mountedRef = useRef(true);
+  useEffect(function trackMounted() {
+    mountedRef.current = true;
+    return function markUnmounted() {
+      mountedRef.current = false;
+    };
+  }, []);
 
   const openId = params.get(ARTIFACT_PARAM);
   const openChat = params.get(CHAT_PARAM);
@@ -130,6 +141,7 @@ export default function Artifacts() {
     setLoadingMore(true);
     drainAssetPages(cursor)
       .then(function onMore({ items, nextCursor }) {
+        if (!mountedRef.current) return;
         setAssets(function append(prev) {
           return prev.concat(items);
         });
@@ -140,7 +152,7 @@ export default function Artifacts() {
         /* transient — keep the list + the button so the user can retry */
       })
       .finally(function settle() {
-        setLoadingMore(false);
+        if (mountedRef.current) setLoadingMore(false);
       });
   }
 
