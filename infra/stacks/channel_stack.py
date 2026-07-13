@@ -20,6 +20,7 @@ Multi-environment usage:
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import aws_cdk as cdk
 from aws_cdk import aws_certificatemanager as acm
@@ -47,6 +48,72 @@ GITHUB_REPO = "warlordofmars/channel"
 
 
 HOSTED_ZONE_NAME = "warlordofmars.net"
+
+# Root for both Lambda ``Code.from_asset`` calls (#316). Relative asset
+# paths resolve against the *process cwd* (verified empirically — jsii's
+# node child inherits the Python cwd), NOT against ``infra/``. The old
+# ``".."`` literal therefore meant "repo root" only when run via the cdk
+# CLI (cwd = ``infra/``); under ``inv pre-push`` (pytest cwd = repo
+# root) it resolved to the PARENT of the repo, fingerprinting every
+# sibling project. Pinning to this module's location makes the asset
+# root the repo/worktree root regardless of cwd.
+_ASSET_ROOT = str(Path(__file__).resolve().parents[2])
+
+# Paths excluded from both Lambda asset fingerprint walks (#316),
+# relative to ``_ASSET_ROOT``. Without these, every synth (including the
+# ``tests/unit/test_channel_stack.py`` template assertions run by
+# ``inv pre-push``) fingerprints the ENTIRE repo tree — including
+# ``.claude/worktrees/``, where sibling agent sessions churn caches
+# concurrently. That churn deletes files between CDK's directory
+# listing and its stat of them, killing the walk with ENOENT.
+#
+# Both assets are Docker-bundled with the default
+# ``AssetHashType.SOURCE``, so these excludes only shape the source
+# fingerprint (and staging); the bundling commands define the deployed
+# zip contents. Keep this list conservative — junk, caches, and build
+# outputs only. The bundling inputs (``pyproject.toml``, ``uv.lock``,
+# ``run.sh``, ``src/channel/**`` including
+# ``src/channel/sandbox/requirements.txt``) must never match.
+#
+# Pattern semantics: CDK matches with minimatch (``dot: true``,
+# ``IgnoreMode.GLOB``) against paths relative to the asset root, and
+# checks directories BEFORE recursing — so a bare directory name
+# (e.g. ``".claude"``) prunes the whole subtree without ever listing
+# it, and ``**/name`` matches at any depth including the root.
+LAMBDA_ASSET_EXCLUDE = [
+    # VCS + agent state (.claude/worktrees churn is the race trigger)
+    ".git",
+    ".claude",
+    ".claude-tmp",
+    ".autonomous-progress",
+    # Python tool caches + virtualenvs
+    "**/__pycache__",
+    "**/.mypy_cache",
+    "**/.pytest_cache",
+    "**/.ruff_cache",
+    "**/.venv",
+    # Node dependencies + Vite cache
+    "**/node_modules",
+    "**/.vite",
+    # Coverage outputs (root-level names match the repo's .gitignore)
+    "**/coverage",
+    "coverage-unit",
+    "coverage-js",
+    "coverage-combined",
+    "coverage.xml",
+    ".coverage*",
+    "htmlcov",
+    # Build outputs
+    "ui/dist",
+    "desktop/dist-main",
+    "desktop/dist-renderer",
+    "desktop/release",
+    "docs-site/.vitepress/dist",
+    "docs-site/.vitepress/cache",
+    "**/cdk.out",
+    # OS junk
+    "**/.DS_Store",
+]
 
 
 def _build_csp_header(
@@ -256,7 +323,8 @@ class ChannelStack(cdk.Stack):
         # Shared Lambda code (Docker-bundled at cdk deploy time)
         # ----------------------------------------------------------------
         lambda_code = lambda_.Code.from_asset(
-            "..",
+            _ASSET_ROOT,
+            exclude=LAMBDA_ASSET_EXCLUDE,
             bundling=cdk.BundlingOptions(
                 image=lambda_.Runtime.PYTHON_3_12.bundling_image,
                 command=[
@@ -711,13 +779,13 @@ class ChannelStack(cdk.Stack):
             runtime=lambda_.Runtime.PYTHON_3_13,
             handler="channel.sandbox.handler.lambda_handler",
             code=lambda_.Code.from_asset(
-                # Asset path mirrors the API Lambda's ``from_asset("..")``
-                # — the path is relative to ``infra/`` (the cdk.json
-                # context); ``..`` resolves to the worktree root which
-                # holds ``src/channel/sandbox/``. The bundling command
-                # pulls only what the sandbox needs (no FastAPI,
+                # Asset root mirrors the API Lambda's ``from_asset``
+                # — the pinned repo/worktree root (see ``_ASSET_ROOT``),
+                # which holds ``src/channel/sandbox/``. The bundling
+                # command pulls only what the sandbox needs (no FastAPI,
                 # uvicorn, or Strands tree).
-                "..",
+                _ASSET_ROOT,
+                exclude=LAMBDA_ASSET_EXCLUDE,
                 bundling=cdk.BundlingOptions(
                     image=lambda_.Runtime.PYTHON_3_13.bundling_image,
                     command=[
