@@ -6,11 +6,16 @@ vi.mock("../api.js", () => ({
   getChat: vi.fn(),
   streamMessage: vi.fn(),
   regenerate: vi.fn(),
+  listChatAssets: vi.fn(() => Promise.resolve({ items: [] })),
 }));
 
 import * as api from "../api.js";
 import { TOKEN_KEY } from "../lib/auth.js";
-import { useChatStream } from "./useChatStream.js";
+import {
+  useChatStream,
+  groupAssetsByMsgId,
+  attachAssetsToTurns,
+} from "./useChatStream.js";
 
 // jsdom in vitest 1+ ships crypto.randomUUID, but guard for older envs.
 globalThis.crypto ??= { randomUUID: () => "uuid-stub" };
@@ -53,6 +58,8 @@ async function mountLoaded(id = "c1") {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // Default: no reattached assets. Individual tests override.
+  api.listChatAssets.mockResolvedValue({ items: [] });
 });
 
 describe("useChatStream", () => {
@@ -1582,5 +1589,214 @@ describe("useChatStream", () => {
       expect(outcome).toEqual({ accepted: false });
       expect(api.streamMessage).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe("asset grouping helpers (#327)", () => {
+  it("groupAssetsByMsgId groups by msg_id and drops descriptors without one", () => {
+    const byMsg = groupAssetsByMsgId([
+      { asset_id: "a", msg_id: "m1" },
+      { asset_id: "b", msg_id: "m1" },
+      { asset_id: "c", msg_id: "m2" },
+      { asset_id: "d" }, // no msg_id → dropped
+      null, // falsy → dropped
+    ]);
+    expect(byMsg.get("m1").map((a) => a.asset_id)).toEqual(["a", "b"]);
+    expect(byMsg.get("m2").map((a) => a.asset_id)).toEqual(["c"]);
+    expect(byMsg.size).toBe(2);
+  });
+
+  it("groupAssetsByMsgId tolerates a null/undefined item list", () => {
+    expect(groupAssetsByMsgId(undefined).size).toBe(0);
+  });
+
+  it("attachAssetsToTurns returns the SAME messages ref when there are no assets", () => {
+    const messages = [{ msg_id: "m1", role: "user", text: "hi" }];
+    expect(attachAssetsToTurns(messages, [])).toBe(messages);
+  });
+
+  it("attachAssetsToTurns hangs assets off matching turns only", () => {
+    const messages = [
+      { msg_id: "m1", role: "user", text: "hi" },
+      { msg_id: "m2", role: "assistant", text: "yo" },
+    ];
+    const out = attachAssetsToTurns(messages, [{ asset_id: "a", msg_id: "m2" }]);
+    expect(out[0]).toBe(messages[0]); // untouched, same ref
+    expect(out[1].assets).toEqual([{ asset_id: "a", msg_id: "m2" }]);
+  });
+});
+
+describe("useChatStream — assets (#327)", () => {
+  function streamWith(events) {
+    api.streamMessage.mockResolvedValue({
+      ok: true,
+      body: makeMockResponseBody(events),
+    });
+  }
+  const doneFrame = {
+    type: "done",
+    msg_id: "asst-1",
+    seq: 1,
+    model: "m",
+    input_tokens: 0,
+    output_tokens: 0,
+    stop_reason: "end_turn",
+  };
+
+  it("reattaches persisted assets to history turns on load", async () => {
+    api.getChat.mockResolvedValue(
+      chatPage([
+        { msg_id: "m1", role: "user", text: "hi" },
+        { msg_id: "m2", role: "assistant", text: "here" },
+      ]),
+    );
+    api.listChatAssets.mockResolvedValue({
+      items: [{ asset_id: "as-1", msg_id: "m2", kind: "code", title: "f.py" }],
+    });
+    const view = await mountLoaded("c1");
+    expect(view.result.current.turns[0].assets).toBeUndefined();
+    expect(view.result.current.turns[1].assets).toEqual([
+      { asset_id: "as-1", msg_id: "m2", kind: "code", title: "f.py" },
+    ]);
+  });
+
+  it("still loads history when the assets fetch fails (non-fatal)", async () => {
+    api.getChat.mockResolvedValue(
+      chatPage([{ msg_id: "m1", role: "user", text: "hi" }]),
+    );
+    api.listChatAssets.mockRejectedValue(new Error("assets boom"));
+    const view = await mountLoaded("c1");
+    expect(view.result.current.status).toBe("idle");
+    expect(view.result.current.turns).toEqual([
+      { msg_id: "m1", role: "user", text: "hi" },
+    ]);
+  });
+
+  it("attaches an asset_created frame to the assistant turn (generated)", async () => {
+    api.getChat.mockResolvedValue(chatPage([]));
+    streamWith([
+      { type: "user_persisted", msg_id: "user-1", seq: 0 },
+      { type: "delta", text: "hi" },
+      doneFrame,
+      {
+        type: "asset_created",
+        asset: {
+          asset_id: "as-1",
+          msg_id: "asst-1",
+          kind: "code",
+          title: "fib.py",
+          source: { fence_index: 0 },
+        },
+      },
+    ]);
+    const { result } = renderHook(() => useChatStream("c1"));
+    await waitFor(() => expect(result.current.status).toBe("idle"));
+    await act(async () => {
+      await result.current.send({ message: "hi", model: "m", effort: "med" });
+    });
+    expect(result.current.turns[0].assets).toBeUndefined(); // user turn untouched
+    expect(result.current.turns[1].assets).toEqual([
+      {
+        asset_id: "as-1",
+        msg_id: "asst-1",
+        kind: "code",
+        title: "fib.py",
+        source: { fence_index: 0 },
+      },
+    ]);
+  });
+
+  it("attaches an upload asset_created frame to the user turn", async () => {
+    api.getChat.mockResolvedValue(chatPage([]));
+    streamWith([
+      { type: "user_persisted", msg_id: "user-1", seq: 0 },
+      {
+        type: "asset_created",
+        asset: {
+          asset_id: "up-1",
+          msg_id: "user-1",
+          kind: "image",
+          title: "pic.png",
+          source: { msg_id: "user-1", attachment_id: "att-1" },
+        },
+      },
+      { type: "delta", text: "ok" },
+      doneFrame,
+    ]);
+    const { result } = renderHook(() => useChatStream("c1"));
+    await waitFor(() => expect(result.current.status).toBe("idle"));
+    await act(async () => {
+      await result.current.send({ message: "hi", model: "m", effort: "med" });
+    });
+    expect(result.current.turns[0].assets).toHaveLength(1);
+    expect(result.current.turns[0].assets[0].asset_id).toBe("up-1");
+  });
+
+  it("asset_updated replaces a card with the same id, and is ignored when absent", async () => {
+    api.getChat.mockResolvedValue(chatPage([]));
+    streamWith([
+      { type: "user_persisted", msg_id: "user-1", seq: 0 },
+      doneFrame,
+      {
+        type: "asset_created",
+        asset: { asset_id: "as-1", msg_id: "asst-1", title: "v1" },
+      },
+      {
+        type: "asset_updated",
+        asset: { asset_id: "as-1", msg_id: "asst-1", title: "v2" },
+      },
+      {
+        type: "asset_updated",
+        asset: { asset_id: "ghost", msg_id: "asst-1", title: "nope" },
+      },
+    ]);
+    const { result } = renderHook(() => useChatStream("c1"));
+    await waitFor(() => expect(result.current.status).toBe("idle"));
+    await act(async () => {
+      await result.current.send({ message: "hi", model: "m", effort: "med" });
+    });
+    expect(result.current.turns[1].assets).toEqual([
+      { asset_id: "as-1", msg_id: "asst-1", title: "v2" },
+    ]);
+  });
+
+  it("de-duplicates a re-emitted asset_created by asset_id", async () => {
+    api.getChat.mockResolvedValue(chatPage([]));
+    streamWith([
+      { type: "user_persisted", msg_id: "user-1", seq: 0 },
+      doneFrame,
+      {
+        type: "asset_created",
+        asset: { asset_id: "as-1", msg_id: "asst-1", title: "a" },
+      },
+      {
+        type: "asset_created",
+        asset: { asset_id: "as-1", msg_id: "asst-1", title: "b" },
+      },
+    ]);
+    const { result } = renderHook(() => useChatStream("c1"));
+    await waitFor(() => expect(result.current.status).toBe("idle"));
+    await act(async () => {
+      await result.current.send({ message: "hi", model: "m", effort: "med" });
+    });
+    expect(result.current.turns[1].assets).toEqual([
+      { asset_id: "as-1", msg_id: "asst-1", title: "b" },
+    ]);
+  });
+
+  it("ignores asset frames with no asset or no msg_id", async () => {
+    api.getChat.mockResolvedValue(chatPage([]));
+    streamWith([
+      { type: "user_persisted", msg_id: "user-1", seq: 0 },
+      doneFrame,
+      { type: "asset_created" }, // no asset payload
+      { type: "asset_created", asset: { asset_id: "x", kind: "code" } }, // no msg_id
+    ]);
+    const { result } = renderHook(() => useChatStream("c1"));
+    await waitFor(() => expect(result.current.status).toBe("idle"));
+    await act(async () => {
+      await result.current.send({ message: "hi", model: "m", effort: "med" });
+    });
+    expect(result.current.turns[1].assets).toBeUndefined();
   });
 });

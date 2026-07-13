@@ -10,9 +10,11 @@ import {
   getAdminMetricsTimeseries,
   getAdminUser,
   getAdminUsers,
+  getAssetContent,
   getChat,
   getChatMCPSettings,
   getPrefs,
+  listChatAssets,
   listChats,
   listMCPServers,
   listModels,
@@ -146,6 +148,58 @@ describe("chats wrappers", () => {
     it("throws on 404", async () => {
       mockFail(404);
       await expect(getChat("missing")).rejects.toThrow(/getChat 404/);
+    });
+  });
+
+  // ---- listChatAssets (#327) ---------------------------------------------
+
+  describe("listChatAssets", () => {
+    it("GETs the per-chat assets surface with Authorization", async () => {
+      mockOk({ items: [{ asset_id: "a1" }] });
+      const result = await listChatAssets("c1");
+      expect(result).toEqual({ items: [{ asset_id: "a1" }] });
+      expect(fetchMock.mock.calls[0][0]).toBe("/api/chats/c1/assets");
+      expect(fetchMock.mock.calls[0][1].headers.Authorization).toBe(
+        "Bearer tok-abc",
+      );
+    });
+
+    it("throws an ApiError carrying the status on non-ok", async () => {
+      mockFail(404);
+      const err = await listChatAssets("c1").catch((e) => e);
+      expect(err).toBeInstanceOf(ApiError);
+      expect(err.status).toBe(404);
+    });
+  });
+
+  // ---- getAssetContent (#327) --------------------------------------------
+
+  describe("getAssetContent", () => {
+    it("GETs the content endpoint and returns the raw Response", async () => {
+      const response = { ok: true, status: 200, blob: () => Promise.resolve() };
+      fetchMock.mockResolvedValue(response);
+      const result = await getAssetContent("c1", "a1");
+      expect(result).toBe(response);
+      expect(fetchMock.mock.calls[0][0]).toBe(
+        "/api/chats/c1/assets/a1/content",
+      );
+      expect(fetchMock.mock.calls[0][1].headers.Authorization).toBe(
+        "Bearer tok-abc",
+      );
+    });
+
+    it("throws ApiError 404 when the object is gone", async () => {
+      mockFail(404);
+      const err = await getAssetContent("c1", "a1").catch((e) => e);
+      expect(err).toBeInstanceOf(ApiError);
+      expect(err.status).toBe(404);
+    });
+
+    it("throws ApiError 502 on other S3 failures", async () => {
+      mockFail(502);
+      const err = await getAssetContent("c1", "a1").catch((e) => e);
+      expect(err).toBeInstanceOf(ApiError);
+      expect(err.status).toBe(502);
     });
   });
 
