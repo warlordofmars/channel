@@ -222,6 +222,20 @@ def _qualifying_fences(fences: list[CodeFence]) -> list[CodeFence]:
     ]
 
 
+async def _record_outcome_safe(success: bool) -> None:
+    """Emit the persist counter without ever raising into the stream.
+
+    Metric emission rides the producers' fail-soft contract too: an EMF
+    flush/serialization failure after a successful ``put_asset`` must
+    not abort the producer loop (or the SSE stream it runs inside) —
+    the row is durable and the frame must still go out. Log + swallow.
+    """
+    try:
+        await record_asset_persist_outcome(success=success)
+    except Exception:
+        logger.warning("asset.metric_emit_failed success=%s", success, exc_info=True)
+
+
 async def _record_persist_failure(*, producer: str, chat_id: str, exc: Exception) -> None:
     """Shared fail-soft tail: log (fingerprinted ids only) + EMF count."""
     logger.warning(
@@ -231,7 +245,7 @@ async def _record_persist_failure(*, producer: str, chat_id: str, exc: Exception
         extra={"error_type": type(exc).__name__, "error_message": str(exc)},
         exc_info=True,
     )
-    await record_asset_persist_outcome(success=False)
+    await _record_outcome_safe(success=False)
 
 
 async def persist_upload_assets(
@@ -275,7 +289,7 @@ async def persist_upload_assets(
         except Exception as exc:
             await _record_persist_failure(producer="upload", chat_id=chat_id, exc=exc)
             continue
-        await record_asset_persist_outcome(success=True)
+        await _record_outcome_safe(success=True)
         persisted.append(asset)
     return persisted
 
@@ -310,7 +324,12 @@ async def persist_code_exec_image_assets(
         for entry in images:
             figure_ordinal += 1
             try:
-                data = base64.b64decode(entry["b64"])
+                # ``validate=True`` — strict alphabet check. The input
+                # comes from our own sandbox handler's b64encode, so any
+                # non-alphabet byte means a malformed payload; without
+                # strict mode b64decode silently drops such bytes and
+                # would persist garbage instead of counting a failure.
+                data = base64.b64decode(entry["b64"], validate=True)
             except (KeyError, TypeError, ValueError, binascii.Error) as exc:
                 await _record_persist_failure(producer="code_exec_image", chat_id=chat_id, exc=exc)
                 continue
@@ -340,7 +359,7 @@ async def persist_code_exec_image_assets(
             except Exception as exc:
                 await _record_persist_failure(producer="code_exec_image", chat_id=chat_id, exc=exc)
                 continue
-            await record_asset_persist_outcome(success=True)
+            await _record_outcome_safe(success=True)
             persisted.append(asset)
     return persisted
 
@@ -409,6 +428,6 @@ async def persist_fence_assets(
         except Exception as exc:
             await _record_persist_failure(producer="fence", chat_id=chat_id, exc=exc)
             continue
-        await record_asset_persist_outcome(success=True)
+        await _record_outcome_safe(success=True)
         persisted.append(asset)
     return persisted

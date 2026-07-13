@@ -490,3 +490,76 @@ async def test_fence_persist_failure_is_isolated_per_fence(
     assert [a.source["fence_index"] for a in persisted] == [1]
     assert metrics.await_args_list[0].kwargs == {"success": False}
     assert metrics.await_args_list[1].kwargs == {"success": True}
+
+
+# ----------------------------------------------------------------
+# Copilot review round 1 — metric guard + strict base64
+# ----------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_metric_emission_failure_never_breaks_producer(
+    put_asset_capture: list[Asset], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """EMF flush failures ride the fail-soft contract too: a raising
+    ``record_asset_persist_outcome`` must not abort the producer loop —
+    the row is durable, the asset is still returned (so the frame still
+    goes out)."""
+    monkeypatch.delenv("STARTER_ASSET_EXTRACTION_ENABLED", raising=False)
+
+    async def exploding_metric(*, success: bool) -> None:
+        raise RuntimeError("EMF flush failed")
+
+    monkeypatch.setattr(
+        "channel.agents.asset_producers.record_asset_persist_outcome", exploding_metric
+    )
+    persisted = await ap.persist_fence_assets(
+        chat_id="c-1", owner="u-1", msg_id="m-a", text=_fence(15)
+    )
+    assert len(persisted) == 1
+    assert persisted == put_asset_capture
+
+
+@pytest.mark.asyncio
+async def test_metric_emission_failure_in_failure_path_is_swallowed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both fail-soft tails compose: put_asset raises AND the failure
+    counter raises — the producer still returns cleanly."""
+    monkeypatch.delenv("STARTER_ASSET_EXTRACTION_ENABLED", raising=False)
+
+    def exploding_put(_asset: Asset) -> None:
+        raise RuntimeError("ddb down")
+
+    async def exploding_metric(*, success: bool) -> None:
+        raise RuntimeError("EMF flush failed")
+
+    monkeypatch.setattr("channel.agents.asset_producers.storage.put_asset", exploding_put)
+    monkeypatch.setattr(
+        "channel.agents.asset_producers.record_asset_persist_outcome", exploding_metric
+    )
+    persisted = await ap.persist_fence_assets(
+        chat_id="c-1", owner="u-1", msg_id="m-a", text=_fence(15)
+    )
+    assert persisted == []
+
+
+@pytest.mark.asyncio
+async def test_code_exec_image_non_alphabet_b64_rejected_strictly(
+    put_asset_capture: list[Asset],
+    put_bytes_capture: list[dict[str, Any]],
+    metrics: AsyncMock,
+) -> None:
+    """``validate=True`` pins strict decoding: without it, b64decode
+    silently DROPS non-alphabet bytes ("QUJ*RA==" -> b"ABD") and would
+    persist garbage instead of counting a failure."""
+    persisted = await ap.persist_code_exec_image_assets(
+        chat_id="c-1",
+        owner="u-1",
+        msg_id="m-a",
+        images_by_tool=[("tool-1", [{"mime": "image/png", "b64": "QUJ*RA=="}])],
+    )
+    assert persisted == []
+    assert put_bytes_capture == []
+    assert put_asset_capture == []
+    metrics.assert_awaited_once_with(success=False)
