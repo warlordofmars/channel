@@ -190,6 +190,49 @@ require a valid Bearer mgmt JWT. JWT validation enforces `iss`,
     `SK={created_at}#{asset_id}` (sparse; only asset rows project onto
     it; powers the cross-chat asset browse view, newest first)
 
+## Asset producers (#326, epic #321)
+
+Everything that creates ASSET rows lives in
+`src/channel/agents/asset_producers.py`, driven from the
+`chats.py` stream path. Three producers:
+
+- **Upload projection** (deterministic) — at message-send, each
+  verified attachment writes an `origin=upload` ASSET row pointing at
+  the SAME S3 object as the ATTACHMENT row (metadata projection, no
+  byte copy; `kind` derived from MIME). Fires on fresh sends only —
+  regenerate never re-projects.
+- **Code-exec images** (deterministic) — tool results matching the
+  code-exec shape persist each `images[]` entry to S3 under
+  `assets/chat/{chat_id}/{asset_id}` (`kind=image`,
+  `origin=tool_output`, `source.tool_use_id`). Live base64-over-SSE
+  rendering is unchanged; persistence is additive.
+- **Fenced-code extraction** (the ONLY heuristic) — post-stream, in
+  the same slot as the auto-titler: fenced code blocks ≥ 15 body
+  lines (mermaid excluded — #278 renders those inline) become
+  `kind=code` assets with `source.fence_index` (0-based ordinal over
+  ALL fences in the message) and `source.lang`. Message text persists
+  UNCHANGED — the SPA swaps fence → card by ordinal. Kill-switch:
+  `STARTER_ASSET_EXTRACTION_ENABLED` (default `"1"`; gates the
+  heuristic only).
+
+SSE vocabulary (`strands_sse.py`): `asset_created` / `asset_updated`
+frames carry `{"type": ..., "asset": <card descriptor>}` where the
+descriptor is `{asset_id, chat_id, msg_id, kind, title, mime,
+size_bytes, origin, created_at, source}` — no payload bytes on the
+wire; the SPA fetches content via the `/api/chats/{chat_id}/assets`
+surface (#325). Frames are emitted only AFTER the row persists —
+a rendered card is always durable. Generated-asset frames arrive
+after `done` (post-stream slot); upload projections right after
+`user_persisted`. Failures are fail-soft per asset:
+`asset.persist_failed` log line + `AssetPersistFailures` EMF counter,
+never a broken stream.
+
+**Asset content never reaches AgentCore Memory** — code-exec images
+ride `toolResult` blocks (stripped), uploads ride `document`/`image`
+blocks (no `text` key — dropped), extraction never mutates the
+agent's message list. Pinned by
+`tests/unit/test_memory.py::test_payload_from_messages_never_leaks_asset_content`.
+
 ## AgentCore Memory
 
 Phase 7c onward, every chat turn is persisted to a Bedrock AgentCore

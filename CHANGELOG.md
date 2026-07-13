@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Asset producers + `asset_created` SSE (#326, epic #321). Chats now
+  persist their assets: verified uploads project into `origin=upload`
+  ASSET rows at message-send (same S3 object, no byte copy), code-exec
+  output images persist to S3 under `assets/chat/{chat_id}/{asset_id}`
+  as `origin=tool_output`, and — behind the
+  `STARTER_ASSET_EXTRACTION_ENABLED` kill-switch — fenced code blocks
+  of 15+ lines (mermaid excluded) in the settled assistant text become
+  `kind=code` assets with `source.fence_index` for a deterministic
+  fence → card swap. New `asset_created` / `asset_updated` SSE frames
+  carry the inline-card descriptor, emitted only after the row
+  persists; message text is never mutated, and asset content never
+  reaches AgentCore Memory (pinned by a regression test).
 - MCP-server registry + per-chat selection. Users can register external
   Model Context Protocol servers from `/app/customize`; each chat
   inherits the globally-enabled set or opts into an explicit list via a

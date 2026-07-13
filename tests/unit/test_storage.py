@@ -2781,3 +2781,38 @@ def test_delete_asset_skips_s3_when_bucket_missing_on_unvalidated_instance(
 
     assert s3_client.deleted == []
     assert ("CHAT#c-hollow", f"ASSET#{hollow.created_at}#a-hollow") not in table.items
+
+
+def test_put_asset_bytes_writes_kms_encrypted_object_and_returns_coords(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#326 — server-side asset payload writes land under the
+    ``assets/chat/{chat_id}/{asset_id}`` prefix with the same
+    ``aws:kms`` SSE the presign path uses, and hand back the (bucket,
+    key) pair the producer stamps onto the ASSET row."""
+    from channel import storage
+
+    calls: list[dict[str, Any]] = []
+
+    class _PutOnlyS3:
+        def put_object(self, **kwargs: Any) -> dict[str, Any]:
+            calls.append(kwargs)
+            return {}
+
+    monkeypatch.setattr("channel.storage._get_s3_client", lambda: _PutOnlyS3())
+    monkeypatch.setenv("STARTER_ATTACHMENTS_BUCKET", "channel-attachments-test")
+
+    bucket, key = storage.put_asset_bytes(
+        chat_id="c-1", asset_id="a-1", data=b"\x89PNG", mime="image/png"
+    )
+
+    assert (bucket, key) == ("channel-attachments-test", "assets/chat/c-1/a-1")
+    assert calls == [
+        {
+            "Bucket": "channel-attachments-test",
+            "Key": "assets/chat/c-1/a-1",
+            "Body": b"\x89PNG",
+            "ContentType": "image/png",
+            "ServerSideEncryption": "aws:kms",
+        }
+    ]

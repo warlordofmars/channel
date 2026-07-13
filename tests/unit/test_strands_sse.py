@@ -896,3 +896,50 @@ def test_sse_error_truncates_message_at_500():
     payload = json.loads(raw[6:-2])
     assert len(payload["message"]) == 500
     assert payload["retryable"] is False
+
+
+def test_sse_asset_created_wraps_descriptor_under_asset_key():
+    """#326 — the asset_created frame carries the full inline-card
+    descriptor (decision Q4) nested under ``asset``, with no payload
+    coordinates. This is the exact wire shape #327's card renderer
+    consumes."""
+    from channel.agents.strands_sse import sse_asset_created
+
+    descriptor = {
+        "asset_id": "a-1",
+        "chat_id": "c-1",
+        "msg_id": "m-1",
+        "kind": "code",
+        "title": "fib.py",
+        "mime": "text/plain",
+        "size_bytes": 321,
+        "origin": "generated",
+        "created_at": "2026-07-13T00:00:00.000000+00:00",
+        "source": {"msg_id": "m-1", "fence_index": 0, "lang": "python"},
+    }
+    raw = sse_asset_created(descriptor)
+    assert raw.startswith(b"data: ")
+    assert raw.endswith(b"\n\n")
+    payload = json.loads(raw[6:-2])
+    assert payload == {"type": "asset_created", "asset": descriptor}
+
+
+def test_sse_asset_updated_mirrors_created_shape():
+    """#326 — reserved regenerate-flow vocabulary; same descriptor
+    contract as ``asset_created``."""
+    from channel.agents.strands_sse import sse_asset_updated
+
+    descriptor = {
+        "asset_id": "a-2",
+        "chat_id": "c-1",
+        "msg_id": "m-2",
+        "kind": "image",
+        "title": "Figure 1",
+        "mime": "image/png",
+        "size_bytes": 2048,
+        "origin": "tool_output",
+        "created_at": "2026-07-13T00:00:01.000000+00:00",
+        "source": {"msg_id": "m-2", "tool_use_id": "t-1"},
+    }
+    payload = json.loads(sse_asset_updated(descriptor)[6:-2])
+    assert payload == {"type": "asset_updated", "asset": descriptor}

@@ -1066,6 +1066,35 @@ def put_asset(asset: Asset) -> None:
     _get_table().put_item(Item=_asset_item(asset))
 
 
+def put_asset_bytes(*, chat_id: str, asset_id: str, data: bytes, mime: str) -> tuple[str, str]:
+    """Write an asset's payload bytes to S3, returning ``(bucket, key)`` (#326).
+
+    Server-side producer counterpart to the presigned-PUT ingestion
+    path: generated payloads (code-exec images, oversized fence
+    bodies) land under the ``assets/chat/{chat_id}/{asset_id}`` prefix
+    of the existing attachments bucket (epic #321 decision Q2 — no new
+    bucket; prefix-scoped IAM grants landed with #324).
+    ``ServerSideEncryption="aws:kms"`` matches the presign params so
+    every object in the bucket rides the same CMK. No lifecycle
+    ``Tagging`` — assets are chat-scoped rows reaped by the delete
+    cascade / lazy expiry, not by the unreferenced-upload GC rule.
+
+    Errors propagate — callers (``channel.agents.asset_producers``)
+    wrap per-asset for fail-soft isolation.
+    """
+
+    bucket = os.environ["STARTER_ATTACHMENTS_BUCKET"]
+    key = f"assets/chat/{chat_id}/{asset_id}"
+    _get_s3_client().put_object(
+        Bucket=bucket,
+        Key=key,
+        Body=data,
+        ContentType=mime,
+        ServerSideEncryption="aws:kms",
+    )
+    return bucket, key
+
+
 def get_asset(*, chat_id: str, asset_id: str) -> Asset | None:
     """Look up one asset by ``(chat_id, asset_id)``. Returns None on miss.
 

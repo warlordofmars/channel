@@ -295,6 +295,15 @@ def _payload_from_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any
     (see ``src/channel/agents/tool_hooks.py``). Verified explicitly by
     ``tests/unit/test_memory.py::test_payload_from_messages_invariant_drops_tool_use_blocks``.
 
+    This same strip is the #326 asset-content memory guard (epic #321
+    derived decision): code-exec image payloads ride ``toolResult``
+    blocks (dropped here), upload payloads ride ``document`` /
+    ``image`` blocks (no ``"text"`` key — dropped by the text-only
+    join below), and fenced-code extraction runs post-stream on the
+    settled assistant text without ever mutating the agent's message
+    list. Pinned by
+    ``tests/unit/test_memory.py::test_payload_from_messages_never_leaks_asset_content``.
+
     Strands messages have shape
     ``{"role": str, "content": [{"text": str}, ...]}``. AgentCore's
     payload is a list of typed conversational entries with role

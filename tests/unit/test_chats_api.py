@@ -56,6 +56,20 @@ def _stub_get_prefs(monkeypatch: pytest.MonkeyPatch) -> None:
         lambda **_kwargs: (0, 0),
     )
 
+    # #326 — default the asset producers' storage seams to no-ops so
+    # legacy send-path tests (which now flow through the upload
+    # projection / post-stream extraction slots) never reach the real
+    # DynamoDB / S3 clients. Tests that assert producer behaviour
+    # override these inline.
+    monkeypatch.setattr("channel.storage.put_asset", lambda _asset: None)
+    monkeypatch.setattr(
+        "channel.storage.put_asset_bytes",
+        lambda *, chat_id, asset_id, data, mime: (
+            "channel-attachments-test",
+            f"assets/chat/{chat_id}/{asset_id}",
+        ),
+    )
+
     # #207 — default the MCP-registry resolver to "no servers" so legacy
     # chats_api tests that pre-date MCP don't need to stub each call
     # site. Tests exercising MCP-client behaviour override these inline.
@@ -4276,3 +4290,426 @@ def test_regenerate_skips_assistant_delete_when_tail_is_user(
     assert deleted_calls == []
     # Re-streams from the orphaned user turn.
     assert captured["prompt"] == "failed q"
+
+
+# ----------------------------------------------------------------
+# #326 — asset producers on the stream path
+# ----------------------------------------------------------------
+
+
+def _sse_events(body: str) -> list[dict[str, Any]]:
+    """Parse an SSE response body into its JSON event payloads."""
+    events: list[dict[str, Any]] = []
+    for chunk in body.split("\n\n"):
+        chunk = chunk.strip()
+        if chunk.startswith("data: "):
+            events.append(json.loads(chunk[len("data: ") :]))
+    return events
+
+
+def _event_index(events: list[dict[str, Any]], event_type: str) -> int:
+    return next(i for i, e in enumerate(events) if e["type"] == event_type)
+
+
+def _stub_turn_with_asset_capture(
+    monkeypatch: pytest.MonkeyPatch, *, reply_text: str
+) -> tuple[list[Any], list[Message]]:
+    """One-turn stream stubs + put_asset capture for the #326 tests.
+
+    Returns ``(captured_assets, persisted_messages)``. The chat has a
+    non-zero ``message_count`` so the auto-titler stays quiet.
+    """
+    chat = Chat(
+        chat_id="c1",
+        user_id="u-1",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="claude-sonnet-4-6",
+        message_count=2,
+    )
+    monkeypatch.setattr("channel.api.chats.storage.get_chat_by_id", lambda _: chat)
+    monkeypatch.setattr("channel.api.chats.storage.update_chat_index", lambda **_: None)
+    monkeypatch.setattr("channel.api.chats.storage.list_recent_messages", lambda *_a, **_kw: [])
+
+    persisted: list[Message] = []
+
+    def fake_put(**kwargs: Any) -> Message:
+        msg = Message(
+            chat_id=kwargs["chat_id"],
+            msg_id=f"m-{len(persisted)}",
+            role=kwargs["role"],
+            text=kwargs["text"],
+            model=kwargs.get("model"),
+            created_at="t",
+        )
+        persisted.append(msg)
+        return msg
+
+    monkeypatch.setattr("channel.api.chats.storage.put_message", fake_put)
+
+    captured_assets: list[Any] = []
+    monkeypatch.setattr("channel.storage.put_asset", lambda asset: captured_assets.append(asset))
+
+    async def fake_stream(self, prompt):
+        yield {"event": {"contentBlockDelta": {"delta": {"text": reply_text}}}}
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+        yield {"event": {"metadata": {"usage": {"inputTokens": 1, "outputTokens": 1}}}}
+
+    class FakeAgent:
+        stream_async = fake_stream
+
+    monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
+    return captured_assets, persisted
+
+
+_FENCE_BODY = "\n".join(f"print({i})" for i in range(16))
+_FENCED_REPLY = f"Here you go:\n\n```python\n{_FENCE_BODY}\n```\nDone."
+
+
+def test_post_message_extracts_fence_asset_and_emits_asset_created(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A >= 15-line non-mermaid fence in the settled assistant text
+    persists as a ``kind=code`` asset and announces itself via an
+    ``asset_created`` frame AFTER ``done`` (the post-stream slot),
+    while the persisted message text keeps the fence verbatim."""
+    monkeypatch.delenv("STARTER_ASSET_EXTRACTION_ENABLED", raising=False)
+    captured_assets, persisted = _stub_turn_with_asset_capture(
+        monkeypatch, reply_text=_FENCED_REPLY
+    )
+
+    response = client.post("/api/chats/c1/messages", json={"message": "write code"})
+    assert response.status_code == 200
+    events = _sse_events(response.text)
+
+    (asset_event,) = [e for e in events if e["type"] == "asset_created"]
+    assert _event_index(events, "done") < _event_index(events, "asset_created")
+    descriptor = asset_event["asset"]
+    assert descriptor["kind"] == "code"
+    assert descriptor["origin"] == "generated"
+    assert descriptor["msg_id"] == "m-1"  # the assistant turn
+    assert descriptor["chat_id"] == "c1"
+    assert descriptor["title"] == "Code — python"
+    assert descriptor["source"] == {"msg_id": "m-1", "fence_index": 0, "lang": "python"}
+    # No payload coordinates on the wire.
+    assert "content" not in descriptor
+
+    (asset,) = captured_assets
+    assert asset.content == _FENCE_BODY
+    assert asset.owner == "u-1"
+
+    # Message text persists UNCHANGED — the fence stays in the
+    # transcript for the deterministic fence -> card swap.
+    assert persisted[1].text == _FENCED_REPLY
+
+
+def test_post_message_fence_kill_switch_off_emits_no_asset_frames(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("STARTER_ASSET_EXTRACTION_ENABLED", "0")
+    captured_assets, persisted = _stub_turn_with_asset_capture(
+        monkeypatch, reply_text=_FENCED_REPLY
+    )
+
+    response = client.post("/api/chats/c1/messages", json={"message": "write code"})
+    assert response.status_code == 200
+    events = _sse_events(response.text)
+
+    assert [e for e in events if e["type"] == "asset_created"] == []
+    assert captured_assets == []
+    # The reply itself is untouched by the kill-switch.
+    assert persisted[1].text == _FENCED_REPLY
+
+
+def test_post_message_persists_code_exec_images_as_assets_after_done(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Code-exec ``images[]`` harvested mid-stream persist as
+    ``origin=tool_output`` assets in the post-stream slot, keyed to the
+    assistant msg_id, without disturbing the live base64-over-SSE
+    rendering in ``tool_finished``."""
+    monkeypatch.delenv("STARTER_ASSET_EXTRACTION_ENABLED", raising=False)
+    png_bytes = b"\x89PNG-fake"
+    b64 = base64.b64encode(png_bytes).decode()
+    code_exec_payload = json.dumps(
+        {
+            "stdout": "plotted",
+            "stderr": "",
+            "exit_code": 0,
+            "duration_ms": 12,
+            "truncated": False,
+            "timed_out": False,
+            "images": [{"mime": "image/png", "b64": b64}],
+        }
+    )
+
+    chat = Chat(
+        chat_id="c1",
+        user_id="u-1",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="claude-sonnet-4-6",
+        message_count=2,
+    )
+    monkeypatch.setattr("channel.api.chats.storage.get_chat_by_id", lambda _: chat)
+    monkeypatch.setattr("channel.api.chats.storage.update_chat_index", lambda **_: None)
+    monkeypatch.setattr("channel.api.chats.storage.list_recent_messages", lambda *_a, **_kw: [])
+
+    persisted: list[Message] = []
+
+    def fake_put(**kwargs: Any) -> Message:
+        msg = Message(
+            chat_id=kwargs["chat_id"],
+            msg_id=f"m-{len(persisted)}",
+            role=kwargs["role"],
+            text=kwargs["text"],
+            created_at="t",
+        )
+        persisted.append(msg)
+        return msg
+
+    monkeypatch.setattr("channel.api.chats.storage.put_message", fake_put)
+
+    captured_assets: list[Any] = []
+    monkeypatch.setattr("channel.storage.put_asset", lambda asset: captured_assets.append(asset))
+    put_bytes_calls: list[dict[str, Any]] = []
+
+    def fake_put_bytes(*, chat_id: str, asset_id: str, data: bytes, mime: str) -> tuple[str, str]:
+        put_bytes_calls.append({"chat_id": chat_id, "data": data, "mime": mime})
+        return "channel-attachments-test", f"assets/chat/{chat_id}/{asset_id}"
+
+    monkeypatch.setattr("channel.storage.put_asset_bytes", fake_put_bytes)
+
+    async def fake_stream(self, prompt):
+        yield {
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "toolResult": {
+                            "toolUseId": "t-exec",
+                            "status": "success",
+                            "content": [{"text": code_exec_payload}],
+                        }
+                    }
+                ],
+            }
+        }
+        yield {"event": {"contentBlockDelta": {"delta": {"text": "Here's the plot."}}}}
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+        yield {"event": {"metadata": {"usage": {"inputTokens": 1, "outputTokens": 1}}}}
+
+    class FakeAgent:
+        stream_async = fake_stream
+
+    monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
+
+    response = client.post("/api/chats/c1/messages", json={"message": "plot it"})
+    assert response.status_code == 200
+    events = _sse_events(response.text)
+
+    # Live rendering unchanged: tool_finished still carries the parsed
+    # code-exec payload (base64 included) for the in-flight turn.
+    (tool_finished,) = [e for e in events if e["type"] == "tool_finished"]
+    assert tool_finished["kind"] == "code-output"
+    assert tool_finished["payload"]["images"][0]["b64"] == b64
+
+    (asset_event,) = [e for e in events if e["type"] == "asset_created"]
+    assert _event_index(events, "done") < _event_index(events, "asset_created")
+    descriptor = asset_event["asset"]
+    assert descriptor["kind"] == "image"
+    assert descriptor["origin"] == "tool_output"
+    assert descriptor["mime"] == "image/png"
+    assert descriptor["title"] == "Figure 1"
+    assert descriptor["msg_id"] == "m-1"
+    assert descriptor["source"] == {"msg_id": "m-1", "tool_use_id": "t-exec"}
+    assert descriptor["size_bytes"] == len(png_bytes)
+
+    assert put_bytes_calls == [{"chat_id": "c1", "data": png_bytes, "mime": "image/png"}]
+    (asset,) = captured_assets
+    assert asset.s3_key == f"assets/chat/c1/{asset.asset_id}"
+
+
+def test_post_message_projects_upload_assets_after_user_persisted(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verified attachments project into ``origin=upload`` ASSET rows
+    referencing the SAME S3 object, announced right after
+    ``user_persisted`` (before the model reply begins)."""
+    chat = Chat(
+        chat_id="c-att-asset",
+        user_id="u-1",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="claude-sonnet-4-6",
+        message_count=2,
+    )
+    owned = {
+        "att-png": _att_model(
+            id="att-png",
+            name="screenshot.png",
+            mime="image/png",
+            size_bytes=204_800,
+            s3_key="attachments/user/u-1/att-png",
+        ),
+    }
+    _stub_send_path_for_attachments(monkeypatch, chat=chat, owned=owned)
+    captured_assets: list[Any] = []
+    monkeypatch.setattr("channel.storage.put_asset", lambda asset: captured_assets.append(asset))
+
+    response = client.post(
+        "/api/chats/c-att-asset/messages",
+        json={"message": "look", "attachments": [{"id": "att-png"}]},
+    )
+    assert response.status_code == 200
+    events = _sse_events(response.text)
+
+    (asset_event,) = [e for e in events if e["type"] == "asset_created"]
+    assert (
+        _event_index(events, "user_persisted")
+        < _event_index(events, "asset_created")
+        < _event_index(events, "done")
+    )
+    descriptor = asset_event["asset"]
+    assert descriptor["kind"] == "image"
+    assert descriptor["origin"] == "upload"
+    assert descriptor["title"] == "screenshot.png"
+    assert descriptor["mime"] == "image/png"
+    assert descriptor["size_bytes"] == 204_800
+    assert descriptor["msg_id"] == "m-0"  # the USER turn, not the assistant
+    assert descriptor["source"] == {"msg_id": "m-0", "attachment_id": "att-png"}
+
+    (asset,) = captured_assets
+    # Metadata projection — the ASSET row points at the attachment's
+    # existing S3 object; no byte copy.
+    assert asset.s3_bucket == "channel-attachments-test"
+    assert asset.s3_key == "attachments/user/u-1/att-png"
+    assert asset.content is None
+
+
+def test_regenerate_does_not_reproject_upload_assets(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The upload projection fires on the original send only — the
+    regenerate path replays attachments to the model but must not
+    duplicate their ASSET rows."""
+    chat = Chat(
+        chat_id="c-regen",
+        user_id="u-1",
+        title="t",
+        created_at="t",
+        last_message_at="t",
+        model_default="claude-sonnet-4-6",
+        message_count=2,
+    )
+    owned = {"att-png": _att_model(id="att-png", name="s.png", mime="image/png")}
+    _stub_send_path_for_attachments(monkeypatch, chat=chat, owned=owned)
+    monkeypatch.setattr(
+        "channel.api.chats.storage.list_recent_messages",
+        lambda *_a, **_kw: [
+            Message(
+                chat_id="c-regen",
+                msg_id="m-user",
+                role=MessageRole.USER,
+                text="look",
+                attachments=[{"id": "att-png", "name": "s.png"}],
+                created_at="t",
+            ),
+            Message(
+                chat_id="c-regen",
+                msg_id="m-old",
+                role=MessageRole.ASSISTANT,
+                text="old reply",
+                created_at="t",
+            ),
+        ],
+    )
+    monkeypatch.setattr(
+        "channel.api.chats.storage.delete_last_assistant_message", lambda _chat_id: None
+    )
+    captured_assets: list[Any] = []
+    monkeypatch.setattr("channel.storage.put_asset", lambda asset: captured_assets.append(asset))
+
+    response = client.post("/api/chats/c-regen/regenerate", json={})
+    assert response.status_code == 200
+    events = _sse_events(response.text)
+
+    assert [e for e in events if e["type"] == "asset_created"] == []
+    assert captured_assets == []
+
+
+def test_post_message_stream_error_persists_no_generated_assets(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#310 composition: a failed stream returns before the assistant
+    persist, so no generated asset is written and no ``asset_created``
+    frame is emitted — even though fence-shaped text was already
+    accumulated."""
+    monkeypatch.delenv("STARTER_ASSET_EXTRACTION_ENABLED", raising=False)
+    captured_assets, persisted = _stub_turn_with_asset_capture(
+        monkeypatch, reply_text=_FENCED_REPLY
+    )
+
+    async def failing_stream(self, prompt):
+        yield {"event": {"contentBlockDelta": {"delta": {"text": _FENCED_REPLY}}}}
+        raise RuntimeError("bedrock exploded")
+
+    class FailingAgent:
+        stream_async = failing_stream
+
+    monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FailingAgent())
+
+    response = client.post("/api/chats/c1/messages", json={"message": "write code"})
+    assert response.status_code == 200
+    events = _sse_events(response.text)
+
+    assert any(e["type"] == "error" for e in events)
+    assert [e for e in events if e["type"] == "asset_created"] == []
+    assert captured_assets == []
+    # Only the user turn persisted — the failed assistant turn leaves
+    # no message row, hence nothing for the producers to key on.
+    assert [m.role for m in persisted] == [MessageRole.USER]
+
+
+def test_collect_code_exec_images_harvests_code_output_payloads() -> None:
+    from channel.api.chats import _collect_code_exec_images
+
+    sink: list[tuple[str, list[dict[str, Any]]]] = []
+    images = [{"mime": "image/png", "b64": "QQ=="}]
+    _collect_code_exec_images(
+        {
+            "tool_use_id": "t-1",
+            "summary": "completed",
+            "kind": "code-output",
+            "payload": {"stdout": "ok", "images": images},
+        },
+        sink,
+    )
+    assert sink == [("t-1", images)]
+
+
+def test_collect_code_exec_images_ignores_non_code_output() -> None:
+    from channel.api.chats import _collect_code_exec_images
+
+    sink: list[tuple[str, list[dict[str, Any]]]] = []
+    _collect_code_exec_images({"tool_use_id": "t-1", "summary": "completed"}, sink)
+    assert sink == []
+
+
+def test_collect_code_exec_images_ignores_empty_images_list() -> None:
+    from channel.api.chats import _collect_code_exec_images
+
+    sink: list[tuple[str, list[dict[str, Any]]]] = []
+    _collect_code_exec_images(
+        {
+            "tool_use_id": "t-1",
+            "summary": "completed",
+            "kind": "code-output",
+            "payload": {"stdout": "ok", "images": []},
+        },
+        sink,
+    )
+    assert sink == []
