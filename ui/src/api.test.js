@@ -6,6 +6,8 @@ import {
   deleteChat,
   deleteMCPServer,
   finalizeAttachment,
+  getAdminMetricsSummary,
+  getAdminMetricsTimeseries,
   getAdminUser,
   getAdminUsers,
   getChat,
@@ -841,5 +843,74 @@ describe("admin API client", () => {
     expect(err).toBeInstanceOf(ApiError);
     expect(err.status).toBe(404);
     expect(err.detail).toBe("User not found");
+  });
+
+  it("getAdminMetricsSummary GETs the summary endpoint with auth", async () => {
+    const body = { today: {}, "7d": {}, "30d": {} };
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve(body),
+    });
+    const data = await getAdminMetricsSummary();
+    const [url, opts] = fetchMock.mock.calls[0];
+    expect(url).toBe("/api/admin/metrics/summary");
+    expect(opts.headers.Authorization).toBe("Bearer test-token");
+    expect(data).toEqual(body);
+  });
+
+  it("getAdminMetricsSummary surfaces a 503 as an ApiError with the detail body", async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+      json: () => Promise.resolve({ detail: { error: "metrics_unavailable" } }),
+    });
+    const err = await getAdminMetricsSummary().catch((e) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err.status).toBe(503);
+    expect(err.detail).toEqual({ error: "metrics_unavailable" });
+  });
+
+  it("getAdminMetricsTimeseries GETs metric + window and omits an unset bucket", async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ points: [] }),
+    });
+    await getAdminMetricsTimeseries({ metric: "ToolCallSuccesses", window: "7d" });
+    const [url, opts] = fetchMock.mock.calls[0];
+    expect(url).toBe(
+      "/api/admin/metrics/timeseries?metric=ToolCallSuccesses&window=7d",
+    );
+    expect(opts.headers.Authorization).toBe("Bearer test-token");
+  });
+
+  it("getAdminMetricsTimeseries appends the bucket when one is supplied", async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ points: [] }),
+    });
+    await getAdminMetricsTimeseries({
+      metric: "MemoryWriteSuccesses",
+      window: "24h",
+      bucket: "5m",
+    });
+    const [url] = fetchMock.mock.calls[0];
+    expect(url).toBe(
+      "/api/admin/metrics/timeseries?metric=MemoryWriteSuccesses&window=24h&bucket=5m",
+    );
+  });
+
+  it("getAdminMetricsTimeseries throws ApiError 422 for an unknown metric", async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 422,
+      json: () => Promise.resolve({ detail: "unknown metric" }),
+    });
+    const err = await getAdminMetricsTimeseries({
+      metric: "NopeCounter",
+      window: "7d",
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err.status).toBe(422);
+    expect(err.detail).toBe("unknown metric");
   });
 });

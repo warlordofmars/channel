@@ -7,6 +7,7 @@ import { useChannelPrefs } from "./hooks/useChannelPrefs.js";
 import { ChatsProvider } from "./hooks/ChatsContext.jsx";
 import AdminHome from "./app/admin/AdminHome.jsx";
 import AdminLayout from "./app/admin/AdminLayout.jsx";
+import Dashboard from "./app/admin/Dashboard.jsx";
 import Artifacts from "./app/views/Artifacts.jsx";
 import ChatHome from "./app/ChatHome.jsx";
 import Conversation from "./app/Conversation.jsx";
@@ -28,25 +29,6 @@ import Pricing from "./marketing/pages/Pricing.jsx";
 import Privacy from "./marketing/pages/Privacy.jsx";
 import Product from "./marketing/pages/Product.jsx";
 
-
-/**
- * Placeholder for the admin dashboard child route whose real view
- * lands in #239. That issue replaces the `<AdminPlaceholder />`
- * element in the route table below with its component — the route
- * path and the AdminLayout nesting are already final.
- */
-function AdminPlaceholder({ title, testid }) {
-  return (
-    <div className="view">
-      <div className="view-inner">
-        <div className="view-head" data-testid={testid}>
-          <h2>{title}</h2>
-          <p>Coming soon.</p>
-        </div>
-      </div>
-    </div>
-  );
-}
 
 /**
  * Layout for every authenticated `/app/*` route. Mounts the AuthGate +
@@ -99,7 +81,7 @@ export default function App() {
               <Route path="/app/admin"           element={<AdminHome />} />
               <Route path="/app/admin/users"     element={<Users />} />
               <Route path="/app/admin/users/:id" element={<UserDetail />} />
-              <Route path="/app/admin/dashboard" element={<AdminPlaceholder title="Dashboard" testid="admin-dashboard-placeholder" />} />
+              <Route path="/app/admin/dashboard" element={<Dashboard />} />
             </Route>
           </Route>
 
