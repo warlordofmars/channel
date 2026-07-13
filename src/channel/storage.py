@@ -1095,6 +1095,22 @@ def put_asset_bytes(*, chat_id: str, asset_id: str, data: bytes, mime: str) -> t
     return bucket, key
 
 
+def delete_asset_object(*, bucket: str, key: str) -> None:
+    """Delete one produced S3 object by raw coordinates (#326).
+
+    Compensating cleanup for the producer path: when
+    :func:`put_asset_bytes` succeeded but the subsequent ASSET row
+    write failed, the object has no row — which makes it invisible to
+    both the chat-delete cascade and the lazy-expiry reap (each
+    discovers objects via rows), and the ``assets/chat/*`` prefix has
+    no lifecycle GC tag. Without this delete, transient DynamoDB
+    errors would grow S3 unboundedly. Errors propagate; the caller
+    (``channel.agents.asset_producers``) wraps best-effort.
+    """
+
+    _get_s3_client().delete_object(Bucket=bucket, Key=key)
+
+
 def get_asset(*, chat_id: str, asset_id: str) -> Asset | None:
     """Look up one asset by ``(chat_id, asset_id)``. Returns None on miss.
 

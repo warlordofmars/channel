@@ -2816,3 +2816,22 @@ def test_put_asset_bytes_writes_kms_encrypted_object_and_returns_coords(
             "ServerSideEncryption": "aws:kms",
         }
     ]
+
+
+def test_delete_asset_object_deletes_by_raw_coordinates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#326 — compensating cleanup for produced objects whose ASSET row
+    write failed; a row-less object is invisible to the cascade/reap."""
+    from channel import storage
+
+    calls: list[tuple[str, str]] = []
+
+    class _DeleteOnlyS3:
+        def delete_object(self, *, Bucket: str, Key: str) -> dict[str, Any]:
+            calls.append((Bucket, Key))
+            return {}
+
+    monkeypatch.setattr("channel.storage._get_s3_client", lambda: _DeleteOnlyS3())
+    storage.delete_asset_object(bucket="channel-attachments-test", key="assets/chat/c-1/a-1")
+    assert calls == [("channel-attachments-test", "assets/chat/c-1/a-1")]

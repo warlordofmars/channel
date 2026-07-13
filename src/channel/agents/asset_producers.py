@@ -248,6 +248,34 @@ async def _record_persist_failure(*, producer: str, chat_id: str, exc: Exception
     await _record_outcome_safe(success=False)
 
 
+def _cleanup_orphaned_object(*, chat_id: str, s3_bucket: str | None, s3_key: str | None) -> None:
+    """Best-effort compensating delete for a PRODUCED S3 object whose
+    ASSET row write failed (Copilot round 2).
+
+    A row-less object under ``assets/chat/*`` is invisible to both the
+    chat-delete cascade and the lazy-expiry reap (each discovers
+    objects via rows) and carries no lifecycle GC tag — without this,
+    transient DynamoDB errors would leak S3 objects unboundedly.
+
+    Only called with coordinates returned by ``put_asset_bytes`` —
+    NEVER for upload projections, whose S3 object belongs to the
+    canonical ATTACHMENT row and must survive a failed projection.
+    Cleanup failure is logged + swallowed: the persist failure is
+    already counted, and a doubly-failed delete just leaves the
+    (rare) orphan it was trying to prevent.
+    """
+    if s3_bucket is None or s3_key is None:
+        return
+    try:
+        storage.delete_asset_object(bucket=s3_bucket, key=s3_key)
+    except Exception:
+        logger.warning(
+            "asset.orphan_cleanup_failed chat_id_hash=%s",
+            fingerprint_id(chat_id),
+            exc_info=True,
+        )
+
+
 async def persist_upload_assets(
     *,
     chat_id: str,
@@ -333,6 +361,11 @@ async def persist_code_exec_image_assets(
             except (KeyError, TypeError, ValueError, binascii.Error) as exc:
                 await _record_persist_failure(producer="code_exec_image", chat_id=chat_id, exc=exc)
                 continue
+            # Re-initialised per image so a failure BEFORE this entry's
+            # S3 put can never trigger cleanup against a previous
+            # iteration's coordinates.
+            bucket: str | None = None
+            key: str | None = None
             try:
                 asset_id = str(uuid4())
                 mime = entry.get("mime", "application/octet-stream")
@@ -358,6 +391,7 @@ async def persist_code_exec_image_assets(
                 storage.put_asset(asset)
             except Exception as exc:
                 await _record_persist_failure(producer="code_exec_image", chat_id=chat_id, exc=exc)
+                _cleanup_orphaned_object(chat_id=chat_id, s3_bucket=bucket, s3_key=key)
                 continue
             await _record_outcome_safe(success=True)
             persisted.append(asset)
@@ -392,12 +426,15 @@ async def persist_fence_assets(
         return []
     persisted: list[Asset] = []
     for fence in _qualifying_fences(extract_code_fences(text)):
+        # Initialised OUTSIDE the try (and re-initialised per fence) so
+        # the except path can safely read the coordinates: set only
+        # when this fence's body actually landed in S3.
+        s3_bucket: str | None = None
+        s3_key: str | None = None
         try:
             asset_id = str(uuid4())
             body_bytes = fence.body.encode("utf-8")
             content: str | None = fence.body
-            s3_bucket: str | None = None
-            s3_key: str | None = None
             if len(body_bytes) > ASSET_INLINE_CONTENT_MAX_BYTES:
                 content = None
                 s3_bucket, s3_key = storage.put_asset_bytes(
@@ -427,6 +464,7 @@ async def persist_fence_assets(
             storage.put_asset(asset)
         except Exception as exc:
             await _record_persist_failure(producer="fence", chat_id=chat_id, exc=exc)
+            _cleanup_orphaned_object(chat_id=chat_id, s3_bucket=s3_bucket, s3_key=s3_key)
             continue
         await _record_outcome_safe(success=True)
         persisted.append(asset)

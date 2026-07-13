@@ -563,3 +563,146 @@ async def test_code_exec_image_non_alphabet_b64_rejected_strictly(
     assert put_bytes_capture == []
     assert put_asset_capture == []
     metrics.assert_awaited_once_with(success=False)
+
+
+# ----------------------------------------------------------------
+# Copilot review round 2 — S3 orphan cleanup on failed row writes
+# ----------------------------------------------------------------
+
+
+@pytest.fixture
+def delete_object_capture(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
+    captured: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "channel.agents.asset_producers.storage.delete_asset_object",
+        lambda *, bucket, key: captured.append((bucket, key)),
+    )
+    return captured
+
+
+@pytest.mark.asyncio
+async def test_code_exec_row_write_failure_cleans_up_s3_object(
+    monkeypatch: pytest.MonkeyPatch,
+    put_bytes_capture: list[dict[str, Any]],
+    delete_object_capture: list[tuple[str, str]],
+    metrics: AsyncMock,
+) -> None:
+    """put_asset_bytes succeeded but the row write failed: the produced
+    S3 object must be compensating-deleted — a row-less object is
+    invisible to the cascade and the reap."""
+
+    def exploding_put(_asset: Asset) -> None:
+        raise RuntimeError("ddb down")
+
+    monkeypatch.setattr("channel.agents.asset_producers.storage.put_asset", exploding_put)
+    persisted = await ap.persist_code_exec_image_assets(
+        chat_id="c-1",
+        owner="u-1",
+        msg_id="m-a",
+        images_by_tool=[
+            ("tool-1", [{"mime": "image/png", "b64": base64.b64encode(b"x").decode()}])
+        ],
+    )
+    assert persisted == []
+    assert len(put_bytes_capture) == 1
+    asset_id = put_bytes_capture[0]["asset_id"]
+    assert delete_object_capture == [("channel-attachments-test", f"assets/chat/c-1/{asset_id}")]
+    metrics.assert_awaited_once_with(success=False)
+
+
+@pytest.mark.asyncio
+async def test_code_exec_s3_put_failure_skips_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    delete_object_capture: list[tuple[str, str]],
+    metrics: AsyncMock,
+) -> None:
+    """When put_asset_bytes itself failed nothing landed in S3, so the
+    compensating delete must NOT fire."""
+
+    def failing_put_bytes(**_kwargs: Any) -> tuple[str, str]:
+        raise RuntimeError("s3 down")
+
+    monkeypatch.setattr("channel.agents.asset_producers.storage.put_asset_bytes", failing_put_bytes)
+    persisted = await ap.persist_code_exec_image_assets(
+        chat_id="c-1",
+        owner="u-1",
+        msg_id="m-a",
+        images_by_tool=[
+            ("tool-1", [{"mime": "image/png", "b64": base64.b64encode(b"x").decode()}])
+        ],
+    )
+    assert persisted == []
+    assert delete_object_capture == []
+
+
+@pytest.mark.asyncio
+async def test_fence_row_write_failure_cleans_up_oversized_s3_object(
+    monkeypatch: pytest.MonkeyPatch,
+    put_bytes_capture: list[dict[str, Any]],
+    delete_object_capture: list[tuple[str, str]],
+    metrics: AsyncMock,
+) -> None:
+    monkeypatch.delenv("STARTER_ASSET_EXTRACTION_ENABLED", raising=False)
+
+    def exploding_put(_asset: Asset) -> None:
+        raise RuntimeError("ddb down")
+
+    monkeypatch.setattr("channel.agents.asset_producers.storage.put_asset", exploding_put)
+    line = "x" * ((ASSET_INLINE_CONTENT_MAX_BYTES // 15) + 1)
+    body = "\n".join([line] * 15)
+    persisted = await ap.persist_fence_assets(
+        chat_id="c-1", owner="u-1", msg_id="m-a", text=f"```python\n{body}\n```"
+    )
+    assert persisted == []
+    assert len(put_bytes_capture) == 1
+    asset_id = put_bytes_capture[0]["asset_id"]
+    assert delete_object_capture == [("channel-attachments-test", f"assets/chat/c-1/{asset_id}")]
+
+
+@pytest.mark.asyncio
+async def test_fence_inline_failure_does_not_touch_s3(
+    monkeypatch: pytest.MonkeyPatch,
+    delete_object_capture: list[tuple[str, str]],
+    metrics: AsyncMock,
+) -> None:
+    """Inline-content fences never wrote to S3, so a failed row write
+    must not fire the compensating delete (coords are None)."""
+    monkeypatch.delenv("STARTER_ASSET_EXTRACTION_ENABLED", raising=False)
+
+    def exploding_put(_asset: Asset) -> None:
+        raise RuntimeError("ddb down")
+
+    monkeypatch.setattr("channel.agents.asset_producers.storage.put_asset", exploding_put)
+    persisted = await ap.persist_fence_assets(
+        chat_id="c-1", owner="u-1", msg_id="m-a", text=_fence(15)
+    )
+    assert persisted == []
+    assert delete_object_capture == []
+
+
+@pytest.mark.asyncio
+async def test_orphan_cleanup_failure_is_swallowed(
+    monkeypatch: pytest.MonkeyPatch,
+    put_bytes_capture: list[dict[str, Any]],
+    metrics: AsyncMock,
+) -> None:
+    """A doubly-failed cleanup (row write AND compensating delete both
+    raise) still leaves the producer loop intact."""
+    monkeypatch.delenv("STARTER_ASSET_EXTRACTION_ENABLED", raising=False)
+
+    def exploding_put(_asset: Asset) -> None:
+        raise RuntimeError("ddb down")
+
+    def exploding_delete(*, bucket: str, key: str) -> None:
+        raise RuntimeError("s3 also down")
+
+    monkeypatch.setattr("channel.agents.asset_producers.storage.put_asset", exploding_put)
+    monkeypatch.setattr(
+        "channel.agents.asset_producers.storage.delete_asset_object", exploding_delete
+    )
+    line = "x" * ((ASSET_INLINE_CONTENT_MAX_BYTES // 15) + 1)
+    body = "\n".join([line] * 15)
+    persisted = await ap.persist_fence_assets(
+        chat_id="c-1", owner="u-1", msg_id="m-a", text=f"```python\n{body}\n```"
+    )
+    assert persisted == []
