@@ -201,8 +201,12 @@ def test_api_lambda_role_grants_cloudwatch_read(dev_template):
             if isinstance(actions, str):
                 actions = [actions]
             if "cloudwatch:GetMetricData" in actions:
-                assert stmt.get("Resource") == "*", (
-                    f"GetMetricData statement resource must be '*', got {stmt.get('Resource')}"
+                # CDK may emit Resource as a bare string or a
+                # single-element list; accept both shapes.
+                resource = stmt.get("Resource")
+                resources = resource if isinstance(resource, list) else [resource]
+                assert resources == ["*"], (
+                    f"GetMetricData statement resource must be '*', got {resource}"
                 )
                 found = True
     assert found, "cloudwatch:GetMetricData missing from API Lambda role policies"
