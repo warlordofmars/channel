@@ -315,3 +315,35 @@ def test_record_asset_lazy_expiry_reaps_signature_locks_out_dimensions():
     sig = inspect.signature(record_asset_lazy_expiry_reaps)
     assert list(sig.parameters.keys()) == ["reaped", "failed"]
     assert all(p.annotation == "int" for p in sig.parameters.values())
+
+
+@pytest.mark.asyncio
+async def test_record_asset_persist_outcome_success_emits_success_counter():
+    from channel.metrics import record_asset_persist_outcome
+
+    with patch("channel.metrics.emit_metric", new=AsyncMock()) as mock_emit:
+        await record_asset_persist_outcome(success=True)
+
+    mock_emit.assert_awaited_once_with("AssetPersistSuccesses")
+
+
+@pytest.mark.asyncio
+async def test_record_asset_persist_outcome_failure_emits_failure_counter():
+    from channel.metrics import record_asset_persist_outcome
+
+    with patch("channel.metrics.emit_metric", new=AsyncMock()) as mock_emit:
+        await record_asset_persist_outcome(success=False)
+
+    mock_emit.assert_awaited_once_with("AssetPersistFailures")
+
+
+def test_record_asset_persist_outcome_signature_locks_out_dimensions():
+    """Same cardinality rule as the memory-write counters — no kwargs
+    path for per-actor / per-chat / per-producer dimensions (#326)."""
+    from channel.metrics import record_asset_persist_outcome
+
+    sig = inspect.signature(record_asset_persist_outcome)
+    assert list(sig.parameters.keys()) == ["success"]
+    param = sig.parameters["success"]
+    assert param.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+    assert param.annotation == "bool"

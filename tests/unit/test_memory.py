@@ -495,3 +495,91 @@ async def test_write_meta_event_swallows_client_exceptions():
     # the async helper, not propagated here.
     while hook._pending_writes:
         await _asyncio.sleep(0)
+
+
+def test_payload_from_messages_never_leaks_asset_content():
+    """#326 asset-content memory guard (epic #321 derived decision):
+    asset CONTENT must never reach AgentCore Memory.
+
+    Pins the three producer surfaces against the serializer:
+
+    1. Code-exec image payloads (base64 in ``toolResult`` content) —
+       dropped by the toolResult strip.
+    2. Upload payloads (``document`` / ``image`` content blocks carrying
+       raw bytes on the send path) — dropped by the text-only join.
+    3. Fenced-code extraction — runs post-stream on the settled text and
+       never mutates the agent's message list; the message list fed to
+       the serializer here is byte-identical before and after the
+       producers module is exercised (extraction is a pure read).
+
+    Only conversational text (including the attachment header label,
+    which is metadata, and the assistant's own prose) may survive.
+    """
+    import json as _json
+
+    from channel.agents import asset_producers as _ap
+
+    image_b64_marker = "aW1hZ2UtYnl0ZXMtbWFya2Vy"  # "image-bytes-marker"
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"text": "[attachment_1: plot.png, 0.1MB, image]"},
+                {"image": {"format": "png", "source": {"bytes": b"raw-upload-bytes"}}},
+                {"document": {"format": "pdf", "name": "spec", "source": {"bytes": b"pdf"}}},
+                {"text": "please chart this"},
+            ],
+        },
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "toolResult": {
+                        "toolUseId": "t-1",
+                        "status": "success",
+                        "content": [
+                            {
+                                "text": _json.dumps(
+                                    {
+                                        "stdout": "ok",
+                                        "stderr": "",
+                                        "exit_code": 0,
+                                        "duration_ms": 5,
+                                        "truncated": False,
+                                        "timed_out": False,
+                                        "images": [{"mime": "image/png", "b64": image_b64_marker}],
+                                    }
+                                )
+                            }
+                        ],
+                    }
+                },
+                {"text": "Here is the chart."},
+            ],
+        },
+    ]
+    snapshot = repr(messages)
+
+    # Exercise the extraction producer on the assistant text the way the
+    # post-stream slot does — it must not mutate the message list.
+    fences = _ap.extract_code_fences("Here is the chart.")
+    assert fences == []
+    assert repr(messages) == snapshot
+
+    payload = _payload_from_messages(messages)
+
+    # Text-only survivors: the attachment label + prose.
+    assert payload[0]["conversational"]["content"]["text"] == (
+        "[attachment_1: plot.png, 0.1MB, image]please chart this"
+    )
+    assert payload[1]["conversational"]["content"]["text"] == "Here is the chart."
+
+    # No asset payload bytes / base64 anywhere in the serialized event.
+    serialized = _json.dumps(payload)
+    assert image_b64_marker not in serialized
+    assert "raw-upload-bytes" not in serialized
+
+    # No asset-bearing block keys at any depth.
+    _assert_no_block_keys(
+        payload, forbidden=("toolUse", "toolResult", "document", "image", "images")
+    )

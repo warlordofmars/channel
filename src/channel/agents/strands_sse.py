@@ -358,6 +358,34 @@ def sse_follow_ups_suggested(*, chat_id: str, message_id: str, suggestions: list
     )
 
 
+def sse_asset_created(asset: dict[str, Any]) -> bytes:
+    """Emit an ``asset_created`` SSE event (#326, epic #321 decision Q3).
+
+    ``asset`` is the full inline-card descriptor built by
+    ``channel.agents.asset_producers.asset_card_descriptor``:
+    ``{asset_id, chat_id, msg_id, kind, title, mime, size_bytes,
+    origin, created_at, source}``. Payload bytes are NOT on the frame —
+    the SPA fetches content via the #325 asset content endpoint.
+
+    Contract: emitted only AFTER the ASSET row has persisted, so a
+    rendered card is always durable. Producers that fail to persist
+    must not emit this frame.
+    """
+    return _sse({"type": "asset_created", "asset": asset})
+
+
+def sse_asset_updated(asset: dict[str, Any]) -> bytes:
+    """Emit an ``asset_updated`` SSE event (#326, epic #321 decision Q3).
+
+    Same descriptor shape and emit-after-persist contract as
+    ``sse_asset_created``. Reserved for regenerate flows — the
+    vocabulary is defined now so the SPA can wire a handler, but v1
+    producers never re-point an existing asset (regenerate creates new
+    assets for the new assistant turn).
+    """
+    return _sse({"type": "asset_updated", "asset": asset})
+
+
 def sse_done(
     *,
     msg_id: str,

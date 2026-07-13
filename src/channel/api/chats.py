@@ -25,6 +25,12 @@ from strands.tools.mcp import MCPClient
 from strands.types.exceptions import MaxTokensReachedException
 
 from channel import storage
+from channel.agents.asset_producers import (
+    asset_card_descriptor,
+    persist_code_exec_image_assets,
+    persist_fence_assets,
+    persist_upload_assets,
+)
 from channel.agents.chat_agent import (
     build_agent,
     build_followups_agent,
@@ -33,6 +39,7 @@ from channel.agents.chat_agent import (
 )
 from channel.agents.memory import _sanitize_actor_id, get_or_create_memory
 from channel.agents.strands_sse import (
+    sse_asset_created,
     sse_attachment_error,
     sse_delta,
     sse_done,
@@ -62,6 +69,7 @@ from channel.metrics import (
     record_followup_outcome,
 )
 from channel.models import (
+    Attachment,
     Chat,
     ChatCreate,
     ChatMCPMode,
@@ -169,13 +177,17 @@ def _resolve_attachments_for_send(
     list[dict[str, Any]] | None,
     list[dict[str, Any]],
     list[str],
+    list[Attachment],
 ]:
     """Resolve a request's ``attachments`` list into Strands content blocks
     plus the denormalised message-row snapshots, the SSE error payloads
-    for any S3-verify failures, and the list of att_ids that should
-    have ``referenced_at`` stamped.
+    for any S3-verify failures, the list of att_ids that should
+    have ``referenced_at`` stamped, and the verified canonical
+    ``Attachment`` models (#326 upload projection — the producer needs
+    the S3 coordinates, which the id-only snapshots don't carry).
 
-    Returns ``(content_blocks, snapshots, errors, verified_ids)``.
+    Returns ``(content_blocks, snapshots, errors, verified_ids,
+    verified_attachments)``.
 
     Raises ``HTTPException(400)`` if any attachment id is missing or
     owned by a different user — the request is structurally invalid
@@ -183,7 +195,7 @@ def _resolve_attachments_for_send(
     """
 
     if not attachments:
-        return [], None, [], []
+        return [], None, [], [], []
 
     # 1. Resolve canonical rows. Hard-reject on the first miss.
     resolved: list[Any] = []
@@ -209,6 +221,7 @@ def _resolve_attachments_for_send(
     content_blocks: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
     verified_ids: list[str] = []
+    verified_attachments: list[Attachment] = []
     for index, att in enumerate(resolved, start=1):
         # Fetch the object bytes inline. Bedrock's Converse API exposes
         # ``s3Location`` references only for select models — Claude
@@ -279,8 +292,9 @@ def _resolve_attachments_for_send(
             continue
 
         verified_ids.append(att.id)
+        verified_attachments.append(att)
 
-    return content_blocks, snapshots, errors, verified_ids
+    return content_blocks, snapshots, errors, verified_ids, verified_attachments
 
 
 router = APIRouter(prefix="/chats", tags=["chats"])
@@ -797,6 +811,27 @@ def _classify_stream_exception(exc: BaseException) -> tuple[str, str, bool]:
     return _STREAM_ERROR_FALLBACK
 
 
+def _collect_code_exec_images(
+    payload: dict[str, Any],
+    sink: list[tuple[str, list[dict[str, Any]]]],
+) -> None:
+    """Stash a code-exec ``tool_finished`` payload's ``images[]`` for
+    post-stream asset persistence (#326).
+
+    ``translate_event`` already discriminates the code-exec shape (full
+    sandbox-handler key set) and sets ``kind="code-output"`` — this
+    helper just harvests the image entries alongside their
+    ``tool_use_id``. Persistence is deferred to the post-stream slot
+    because ``Asset.source`` requires the assistant ``msg_id``, which
+    doesn't exist until the assistant row lands.
+    """
+    if payload.get("kind") != "code-output":
+        return
+    images = (payload.get("payload") or {}).get("images") or []
+    if images:
+        sink.append((payload["tool_use_id"], images))
+
+
 async def _stream_bedrock_reply(
     *,
     chat: Chat,
@@ -811,6 +846,7 @@ async def _stream_bedrock_reply(
     attachment_snapshots: list[dict[str, Any]] | None = None,
     attachment_errors: list[dict[str, Any]] | None = None,
     verified_attachment_ids: list[str] | None = None,
+    verified_attachments: list[Attachment] | None = None,
 ) -> Any:
     """Persist the user turn, stream Strands events, persist the assistant turn.
 
@@ -830,6 +866,13 @@ async def _stream_bedrock_reply(
     ``effort`` overrides the per-turn ``max_tokens`` budget on the
     Strands BedrockModel (issue #154). When omitted, the user's saved
     pref tier applies.
+
+    ``verified_attachments`` feeds the #326 upload projection: on a
+    fresh send (``persist_user=True``) each verified attachment gets
+    an ``origin=upload`` ASSET row + ``asset_created`` frame right
+    after ``user_persisted``. Regenerate deliberately does NOT pass
+    this — the projection already happened on the original send, and
+    re-projecting would duplicate rows for the same attachment.
     """
 
     state = state if state is not None else {}
@@ -888,6 +931,24 @@ async def _stream_bedrock_reply(
         state["user_msg_id"] = user_msg.msg_id
         yield sse_user_persisted(msg_id=user_msg.msg_id, seq=0)
 
+        # #326 upload projection — each verified attachment becomes an
+        # ``origin=upload`` ASSET row pointing at the SAME S3 object
+        # (metadata projection; the #109 ingestion flow is untouched).
+        # Emitted here — not post-stream — because the projection
+        # belongs to the user turn (``source.msg_id`` = the user msg)
+        # and the card should render even if the model reply later
+        # fails: the user message survives a stream error, so its
+        # assets do too. Frames only for rows that actually persisted
+        # (fail-soft per-asset isolation inside the producer).
+        if verified_attachments:
+            for asset in await persist_upload_assets(
+                chat_id=chat.chat_id,
+                owner=claims["sub"],
+                msg_id=user_msg.msg_id,
+                attachments=verified_attachments,
+            ):
+                yield sse_asset_created(asset_card_descriptor(asset))
+
     # Attachment side-effects fire on BOTH the initial send and regenerate.
     # The original send-side ``referenced_at`` stamp is preserved across
     # regenerate (the re-stamp is harmless idempotent under the
@@ -937,6 +998,10 @@ async def _stream_bedrock_reply(
     # and fails on 4 still surfaces partial_result_count=3". The
     # translator can't track this — it's per-stream dispatcher state.
     completed_tool_calls = 0
+    # #326 — code-exec image payloads harvested mid-stream, persisted
+    # as assets in the post-stream slot (the assistant ``msg_id`` the
+    # rows need doesn't exist until the assistant turn lands).
+    code_exec_images: list[tuple[str, list[dict[str, Any]]]] = []
 
     # When attachments are present, Strands gets the labeled content-block
     # list with the user's text appended; otherwise the bare string keeps
@@ -1016,6 +1081,7 @@ async def _stream_bedrock_reply(
                 yield sse_tool_progress(**payload)
             elif kind == "tool_finished":
                 completed_tool_calls += 1
+                _collect_code_exec_images(payload, code_exec_images)
                 yield sse_tool_finished(**payload)
             elif kind == "tool_error":
                 # Override the translator's hardcoded 0 with the
@@ -1032,6 +1098,7 @@ async def _stream_bedrock_reply(
                 for sub_kind, sub_payload in payload:
                     if sub_kind == "tool_finished":
                         completed_tool_calls += 1
+                        _collect_code_exec_images(sub_payload, code_exec_images)
                         yield sse_tool_finished(**sub_payload)
                     elif sub_kind == "tool_error":
                         sub_payload = {
@@ -1156,6 +1223,33 @@ async def _stream_bedrock_reply(
         stop_reason=stop_reason,
     )
 
+    # #326 generated-asset producers — same post-stream slot as the
+    # auto-titler (after ``done``, before stream close), because the
+    # ASSET rows need the assistant ``msg_id`` that only exists once
+    # the assistant turn has persisted. Ordering within the slot:
+    # assets first (the SPA attaches cards to the just-finished turn),
+    # then title, then follow-ups. Error-path composition (#310): a
+    # failed stream returns before the assistant persist above, so no
+    # generated asset is ever persisted or announced for a failed turn;
+    # per-asset persist failures inside the producers log + count +
+    # skip the frame (emit-after-persist contract). The assistant
+    # message text is NEVER mutated by extraction — fences stay in the
+    # transcript and the SPA swaps fence -> card by ``fence_index``.
+    for asset in await persist_code_exec_image_assets(
+        chat_id=chat.chat_id,
+        owner=claims["sub"],
+        msg_id=assistant_msg.msg_id,
+        images_by_tool=code_exec_images,
+    ):
+        yield sse_asset_created(asset_card_descriptor(asset))
+    for asset in await persist_fence_assets(
+        chat_id=chat.chat_id,
+        owner=claims["sub"],
+        msg_id=assistant_msg.msg_id,
+        text=assistant_text,
+    ):
+        yield sse_asset_created(asset_card_descriptor(asset))
+
     # Phase 7d auto-title: after the FIRST round-trip lands, fire a
     # one-shot Haiku Agent to summarise the exchange in 3-6 words.
     # Inline-emitted in the same SSE stream after ``done`` and BEFORE
@@ -1274,8 +1368,8 @@ async def post_message(
     # 400-on-unowned-id surfaces cleanly. S3 verify happens here too;
     # individual failures become labeled blocks + SSE errors inside
     # the stream (soft fail), not 400s.
-    content_blocks, snapshots, att_errors, verified_ids = _resolve_attachments_for_send(
-        user_id=claims["sub"], attachments=payload.attachments
+    content_blocks, snapshots, att_errors, verified_ids, verified_atts = (
+        _resolve_attachments_for_send(user_id=claims["sub"], attachments=payload.attachments)
     )
 
     replay: dict[str, Any] | None = None
@@ -1307,6 +1401,7 @@ async def post_message(
             attachment_snapshots=snapshots,
             attachment_errors=att_errors,
             verified_attachment_ids=verified_ids,
+            verified_attachments=verified_atts,
         ):
             yield chunk
         if idempotency_key and state.get("assistant_msg_id"):
@@ -1366,7 +1461,11 @@ async def regenerate(
     replay_attachments = [
         {"id": s.get("id")} for s in (last_user.attachments or []) if s.get("id")
     ] or None
-    content_blocks, snapshots, att_errors, verified_ids = _resolve_attachments_for_send(
+    # ``verified_attachments`` (the 5th element) is deliberately NOT
+    # forwarded: the #326 upload projection fired on the original send,
+    # and regenerate re-projecting would duplicate ASSET rows for the
+    # same attachment + user message.
+    content_blocks, snapshots, att_errors, verified_ids, _ = _resolve_attachments_for_send(
         user_id=claims["sub"], attachments=replay_attachments
     )
 
