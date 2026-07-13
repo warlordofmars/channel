@@ -115,6 +115,15 @@ export default function Artifacts() {
     setParams(next);
   }
 
+  function handleRowKey(event, a) {
+    // Keyboard parity for the role="button" rows (Enter / Space open the
+    // panel, same as a pointer click).
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      openRow(a);
+    }
+  }
+
   function loadMore() {
     // The button only renders while `!exhausted` (so `cursor` is live);
     // the sole re-entrancy risk is a re-click before the page settles.
@@ -155,7 +164,14 @@ export default function Artifacts() {
           </div>
         )}
         {assets.map((a) => (
-          <div className="list-row" key={a.asset_id} onClick={() => openRow(a)}>
+          <div
+            className="list-row"
+            key={a.asset_id}
+            role="button"
+            tabIndex={0}
+            onClick={() => openRow(a)}
+            onKeyDown={(e) => handleRowKey(e, a)}
+          >
             <span className="badge"><Icon name={artIcon(a.kind)} size={18} /></span>
             <div className="info">
               <div className="ti">{a.title}</div>

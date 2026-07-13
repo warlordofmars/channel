@@ -177,6 +177,25 @@ describe("Artifacts", () => {
     expect(api.getAsset).not.toHaveBeenCalled();
   });
 
+  it("opens a row via keyboard (Enter / Space) and ignores other keys", async () => {
+    api.listAssets.mockResolvedValueOnce({
+      items: [card({ asset_id: "as-7", chat_id: "ch-3" })],
+      next_cursor: null,
+    });
+    const { container, getLastSearch } = renderAt("/app/artifacts");
+    const row = await screen.findByRole("button", { name: /rate-limiter\.py/ });
+    // A non-activating key is a no-op.
+    fireEvent.keyDown(row, { key: "a" });
+    expect(getLastSearch()).toBe("");
+    // Enter opens the panel.
+    fireEvent.keyDown(row, { key: "Enter" });
+    await waitFor(() => expect(container.querySelector(".art-panel-wrap")).toBeTruthy());
+    expect(getLastSearch()).toBe("?artifact=as-7&chat=ch-3");
+    // Space also activates (covers the second branch).
+    fireEvent.keyDown(row, { key: " " });
+    expect(getLastSearch()).toBe("?artifact=as-7&chat=ch-3");
+  });
+
   it("Close clears both params and removes the panel", async () => {
     api.listAssets.mockResolvedValueOnce({
       items: [card({ asset_id: "as-7", chat_id: "ch-3" })],
