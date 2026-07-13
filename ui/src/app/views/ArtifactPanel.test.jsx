@@ -49,20 +49,22 @@ function mountPanel(assetOver, onClose = () => {}) {
 beforeEach(() => {
   api.getAssetContent.mockReset();
   api.getAssetContent.mockResolvedValue(textResponse(""));
-  URL.createObjectURL = vi.fn(() => "blob:mock");
-  URL.revokeObjectURL = vi.fn();
+  // Reuse the shared setupTests.js URL stubs (they return "blob:test-url")
+  // — clear their call history rather than reassigning the globals, so
+  // nothing leaks into later test files.
+  URL.createObjectURL.mockClear();
+  URL.revokeObjectURL.mockClear();
   // Neuter the transient download anchor's click so jsdom doesn't warn
   // about "navigation (except hash changes)" on every Download test.
   vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
-  Object.defineProperty(navigator, "clipboard", {
-    value: { writeText: vi.fn().mockResolvedValue(undefined) },
-    configurable: true,
-    writable: true,
-  });
+  // Stub navigator through vitest so unstubAllGlobals restores it (no
+  // leak into later files) — mirrors Conversation.test.jsx.
+  vi.stubGlobal("navigator", { clipboard: { writeText: vi.fn().mockResolvedValue(undefined) } });
 });
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe("ArtifactPanel — mounting", () => {
@@ -123,7 +125,7 @@ describe("ArtifactPanel — renderers", () => {
     api.getAssetContent.mockResolvedValue(textResponse("PNGBYTES"));
     mountPanel({ kind: "image", mime: "image/png" });
     const img = await screen.findByRole("img");
-    expect(img.getAttribute("src")).toBe("blob:mock");
+    expect(img.getAttribute("src")).toBe("blob:test-url");
     expect(URL.createObjectURL).toHaveBeenCalledTimes(1);
   });
 
@@ -233,6 +235,14 @@ describe("ArtifactPanel — download", () => {
     // Panel is still intact.
     expect(document.querySelector(".art-panel-wrap")).toBeTruthy();
   });
+
+  it("a malformed card (missing chat_id) fetches nothing and Download no-ops", () => {
+    // Defensive: a card without both ids must never hit /api/chats/null/...
+    mountPanel({ kind: "code", chat_id: null });
+    expect(api.getAssetContent).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByTitle("Download"));
+    expect(api.getAssetContent).not.toHaveBeenCalled();
+  });
 });
 
 describe("ArtifactPanel — close + cancellation", () => {
@@ -261,7 +271,7 @@ describe("ArtifactPanel — close + cancellation", () => {
       await Promise.resolve();
       await Promise.resolve();
     });
-    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:mock");
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:test-url");
   });
 
   it("ignores a text fetch that resolves after the panel closes", async () => {
@@ -313,7 +323,7 @@ describe("ArtifactPanel — exported helpers", () => {
     triggerBlobDownload(new Blob(["x"]), "report.csv");
     expect(URL.createObjectURL).toHaveBeenCalled();
     expect(HTMLAnchorElement.prototype.click).toHaveBeenCalled();
-    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:mock");
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:test-url");
   });
 
   it("triggerBlobDownload defaults the filename to 'artifact' when none is given", () => {

@@ -97,7 +97,9 @@ export default function ArtifactPanel({ artifact, onClose }) {
   }, []);
 
   useEffect(function fetchAssetContent() {
-    if (!assetId) return undefined;
+    // Both ids are required for the per-chat content route; guard against
+    // a malformed card so we never issue `/api/chats/null/...`.
+    if (!assetId || !chatId) return undefined;
     // Reset the copy affordance whenever the open asset changes.
     setCopied(false);
     if (!TEXT_KINDS.has(kind) && kind !== "image") {
@@ -144,6 +146,7 @@ export default function ArtifactPanel({ artifact, onClose }) {
   }
 
   async function handleDownload() {
+    if (!chatId || !assetId) return;
     try {
       const response = await getAssetContent(chatId, assetId);
       const blob = await response.blob();

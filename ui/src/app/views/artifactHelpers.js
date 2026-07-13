@@ -70,6 +70,10 @@ export function formatBytes(bytes) {
  * `Date.now()`. An unparseable timestamp renders as an empty string.
  */
 export function relativeTime(iso, now = Date.now()) {
+  // `new Date(null)` is the epoch (not Invalid Date), so a falsy input
+  // would otherwise render "56y ago" — guard it to the empty string so
+  // callers can drop a missing timestamp from a meta line.
+  if (!iso) return "";
   const ts = new Date(iso).getTime();
   if (Number.isNaN(ts)) return "";
   const sec = Math.max(0, Math.floor((now - ts) / 1000));

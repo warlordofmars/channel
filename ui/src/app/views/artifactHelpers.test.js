@@ -88,6 +88,14 @@ describe("artifactHelpers", () => {
     expect(relativeTime("not-a-date", Date.now())).toBe("");
   });
 
+  it("relativeTime returns an empty string for a missing timestamp (not the epoch)", () => {
+    // `new Date(null)` is the epoch, so without the falsy guard this would
+    // render a bogus multi-decade "Xy ago".
+    expect(relativeTime(null, Date.now())).toBe("");
+    expect(relativeTime(undefined, Date.now())).toBe("");
+    expect(relativeTime("", Date.now())).toBe("");
+  });
+
   it("relativeTime defaults now to the current clock", () => {
     expect(relativeTime(new Date().toISOString())).toBe("just now");
   });

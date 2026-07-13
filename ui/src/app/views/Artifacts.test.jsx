@@ -145,6 +145,17 @@ describe("Artifacts", () => {
     expect(sub).toContain("just now");
   });
 
+  it("meta line omits empty size / time segments (no dangling separators)", async () => {
+    api.listAssets.mockResolvedValueOnce({
+      items: [card({ size_bytes: null, created_at: null })],
+      next_cursor: null,
+    });
+    const { container } = renderAt("/app/artifacts");
+    await screen.findByText("rate-limiter.py");
+    // Only the kind label survives — no "Code ·  · ".
+    expect(container.querySelector(".list-row .sub").textContent).toBe("Code");
+  });
+
   it("renders an empty state when the browse returns no assets", async () => {
     api.listAssets.mockResolvedValueOnce({ items: [], next_cursor: null });
     renderAt("/app/artifacts");
@@ -267,7 +278,7 @@ describe("Artifacts", () => {
     expect(screen.getByText("page1.py")).toBeTruthy();
   });
 
-  it("ignores a re-click while a Load more page is still in flight", async () => {
+  it("disables Load more while a page is in flight, preventing a re-fetch", async () => {
     const d = deferred();
     api.listAssets
       .mockResolvedValueOnce({ items: [card({ title: "page1.py" })], next_cursor: "c1" })
@@ -275,8 +286,11 @@ describe("Artifacts", () => {
     renderAt("/app/artifacts");
     await screen.findByText("page1.py");
     fireEvent.click(screen.getByRole("button", { name: "Load more" }));
-    // The in-flight click flipped the label; a re-click is a no-op.
-    fireEvent.click(screen.getByRole("button", { name: "Loading…" }));
+    // The in-flight click flips the label + disables the button; a
+    // re-click on a disabled button can't fire onClick.
+    const loadingBtn = screen.getByRole("button", { name: "Loading…" });
+    expect(loadingBtn).toBeDisabled();
+    fireEvent.click(loadingBtn);
     await act(async () => {
       d.resolve({ items: [card({ asset_id: "as-2", title: "page2.py" })], next_cursor: null });
       await Promise.resolve();

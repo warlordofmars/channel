@@ -125,9 +125,8 @@ export default function Artifacts() {
   }
 
   function loadMore() {
-    // The button only renders while `!exhausted` (so `cursor` is live);
-    // the sole re-entrancy risk is a re-click before the page settles.
-    if (loadingMore) return;
+    // The button only renders while `!exhausted` (so `cursor` is live) and
+    // is `disabled` while a page is in flight, so re-entrancy can't happen.
     setLoadingMore(true);
     drainAssetPages(cursor)
       .then(function onMore({ items, nextCursor }) {
@@ -176,14 +175,21 @@ export default function Artifacts() {
             <div className="info">
               <div className="ti">{a.title}</div>
               <div className="sub">
-                {kindLabel(a.kind)} · {formatBytes(a.size_bytes)} · {relativeTime(a.created_at)}
+                {[kindLabel(a.kind), formatBytes(a.size_bytes), relativeTime(a.created_at)]
+                  .filter(Boolean)
+                  .join(" · ")}
               </div>
             </div>
             <span className="kind">{a.kind}</span>
           </div>
         ))}
         {status === "ready" && !exhausted && (
-          <button type="button" className="art-loadmore" onClick={loadMore}>
+          <button
+            type="button"
+            className="art-loadmore"
+            onClick={loadMore}
+            disabled={loadingMore}
+          >
             {loadingMore ? "Loading…" : "Load more"}
           </button>
         )}
