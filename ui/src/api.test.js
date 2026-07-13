@@ -727,40 +727,47 @@ describe("MCP API client", () => {
 // ---------------------------------------------------------------------------
 
 describe("admin API client", () => {
+  // vi.stubGlobal + unstubAllGlobals (not a bare `global.fetch =`
+  // assignment) so the mock cannot leak into later suites —
+  // vi.restoreAllMocks() does not undo plain global assignments
+  // (Copilot review, #343).
+  let fetchMock;
+
   beforeEach(() => {
     localStorage.setItem("starter_mgmt_token", "test-token");
-    global.fetch = vi.fn();
+    fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
   });
 
   afterEach(() => {
     localStorage.removeItem("starter_mgmt_token");
-    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
   it("getAdminUsers GETs with auth and the default limit only", async () => {
-    global.fetch.mockResolvedValueOnce({
+    fetchMock.mockResolvedValueOnce({
       ok: true,
       json: () => Promise.resolve({ items: [], next_cursor: null }),
     });
     const data = await getAdminUsers();
-    const [url, opts] = global.fetch.mock.calls[0];
+    const [url, opts] = fetchMock.mock.calls[0];
     expect(url).toBe("/api/admin/users?limit=50");
     expect(opts.headers.Authorization).toBe("Bearer test-token");
     expect(data).toEqual({ items: [], next_cursor: null });
   });
 
   it("getAdminUsers passes cursor, limit, and sort through the query", async () => {
-    global.fetch.mockResolvedValueOnce({
+    fetchMock.mockResolvedValueOnce({
       ok: true,
       json: () => Promise.resolve({ items: [], next_cursor: "c2" }),
     });
     await getAdminUsers({ cursor: "c1", limit: 5, sort: "email" });
-    const [url] = global.fetch.mock.calls[0];
+    const [url] = fetchMock.mock.calls[0];
     expect(url).toBe("/api/admin/users?limit=5&cursor=c1&sort=email");
   });
 
   it("getAdminUsers throws ApiError with status + detail on a JSON error", async () => {
-    global.fetch.mockResolvedValueOnce({
+    fetchMock.mockResolvedValueOnce({
       ok: false,
       status: 400,
       json: () => Promise.resolve({ detail: "invalid cursor" }),
@@ -773,7 +780,7 @@ describe("admin API client", () => {
   });
 
   it("getAdminUsers nulls detail when the error body has none", async () => {
-    global.fetch.mockResolvedValueOnce({
+    fetchMock.mockResolvedValueOnce({
       ok: false,
       status: 401,
       json: () => Promise.resolve({}),
@@ -785,7 +792,7 @@ describe("admin API client", () => {
   });
 
   it("getAdminUsers nulls detail when the error body is not JSON", async () => {
-    global.fetch.mockResolvedValueOnce({
+    fetchMock.mockResolvedValueOnce({
       ok: false,
       status: 502,
       json: () => Promise.reject(new Error("not json")),
@@ -800,7 +807,7 @@ describe("admin API client", () => {
     // Through the deployed domain, CloudFront rewrites API 403s to a
     // 200 index.html — parsing that as JSON throws, and the wrapper
     // must surface unauthorized rather than a parse error.
-    global.fetch.mockResolvedValueOnce({
+    fetchMock.mockResolvedValueOnce({
       ok: true,
       status: 200,
       json: () => Promise.reject(new SyntaxError("Unexpected token <")),
@@ -813,19 +820,19 @@ describe("admin API client", () => {
 
   it("getAdminUser GETs the encoded user id with auth", async () => {
     const body = { user: {}, recent_chats: [], recent_audit_events: [] };
-    global.fetch.mockResolvedValueOnce({
+    fetchMock.mockResolvedValueOnce({
       ok: true,
       json: () => Promise.resolve(body),
     });
     const data = await getAdminUser("amy@ex.com");
-    const [url, opts] = global.fetch.mock.calls[0];
+    const [url, opts] = fetchMock.mock.calls[0];
     expect(url).toBe("/api/admin/users/amy%40ex.com");
     expect(opts.headers.Authorization).toBe("Bearer test-token");
     expect(data).toEqual(body);
   });
 
   it("getAdminUser throws ApiError 404 for an unknown user", async () => {
-    global.fetch.mockResolvedValueOnce({
+    fetchMock.mockResolvedValueOnce({
       ok: false,
       status: 404,
       json: () => Promise.resolve({ detail: "User not found" }),

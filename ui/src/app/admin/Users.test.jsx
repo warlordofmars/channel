@@ -152,6 +152,37 @@ describe("Users", () => {
     expect(screen.queryByRole("button", { name: /load more/i })).toBeNull();
   });
 
+  it("ignores sort clicks while a Load more append is in flight", async () => {
+    getAdminUsers.mockResolvedValueOnce({
+      items: [makeUser()],
+      next_cursor: "cur-1",
+    });
+    const d = deferred();
+    getAdminUsers.mockReturnValueOnce(d.promise);
+    await act(async () => renderUsers());
+    fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+    // Sort switch mid-append would reset rows to null and let the
+    // stale append spread null / corrupt the new listing — the click
+    // must be a no-op until the append settles.
+    fireEvent.click(screen.getByRole("button", { name: /email/i }));
+    expect(getAdminUsers).toHaveBeenCalledTimes(2); // no third (sort) fetch
+    await act(async () =>
+      d.resolve({
+        items: [makeUser({ user_id: "bob@ex.com", email: "bob@ex.com" })],
+        next_cursor: null,
+      }),
+    );
+    // Append landed under the original sort; both pages render.
+    expect(screen.getByText("amy@ex.com")).toBeTruthy();
+    expect(screen.getByText("bob@ex.com")).toBeTruthy();
+    // Once settled, sort clicks work again.
+    getAdminUsers.mockResolvedValueOnce({ items: [], next_cursor: null });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /email/i }));
+    });
+    expect(getAdminUsers).toHaveBeenLastCalledWith({ sort: "email" });
+  });
+
   it("a 400 on Load more restarts from page 1 (stale cursor contract)", async () => {
     getAdminUsers.mockResolvedValueOnce({
       items: [makeUser()],

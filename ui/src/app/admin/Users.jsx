@@ -89,6 +89,14 @@ export default function Users() {
   );
 
   function handleHeaderClick(event) {
+    // No sort changes while a "Load more" append is in flight — a sort
+    // switch resets `rows` to null, so a stale append resolving
+    // afterwards would spread null (TypeError) or splice the old
+    // sort's rows/cursor into the new listing (Copilot review, #343).
+    // Header clicks are the only reset trigger that can interleave:
+    // the Load more button disables itself and Retry only renders in
+    // the rows-empty error state.
+    if (busy) return;
     const field = event.currentTarget.dataset.sort;
     // Clicking the active header is a no-op — direction is fixed
     // server-side, so there is nothing to flip.
