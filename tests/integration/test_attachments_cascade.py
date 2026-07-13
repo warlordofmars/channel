@@ -8,30 +8,11 @@ covered by the unit tests in :mod:`tests.unit.test_storage`.
 
 from __future__ import annotations
 
-from typing import Any
-
 import pytest
 
 from channel import storage
 from channel.models import Attachment, MessageRole
-
-
-class _FakeS3:
-    """Per-test S3 stub: delete_object is a no-op recorder."""
-
-    def __init__(self) -> None:
-        self.deleted: list[tuple[str, str]] = []
-
-    def delete_object(self, *, Bucket: str, Key: str) -> dict[str, Any]:
-        self.deleted.append((Bucket, Key))
-        return {}
-
-
-@pytest.fixture
-def fake_s3(monkeypatch: pytest.MonkeyPatch) -> _FakeS3:
-    fake = _FakeS3()
-    monkeypatch.setattr("channel.storage._get_s3_client", lambda: fake)
-    return fake
+from tests.integration._helpers import FakeS3 as _FakeS3
 
 
 def _att(att_id: str, *, user_id: str = "u-cascade") -> Attachment:
