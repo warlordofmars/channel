@@ -5,6 +5,8 @@ import AuthGate from "./components/AuthGate.jsx";
 import ErrorBoundary from "./components/ErrorBoundary.jsx";
 import { useChannelPrefs } from "./hooks/useChannelPrefs.js";
 import { ChatsProvider } from "./hooks/ChatsContext.jsx";
+import AdminHome from "./app/admin/AdminHome.jsx";
+import AdminLayout from "./app/admin/AdminLayout.jsx";
 import Artifacts from "./app/views/Artifacts.jsx";
 import ChatHome from "./app/ChatHome.jsx";
 import Conversation from "./app/Conversation.jsx";
@@ -24,6 +26,26 @@ import Pricing from "./marketing/pages/Pricing.jsx";
 import Privacy from "./marketing/pages/Privacy.jsx";
 import Product from "./marketing/pages/Product.jsx";
 
+
+/**
+ * Placeholder for admin child routes whose real views land in
+ * follow-up issues (#238 users list/detail, #239 dashboard). Those
+ * issues replace the `<AdminPlaceholder />` element in the route table
+ * below with their component — the route paths and the AdminLayout
+ * nesting are already final.
+ */
+function AdminPlaceholder({ title, testid }) {
+  return (
+    <div className="view">
+      <div className="view-inner">
+        <div className="view-head" data-testid={testid}>
+          <h2>{title}</h2>
+          <p>Coming soon.</p>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 /**
  * Layout for every authenticated `/app/*` route. Mounts the AuthGate +
@@ -70,6 +92,14 @@ export default function App() {
             <Route path="/app/projects/:id"   element={<ProjectDetail />} />
             <Route path="/app/artifacts"      element={<Artifacts />} />
             <Route path="/app/customize"      element={<Customize />} />
+            {/* Admin — nested under AdminLayout so the role gate runs
+                exactly once for the whole /app/admin/* subtree (#237) */}
+            <Route element={<AdminLayout />}>
+              <Route path="/app/admin"           element={<AdminHome />} />
+              <Route path="/app/admin/users"     element={<AdminPlaceholder title="Users" testid="admin-users-placeholder" />} />
+              <Route path="/app/admin/users/:id" element={<AdminPlaceholder title="User detail" testid="admin-user-detail-placeholder" />} />
+              <Route path="/app/admin/dashboard" element={<AdminPlaceholder title="Dashboard" testid="admin-dashboard-placeholder" />} />
+            </Route>
           </Route>
 
           {/* Anything else → branded 404 */}

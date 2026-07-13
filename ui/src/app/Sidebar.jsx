@@ -103,6 +103,10 @@ export default function Sidebar({
 
   const token = localStorage.getItem(TOKEN_KEY) ?? "";
   const claims = parseToken(token) ?? {};
+  // Link visibility only — the /app/admin/* routes are independently
+  // gated by AdminLayout (and the API by require_admin). Read
+  // synchronously from the JWT so non-admins never see a flicker.
+  const isAdmin = claims.role === "admin";
   const email = claims.email ?? "you@example.com";
   // Prefer Google's full display_name; fall back to the email's
   // local-part if absent (older tokens, test stubs, etc.).
@@ -194,6 +198,11 @@ export default function Sidebar({
         <button type="button" className="nav-item" onClick={() => navigate("/app/customize")}>
           <span className="ic"><Icon name="customize" size={18} /></span> Customize
         </button>
+        {isAdmin && (
+          <button type="button" className="nav-item" onClick={() => navigate("/app/admin")}>
+            <span className="ic"><Icon name="shield" size={18} /></span> Admin
+          </button>
+        )}
 
         {groups.map((g) => (
           <div key={g.name}>

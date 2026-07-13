@@ -5,9 +5,9 @@ import App from "./App.jsx";
 import { TOKEN_KEY } from "./lib/auth.js";
 import { __resetChannelPrefsForTest } from "./hooks/useChannelPrefs.js";
 
-function makeToken({ expOffsetSeconds = 3600 } = {}) {
+function makeToken({ expOffsetSeconds = 3600, role = "user" } = {}) {
   const exp = Math.floor(Date.now() / 1000) + expOffsetSeconds;
-  const payload = btoa(JSON.stringify({ exp, sub: "u1", role: "user", email: "u@ex.com" }));
+  const payload = btoa(JSON.stringify({ exp, sub: "u1", role, email: "u@ex.com" }));
   return `eyJhbGciOiJIUzI1NiJ9.${payload}.sig`;
 }
 
@@ -118,6 +118,44 @@ describe("App routing", () => {
     await act(async () => render(<App />));
     expect(screen.getByRole("heading", { level: 2, name: "Customize" })).toBeTruthy();
     expect(screen.queryByTestId("app-customize")).toBeNull();
+  });
+
+  it("/app/admin renders AdminHome for an admin-role token (#237)", async () => {
+    storage[TOKEN_KEY] = makeToken({ role: "admin" });
+    window.history.pushState({}, "", "/app/admin");
+    await act(async () => render(<App />));
+    expect(screen.getByRole("heading", { level: 2, name: "Admin" })).toBeTruthy();
+  });
+
+  it("/app/admin redirects a user-role token back to ChatHome (#237)", async () => {
+    storage[TOKEN_KEY] = makeToken({ role: "user" });
+    window.history.pushState({}, "", "/app/admin");
+    await act(async () => render(<App />));
+    // AdminLayout's Navigate replace lands on /app → ChatHome greeting.
+    expect(screen.getByRole("heading", { level: 1 }).textContent).toMatch(/back at it/i);
+    expect(screen.queryByRole("heading", { level: 2, name: "Admin" })).toBeNull();
+  });
+
+  it.each([
+    ["/app/admin/users",     "admin-users-placeholder"],
+    ["/app/admin/users/u42", "admin-user-detail-placeholder"],
+    ["/app/admin/dashboard", "admin-dashboard-placeholder"],
+  ])("%s renders its placeholder for an admin (#237)", async (path, testid) => {
+    storage[TOKEN_KEY] = makeToken({ role: "admin" });
+    window.history.pushState({}, "", path);
+    await act(async () => render(<App />));
+    expect(screen.getByTestId(testid)).toBeTruthy();
+  });
+
+  it.each([
+    "/app/admin/users",
+    "/app/admin/users/u42",
+    "/app/admin/dashboard",
+  ])("%s redirects a user-role token back to ChatHome (#237)", async (path) => {
+    storage[TOKEN_KEY] = makeToken({ role: "user" });
+    window.history.pushState({}, "", path);
+    await act(async () => render(<App />));
+    expect(screen.getByRole("heading", { level: 1 }).textContent).toMatch(/back at it/i);
   });
 
   it("applies the saved theme to <html> on mount", async () => {

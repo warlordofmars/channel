@@ -41,6 +41,7 @@ export default function Icon({ name, size = 18, stroke = 1.6, style = {} }) {
     case "write":        return <svg {...p}><path d="M4 20h4L19 9a2 2 0 0 0-3-3L5 16z"/><path d="M14 7l3 3"/></svg>;
     case "learn":        return <svg {...p}><path d="M3 8l9-4 9 4-9 4z"/><path d="M7 10v5c0 1.2 2.2 2.5 5 2.5s5-1.3 5-2.5v-5"/></svg>;
     case "settings":     return <svg {...p}><circle cx="12" cy="12" r="3.2"/><path d="M12 3v2.5M12 18.5V21M3 12h2.5M18.5 12H21M5.5 5.5l1.8 1.8M16.7 16.7l1.8 1.8M18.5 5.5l-1.8 1.8M7.3 16.7l-1.8 1.8"/></svg>;
+    case "shield":       return <svg {...p}><path d="M12 3l7 3v5c0 4.4-2.9 8-7 10-4.1-2-7-5.6-7-10V6z"/></svg>;
     case "sun":          return <svg {...p}><circle cx="12" cy="12" r="4"/><path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.5 4.5l1.8 1.8M17.7 17.7l1.8 1.8M19.5 4.5l-1.8 1.8M6.3 17.7l-1.8 1.8"/></svg>;
     case "moon":         return <svg {...p}><path d="M20 14.5A8 8 0 0 1 9.5 4 7 7 0 1 0 20 14.5z"/></svg>;
     case "download":     return <svg {...p}><path d="M12 4v11M7 11l5 4 5-4M5 20h14"/></svg>;
