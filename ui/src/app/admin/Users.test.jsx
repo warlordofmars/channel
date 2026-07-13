@@ -86,8 +86,14 @@ describe("Users", () => {
     getAdminUsers.mockResolvedValue({ items: [makeUser()], next_cursor: null });
     await act(async () => renderUsers());
     expect(getAdminUsers).toHaveBeenCalledWith({ sort: "last_chat_at" });
-    const active = screen.getByRole("button", { name: /last chat/i });
-    expect(active.getAttribute("aria-pressed")).toBe("true");
+    // aria-sort lives on the <th> — descending for the active timestamp
+    // column, "none" on the inactive sortable columns.
+    const active = screen.getByRole("columnheader", { name: /last chat/i });
+    expect(active.getAttribute("aria-sort")).toBe("descending");
+    const inactive = screen.getByRole("columnheader", { name: /email/i });
+    expect(inactive.getAttribute("aria-sort")).toBe("none");
+    const unsortable = screen.getByRole("columnheader", { name: "Chats" });
+    expect(unsortable.getAttribute("aria-sort")).toBeNull();
     // Timestamps sort descending → indicator arrow points down.
     expect(screen.getByTestId("sort-indicator").style.transform).toBe(
       "rotate(180deg)",
@@ -111,8 +117,11 @@ describe("Users", () => {
     // Pagination reset: the new page replaces the old rows.
     expect(screen.getByText("zoe@ex.com")).toBeTruthy();
     expect(screen.queryByText("amy@ex.com")).toBeNull();
-    // Email sorts ascending → indicator is not rotated.
+    // Email sorts ascending → indicator is not rotated, th announces it.
     expect(screen.getByTestId("sort-indicator").style.transform).toBe("none");
+    expect(
+      screen.getByRole("columnheader", { name: /email/i }).getAttribute("aria-sort"),
+    ).toBe("ascending");
   });
 
   it("clicking the active sort header is a no-op", async () => {

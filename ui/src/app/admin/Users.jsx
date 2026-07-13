@@ -19,6 +19,13 @@ const COLUMNS = [
   { key: "last_login_at", label: "Last login" },
 ];
 
+/** aria-sort value per sort field — directions are fixed server-side. */
+const SORT_DIRECTION = {
+  email: "ascending",
+  created_at: "descending",
+  last_chat_at: "descending",
+};
+
 const HEADER_BUTTON_STYLE = {
   background: "none",
   border: "none",
@@ -151,13 +158,24 @@ export default function Users() {
           <thead>
             <tr>
               {COLUMNS.map((col) => (
-                <th key={col.key}>
+                // aria-sort on the <th> (not aria-pressed on the
+                // button) conveys column sort order to assistive tech
+                // with correct table semantics (Copilot review, #343).
+                <th
+                  key={col.key}
+                  aria-sort={
+                    col.sort
+                      ? col.sort === sort
+                        ? SORT_DIRECTION[sort]
+                        : "none"
+                      : undefined
+                  }
+                >
                   {col.sort ? (
                     <button
                       type="button"
                       data-sort={col.sort}
                       onClick={handleHeaderClick}
-                      aria-pressed={col.sort === sort}
                       style={HEADER_BUTTON_STYLE}
                     >
                       {col.label}
