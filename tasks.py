@@ -13,7 +13,7 @@ Usage:
     uv run inv e2e                          # run e2e tests against deployed stack
     uv run inv e2e-local                    # run e2e tests against local dev stack (inv dev must be running)
     uv run inv deploy                       # deploy to AWS via CDK
-    uv run inv synth                        # synthesize CDK template (no Docker bundling)
+    uv run inv synth                        # synthesize CDK template (runs Docker asset bundling; needs Docker running)
     uv run inv outputs                      # print CloudFormation stack outputs
     uv run inv install-hooks               # install pre-push hook (run once after clone)
     uv run inv pre-push                    # full local CI gate (lint+typecheck+unit+combined-coverage+frontend+desktop)
@@ -705,7 +705,7 @@ def export_openapi(ctx, out="docs-site/public/openapi.json"):
 
 @task
 def synth(ctx, env="prod"):
-    """Synthesize CDK template locally (skips Docker bundling). Use --env dev for dev stack."""
+    """Synthesize CDK template locally (runs Docker asset bundling; needs Docker running). Use --env dev for dev stack."""
     account = _aws_account(ctx)
     zone_id = _hosted_zone_id(ctx)
     origin_verify = _origin_verify_secret(ctx, env)
