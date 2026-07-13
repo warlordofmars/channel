@@ -79,6 +79,16 @@ describe("artifactHelpers", () => {
     expect(relativeTime(at(800 * 86400), now)).toBe("2y ago");
   });
 
+  it("relativeTime handles the ~12-month boundary without a bogus '0y ago'", () => {
+    const now = Date.parse("2026-07-13T12:00:00Z");
+    const at = (secondsAgo) => new Date(now - secondsAgo * 1000).toISOString();
+    // Days 360–364 are month 12 but < 1 year — must stay in months.
+    expect(relativeTime(at(360 * 86400), now)).toBe("12mo ago");
+    expect(relativeTime(at(364 * 86400), now)).toBe("12mo ago");
+    // 365 days rolls over to years.
+    expect(relativeTime(at(365 * 86400), now)).toBe("1y ago");
+  });
+
   it("relativeTime clamps a future timestamp to 'just now'", () => {
     const now = Date.parse("2026-07-13T12:00:00Z");
     expect(relativeTime(new Date(now + 5000).toISOString(), now)).toBe("just now");

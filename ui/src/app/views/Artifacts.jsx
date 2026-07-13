@@ -195,7 +195,7 @@ export default function Artifacts() {
                   .join(" · ")}
               </div>
             </div>
-            <span className="kind">{a.kind}</span>
+            <span className="kind">{kindLabel(a.kind)}</span>
           </div>
         ))}
         {status === "ready" && !exhausted && (

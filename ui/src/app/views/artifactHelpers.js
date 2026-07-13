@@ -86,7 +86,9 @@ export function relativeTime(iso, now = Date.now()) {
   if (day < 7) return `${day}d ago`;
   const wk = Math.floor(day / 7);
   if (wk < 5) return `${wk}w ago`;
-  const mo = Math.floor(day / 30);
-  if (mo < 12) return `${mo}mo ago`;
+  // Switch to years strictly at 365 days — keying the boundary off the
+  // month count instead let days 360–364 (month 12) fall through to a
+  // bogus "0y ago".
+  if (day < 365) return `${Math.floor(day / 30)}mo ago`;
   return `${Math.floor(day / 365)}y ago`;
 }
