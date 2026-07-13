@@ -80,8 +80,9 @@ uv run inv deploy --env dev
 # Start all services (DynamoDB Local, API, Vite dev server)
 uv run inv dev
 
-# Seed demo data
-uv run inv seed
+# Provision the local DynamoDB table (re-run after every `inv dev`
+# restart — DynamoDB Local is in-memory/ephemeral)
+uv run python scripts/reset_dev_table.py
 
 # Open http://localhost:5173?test_email=you@example.com
 ```

@@ -674,8 +674,7 @@ gh pr merge --auto --merge
 
 ```bash
 # 1. Start all services (DynamoDB Local, API, Vite dev server)
-#    Add --seed to also seed demo data automatically once the API is ready
-uv run inv dev [--seed]
+uv run inv dev
 ```
 
 `inv dev` sets automatically:
@@ -687,11 +686,15 @@ uv run inv dev [--seed]
   are unaffected)
 
 ```bash
-# 2. Seed DynamoDB with demo data (also creates the table) — if not using --seed
-uv run inv seed
+# 2. Provision the local DynamoDB table (must re-run after every
+#    `inv dev` restart — DynamoDB Local is in-memory/ephemeral)
+uv run python scripts/reset_dev_table.py
 ```
 
-Must be re-run after every `inv dev` restart (DynamoDB Local is ephemeral).
+The script drops and recreates the local `channel` table with all four
+GSIs (schema lives in `channel._table_schema`, shared with the
+integration test fixture). It provisions schema only — nothing seeds
+demo data.
 
 ### Running UI e2e tests locally
 
@@ -723,8 +726,8 @@ Key local e2e gotchas:
 - If Vite lands on a port other than 5173, `CORS_ORIGINS` must include that
   port. `inv dev` covers 5173–5179; if you're outside that range, pass
   `CORS_ORIGINS=http://localhost:<port>` when starting the stack.
-- `inv seed` (or `inv dev --seed`) must succeed before running e2e tests —
-  if auth bypass returns 500, the table is likely missing.
+- `uv run python scripts/reset_dev_table.py` must succeed before running
+  e2e tests — if auth bypass returns 500, the table is likely missing.
 - Any `test_docs_e2e.py` suite (when restored) is excluded automatically —
   those tests require a deployed VitePress build; run them against the
   deployed stack with `inv e2e`.
