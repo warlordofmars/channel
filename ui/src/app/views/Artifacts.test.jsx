@@ -10,7 +10,7 @@ vi.mock("../../api.js", () => ({
 }));
 
 import * as api from "../../api.js";
-import Artifacts, { drainAssetPages } from "./Artifacts.jsx";
+import Artifacts, { drainAssetPages, findAssetById } from "./Artifacts.jsx";
 
 function card(over = {}) {
   return {
@@ -94,6 +94,66 @@ describe("drainAssetPages", () => {
     api.listAssets.mockResolvedValueOnce({ items: [card()] });
     const { nextCursor } = await drainAssetPages(null);
     expect(nextCursor).toBeNull();
+  });
+});
+
+describe("findAssetById", () => {
+  beforeEach(() => {
+    api.listAssets.mockReset();
+  });
+
+  it("returns the matching card from the first page", async () => {
+    api.listAssets.mockResolvedValueOnce({
+      items: [card({ asset_id: "x" }), card({ asset_id: "y", title: "hit" })],
+      next_cursor: "c1",
+    });
+    const found = await findAssetById("y");
+    expect(found.title).toBe("hit");
+    expect(api.listAssets).toHaveBeenCalledTimes(1);
+  });
+
+  it("resumes from a provided cursor instead of refetching from the start", async () => {
+    api.listAssets.mockResolvedValueOnce({
+      items: [card({ asset_id: "y", title: "hit" })],
+      next_cursor: null,
+    });
+    const found = await findAssetById("y", "cursor-x");
+    expect(found.title).toBe("hit");
+    expect(api.listAssets).toHaveBeenCalledWith({ limit: 30, cursor: "cursor-x" });
+  });
+
+  it("pages forward until the asset is found", async () => {
+    api.listAssets
+      .mockResolvedValueOnce({ items: [card({ asset_id: "x" })], next_cursor: "c1" })
+      .mockResolvedValueOnce({ items: [card({ asset_id: "y", title: "hit" })], next_cursor: "c2" });
+    const found = await findAssetById("y");
+    expect(found.title).toBe("hit");
+    expect(api.listAssets).toHaveBeenCalledTimes(2);
+  });
+
+  it("returns null when the cursor exhausts without a match", async () => {
+    api.listAssets
+      .mockResolvedValueOnce({ items: [card({ asset_id: "x" })], next_cursor: "c1" })
+      .mockResolvedValueOnce({ items: [card({ asset_id: "z" })], next_cursor: null });
+    expect(await findAssetById("missing")).toBeNull();
+    expect(api.listAssets).toHaveBeenCalledTimes(2);
+  });
+
+  it("treats a missing next_cursor as exhausted", async () => {
+    api.listAssets.mockResolvedValueOnce({ items: [card({ asset_id: "x" })] });
+    expect(await findAssetById("missing")).toBeNull();
+  });
+
+  it("returns null on a non-advancing cursor instead of looping forever", async () => {
+    // Server keeps returning the same cursor — the guard must break out.
+    api.listAssets.mockResolvedValue({ items: [card({ asset_id: "x" })], next_cursor: "stuck" });
+    expect(await findAssetById("missing", "stuck")).toBeNull();
+    expect(api.listAssets).toHaveBeenCalledTimes(1);
+  });
+
+  it("treats a page with no items field as empty", async () => {
+    api.listAssets.mockResolvedValueOnce({ next_cursor: null });
+    expect(await findAssetById("x")).toBeNull();
   });
 });
 
@@ -276,10 +336,31 @@ describe("Artifacts", () => {
     expect(container.querySelector(".art-panel-wrap")).toBeNull();
   });
 
-  it("a partial deep-link (artifact without chat) opens no panel and fetches no descriptor", async () => {
-    api.listAssets.mockResolvedValueOnce({ items: [], next_cursor: null });
+  it("chat-less deep-link (?artifact= only, from an inline card) resolves via browse", async () => {
+    // First page (loadFirstPage) has no matching asset; the browse search
+    // (findAssetById) then locates it on the next page. No getAsset call —
+    // there is no chat id to hit the per-chat route with.
+    api.listAssets
+      .mockResolvedValueOnce({ items: [card({ asset_id: "other" })], next_cursor: "c1" })
+      .mockResolvedValueOnce({ items: [card({ asset_id: "other" })], next_cursor: "c2" })
+      .mockResolvedValueOnce({
+        items: [card({ asset_id: "as-9", chat_id: "ch-9", title: "from-card.md", kind: "document" })],
+        next_cursor: null,
+      });
     const { container } = renderAt("/app/artifacts?artifact=as-9");
+    await waitFor(() => expect(container.querySelector(".art-panel-wrap")).toBeTruthy());
+    expect(api.getAsset).not.toHaveBeenCalled();
+    expect(screen.getByText("from-card.md")).toBeTruthy();
+  });
+
+  it("chat-less deep-link skips the browse search when the browse is exhausted", async () => {
+    // One page, fully drained, asset absent → no findAssetById round-trip.
+    api.listAssets.mockResolvedValue({ items: [], next_cursor: null });
+    const { container } = renderAt("/app/artifacts?artifact=ghost");
     await screen.findByText(/No artifacts yet/i);
+    await waitFor(() => expect(api.listAssets).toHaveBeenCalled());
+    // loadFirstPage only — the exhausted short-circuit skipped findAssetById.
+    expect(api.listAssets).toHaveBeenCalledTimes(1);
     expect(api.getAsset).not.toHaveBeenCalled();
     expect(container.querySelector(".art-panel-wrap")).toBeNull();
   });

@@ -34,15 +34,44 @@ export async function drainAssetPages(fromCursor) {
 }
 
 /**
+ * Locate an asset's card descriptor by id across the owner's browse
+ * pages, returning it (or null if not found). Used for the chat-less
+ * `?artifact=<id>` deep link the inline transcript cards (#327) emit —
+ * they carry no chat id, and the per-chat descriptor route needs one, so
+ * the owner GSI browse is the only id→card path. Browse is newest-first,
+ * so a just-created inline-card asset resolves on the first page; older
+ * bookmarks page back until found or the cursor exhausts.
+ *
+ * `fromCursor` lets the caller resume from the browse cursor it already
+ * holds (the tail past its loaded pages), skipping a redundant refetch of
+ * pages the caller has already scanned; it defaults to the start.
+ */
+export async function findAssetById(assetId, fromCursor = null) {
+  let cursor = fromCursor;
+  for (;;) {
+    const page = await listAssets({ limit: PAGE_LIMIT, cursor });
+    const found = (page.items ?? []).find((a) => a.asset_id === assetId);
+    if (found) return found;
+    const next = page.next_cursor ?? null;
+    // Stop on exhaustion or a non-advancing cursor — a server that returned
+    // the same cursor would otherwise spin the loop forever.
+    if (next === null || next === cursor) return null;
+    cursor = next;
+  }
+}
+
+/**
  * `/app/artifacts` — the real cross-chat asset browse view (#328). Rows
  * come from `GET /api/assets` (newest-first, cursor-paginated) rather
  * than the retired `ARTIFACTS` mock. Each row shows the kind glyph,
  * title, and a meta line (kind · size · relative time).
  *
- * The detail panel is bookmarkable via `?artifact=<asset_id>&chat=<chat_id>`
- * — both ids are needed because the content route is per-chat. On a cold
- * deep-link (refresh/bookmark) where the asset isn't on the loaded page,
- * the descriptor is fetched directly rather than searched for.
+ * The detail panel is bookmarkable via `?artifact=<asset_id>` (optionally
+ * `&chat=<chat_id>`). Row clicks add the chat id so the descriptor is one
+ * point read; the inline transcript cards (#327) link only the asset id,
+ * which resolves via the owner browse. On a cold deep-link where the
+ * asset isn't on the loaded page, the descriptor is fetched via the REST
+ * surface rather than searched for in memory.
  */
 export default function Artifacts() {
   const [params, setParams] = useSearchParams();
@@ -63,6 +92,17 @@ export default function Artifacts() {
       mountedRef.current = false;
     };
   }, []);
+
+  // Latest browse state (the tail cursor past the loaded pages + whether
+  // the browse is fully drained), read by the chat-less deep-link resolver
+  // so it resumes the scan from the loaded tail — or skips it entirely when
+  // the browse is exhausted and the asset still wasn't found. Held in a ref
+  // so pagination changes don't re-run the deep-link effect (which would
+  // flash the panel closed).
+  const browseStateRef = useRef({ cursor: null, exhausted: false });
+  useEffect(function trackBrowseState() {
+    browseStateRef.current = { cursor, exhausted };
+  }, [cursor, exhausted]);
 
   const openId = params.get(ARTIFACT_PARAM);
   const openChat = params.get(CHAT_PARAM);
@@ -88,12 +128,17 @@ export default function Artifacts() {
   }, []);
 
   // Cold deep-link: the URL points at an asset that isn't on the loaded
-  // page, so fetch its descriptor directly (needs both ids). Gated until
-  // the first page has settled so a link to a page-1 asset resolves from
-  // the loaded card instead of a redundant round-trip. No-op when the
-  // card is already loaded or the params are absent/partial.
+  // page, so fetch its descriptor via the REST surface. Gated until the
+  // first page has settled so a link to a page-1 asset resolves from the
+  // loaded card instead of a redundant round-trip. Two URL shapes:
+  //   - `?artifact=<id>&chat=<chat>` (a row click / full bookmark) → the
+  //     per-chat descriptor route, one point read.
+  //   - `?artifact=<id>` alone (an inline transcript card, #327, which
+  //     carries no chat id) → locate the card across the owner's browse
+  //     pages.
+  // No-op when the card is already loaded or `artifact` is absent.
   useEffect(function resolveDeepLink() {
-    if (!openId || !openChat || loadedOpen || status === "loading") {
+    if (!openId || loadedOpen || status === "loading") {
       setDeepLinked(null);
       return undefined;
     }
@@ -101,9 +146,17 @@ export default function Artifacts() {
     // Clear any prior descriptor before the new fetch so the panel doesn't
     // flash the previously deep-linked asset while this one loads.
     setDeepLinked(null);
-    getAsset(openChat, openId)
+    const { cursor: browseCursor, exhausted: browseExhausted } = browseStateRef.current;
+    // A fully-drained browse that didn't surface the asset (loadedOpen is
+    // false) means it doesn't exist — skip the redundant page-1 refetch.
+    const lookup = openChat
+      ? getAsset(openChat, openId)
+      : browseExhausted
+        ? Promise.resolve(null)
+        : findAssetById(openId, browseCursor);
+    lookup
       .then(function onDescriptor(descriptor) {
-        if (!cancelled) setDeepLinked(descriptor);
+        if (!cancelled) setDeepLinked(descriptor ?? null);
       })
       .catch(function onDescriptorError() {
         if (!cancelled) setDeepLinked(null);
