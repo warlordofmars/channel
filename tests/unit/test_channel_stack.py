@@ -33,7 +33,11 @@ from aws_cdk import assertions
 _INFRA = Path(__file__).resolve().parents[2] / "infra"
 sys.path.insert(0, str(_INFRA))
 
-from stacks.channel_stack import LAMBDA_ASSET_EXCLUDE, ChannelStack  # noqa: E402
+from stacks.channel_stack import (  # noqa: E402
+    API_LAMBDA_BUNDLING_STEPS,
+    LAMBDA_ASSET_EXCLUDE,
+    ChannelStack,
+)
 
 
 def _synth(env_name: str) -> assertions.Template:
@@ -757,6 +761,43 @@ def test_lambda_asset_exclude_covers_volatile_agent_paths():
         "**/cdk.out",
     ):
         assert required in LAMBDA_ASSET_EXCLUDE, f"missing exclude pattern: {required}"
+
+
+def test_api_bundling_uv_export_omits_the_project_itself():
+    """#319 — the ``uv export`` bundling step must carry
+    ``--no-emit-project``. Without it the export contains the project as
+    an editable requirement (``-e .``), pip builds the project inside the
+    bundling container, and hatch-vcs tries to resolve the version from
+    ``.git`` — which is a pointer FILE in a git worktree, referencing a
+    gitdir outside the Docker bind mount. Synth/deploy from a
+    ``.claude/worktrees/`` worktree dies on exactly that. The dev and
+    infra (CDK) dependency groups must stay excluded too — neither
+    belongs in the Lambda zip.
+    """
+    export_steps = [s for s in API_LAMBDA_BUNDLING_STEPS if "uv export" in s]
+    assert len(export_steps) == 1, "expected exactly one uv export step"
+    export = export_steps[0]
+    assert "--no-emit-project" in export, (
+        "uv export must not emit the project — hatch-vcs cannot resolve a "
+        "version inside the Docker bundling mount of a git worktree (#319)"
+    )
+    assert "--no-group dev" in export
+    assert "--no-group infra" in export
+
+
+def test_api_bundling_ships_first_party_code_and_entrypoint():
+    """#319 — dropping the project from the export is only safe while the
+    bundle ships first-party code via the explicit ``src/channel`` copy,
+    installs the exported third-party deps into the asset output, and
+    copies + chmods the AWSLWA entrypoint. Guard those steps so a future
+    command rewrite can't silently remove what makes ``--no-emit-project``
+    sound.
+    """
+    joined = " && ".join(API_LAMBDA_BUNDLING_STEPS)
+    assert "pip install -r /tmp/requirements.txt -t /asset-output" in joined
+    assert "cp -r src/channel /asset-output/channel" in joined
+    assert "cp run.sh /asset-output/run.sh" in joined
+    assert "chmod +x /asset-output/run.sh" in joined
 
 
 def test_lambda_asset_exclude_never_matches_bundling_inputs():

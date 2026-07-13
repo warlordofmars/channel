@@ -115,6 +115,45 @@ LAMBDA_ASSET_EXCLUDE = [
     "**/.DS_Store",
 ]
 
+# API Lambda Docker-bundling steps (#319). Module-level so the unit
+# tests can assert the command shape — bundling commands never appear
+# in the synthesized template (they only drive local asset staging),
+# so a template assertion can't guard them.
+#
+# ``uv export`` MUST carry ``--no-emit-project``. Without it, the
+# export includes the project itself as an editable requirement
+# (``-e .``) and ``pip install`` builds the project inside the
+# bundling container to generate its metadata. The build backend is
+# hatchling + hatch-vcs, which resolves the version from ``.git`` —
+# but in a git worktree (the agent workflow's default), ``.git`` is a
+# pointer FILE referencing a gitdir OUTSIDE the bind mount, so
+# version resolution fails (setuptools-scm LookupError: "unable to
+# detect version for /asset-input") and bundling — and thus
+# synth/deploy — dies.
+#
+# Dropping the project from the export is safe: the exported
+# requirements still pin the full third-party closure, first-party
+# code ships via the explicit ``cp -r src/channel`` step below (no
+# dist-info entry point is load-bearing — ``run.sh`` starts uvicorn
+# via plain module import), and the runtime's two self-version reads
+# (``channel/api/main.py:_app_version`` and
+# ``channel/logging_config.py``) both fall back to the
+# ``APP_VERSION`` env var, which this stack always injects into the
+# Lambda environment.
+API_LAMBDA_BUNDLING_STEPS = [
+    "pip install uv --quiet --no-cache-dir",
+    # Export only third-party runtime deps — exclude the dev and infra
+    # (CDK) groups and the project itself (see module comment above).
+    # Kept as ONE literal (E501 is ignored repo-wide): implicit string
+    # concatenation across lines invites a silently missing space.
+    "UV_CACHE_DIR=/tmp/uv-cache uv export --no-hashes --no-group dev --no-group infra --no-emit-project -o /tmp/requirements.txt",
+    "pip install -r /tmp/requirements.txt -t /asset-output --quiet --no-cache-dir",
+    "cp -r src/channel /asset-output/channel",
+    # run.sh is the AWSLWA entrypoint — must be executable at Lambda root
+    "cp run.sh /asset-output/run.sh",
+    "chmod +x /asset-output/run.sh",
+]
+
 
 def _build_csp_header(
     *,
@@ -327,22 +366,7 @@ class ChannelStack(cdk.Stack):
             exclude=LAMBDA_ASSET_EXCLUDE,
             bundling=cdk.BundlingOptions(
                 image=lambda_.Runtime.PYTHON_3_12.bundling_image,
-                command=[
-                    "bash",
-                    "-c",
-                    " && ".join(
-                        [
-                            "pip install uv --quiet --no-cache-dir",
-                            # Export only runtime deps — exclude dev and infra (CDK) groups
-                            "UV_CACHE_DIR=/tmp/uv-cache uv export --no-hashes --no-group dev --no-group infra -o /tmp/requirements.txt",
-                            "pip install -r /tmp/requirements.txt -t /asset-output --quiet --no-cache-dir",
-                            "cp -r src/channel /asset-output/channel",
-                            # run.sh is the AWSLWA entrypoint — must be executable at Lambda root
-                            "cp run.sh /asset-output/run.sh",
-                            "chmod +x /asset-output/run.sh",
-                        ]
-                    ),
-                ],
+                command=["bash", "-c", " && ".join(API_LAMBDA_BUNDLING_STEPS)],
             ),
         )
 
