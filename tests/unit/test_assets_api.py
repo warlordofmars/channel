@@ -12,6 +12,7 @@ pattern.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import os
@@ -128,6 +129,9 @@ def metrics_calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[int, int]]:
     calls: list[tuple[int, int]] = []
 
     async def _record(reaped: int, failed: int) -> None:
+        # Yield once so the stub is genuinely async (matches the real
+        # awaitable's shape and keeps S7503 quiet).
+        await asyncio.sleep(0)
         calls.append((reaped, failed))
 
     monkeypatch.setattr(assets_api, "record_asset_lazy_expiry_reaps", _record)

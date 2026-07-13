@@ -50,7 +50,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import binascii
 import json
 import logging
 from decimal import Decimal
@@ -146,7 +145,9 @@ def _decode_cursor(token: str, owner: str) -> dict[str, Any]:
     """
     try:
         key = json.loads(base64.urlsafe_b64decode(token.encode()))
-    except (ValueError, binascii.Error) as exc:
+    except ValueError as exc:
+        # Covers bad base64 (binascii.Error subclasses ValueError),
+        # non-UTF-8 bytes, and malformed JSON alike.
         raise HTTPException(status_code=400, detail="invalid cursor") from exc
     if (
         not isinstance(key, dict)
@@ -163,7 +164,10 @@ def _decode_cursor(token: str, owner: str) -> dict[str, Any]:
 # ----------------------------------------------------------------
 
 
-@router.get("/chats/{chat_id}/assets")
+@router.get(
+    "/chats/{chat_id}/assets",
+    responses={404: {"description": "Chat not found (missing or not owned by the caller)"}},
+)
 async def list_chat_assets(
     chat_id: str,
     claims: dict[str, Any] = Depends(require_mgmt_user),
@@ -174,7 +178,10 @@ async def list_chat_assets(
     return {"items": [_card_from_asset(a) for a in assets]}
 
 
-@router.get("/chats/{chat_id}/assets/{asset_id}")
+@router.get(
+    "/chats/{chat_id}/assets/{asset_id}",
+    responses={404: {"description": "Chat or asset not found"}},
+)
 async def get_chat_asset(
     chat_id: str,
     asset_id: str,
@@ -188,7 +195,13 @@ async def get_chat_asset(
     return _card_from_asset(asset)
 
 
-@router.get("/chats/{chat_id}/assets/{asset_id}/content")
+@router.get(
+    "/chats/{chat_id}/assets/{asset_id}/content",
+    responses={
+        404: {"description": "Chat, asset, or asset payload not found"},
+        502: {"description": "Asset content unavailable (upstream S3 failure)"},
+    },
+)
 async def get_chat_asset_content(
     chat_id: str,
     asset_id: str,
@@ -213,9 +226,11 @@ async def get_chat_asset_content(
             # wipe) — from the caller's side the asset is gone.
             raise HTTPException(status_code=404, detail="Asset content not found")
         logger.warning(
-            "asset.content_fetch_failed chat_id_hash=%s asset_id=%s reason=%s",
+            # Both ids are caller-supplied path params — fingerprint
+            # them rather than logging user-controlled data (S5145).
+            "asset.content_fetch_failed chat_id_hash=%s asset_id_hash=%s reason=%s",
             fingerprint_id(chat_id),
-            asset_id,
+            fingerprint_id(asset_id),
             reason,
         )
         raise HTTPException(status_code=502, detail="Asset content unavailable")
@@ -229,7 +244,11 @@ async def get_chat_asset_content(
     )
 
 
-@router.delete("/chats/{chat_id}/assets/{asset_id}", status_code=204)
+@router.delete(
+    "/chats/{chat_id}/assets/{asset_id}",
+    status_code=204,
+    responses={404: {"description": "Chat not found (missing or not owned by the caller)"}},
+)
 async def delete_chat_asset(
     chat_id: str,
     asset_id: str,
@@ -306,7 +325,10 @@ async def _reap_orphans(orphans: list[dict[str, Any]], owner: str) -> None:
     await record_asset_lazy_expiry_reaps(reaped, failed)
 
 
-@router.get("/assets")
+@router.get(
+    "/assets",
+    responses={400: {"description": "Malformed or foreign cursor"}},
+)
 async def browse_assets(
     limit: int = Query(default=50, ge=1, le=100),
     cursor: str | None = None,

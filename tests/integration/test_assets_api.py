@@ -25,7 +25,9 @@ from fastapi.testclient import TestClient
 from channel import storage
 from channel.api.main import app
 from channel.auth.tokens import issue_mgmt_jwt
-from channel.models import Asset
+from tests.integration._helpers import FakeS3 as _FakeS3
+from tests.integration._helpers import asset_ts as _ts
+from tests.integration._helpers import make_asset as _asset
 
 client = TestClient(app)
 
@@ -33,60 +35,6 @@ client = TestClient(app)
 def _headers(user_id: str) -> dict[str, str]:
     token = issue_mgmt_jwt({"user_id": user_id, "email": user_id, "role": "user"})
     return {"Authorization": f"Bearer {token}"}
-
-
-class _FakeS3:
-    """Per-test S3 stub: delete_object is a no-op recorder."""
-
-    def __init__(self) -> None:
-        self.deleted: list[tuple[str, str]] = []
-
-    def delete_object(self, *, Bucket: str, Key: str) -> dict[str, Any]:
-        self.deleted.append((Bucket, Key))
-        return {}
-
-
-@pytest.fixture
-def fake_s3(monkeypatch: pytest.MonkeyPatch) -> _FakeS3:
-    fake = _FakeS3()
-    monkeypatch.setattr("channel.storage._get_s3_client", lambda: fake)
-    return fake
-
-
-def _ts(i: int) -> str:
-    return f"2026-07-13T00:00:{i:02d}.000000+00:00"
-
-
-def _asset(
-    asset_id: str,
-    *,
-    chat_id: str,
-    owner: str,
-    created_at: str,
-    inline: bool = True,
-) -> Asset:
-    payload: dict[str, Any] = (
-        {"content": f"content of {asset_id}"}
-        if inline
-        else {
-            "s3_bucket": "channel-attachments-test",
-            "s3_key": f"assets/chat/{chat_id}/{asset_id}",
-        }
-    )
-    return Asset(
-        asset_id=asset_id,
-        chat_id=chat_id,
-        owner=owner,
-        kind="code" if inline else "image",
-        title=f"{asset_id}.txt",
-        mime="text/plain" if inline else "image/png",
-        size_bytes=64,
-        origin="generated" if inline else "tool_output",
-        source={"msg_id": f"m-{asset_id}"},
-        created_at=created_at,
-        updated_at=created_at,
-        **payload,
-    )
 
 
 @pytest.mark.usefixtures("starter_table")
