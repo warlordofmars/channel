@@ -127,8 +127,9 @@ LAMBDA_ASSET_EXCLUDE = [
 # hatchling + hatch-vcs, which resolves the version from ``.git`` —
 # but in a git worktree (the agent workflow's default), ``.git`` is a
 # pointer FILE referencing a gitdir OUTSIDE the bind mount, so
-# version resolution fails (``LookupError: Error getting the version
-# from source `vcs```) and bundling — and thus synth/deploy — dies.
+# version resolution fails (setuptools-scm LookupError: "unable to
+# detect version for /asset-input") and bundling — and thus
+# synth/deploy — dies.
 #
 # Dropping the project from the export is safe: the exported
 # requirements still pin the full third-party closure, first-party
@@ -143,8 +144,9 @@ API_LAMBDA_BUNDLING_STEPS = [
     "pip install uv --quiet --no-cache-dir",
     # Export only third-party runtime deps — exclude the dev and infra
     # (CDK) groups and the project itself (see module comment above).
-    "UV_CACHE_DIR=/tmp/uv-cache uv export --no-hashes --no-group dev"
-    " --no-group infra --no-emit-project -o /tmp/requirements.txt",
+    # Kept as ONE literal (E501 is ignored repo-wide): implicit string
+    # concatenation across lines invites a silently missing space.
+    "UV_CACHE_DIR=/tmp/uv-cache uv export --no-hashes --no-group dev --no-group infra --no-emit-project -o /tmp/requirements.txt",
     "pip install -r /tmp/requirements.txt -t /asset-output --quiet --no-cache-dir",
     "cp -r src/channel /asset-output/channel",
     # run.sh is the AWSLWA entrypoint — must be executable at Lambda root
