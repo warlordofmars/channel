@@ -1654,10 +1654,13 @@ describe("useChatStream — assets (#327)", () => {
       items: [{ asset_id: "as-1", msg_id: "m2", kind: "code", title: "f.py" }],
     });
     const view = await mountLoaded("c1");
+    // Cards attach opportunistically AFTER history renders — wait for it.
+    await waitFor(() =>
+      expect(view.result.current.turns[1].assets).toEqual([
+        { asset_id: "as-1", msg_id: "m2", kind: "code", title: "f.py" },
+      ]),
+    );
     expect(view.result.current.turns[0].assets).toBeUndefined();
-    expect(view.result.current.turns[1].assets).toEqual([
-      { asset_id: "as-1", msg_id: "m2", kind: "code", title: "f.py" },
-    ]);
   });
 
   it("still loads history when the assets fetch fails (non-fatal)", async () => {
@@ -1782,6 +1785,30 @@ describe("useChatStream — assets (#327)", () => {
     expect(result.current.turns[1].assets).toEqual([
       { asset_id: "as-1", msg_id: "asst-1", title: "b" },
     ]);
+  });
+
+  it("drops reattached assets when the chat changed before they arrive", async () => {
+    // c1 history resolves and renders; its assets fetch is left pending.
+    api.getChat.mockResolvedValue(chatPage([{ msg_id: "m1", role: "user", text: "hi" }]));
+    let resolveAssets;
+    api.listChatAssets.mockImplementationOnce(
+      () => new Promise((r) => { resolveAssets = r; }),
+    );
+    const { result, rerender } = renderHook(({ id }) => useChatStream(id), {
+      initialProps: { id: "c1" },
+    });
+    await waitFor(() => expect(result.current.status).toBe("idle"));
+    // Switch chats before c1's assets land — cancels the c1 effect.
+    rerender({ id: "c2" });
+    await waitFor(() => expect(result.current.status).toBe("idle"));
+    // Now let c1's (stale) assets resolve: the cancelled guard drops them.
+    await act(async () => {
+      resolveAssets({ items: [{ asset_id: "late", msg_id: "m1" }] });
+      await Promise.resolve();
+    });
+    expect(
+      result.current.turns.some((t) => t.assets?.some((a) => a.asset_id === "late")),
+    ).toBe(false);
   });
 
   it("ignores asset frames with no asset or no msg_id", async () => {

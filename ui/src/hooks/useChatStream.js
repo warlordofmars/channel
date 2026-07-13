@@ -211,22 +211,35 @@ export function useChatStream(chatId, { onTitleSuggested } = {}) {
     loadingOlderRef.current = false;
     let cancelled = false;
     setStatus("loading-history");
-    // #327: reattach persisted asset cards alongside history. The assets
-    // fetch is best-effort — its own `.catch` degrades to no cards so a
-    // failed assets call never blocks the transcript from loading.
-    Promise.all([
-      api.getChat(chatId),
-      api.listChatAssets(chatId).catch(() => ({ items: [] })),
-    ])
-      .then(([{ messages, older_cursor: older }, assetsResp]) => {
+    api
+      .getChat(chatId)
+      .then(({ messages, older_cursor: older }) => {
         if (cancelled) return;
-        const withAssets = attachAssetsToTurns(messages, assetsResp?.items);
         // Only install loaded history if the caller hasn't already
         // pushed optimistic turns (the first-message-creates-chat flow
         // calls send() during the same mount).
-        setTurns((prev) => (prev.length === 0 ? withAssets : prev));
+        setTurns((prev) => (prev.length === 0 ? messages : prev));
         setOlderCursor(older ?? null);
         setStatus("idle");
+        // #327: reattach persisted asset cards opportunistically, kicked
+        // off only AFTER history is on screen so a slow or hung assets
+        // fetch can never delay the transcript (Copilot review on #349).
+        // Fully best-effort — a rejected fetch leaves the transcript
+        // intact. `attachAssetsToTurns` only touches turns whose
+        // persisted msg_id matches, so a concurrent optimistic send
+        // (temp ids) is an untouched no-op.
+        api
+          .listChatAssets(chatId)
+          .then((assetsResp) => {
+            if (cancelled) return;
+            const items = assetsResp?.items;
+            if (items && items.length > 0) {
+              setTurns((prev) => attachAssetsToTurns(prev, items));
+            }
+          })
+          .catch(() => {
+            /* best-effort — history already rendered without cards */
+          });
       })
       .catch((err) => {
         if (cancelled) return;
