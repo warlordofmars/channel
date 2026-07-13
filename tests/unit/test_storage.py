@@ -32,6 +32,7 @@ from channel.storage import (
     deny_jti,
     derive_users_from_chat_index,
     get_chat_by_id,
+    get_user_meta,
     is_jti_denied,
     list_audit_events_for_actor,
     list_chats_for_user,
@@ -2249,3 +2250,19 @@ def test_count_active_users_follows_scan_pagination(
             last_message_at=active,
         )
     assert count_active_users("2500-01-01T00:00:00+00:00") == 3
+
+
+def test_get_user_meta_returns_row_when_present(table: FakeTable) -> None:
+    _put_user_meta(table, "u-1", email="one@example.com", created_at="2026-01-01T00:00:00+00:00")
+    row = get_user_meta("u-1")
+    assert row is not None
+    assert row["email"] == "one@example.com"
+    assert row["created_at"] == "2026-01-01T00:00:00+00:00"
+
+
+def test_get_user_meta_returns_none_when_absent(table: FakeTable) -> None:
+    """Every user is META-less until the #110 writer ships — None, not KeyError."""
+
+    # A sibling row under the same PK must not satisfy the point read.
+    create_chat(user_id="u-1", title=None, model_default="m")
+    assert get_user_meta("u-1") is None

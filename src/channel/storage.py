@@ -1303,6 +1303,20 @@ def _normalize_iso_bound(value: str) -> str:
     return _parse_iso_utc(value).isoformat(timespec="microseconds")
 
 
+def get_user_meta(user_id: str) -> dict[str, Any] | None:
+    """Point-read the ``PK=USER#{user_id}, SK=META`` row (#235).
+
+    Returns the raw item dict, or ``None`` when the row is absent —
+    which is every user until the #110 writer ships. The #235 admin
+    detail endpoint combines this with the caller's chat-index rows to
+    decide 404 (a user with chats but no META row still exists).
+    """
+
+    result = _get_table().get_item(Key={"PK": f"USER#{user_id}", "SK": "META"})
+    item: dict[str, Any] | None = result.get("Item")
+    return item
+
+
 def scan_users(
     *,
     cursor: dict[str, Any] | None = None,

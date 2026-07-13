@@ -16,6 +16,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from channel.api._auth import require_admin  # noqa: F401 — re-exported for route use
+from channel.api.admin import router as admin_router
 from channel.api.attachments import router as attachments_router
 from channel.api.chats import router as chats_router
 from channel.api.csp import router as csp_router
@@ -150,6 +151,9 @@ app.include_router(models_router, prefix="/api")
 
 # Attachments presign + finalize — served at /api/attachments/* (#175)
 app.include_router(attachments_router, prefix="/api")
+
+# Admin user list + detail — requires mgmt JWT with role=admin (#235)
+app.include_router(admin_router, prefix="/api")
 
 # User preferences — GET/PUT /api/me/prefs (full paths declared on the
 # router so no prefix needed here)
