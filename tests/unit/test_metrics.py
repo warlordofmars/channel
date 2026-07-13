@@ -242,3 +242,76 @@ def test_record_tool_call_outcome_signature_locks_out_dimensions():
     sig = inspect.signature(record_tool_call_outcome)
     assert list(sig.parameters.keys()) == ["success"]
     assert sig.parameters["success"].annotation == "bool"
+
+
+@pytest.mark.asyncio
+async def test_record_chat_delete_asset_wipe_outcome_success_emits_success_counter():
+    from channel.metrics import record_chat_delete_asset_wipe_outcome
+
+    with patch("channel.metrics.emit_metric", new=AsyncMock()) as mock_emit:
+        await record_chat_delete_asset_wipe_outcome(success=True)
+
+    mock_emit.assert_awaited_once_with("ChatDeleteAssetWipeSuccesses")
+
+
+@pytest.mark.asyncio
+async def test_record_chat_delete_asset_wipe_outcome_failure_emits_failure_counter():
+    from channel.metrics import record_chat_delete_asset_wipe_outcome
+
+    with patch("channel.metrics.emit_metric", new=AsyncMock()) as mock_emit:
+        await record_chat_delete_asset_wipe_outcome(success=False)
+
+    mock_emit.assert_awaited_once_with("ChatDeleteAssetWipeFailures")
+
+
+def test_record_chat_delete_asset_wipe_outcome_signature_locks_out_dimensions():
+    """Same cardinality rule as the memory-write counters — no kwargs
+    path for per-actor / per-chat / per-asset dimensions."""
+    from channel.metrics import record_chat_delete_asset_wipe_outcome
+
+    sig = inspect.signature(record_chat_delete_asset_wipe_outcome)
+    assert list(sig.parameters.keys()) == ["success"]
+    param = sig.parameters["success"]
+    assert param.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+    assert param.annotation == "bool"
+
+
+@pytest.mark.asyncio
+async def test_record_asset_lazy_expiry_reaps_emits_both_counters():
+    from channel.metrics import record_asset_lazy_expiry_reaps
+
+    with patch("channel.metrics.emit_metric", new=AsyncMock()) as mock_emit:
+        await record_asset_lazy_expiry_reaps(reaped=3, failed=2)
+
+    mock_emit.assert_any_await("AssetLazyExpiryReaps", value=3.0)
+    mock_emit.assert_any_await("AssetLazyExpiryReapFailures", value=2.0)
+    assert mock_emit.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_record_asset_lazy_expiry_reaps_skips_zero_counters():
+    from channel.metrics import record_asset_lazy_expiry_reaps
+
+    with patch("channel.metrics.emit_metric", new=AsyncMock()) as mock_emit:
+        await record_asset_lazy_expiry_reaps(reaped=0, failed=0)
+
+    mock_emit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_record_asset_lazy_expiry_reaps_emits_only_nonzero_side():
+    from channel.metrics import record_asset_lazy_expiry_reaps
+
+    with patch("channel.metrics.emit_metric", new=AsyncMock()) as mock_emit:
+        await record_asset_lazy_expiry_reaps(reaped=1, failed=0)
+
+    mock_emit.assert_awaited_once_with("AssetLazyExpiryReaps", value=1.0)
+
+
+def test_record_asset_lazy_expiry_reaps_signature_locks_out_dimensions():
+    """Two ints only — no kwargs path for dimensions (cardinality rule)."""
+    from channel.metrics import record_asset_lazy_expiry_reaps
+
+    sig = inspect.signature(record_asset_lazy_expiry_reaps)
+    assert list(sig.parameters.keys()) == ["reaped", "failed"]
+    assert all(p.annotation == "int" for p in sig.parameters.values())

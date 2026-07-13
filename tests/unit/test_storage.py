@@ -2286,3 +2286,498 @@ def test_get_user_meta_returns_none_when_absent(table: FakeTable) -> None:
     # A sibling row under the same PK must not satisfy the point read.
     create_chat(user_id="u-1", title=None, model_default="m")
     assert get_user_meta("u-1") is None
+
+
+# ----------------------------------------------------------------
+# Assets (#324, epic #321)
+# ----------------------------------------------------------------
+
+
+def _asset(
+    asset_id: str = "a-1",
+    *,
+    chat_id: str = "c-1",
+    owner: str = "u-1",
+    created_at: str = "2026-07-13T00:00:00.000000+00:00",
+    content: str | None = "print('hi')",
+    s3_bucket: str | None = None,
+    s3_key: str | None = None,
+    kind: str = "code",
+    origin: str = "generated",
+) -> Any:
+    from channel.models import Asset
+
+    return Asset(
+        asset_id=asset_id,
+        chat_id=chat_id,
+        owner=owner,
+        kind=kind,  # type: ignore[arg-type]
+        title=f"{asset_id}.txt",
+        mime="text/plain",
+        size_bytes=11,
+        origin=origin,  # type: ignore[arg-type]
+        source={"msg_id": "m-1"},
+        content=content,
+        s3_bucket=s3_bucket,
+        s3_key=s3_key,
+        created_at=created_at,
+        updated_at=created_at,
+    )
+
+
+def _s3_asset(asset_id: str = "a-s3", **overrides: Any) -> Any:
+    defaults: dict[str, Any] = {
+        "content": None,
+        "s3_bucket": "channel-attachments-test",
+        "s3_key": f"assets/chat/{overrides.get('chat_id', 'c-1')}/{asset_id}",
+        "kind": "image",
+        "origin": "tool_output",
+    }
+    defaults.update(overrides)
+    return _asset(asset_id, **defaults)
+
+
+def test_put_asset_writes_chat_partition_row_with_owner_gsi_keys(table: FakeTable) -> None:
+    from channel import storage
+
+    asset = _asset("a-keys", chat_id="c-keys", owner="u-keys")
+    storage.put_asset(asset)
+
+    key = (f"CHAT#{asset.chat_id}", f"ASSET#{asset.created_at}#{asset.asset_id}")
+    assert key in table.items
+    row = table.items[key]
+    assert row["owner_pk"] == "ASSETOWNER#u-keys"
+    assert row["owner_sk"] == f"{asset.created_at}#{asset.asset_id}"
+    assert row["content"] == "print('hi')"
+    # None-valued payload attrs are stripped, mirroring _attachment_item.
+    assert "s3_bucket" not in row
+    assert "s3_key" not in row
+
+
+def test_put_asset_s3_backed_row_omits_content(table: FakeTable) -> None:
+    from channel import storage
+
+    asset = _s3_asset("a-bin", chat_id="c-bin")
+    storage.put_asset(asset)
+
+    row = table.items[(f"CHAT#{asset.chat_id}", f"ASSET#{asset.created_at}#{asset.asset_id}")]
+    assert row["s3_bucket"] == "channel-attachments-test"
+    assert row["s3_key"] == "assets/chat/c-bin/a-bin"
+    assert "content" not in row
+
+
+def test_get_asset_matches_on_id_within_chat_partition(table: FakeTable) -> None:
+    from channel import storage
+
+    storage.put_asset(_asset("a-1", chat_id="c-1"))
+    storage.put_asset(_asset("a-2", chat_id="c-1", created_at="2026-07-13T00:00:01.000000+00:00"))
+    storage.put_asset(_asset("a-other", chat_id="c-2"))
+
+    found = storage.get_asset(chat_id="c-1", asset_id="a-2")
+    assert found is not None
+    assert found.asset_id == "a-2"
+    assert storage.get_asset(chat_id="c-1", asset_id="a-other") is None
+    assert storage.get_asset(chat_id="c-1", asset_id="nope") is None
+
+
+def test_list_chat_assets_orders_oldest_first_and_scopes_to_chat(table: FakeTable) -> None:
+    from channel import storage
+
+    storage.put_asset(_asset("a-new", chat_id="c-1", created_at="2026-07-13T00:00:02.000000+00:00"))
+    storage.put_asset(_asset("a-old", chat_id="c-1", created_at="2026-07-13T00:00:01.000000+00:00"))
+    storage.put_asset(_asset("a-elsewhere", chat_id="c-2"))
+
+    assets = storage.list_chat_assets("c-1")
+    assert [a.asset_id for a in assets] == ["a-old", "a-new"]
+
+
+def test_list_chat_assets_follows_pagination(table: FakeTable) -> None:
+    """The partition walk must follow LastEvaluatedKey across pages."""
+
+    from channel import storage
+
+    for i in range(3):
+        storage.put_asset(
+            _asset(f"a-{i}", chat_id="c-pg", created_at=f"2026-07-13T00:00:0{i}.000000+00:00")
+        )
+
+    original_query = table.query
+    calls: list[dict[str, Any]] = []
+
+    def paginating_query(**kwargs: Any) -> dict[str, Any]:
+        calls.append(kwargs)
+        return original_query(**{**kwargs, "Limit": 2})
+
+    table.query = paginating_query  # type: ignore[method-assign]
+    assets = storage.list_chat_assets("c-pg")
+    assert [a.asset_id for a in assets] == ["a-0", "a-1", "a-2"]
+    assert len(calls) == 2
+    assert "ExclusiveStartKey" in calls[1]
+
+
+def test_list_assets_by_owner_returns_newest_first_dicts(table: FakeTable) -> None:
+    from channel import storage
+
+    storage.put_asset(
+        _asset("a-1", chat_id="c-1", owner="u-o", created_at="2026-07-13T00:00:01.000000+00:00")
+    )
+    storage.put_asset(
+        _asset("a-2", chat_id="c-2", owner="u-o", created_at="2026-07-13T00:00:02.000000+00:00")
+    )
+    storage.put_asset(_asset("a-x", chat_id="c-3", owner="u-someone-else"))
+
+    rows, cursor = storage.list_assets_by_owner("u-o")
+    assert [r["asset_id"] for r in rows] == ["a-2", "a-1"]
+    assert cursor is None
+    assert all(isinstance(r, dict) for r in rows)
+
+
+def test_list_assets_by_owner_paginates_with_cursor(table: FakeTable) -> None:
+    from channel import storage
+
+    for i in range(3):
+        storage.put_asset(
+            _asset(
+                f"a-{i}",
+                chat_id=f"c-{i}",
+                owner="u-pg",
+                created_at=f"2026-07-13T00:00:0{i}.000000+00:00",
+            )
+        )
+
+    first, cursor = storage.list_assets_by_owner("u-pg", limit=2)
+    assert [r["asset_id"] for r in first] == ["a-2", "a-1"]
+    assert cursor is not None
+    rest, done = storage.list_assets_by_owner("u-pg", limit=2, cursor=cursor)
+    assert [r["asset_id"] for r in rest] == ["a-0"]
+    assert done is None
+
+
+def test_list_assets_by_owner_query_shape(
+    table: FakeTable, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The browse query must hit the owner GSI, newest first, with a
+    ProjectionExpression that keeps ``content`` off the hot path."""
+
+    from channel import storage
+
+    calls: list[dict[str, Any]] = []
+    original_query = table.query
+
+    def recording_query(**kwargs: Any) -> dict[str, Any]:
+        calls.append(kwargs)
+        return original_query(**kwargs)
+
+    monkeypatch.setattr(table, "query", recording_query)
+    storage.list_assets_by_owner("u-shape", limit=7)
+
+    (kwargs,) = calls
+    assert kwargs["IndexName"] == "AssetOwnerIndex"
+    assert kwargs["ScanIndexForward"] is False
+    assert kwargs["Limit"] == 7
+    aliases = kwargs["ExpressionAttributeNames"]
+    projected = {aliases[a.strip()] for a in kwargs["ProjectionExpression"].split(",")}
+    assert "content" not in projected
+    assert {
+        "PK",
+        "SK",
+        "asset_id",
+        "chat_id",
+        "owner",
+        "kind",
+        "title",
+        "mime",
+        "size_bytes",
+        "origin",
+        "source",
+        "s3_bucket",
+        "s3_key",
+        "created_at",
+        "updated_at",
+    } == projected
+
+
+@pytest.mark.parametrize(("requested", "effective"), [(0, 1), (-5, 1), (500, 100)])
+def test_list_assets_by_owner_clamps_limit(
+    table: FakeTable, monkeypatch: pytest.MonkeyPatch, requested: int, effective: int
+) -> None:
+    from channel import storage
+
+    calls: list[dict[str, Any]] = []
+    original_query = table.query
+
+    def recording_query(**kwargs: Any) -> dict[str, Any]:
+        calls.append(kwargs)
+        return original_query(**kwargs)
+
+    monkeypatch.setattr(table, "query", recording_query)
+    storage.list_assets_by_owner("u-clamp", limit=requested)
+    assert calls[0]["Limit"] == effective
+
+
+def test_delete_asset_deletes_s3_object_before_row(table: FakeTable, s3_client: _FakeS3) -> None:
+    from channel import storage
+
+    asset = _s3_asset("a-del", chat_id="c-del")
+    storage.put_asset(asset)
+    storage.delete_asset(asset)
+
+    assert s3_client.deleted == [("channel-attachments-test", "assets/chat/c-del/a-del")]
+    assert ("CHAT#c-del", f"ASSET#{asset.created_at}#a-del") not in table.items
+
+
+def test_delete_asset_inline_skips_s3(table: FakeTable, s3_client: _FakeS3) -> None:
+    from channel import storage
+
+    asset = _asset("a-inline", chat_id="c-del2")
+    storage.put_asset(asset)
+    storage.delete_asset(asset)
+
+    assert s3_client.deleted == []
+    assert ("CHAT#c-del2", f"ASSET#{asset.created_at}#a-inline") not in table.items
+
+
+def test_delete_asset_leaves_row_when_s3_delete_raises(
+    table: FakeTable, s3_client: _FakeS3
+) -> None:
+    """S3-before-row ordering: an S3 failure must leave the row for the
+    lazy-expiry reap to retry."""
+
+    from channel import storage
+
+    asset = _s3_asset("a-stuck", chat_id="c-stuck")
+    storage.put_asset(asset)
+    s3_client.delete_errors[(asset.s3_bucket, asset.s3_key)] = "AccessDenied"
+
+    with pytest.raises(ClientError):
+        storage.delete_asset(asset)
+    assert ("CHAT#c-stuck", f"ASSET#{asset.created_at}#a-stuck") in table.items
+
+
+def test_get_asset_bytes_inline_returns_utf8_without_s3(s3_client: _FakeS3) -> None:
+    from channel import storage
+
+    data, reason = storage.get_asset_bytes(_asset(content="héllo"))
+    assert data == "héllo".encode()
+    assert reason is None
+    assert s3_client.handed_out_bodies == []
+
+
+def test_get_asset_bytes_s3_success(s3_client: _FakeS3) -> None:
+    from channel import storage
+
+    asset = _s3_asset("a-png")
+    s3_client.bodies[(asset.s3_bucket, asset.s3_key)] = b"\x89PNG fake"
+    data, reason = storage.get_asset_bytes(asset)
+    assert data == b"\x89PNG fake"
+    assert reason is None
+
+
+def test_get_asset_bytes_s3_not_found(s3_client: _FakeS3) -> None:
+    from channel import storage
+
+    data, reason = storage.get_asset_bytes(_s3_asset("a-miss"))
+    assert data is None
+    assert reason == "S3 object not found"
+
+
+def test_get_asset_bytes_s3_read_error_converts_to_reason(s3_client: _FakeS3) -> None:
+    from channel import storage
+
+    asset = _s3_asset("a-cut")
+    s3_client.bodies[(asset.s3_bucket, asset.s3_key)] = b"partial"
+    s3_client.body_read_errors[(asset.s3_bucket, asset.s3_key)] = OSError("connection reset")
+    data, reason = storage.get_asset_bytes(asset)
+    assert data is None
+    assert reason == "S3 read error: OSError"
+    assert s3_client.handed_out_bodies[0].closed
+
+
+def test_get_asset_bytes_guards_payloadless_instances() -> None:
+    """``model_construct`` bypasses the exactly-one-payload validator;
+    the helper must still fail in the (None, reason) shape."""
+
+    from channel import storage
+    from channel.models import Asset
+
+    hollow = Asset.model_construct(content=None, s3_bucket=None, s3_key=None)
+    data, reason = storage.get_asset_bytes(hollow)
+    assert data is None
+    assert reason == "asset has no payload coordinates"
+
+
+def test_delete_chat_assets_wipes_rows_and_s3_objects(table: FakeTable, s3_client: _FakeS3) -> None:
+    from channel import storage
+
+    inline = _asset("a-inline", chat_id="c-wipe")
+    binary = _s3_asset("a-bin", chat_id="c-wipe", created_at="2026-07-13T00:00:01.000000+00:00")
+    elsewhere = _asset("a-keep", chat_id="c-other")
+    for asset in (inline, binary, elsewhere):
+        storage.put_asset(asset)
+
+    deleted, failed = storage.delete_chat_assets(chat_id="c-wipe")
+
+    assert (deleted, failed) == (2, 0)
+    assert s3_client.deleted == [("channel-attachments-test", "assets/chat/c-wipe/a-bin")]
+    remaining = [sk for (pk, sk) in table.items if pk.startswith("CHAT#")]
+    assert remaining == [f"ASSET#{elsewhere.created_at}#a-keep"]
+
+
+def test_delete_chat_assets_isolates_per_asset_failures(
+    table: FakeTable, s3_client: _FakeS3
+) -> None:
+    from channel import storage
+
+    good = _s3_asset("a-good", chat_id="c-iso")
+    bad = _s3_asset("a-bad", chat_id="c-iso", created_at="2026-07-13T00:00:01.000000+00:00")
+    storage.put_asset(good)
+    storage.put_asset(bad)
+    s3_client.delete_errors[(bad.s3_bucket, bad.s3_key)] = "AccessDenied"
+
+    deleted, failed = storage.delete_chat_assets(chat_id="c-iso")
+
+    assert (deleted, failed) == (1, 1)
+    # The failed asset's row survives (S3-before-row ordering).
+    assert ("CHAT#c-iso", f"ASSET#{bad.created_at}#a-bad") in table.items
+    assert ("CHAT#c-iso", f"ASSET#{good.created_at}#a-good") not in table.items
+
+
+def test_delete_chat_assets_counts_malformed_rows_as_failures(
+    table: FakeTable, s3_client: _FakeS3
+) -> None:
+    from channel import storage
+
+    storage.put_asset(_asset("a-ok", chat_id="c-mal"))
+    table.put_item(
+        Item={
+            "PK": "CHAT#c-mal",
+            "SK": "ASSET#2026-07-13T00:00:09.000000+00:00#a-garbage",
+            # Missing every Asset attribute — hydration must fail, be
+            # counted, and not abort the rest of the cascade.
+        }
+    )
+
+    deleted, failed = storage.delete_chat_assets(chat_id="c-mal")
+    assert (deleted, failed) == (1, 1)
+
+
+def test_reap_orphaned_assets_deletes_orphans_and_skips_live_chats(
+    table: FakeTable, s3_client: _FakeS3
+) -> None:
+    from channel import storage
+
+    live_chat = create_chat(user_id="u-reap", title=None, model_default="m")
+    live = _asset("a-live", chat_id=live_chat.chat_id, owner="u-reap")
+    orphan = _s3_asset("a-orphan", chat_id="c-gone", owner="u-reap")
+    storage.put_asset(live)
+    storage.put_asset(orphan)
+
+    rows, _ = storage.list_assets_by_owner("u-reap")
+    reaped, failed = storage.reap_orphaned_assets(rows)
+
+    assert (reaped, failed) == (1, 0)
+    assert storage.get_asset(chat_id="c-gone", asset_id="a-orphan") is None
+    assert storage.get_asset(chat_id=live_chat.chat_id, asset_id="a-live") is not None
+    assert s3_client.deleted == [("channel-attachments-test", "assets/chat/c-gone/a-orphan")]
+
+
+def test_reap_orphaned_assets_caches_liveness_per_chat(
+    table: FakeTable, s3_client: _FakeS3, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from channel import storage
+
+    lookups: list[str] = []
+    original = storage.get_chat_by_id
+
+    def counting_get_chat_by_id(chat_id: str) -> Any:
+        lookups.append(chat_id)
+        return original(chat_id)
+
+    monkeypatch.setattr(storage, "get_chat_by_id", counting_get_chat_by_id)
+    a1 = _asset("a-1", chat_id="c-gone", owner="u-cache")
+    a2 = _asset(
+        "a-2", chat_id="c-gone", owner="u-cache", created_at="2026-07-13T00:00:01.000000+00:00"
+    )
+    storage.put_asset(a1)
+    storage.put_asset(a2)
+
+    rows, _ = storage.list_assets_by_owner("u-cache")
+    reaped, failed = storage.reap_orphaned_assets(rows)
+
+    assert (reaped, failed) == (2, 0)
+    assert lookups == ["c-gone"]
+
+
+def test_reap_orphaned_assets_isolates_delete_failures(
+    table: FakeTable, s3_client: _FakeS3
+) -> None:
+    from channel import storage
+
+    stuck = _s3_asset("a-stuck", chat_id="c-gone2", owner="u-fail")
+    fine = _asset(
+        "a-fine", chat_id="c-gone2", owner="u-fail", created_at="2026-07-13T00:00:01.000000+00:00"
+    )
+    storage.put_asset(stuck)
+    storage.put_asset(fine)
+    s3_client.delete_errors[(stuck.s3_bucket, stuck.s3_key)] = "AccessDenied"
+
+    rows, _ = storage.list_assets_by_owner("u-fail")
+    reaped, failed = storage.reap_orphaned_assets(rows)
+
+    assert (reaped, failed) == (1, 1)
+    assert storage.get_asset(chat_id="c-gone2", asset_id="a-stuck") is not None
+
+
+def test_reap_orphaned_assets_hydrates_content_projected_rows(
+    table: FakeTable, s3_client: _FakeS3
+) -> None:
+    """Browse rows arrive without ``content`` (the projection strips it);
+    inline-asset rows must still hydrate for the reap."""
+
+    from channel import storage
+
+    inline = _asset("a-proj", chat_id="c-gone3", owner="u-proj")
+    storage.put_asset(inline)
+    row = dict(table.items[("CHAT#c-gone3", f"ASSET#{inline.created_at}#a-proj")])
+    row.pop("content")
+
+    reaped, failed = storage.reap_orphaned_assets([row])
+    assert (reaped, failed) == (1, 0)
+
+
+def test_reap_orphaned_assets_counts_malformed_rows_as_failures(
+    table: FakeTable, s3_client: _FakeS3
+) -> None:
+    from channel import storage
+
+    reaped, failed = storage.reap_orphaned_assets([{"SK": "ASSET#junk"}])
+    assert (reaped, failed) == (0, 1)
+
+
+def test_delete_asset_skips_s3_when_bucket_missing_on_unvalidated_instance(
+    table: FakeTable, s3_client: _FakeS3
+) -> None:
+    """Copilot review on #339: an unvalidated instance (model_construct)
+    with ``s3_key`` set but ``s3_bucket=None`` must not reach boto3 —
+    ``Bucket=None`` raises ``ParamValidationError``, which the cascade's
+    per-asset ``except ClientError`` isolation doesn't cover."""
+
+    from channel import storage
+    from channel.models import Asset
+
+    hollow = Asset.model_construct(
+        asset_id="a-hollow",
+        chat_id="c-hollow",
+        owner="u-1",
+        content=None,
+        s3_bucket=None,
+        s3_key="assets/chat/c-hollow/a-hollow",
+        created_at="2026-07-13T00:00:00.000000+00:00",
+        updated_at="2026-07-13T00:00:00.000000+00:00",
+    )
+    table.put_item(Item={"PK": "CHAT#c-hollow", "SK": f"ASSET#{hollow.created_at}#a-hollow"})
+
+    storage.delete_asset(hollow)
+
+    assert s3_client.deleted == []
+    assert ("CHAT#c-hollow", f"ASSET#{hollow.created_at}#a-hollow") not in table.items

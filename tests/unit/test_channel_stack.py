@@ -259,6 +259,84 @@ def test_lambda_env_has_attachments_bucket_var(dev_template):
 
 
 # ----------------------------------------------------------------
+# Assets (#324, epic #321) — owner GSI + prefix-scoped IAM
+# ----------------------------------------------------------------
+
+
+def _single_table(template: assertions.Template) -> dict:
+    tables = template.find_resources("AWS::DynamoDB::Table")
+    assert len(tables) == 1, f"expected exactly one DynamoDB table, got {list(tables)}"
+    return next(iter(tables.values()))
+
+
+def test_table_has_asset_owner_index(dev_template):
+    """AssetOwnerIndex must exist with the semantic ``owner_pk`` /
+    ``owner_sk`` key attributes (not a GSI5PK slot) — the settled #321
+    design keys the browse GSI off a single owner attribute so the
+    workspace-tenancy migration is a one-value swap."""
+
+    gsis = _single_table(dev_template)["Properties"]["GlobalSecondaryIndexes"]
+    by_name = {g["IndexName"]: g for g in gsis}
+    assert "AssetOwnerIndex" in by_name, f"AssetOwnerIndex missing; found {sorted(by_name)}"
+    index = by_name["AssetOwnerIndex"]
+    assert index["KeySchema"] == [
+        {"AttributeName": "owner_pk", "KeyType": "HASH"},
+        {"AttributeName": "owner_sk", "KeyType": "RANGE"},
+    ]
+    assert index["Projection"]["ProjectionType"] == "ALL"
+
+
+def test_table_declares_owner_key_attributes_as_strings(dev_template):
+    attrs = {
+        a["AttributeName"]: a["AttributeType"]
+        for a in _single_table(dev_template)["Properties"]["AttributeDefinitions"]
+    }
+    assert attrs.get("owner_pk") == "S"
+    assert attrs.get("owner_sk") == "S"
+
+
+def _actions_touching_resource_substring(template: assertions.Template, needle: str) -> set[str]:
+    """Collect every IAM action from statements whose Resource JSON
+    mentions ``needle``. CDK renders prefix-scoped bucket grants as
+    ``Fn::Join`` fragments, so substring matching on the serialized
+    resource is the robust way to find them."""
+
+    actions: set[str] = set()
+    for pol in template.find_resources("AWS::IAM::Policy").values():
+        for stmt in pol["Properties"]["PolicyDocument"]["Statement"]:
+            if needle not in json.dumps(stmt.get("Resource", [])):
+                continue
+            stmt_actions = stmt.get("Action", [])
+            if isinstance(stmt_actions, str):
+                stmt_actions = [stmt_actions]
+            actions.update(stmt_actions)
+    return actions
+
+
+def test_api_role_can_put_read_delete_assets_prefix(dev_template):
+    """#324 — asset payloads live in the attachments bucket under
+    ``assets/chat/{chat_id}/{asset_id}``; the API role needs
+    put/read/delete scoped to that prefix."""
+
+    actions = _actions_touching_resource_substring(dev_template, "assets/chat/*")
+    assert any(a.startswith("s3:PutObject") for a in actions), actions
+    assert any(a.startswith("s3:GetObject") for a in actions), actions
+    assert any(a.startswith("s3:DeleteObject") for a in actions), actions
+
+
+def test_assets_prefix_has_no_dedicated_delete_tagging_statement(dev_template):
+    """Assets never carry the ``unreferenced=1`` upload lifecycle tag, so
+    the dedicated ``s3:DeleteObjectTagging`` statement that presigned
+    uploads need on ``attachments/user/*`` must not be duplicated for
+    the assets prefix. (``s3:PutObjectTagging`` alone is not asserted
+    on — CDK's ``grant_put`` bundles it into its standard write action
+    set for every prefix.)"""
+
+    actions = _actions_touching_resource_substring(dev_template, "assets/chat/*")
+    assert "s3:DeleteObjectTagging" not in actions, actions
+
+
+# ----------------------------------------------------------------
 # Content-Security-Policy header (#196)
 # ----------------------------------------------------------------
 
