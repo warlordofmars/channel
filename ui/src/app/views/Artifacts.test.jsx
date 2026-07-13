@@ -112,6 +112,16 @@ describe("findAssetById", () => {
     expect(api.listAssets).toHaveBeenCalledTimes(1);
   });
 
+  it("resumes from a provided cursor instead of refetching from the start", async () => {
+    api.listAssets.mockResolvedValueOnce({
+      items: [card({ asset_id: "y", title: "hit" })],
+      next_cursor: null,
+    });
+    const found = await findAssetById("y", "cursor-x");
+    expect(found.title).toBe("hit");
+    expect(api.listAssets).toHaveBeenCalledWith({ limit: 30, cursor: "cursor-x" });
+  });
+
   it("pages forward until the asset is found", async () => {
     api.listAssets
       .mockResolvedValueOnce({ items: [card({ asset_id: "x" })], next_cursor: "c1" })

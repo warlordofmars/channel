@@ -41,9 +41,13 @@ export async function drainAssetPages(fromCursor) {
  * the owner GSI browse is the only id→card path. Browse is newest-first,
  * so a just-created inline-card asset resolves on the first page; older
  * bookmarks page back until found or the cursor exhausts.
+ *
+ * `fromCursor` lets the caller resume from the browse cursor it already
+ * holds (the tail past its loaded pages), skipping a redundant refetch of
+ * pages the caller has already scanned; it defaults to the start.
  */
-export async function findAssetById(assetId) {
-  let cursor = null;
+export async function findAssetById(assetId, fromCursor = null) {
+  let cursor = fromCursor;
   for (;;) {
     const page = await listAssets({ limit: PAGE_LIMIT, cursor });
     const found = page.items.find((a) => a.asset_id === assetId);
@@ -85,6 +89,15 @@ export default function Artifacts() {
       mountedRef.current = false;
     };
   }, []);
+
+  // Latest browse cursor (the tail past the loaded pages), read by the
+  // chat-less deep-link resolver so it resumes the browse scan instead of
+  // refetching page 1. Held in a ref so pagination changes don't re-run
+  // the deep-link effect (which would flash the panel closed).
+  const browseCursorRef = useRef(null);
+  useEffect(function trackBrowseCursor() {
+    browseCursorRef.current = cursor;
+  }, [cursor]);
 
   const openId = params.get(ARTIFACT_PARAM);
   const openChat = params.get(CHAT_PARAM);
@@ -128,7 +141,9 @@ export default function Artifacts() {
     // Clear any prior descriptor before the new fetch so the panel doesn't
     // flash the previously deep-linked asset while this one loads.
     setDeepLinked(null);
-    const lookup = openChat ? getAsset(openChat, openId) : findAssetById(openId);
+    const lookup = openChat
+      ? getAsset(openChat, openId)
+      : findAssetById(openId, browseCursorRef.current);
     lookup
       .then(function onDescriptor(descriptor) {
         if (!cancelled) setDeepLinked(descriptor ?? null);
