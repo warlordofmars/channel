@@ -2752,3 +2752,32 @@ def test_reap_orphaned_assets_counts_malformed_rows_as_failures(
 
     reaped, failed = storage.reap_orphaned_assets([{"SK": "ASSET#junk"}])
     assert (reaped, failed) == (0, 1)
+
+
+def test_delete_asset_skips_s3_when_bucket_missing_on_unvalidated_instance(
+    table: FakeTable, s3_client: _FakeS3
+) -> None:
+    """Copilot review on #339: an unvalidated instance (model_construct)
+    with ``s3_key`` set but ``s3_bucket=None`` must not reach boto3 —
+    ``Bucket=None`` raises ``ParamValidationError``, which the cascade's
+    per-asset ``except ClientError`` isolation doesn't cover."""
+
+    from channel import storage
+    from channel.models import Asset
+
+    hollow = Asset.model_construct(
+        asset_id="a-hollow",
+        chat_id="c-hollow",
+        owner="u-1",
+        content=None,
+        s3_bucket=None,
+        s3_key="assets/chat/c-hollow/a-hollow",
+        created_at="2026-07-13T00:00:00.000000+00:00",
+        updated_at="2026-07-13T00:00:00.000000+00:00",
+    )
+    table.put_item(Item={"PK": "CHAT#c-hollow", "SK": f"ASSET#{hollow.created_at}#a-hollow"})
+
+    storage.delete_asset(hollow)
+
+    assert s3_client.deleted == []
+    assert ("CHAT#c-hollow", f"ASSET#{hollow.created_at}#a-hollow") not in table.items

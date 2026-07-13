@@ -1138,9 +1138,16 @@ def delete_asset(asset: Asset) -> None:
     rationale as :func:`delete_chat_attachments`. Errors propagate;
     callers that need best-effort semantics (the cascade, the reap)
     wrap per-asset.
+
+    Both S3 coordinates are checked (not just ``s3_key``) so an
+    unvalidated instance — ``model_construct``-built or mutated after
+    construction — can never reach boto3 with ``Bucket=None``, which
+    would raise a ``ParamValidationError`` the callers' per-asset
+    ``except ClientError`` isolation doesn't cover. Mirrors the
+    payload-coordinates guard in :func:`get_asset_bytes`.
     """
 
-    if asset.s3_key is not None:
+    if asset.s3_bucket is not None and asset.s3_key is not None:
         _get_s3_client().delete_object(Bucket=asset.s3_bucket, Key=asset.s3_key)
     _get_table().delete_item(
         Key={
