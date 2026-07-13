@@ -130,6 +130,9 @@ export default function Artifacts() {
   }
 
   function handleRowKey(event, a) {
+    // Ignore auto-repeat while a key is held so we don't spam the history
+    // stack with identical ?artifact= states.
+    if (event.repeat) return;
     // Keyboard parity for the role="button" rows (Enter / Space open the
     // panel, same as a pointer click).
     if (event.key === "Enter" || event.key === " ") {

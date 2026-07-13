@@ -198,6 +198,9 @@ describe("Artifacts", () => {
     // A non-activating key is a no-op.
     fireEvent.keyDown(row, { key: "a" });
     expect(getLastSearch()).toBe("");
+    // Auto-repeat (held key) is ignored so history isn't spammed.
+    fireEvent.keyDown(row, { key: "Enter", repeat: true });
+    expect(getLastSearch()).toBe("");
     // Enter opens the panel.
     fireEvent.keyDown(row, { key: "Enter" });
     await waitFor(() => expect(container.querySelector(".art-panel-wrap")).toBeTruthy());
