@@ -41,6 +41,7 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Query
 
 from channel import storage
 from channel.api._auth import require_admin
+from channel.logging_config import fingerprint_id
 from channel.models import Chat
 
 logger = logging.getLogger(__name__)
@@ -290,8 +291,10 @@ def _walk_user_chats(user_id: str) -> list[Chat]:
         if cursor is None:
             return chats
     logger.warning(
-        "admin user detail truncated: chat walk for %s cursor still live after %d calls",
-        user_id,
+        # user_id is the user's email (JWT sub) — fingerprint it rather
+        # than writing PII into the log sink (same discipline as chats.py).
+        "admin user detail truncated: chat walk for user %s cursor still live after %d calls",
+        fingerprint_id(user_id),
         _MAX_STORAGE_WALK_CALLS,
     )
     return chats
