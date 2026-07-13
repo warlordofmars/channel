@@ -688,9 +688,10 @@ class ChannelStack(cdk.Stack):
         # lifecycle tag that presigned uploads manipulate (grant_put's
         # standard write action set does bundle s3:PutObjectTagging,
         # which is harmless here).
-        attachments_bucket.grant_put(api_role, "assets/chat/*")
-        attachments_bucket.grant_read(api_role, "assets/chat/*")
-        attachments_bucket.grant_delete(api_role, "assets/chat/*")
+        assets_prefix = "assets/chat/*"
+        attachments_bucket.grant_put(api_role, assets_prefix)
+        attachments_bucket.grant_read(api_role, assets_prefix)
+        attachments_bucket.grant_delete(api_role, assets_prefix)
         api_role.add_to_policy(
             iam.PolicyStatement(
                 actions=["s3:PutObjectTagging", "s3:DeleteObjectTagging"],

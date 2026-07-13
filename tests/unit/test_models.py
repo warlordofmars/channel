@@ -428,19 +428,21 @@ def test_asset_s3_backed_roundtrip():
     assert asset.s3_key == "assets/chat/c-1/a-1"
 
 
+# Note on shape: kwargs are always built OUTSIDE the ``pytest.raises``
+# block so the constructor is the only invocation that can raise
+# (Sonar python:S5778).
+
+
 def test_asset_rejects_both_payload_forms():
+    kwargs = _asset_kwargs(s3_bucket="channel-attachments", s3_key="assets/chat/c-1/a-1")
     with pytest.raises(ValidationError, match="exactly one"):
-        Asset(
-            **_asset_kwargs(
-                s3_bucket="channel-attachments",
-                s3_key="assets/chat/c-1/a-1",
-            )
-        )
+        Asset(**kwargs)
 
 
 def test_asset_rejects_neither_payload_form():
+    kwargs = _asset_kwargs(content=None)
     with pytest.raises(ValidationError, match="exactly one"):
-        Asset(**_asset_kwargs(content=None))
+        Asset(**kwargs)
 
 
 @pytest.mark.parametrize(
@@ -448,36 +450,44 @@ def test_asset_rejects_neither_payload_form():
     [("channel-attachments", None), (None, "assets/chat/c-1/a-1")],
 )
 def test_asset_rejects_partial_s3_coordinates(bucket: str | None, key: str | None):
+    kwargs = _asset_kwargs(content=None, s3_bucket=bucket, s3_key=key)
     with pytest.raises(ValidationError, match="set together"):
-        Asset(**_asset_kwargs(content=None, s3_bucket=bucket, s3_key=key))
+        Asset(**kwargs)
 
 
 def test_asset_inline_content_capped_at_100_kb():
     at_cap = "x" * ASSET_INLINE_CONTENT_MAX_BYTES
     assert Asset(**_asset_kwargs(content=at_cap)).content == at_cap
+    over_cap = _asset_kwargs(content=at_cap + "x")
     with pytest.raises(ValidationError, match="inline cap"):
-        Asset(**_asset_kwargs(content=at_cap + "x"))
+        Asset(**over_cap)
 
 
 def test_asset_inline_cap_measures_utf8_bytes_not_chars():
     # é is 2 bytes in UTF-8 — a string under the cap in characters but
     # over it in bytes must be rejected (DDB item sizing is byte-based).
-    over_in_bytes = "é" * ((ASSET_INLINE_CONTENT_MAX_BYTES // 2) + 1)
+    kwargs = _asset_kwargs(content="é" * ((ASSET_INLINE_CONTENT_MAX_BYTES // 2) + 1))
     with pytest.raises(ValidationError, match="inline cap"):
-        Asset(**_asset_kwargs(content=over_in_bytes))
+        Asset(**kwargs)
 
 
 @pytest.mark.parametrize("source", [{}, {"msg_id": ""}, {"msg_id": 7}, {"tool_use_id": "t"}])
 def test_asset_requires_source_msg_id(source: dict[str, object]):
+    kwargs = _asset_kwargs(source=source)
     with pytest.raises(ValidationError, match="msg_id"):
-        Asset(**_asset_kwargs(source=source))
+        Asset(**kwargs)
 
 
-def test_asset_rejects_unknown_kind_and_origin():
+def test_asset_rejects_unknown_kind():
+    kwargs = _asset_kwargs(kind="video")
     with pytest.raises(ValidationError):
-        Asset(**_asset_kwargs(kind="video"))
+        Asset(**kwargs)
+
+
+def test_asset_rejects_unknown_origin():
+    kwargs = _asset_kwargs(origin="imported")
     with pytest.raises(ValidationError):
-        Asset(**_asset_kwargs(origin="imported"))
+        Asset(**kwargs)
 
 
 def test_asset_has_no_pinned_attribute():

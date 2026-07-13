@@ -546,15 +546,15 @@ async def delete_chat(
         await record_chat_delete_asset_wipe_outcome(success=(assets_failed == 0))
         if assets_failed:
             logger.warning(
-                "asset.chat_delete_partial_failure chat_id=%s deleted=%d failed=%d",
-                chat_id,
+                "asset.chat_delete_partial_failure chat_id_hash=%s deleted=%d failed=%d",
+                fingerprint_id(chat_id),
                 assets_deleted,
                 assets_failed,
             )
     except Exception as exc:
         logger.warning(
-            "asset.chat_delete_wipe_failed chat_id=%s",
-            chat_id,
+            "asset.chat_delete_wipe_failed chat_id_hash=%s",
+            fingerprint_id(chat_id),
             extra={"error_type": type(exc).__name__, "error_message": str(exc)},
             exc_info=True,
         )
