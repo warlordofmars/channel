@@ -337,18 +337,20 @@ async def test_inline_card_reload_and_panel() -> None:
     _, email = _tag("card")
     jwt = _mint_jwt_via_bypass(api_url, email)
     chat_id = _create_chat(api_url, jwt, title="asset-card-ui")
-    asset = _stream_fence_asset(api_url, jwt, chat_id)
-    title = asset["title"]
+    try:
+        # Seed inside the cleanup guard so a seeding-phase failure (e.g. the
+        # model emits no qualifying fence) still deletes the chat.
+        asset = _stream_fence_asset(api_url, jwt, chat_id)
+        title = asset["title"]
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch()
-        try:
-            # Clipboard perms so the Copy button's async write resolves.
-            ctx = await browser.new_context(permissions=["clipboard-read", "clipboard-write"])
-            page = await ctx.new_page()
-            await _open_app(page, ui_url, jwt)
-
+        async with async_playwright() as p:
+            browser = await p.chromium.launch()
             try:
+                # Clipboard perms so the Copy button's async write resolves.
+                ctx = await browser.new_context(permissions=["clipboard-read", "clipboard-write"])
+                page = await ctx.new_page()
+                await _open_app(page, ui_url, jwt)
+
                 # Cold-load the chat: history + async asset reattach.
                 await page.goto(f"{ui_url}/app/c/{chat_id}")
                 card = page.locator("button.art-inline", has_text=title)
@@ -379,11 +381,12 @@ async def test_inline_card_reload_and_panel() -> None:
                 download = await dl_info.value
                 assert download.suggested_filename, "Download produced no filename"
             finally:
-                # ``_delete_chat`` is a sync best-effort helper; run it in a
-                # thread so the teardown never blocks the event loop.
-                await asyncio.to_thread(_delete_chat, api_url, jwt, chat_id)
-        finally:
-            await browser.close()
+                await browser.close()
+    finally:
+        # Best-effort cleanup on ANY failure — seeding, browser setup, or an
+        # assertion — so the chat never leaks. Off-loop via to_thread so it
+        # doesn't block the event loop.
+        await asyncio.to_thread(_delete_chat, api_url, jwt, chat_id)
 
 
 # ----------------------------------------------------------------------
@@ -401,17 +404,19 @@ async def test_browse_view_and_chatless_deeplink() -> None:
     _, email = _tag("browse")
     jwt = _mint_jwt_via_bypass(api_url, email)
     chat_id = _create_chat(api_url, jwt, title="asset-browse-ui")
-    asset = _stream_fence_asset(api_url, jwt, chat_id)
-    asset_id, title = asset["asset_id"], asset["title"]
+    try:
+        # Seed inside the cleanup guard so a seeding-phase failure still
+        # deletes the chat.
+        asset = _stream_fence_asset(api_url, jwt, chat_id)
+        asset_id, title = asset["asset_id"], asset["title"]
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch()
-        try:
-            ctx = await browser.new_context()
-            page = await ctx.new_page()
-            await _open_app(page, ui_url, jwt)
-
+        async with async_playwright() as p:
+            browser = await p.chromium.launch()
             try:
+                ctx = await browser.new_context()
+                page = await ctx.new_page()
+                await _open_app(page, ui_url, jwt)
+
                 # Browse view lists the row (has_text avoids strict-mode
                 # violations against the shared .list-row class).
                 await page.goto(f"{ui_url}/app/artifacts")
@@ -431,9 +436,9 @@ async def test_browse_view_and_chatless_deeplink() -> None:
                 head = page.locator(".art-phead .t", has_text=title)
                 await head.wait_for(timeout=_CARD_TIMEOUT_MS)
             finally:
-                await asyncio.to_thread(_delete_chat, api_url, jwt, chat_id)
-        finally:
-            await browser.close()
+                await browser.close()
+    finally:
+        await asyncio.to_thread(_delete_chat, api_url, jwt, chat_id)
 
 
 # ----------------------------------------------------------------------
@@ -468,10 +473,11 @@ async def test_upload_projection_creates_asset() -> None:
                 await _wait_for_assistant_idle(page)
 
                 # The upload projection ASSET row exists (origin=upload,
-                # image kind for the PNG) via the REST surface. Assert the
-                # HTTP status before parsing so a server-side error surfaces
-                # as a clear status failure, not a downstream KeyError.
-                assets_resp = _list_chat_assets(api_url, jwt, chat_id)
+                # image kind for the PNG) via the REST surface. Run the sync
+                # httpx helper off-loop (browser is live) and assert the HTTP
+                # status before parsing so a server-side error surfaces as a
+                # clear status failure, not a downstream KeyError.
+                assets_resp = await asyncio.to_thread(_list_chat_assets, api_url, jwt, chat_id)
                 assert assets_resp.status_code == 200, assets_resp.text
                 items = assets_resp.json()["items"]
                 uploads = [a for a in items if a["origin"] == "upload"]
