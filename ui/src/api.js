@@ -385,3 +385,37 @@ export async function putChatMCPSettings(chatId, settings) {
   });
   if (!response.ok) throw new Error(`putChatMCPSettings ${response.status}`);
 }
+
+// ---- Admin metrics (#239, epic #233) --------------------------------------
+//
+// Data source for the admin Dashboard (`/app/admin/dashboard`). Both wrap the
+// CloudWatch-backed metrics endpoints (#236) behind the shared `adminJson`
+// helper, so a deployed-domain CloudFront ok-but-non-JSON 403 rewrite surfaces
+// as unauthorized rather than a JSON parse crash. A 503
+// `{"detail": {"error": "metrics_unavailable", ...}}` surfaces as an ApiError
+// (status 503) the Dashboard renders as a degraded panel instead of crashing.
+
+export async function getAdminMetricsSummary() {
+  // → { "today"|"7d"|"30d": { active_users, metrics: {<19 counters>} } }.
+  // "today" is a rolling 24h window; every counter is always present (0.0
+  // when no data), so the Dashboard never guards against missing keys.
+  const response = await fetch(`${BASE}/api/admin/metrics/summary`, {
+    headers: authHeader(),
+  });
+  return adminJson("getAdminMetricsSummary", response);
+}
+
+export async function getAdminMetricsTimeseries({ metric, window, bucket = null }) {
+  // → { metric, window, bucket, start, end, points: [{ t, v }] }. `points`
+  // is a dense, ascending, zero-filled, bucket-aligned grid (≤300 points) —
+  // render straight into Recharts, no client-side gap-filling. `window` ∈
+  // 24h | 7d | 30d; `bucket` is optional (server picks a sane default per
+  // window). `metric` must be one of the 19 named counters — an unknown
+  // metric or an over-cap bucket/window combo 422s.
+  const qs = new URLSearchParams({ metric, window });
+  if (bucket) qs.set("bucket", bucket);
+  const response = await fetch(`${BASE}/api/admin/metrics/timeseries?${qs}`, {
+    headers: authHeader(),
+  });
+  return adminJson("getAdminMetricsTimeseries", response);
+}

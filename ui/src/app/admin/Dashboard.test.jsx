@@ -1,0 +1,315 @@
+// Copyright (c) 2026 John Carter. All rights reserved.
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import Dashboard, {
+  fmtTick,
+  fmtTooltipLabel,
+  formatCount,
+  formatRate,
+} from "./Dashboard.jsx";
+import { getAdminMetricsSummary, getAdminMetricsTimeseries } from "../../api.js";
+
+// Only the two metrics wrappers are consumed by Dashboard; stub them so the
+// component's fetch behaviour is fully controllable per test.
+vi.mock("../../api.js", () => ({
+  getAdminMetricsSummary: vi.fn(),
+  getAdminMetricsTimeseries: vi.fn(),
+}));
+
+// Mock Recharts at the module level so jsdom never tries to lay out SVG (which
+// would need a ResizeObserver stub for ResponsiveContainer). The mocks are
+// thin passthroughs that expose the point count so tests can assert the data
+// reached the chart. These arrows live in the test file, which vitest excludes
+// from coverage.
+vi.mock("recharts", () => ({
+  ResponsiveContainer: ({ children }) => (
+    <div data-testid="rc-container">{children}</div>
+  ),
+  LineChart: ({ children, data }) => (
+    <div data-testid="rc-linechart" data-points={data.length}>
+      {children}
+    </div>
+  ),
+  Line: () => <div data-testid="rc-line" />,
+  XAxis: () => <div data-testid="rc-xaxis" />,
+  YAxis: () => <div data-testid="rc-yaxis" />,
+  Tooltip: () => <div data-testid="rc-tooltip" />,
+  CartesianGrid: () => <div data-testid="rc-grid" />,
+}));
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+// All 19 named counters, defaulting to 0 (the #236 contract guarantees every
+// name is always present), with per-test overrides.
+function metricsBlock(overrides = {}) {
+  const names = [
+    "MemoryWriteSuccesses",
+    "MemoryWriteFailures",
+    "RecallSuccesses",
+    "RecallFailures",
+    "AutoTitleSuccesses",
+    "AutoTitleFailures",
+    "ChatDeleteMemoryWipeSuccesses",
+    "ChatDeleteMemoryWipeFailures",
+    "ChatDeleteAttachmentWipeSuccesses",
+    "ChatDeleteAttachmentWipeFailures",
+    "ChatDeleteAssetWipeSuccesses",
+    "ChatDeleteAssetWipeFailures",
+    "AssetLazyExpiryReaps",
+    "AssetLazyExpiryReapFailures",
+    "ToolCallSuccesses",
+    "ToolCallFailures",
+    "FollowupGenSuccesses",
+    "FollowupGenFailures",
+    "CSPViolations",
+  ];
+  const metrics = {};
+  for (const name of names) metrics[name] = 0;
+  return { ...metrics, ...overrides };
+}
+
+function summaryFixture() {
+  return {
+    today: {
+      active_users: 12,
+      // recall 90/10 → 90% exercises the rate branch...
+      metrics: metricsBlock({
+        MemoryWriteSuccesses: 340,
+        RecallSuccesses: 90,
+        RecallFailures: 10,
+        AutoTitleSuccesses: 22,
+      }),
+    },
+    "7d": {
+      active_users: 48,
+      metrics: metricsBlock({
+        MemoryWriteSuccesses: 2100,
+        RecallSuccesses: 600,
+        RecallFailures: 0,
+        AutoTitleSuccesses: 130,
+      }),
+    },
+    "30d": {
+      active_users: 120,
+      // ...and recall 0/0 → "—" exercises the zero-denominator branch.
+      metrics: metricsBlock({
+        MemoryWriteSuccesses: 9000,
+        RecallSuccesses: 0,
+        RecallFailures: 0,
+        AutoTitleSuccesses: 500,
+      }),
+    },
+  };
+}
+
+function tsFixture(overrides = {}) {
+  return {
+    metric: "MemoryWriteSuccesses",
+    window: "7d",
+    bucket: "1h",
+    start: "2026-07-06T00:00:00+00:00",
+    end: "2026-07-13T00:00:00+00:00",
+    points: [
+      { t: "2026-07-06T00:00:00+00:00", v: 10 },
+      { t: "2026-07-07T00:00:00+00:00", v: 20 },
+      { t: "2026-07-08T00:00:00+00:00", v: 15 },
+    ],
+    ...overrides,
+  };
+}
+
+describe("Dashboard", () => {
+  beforeEach(() => {
+    getAdminMetricsSummary.mockReset();
+    getAdminMetricsTimeseries.mockReset();
+    // Sensible defaults; individual tests override the wrapper under test.
+    getAdminMetricsSummary.mockResolvedValue(summaryFixture());
+    getAdminMetricsTimeseries.mockResolvedValue(tsFixture());
+  });
+
+  it("renders the three rollup cards with active users and a derived recall rate", async () => {
+    await act(async () => render(<Dashboard />));
+
+    expect(screen.getByTestId("rollup-today")).toBeTruthy();
+    expect(screen.getByTestId("rollup-7d")).toBeTruthy();
+    expect(screen.getByTestId("rollup-30d")).toBeTruthy();
+
+    // active_users per window.
+    const today = within(screen.getByTestId("rollup-today"));
+    expect(today.getByText("12")).toBeTruthy();
+    expect(today.getByText("340")).toBeTruthy(); // MemoryWriteSuccesses
+    expect(today.getByText("90%")).toBeTruthy(); // 90 / (90 + 10)
+    expect(today.getByText("22")).toBeTruthy(); // AutoTitleSuccesses
+
+    // Zero-denominator recall renders an em dash rather than "0%".
+    const thirty = within(screen.getByTestId("rollup-30d"));
+    expect(thirty.getByText("120")).toBeTruthy();
+    expect(thirty.getByText("—")).toBeTruthy();
+
+    // The stat-tile labels are present.
+    expect(today.getByText("Active users")).toBeTruthy();
+    expect(today.getByText("Memory writes")).toBeTruthy();
+    expect(today.getByText("Recall success")).toBeTruthy();
+    expect(today.getByText("Auto-titles")).toBeTruthy();
+  });
+
+  it("shows the loading state while the summary fetch is in flight", async () => {
+    const d = deferred();
+    getAdminMetricsSummary.mockReturnValue(d.promise);
+    render(<Dashboard />);
+    expect(screen.getByText("Loading metrics…")).toBeTruthy();
+    await act(async () => {
+      d.resolve(summaryFixture());
+    });
+  });
+
+  it("renders a degraded panel when the summary endpoint fails, keeping the charts", async () => {
+    getAdminMetricsSummary.mockRejectedValue(new Error("metrics_unavailable"));
+    await act(async () => render(<Dashboard />));
+
+    expect(screen.getByText("Metrics temporarily unavailable")).toBeTruthy();
+    expect(screen.getByText(/Usage rollups could not be loaded/)).toBeTruthy();
+    // Cards are gone but the charts still rendered — per-section failure.
+    expect(screen.queryByTestId("rollup-today")).toBeNull();
+    expect(screen.getByTestId("chart-MemoryWriteSuccesses")).toBeTruthy();
+  });
+
+  it("renders both trend charts with their point data", async () => {
+    await act(async () => render(<Dashboard />));
+
+    expect(screen.getByTestId("chart-MemoryWriteSuccesses")).toBeTruthy();
+    expect(screen.getByTestId("chart-ToolCallSuccesses")).toBeTruthy();
+
+    const charts = screen.getAllByTestId("rc-linechart");
+    expect(charts).toHaveLength(2);
+    charts.forEach((c) => expect(c.dataset.points).toBe("3"));
+
+    // Two charts fired on mount with their configured defaults.
+    expect(getAdminMetricsTimeseries).toHaveBeenCalledWith({
+      metric: "MemoryWriteSuccesses",
+      window: "7d",
+    });
+    expect(getAdminMetricsTimeseries).toHaveBeenCalledWith({
+      metric: "ToolCallSuccesses",
+      window: "30d",
+    });
+  });
+
+  it("shows a per-chart empty state when the window has no data", async () => {
+    getAdminMetricsTimeseries.mockResolvedValue(tsFixture({ points: [] }));
+    await act(async () => render(<Dashboard />));
+    expect(screen.getAllByText("No data in this window.")).toHaveLength(2);
+  });
+
+  it("shows the chart loading state while the timeseries fetch is in flight", async () => {
+    const d = deferred();
+    getAdminMetricsTimeseries.mockReturnValue(d.promise);
+    render(<Dashboard />);
+    expect(screen.getAllByText("Loading chart…")).toHaveLength(2);
+    await act(async () => {
+      d.resolve(tsFixture());
+    });
+  });
+
+  it("degrades only the charts when their timeseries fetch fails", async () => {
+    getAdminMetricsTimeseries.mockRejectedValue(new Error("metrics_unavailable"));
+    await act(async () => render(<Dashboard />));
+    // Summary cards still render; each chart shows its own degraded panel.
+    expect(screen.getByTestId("rollup-today")).toBeTruthy();
+    expect(screen.getAllByTestId("dash-degraded")).toHaveLength(2);
+  });
+
+  it("refetches the timeseries for the window a picker click selects", async () => {
+    await act(async () => render(<Dashboard />));
+
+    const memoryChart = within(screen.getByTestId("chart-MemoryWriteSuccesses"));
+    const btn24h = memoryChart.getByText("24h");
+    expect(btn24h.getAttribute("aria-pressed")).toBe("false");
+
+    await act(async () => fireEvent.click(btn24h));
+
+    expect(getAdminMetricsTimeseries).toHaveBeenCalledWith({
+      metric: "MemoryWriteSuccesses",
+      window: "24h",
+    });
+    expect(
+      within(screen.getByTestId("chart-MemoryWriteSuccesses"))
+        .getByText("24h")
+        .getAttribute("aria-pressed"),
+    ).toBe("true");
+  });
+
+  it("discards a summary response that lands after unmount", async () => {
+    const d = deferred();
+    getAdminMetricsSummary.mockReturnValue(d.promise);
+    const { unmount } = render(<Dashboard />);
+    unmount();
+    await act(async () => {
+      d.resolve(summaryFixture());
+    });
+    expect(screen.queryByTestId("rollup-today")).toBeNull();
+  });
+
+  it("discards a summary failure that lands after unmount", async () => {
+    const d = deferred();
+    getAdminMetricsSummary.mockReturnValue(d.promise);
+    const { unmount } = render(<Dashboard />);
+    unmount();
+    await act(async () => {
+      d.reject(new Error("late failure"));
+    });
+    expect(screen.queryByText("Metrics temporarily unavailable")).toBeNull();
+  });
+
+  it("discards a timeseries response that lands after unmount", async () => {
+    const d = deferred();
+    getAdminMetricsTimeseries.mockReturnValue(d.promise);
+    const { unmount } = render(<Dashboard />);
+    unmount();
+    await act(async () => {
+      d.resolve(tsFixture());
+    });
+    expect(screen.queryByTestId("rc-linechart")).toBeNull();
+  });
+
+  it("discards a timeseries failure that lands after unmount", async () => {
+    const d = deferred();
+    getAdminMetricsTimeseries.mockReturnValue(d.promise);
+    const { unmount } = render(<Dashboard />);
+    unmount();
+    await act(async () => {
+      d.reject(new Error("late failure"));
+    });
+    expect(screen.queryByTestId("dash-degraded")).toBeNull();
+  });
+});
+
+describe("Dashboard formatting helpers", () => {
+  it("formatCount rounds floats and drops the decimal", () => {
+    expect(formatCount(0)).toBe("0");
+    expect(formatCount(1234)).toBe("1234");
+    expect(formatCount(2.7)).toBe("3");
+  });
+
+  it("formatRate returns a rounded percentage or an em dash for no attempts", () => {
+    expect(formatRate(90, 10)).toBe("90%");
+    expect(formatRate(1, 2)).toBe("33%");
+    expect(formatRate(0, 0)).toBe("—");
+  });
+
+  it("fmtTick compacts an ISO bucket timestamp to MM-DD HH:MM", () => {
+    expect(fmtTick("2026-07-13T12:05:00+00:00")).toBe("07-13 12:05");
+  });
+
+  it("fmtTooltipLabel gives a minute-precision UTC stamp", () => {
+    expect(fmtTooltipLabel("2026-07-13T12:05:00+00:00")).toBe("2026-07-13 12:05");
+  });
+});

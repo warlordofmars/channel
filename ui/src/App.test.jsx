@@ -182,11 +182,19 @@ describe("App routing", () => {
     expect(screen.queryByTestId("admin-user-detail-placeholder")).toBeNull();
   });
 
-  it("/app/admin/dashboard renders its placeholder for an admin (#237)", async () => {
+  it("/app/admin/dashboard renders the Dashboard view for an admin (#239)", async () => {
     storage[TOKEN_KEY] = makeToken({ role: "admin" });
+    // Reject the metrics endpoints so the view renders its degraded panels.
+    // That keeps Recharts out of the tree here (no ResizeObserver needed in
+    // this routing test); the full chart rendering is covered in
+    // Dashboard.test.jsx with recharts mocked at the module level.
+    vi.stubGlobal("fetch", vi.fn(function fakeMetricsFetch(url) {
+      return Promise.reject(new Error(`metrics unavailable in test: ${url}`));
+    }));
     window.history.pushState({}, "", "/app/admin/dashboard");
     await act(async () => render(<App />));
-    expect(screen.getByTestId("admin-dashboard-placeholder")).toBeTruthy();
+    expect(screen.getByRole("heading", { level: 2, name: "Dashboard" })).toBeTruthy();
+    expect(screen.queryByTestId("admin-dashboard-placeholder")).toBeNull();
   });
 
   it.each([
