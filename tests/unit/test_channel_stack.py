@@ -497,6 +497,40 @@ def test_dev_stack_enables_web_search(dev_template):
     assert env_vars.get("STARTER_WEB_SEARCH_ENABLED") == "1"
 
 
+def test_prod_stack_enables_image_gen(prod_template):
+    """STARTER_IMAGE_GEN_ENABLED = '1' in prod (#279 kill switch, on default)."""
+    api_fn = _api_function(prod_template)
+    env_vars = api_fn["Properties"]["Environment"]["Variables"]
+    assert env_vars.get("STARTER_IMAGE_GEN_ENABLED") == "1"
+
+
+def test_dev_stack_enables_image_gen(dev_template):
+    """STARTER_IMAGE_GEN_ENABLED = '1' in non-prod."""
+    api_fn = _api_function(dev_template)
+    env_vars = api_fn["Properties"]["Environment"]["Variables"]
+    assert env_vars.get("STARTER_IMAGE_GEN_ENABLED") == "1"
+
+
+def test_lambda_role_grants_nova_canvas_invoke_model(dev_template):
+    """#279 — the ``generate_image`` tool calls ``bedrock:InvokeModel`` on
+    Nova Canvas, so the region-pinned foundation-model ARN must appear in
+    the API Lambda role's IAM policies. Without it every generation fails
+    with AccessDeniedException. Scan every IAM::Policy resource because
+    CDK distributes statements across multiple Policy resources."""
+    nova_arn = "arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-canvas-v1:0"
+    policies = dev_template.find_resources("AWS::IAM::Policy")
+    granted_resources: set[str] = set()
+    for pol in policies.values():
+        for stmt in pol["Properties"]["PolicyDocument"]["Statement"]:
+            resources = stmt.get("Resource", [])
+            if isinstance(resources, str):
+                resources = [resources]
+            granted_resources.update(r for r in resources if isinstance(r, str))
+    assert nova_arn in granted_resources, (
+        f"Nova Canvas InvokeModel ARN missing from synth; got {sorted(granted_resources)}"
+    )
+
+
 def test_prod_stack_carries_mcp_env_vars(prod_template):
     """API Lambda must receive STARTER_MCP_REDIRECT_URI + STARTER_SPA_BASE_URL
     + STARTER_MCP_TOKEN_KMS_KEY_ID + STARTER_MCP_REGISTRY_ENABLED.

@@ -398,6 +398,79 @@ async def persist_code_exec_image_assets(
     return persisted
 
 
+async def persist_generated_image_assets(
+    *,
+    chat_id: str,
+    owner: str,
+    msg_id: str,
+    images: list[dict[str, Any]],
+) -> list[Asset]:
+    """Persist ``generate_image`` (Nova Canvas) outputs as assets (#279).
+
+    ``images`` is the per-turn sink the ``generate_image`` tool stashed on
+    the invoking Agent (``generated_image_sink``); each entry is
+    ``{"tool_use_id": str, "b64": str, "mime": str, "title": str}``. The
+    base64 payload travels out-of-band from SSE (never on the wire —
+    decision 6): bytes go to S3 under ``assets/chat/{chat_id}/{asset_id}``
+    and the row lands only after the S3 put succeeds. ``kind=image``,
+    ``origin=generated``, ``source={msg_id, tool_use_id}``.
+
+    Shares every hardened pattern with
+    :func:`persist_code_exec_image_assets`: strict ``b64decode`` (a
+    malformed payload counts a failure instead of silently persisting
+    garbage), per-image failure isolation (log + ``AssetPersistFailures``
+    + skip the frame), and the compensating S3 delete when the row write
+    fails after the object landed.
+
+    Returns the assets that actually persisted — the caller emits an
+    ``asset_created`` frame only for those (emit-after-persist contract).
+    """
+    persisted: list[Asset] = []
+    for entry in images:
+        try:
+            # ``validate=True`` — strict alphabet check; the b64 comes from
+            # Nova Canvas via our own tool, so any non-alphabet byte means a
+            # malformed payload rather than something to silently drop.
+            data = base64.b64decode(entry["b64"], validate=True)
+        except (KeyError, TypeError, ValueError, binascii.Error) as exc:
+            await _record_persist_failure(producer="generate_image", chat_id=chat_id, exc=exc)
+            continue
+        # Re-initialised per image so a failure BEFORE this entry's S3 put
+        # can never trigger cleanup against a previous iteration's coords.
+        bucket: str | None = None
+        key: str | None = None
+        try:
+            asset_id = str(uuid4())
+            mime = entry.get("mime", "image/png")
+            bucket, key = storage.put_asset_bytes(
+                chat_id=chat_id, asset_id=asset_id, data=data, mime=mime
+            )
+            now = _now_iso()
+            asset = Asset(
+                asset_id=asset_id,
+                chat_id=chat_id,
+                owner=owner,
+                kind="image",
+                title=entry.get("title") or "Generated image",
+                mime=mime,
+                size_bytes=len(data),
+                origin="generated",
+                source={"msg_id": msg_id, "tool_use_id": entry["tool_use_id"]},
+                s3_bucket=bucket,
+                s3_key=key,
+                created_at=now,
+                updated_at=now,
+            )
+            storage.put_asset(asset)
+        except Exception as exc:
+            await _record_persist_failure(producer="generate_image", chat_id=chat_id, exc=exc)
+            _cleanup_orphaned_object(chat_id=chat_id, s3_bucket=bucket, s3_key=key)
+            continue
+        await _record_outcome_safe(success=True)
+        persisted.append(asset)
+    return persisted
+
+
 async def persist_fence_assets(
     *,
     chat_id: str,

@@ -527,6 +527,13 @@ class ChannelStack(cdk.Stack):
                     f"arn:aws:bedrock:{self.region}:{self.account}:inference-profile/us.anthropic.claude-sonnet-4-6",
                     f"arn:aws:bedrock:{self.region}:{self.account}:inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0",
                     f"arn:aws:bedrock:{self.region}:{self.account}:inference-profile/us.anthropic.claude-opus-4-6-v1",
+                    # Nova Canvas image generation (#279 — generate_image tool).
+                    # Invoked directly by base model id (image models have no
+                    # cross-region inference profile), so the ARN is
+                    # region-pinned to this stack's region — Nova Canvas runs
+                    # on-demand in-region. Empty account segment (``::``) is the
+                    # foundation-model ARN shape.
+                    f"arn:aws:bedrock:{self.region}::foundation-model/amazon.nova-canvas-v1:0",
                 ],
             )
         )
@@ -607,6 +614,14 @@ class ChannelStack(cdk.Stack):
         common_env["STARTER_EXA_API_KEY_PARAM"] = f"/channel/{env_name}/exa-api-key"
         # Default enabled in every env; flag is a kill switch, not a rollout knob
         common_env["STARTER_WEB_SEARCH_ENABLED"] = "1"
+
+        # #279 Nova Canvas image generation — kill switch only, default-on in
+        # every deployed env (image gen is v0.1 scope). Set explicitly so a
+        # future default-shift can't flip it on/off by accident; the IAM
+        # grant for ``amazon.nova-canvas-v1:0`` rides the InvokeModel
+        # statement above. Billing is deferred, so there is no cost/quota
+        # gate — this flag is the only control besides the EMF counter.
+        common_env["STARTER_IMAGE_GEN_ENABLED"] = "1"
 
         # #207 MCP registry — dedicated CMK + redirect-URI env + IAM.
         # The CMK has annual rotation enabled and is destroyed on stack

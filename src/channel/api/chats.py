@@ -29,6 +29,7 @@ from channel.agents.asset_producers import (
     asset_card_descriptor,
     persist_code_exec_image_assets,
     persist_fence_assets,
+    persist_generated_image_assets,
     persist_upload_assets,
 )
 from channel.agents.chat_agent import (
@@ -55,6 +56,7 @@ from channel.agents.strands_sse import (
 )
 from channel.agents.tool_hooks import clear_cancel_signal, set_cancel_signal
 from channel.agents.tools.clock import current_time
+from channel.agents.tools.generate_image import GENERATED_IMAGE_SINK_ATTR
 from channel.api._auth import require_mgmt_user
 from channel.logging_config import fingerprint_id
 from channel.mcp import auth as mcp_auth
@@ -595,6 +597,8 @@ def _build_tool_registry() -> list[Any]:
         discover/deep-read pair without a second CDK env var.
       * ``STARTER_CODE_EXEC_ENABLED`` — "1" everywhere (kill switch
         only; default-on posture once deployed)
+      * ``STARTER_IMAGE_GEN_ENABLED`` — "1" everywhere (kill switch
+        only; gates the Nova Canvas ``generate_image`` tool, #279)
       * ``STARTER_CLOCK_TOOL_ENABLED`` — "1" in dev, "0" in prod
         (strategy spec policy P2: clock is a smoke-test tool, not a
         user-visible capability)
@@ -621,6 +625,10 @@ def _build_tool_registry() -> list[Any]:
         from channel.agents.tools.code_exec import code_exec  # noqa: PLC0415
 
         registry.append(code_exec)
+    if os.environ.get("STARTER_IMAGE_GEN_ENABLED") == "1":
+        from channel.agents.tools.generate_image import generate_image  # noqa: PLC0415
+
+        registry.append(generate_image)
     return registry
 
 
@@ -1240,6 +1248,18 @@ async def _stream_bedrock_reply(
         owner=claims["sub"],
         msg_id=assistant_msg.msg_id,
         images_by_tool=code_exec_images,
+    ):
+        yield sse_asset_created(asset_card_descriptor(asset))
+    # #279 — generated images (Nova Canvas ``generate_image``). The tool
+    # stashed the base64 payloads on ``agent.generated_image_sink`` during
+    # the stream (out-of-band from SSE — decision 6: never base64 on the
+    # wire); persist them here where the assistant ``msg_id`` exists. The
+    # attribute is absent when the tool never fired, so default to ``[]``.
+    for asset in await persist_generated_image_assets(
+        chat_id=chat.chat_id,
+        owner=claims["sub"],
+        msg_id=assistant_msg.msg_id,
+        images=getattr(agent, GENERATED_IMAGE_SINK_ATTR, []),
     ):
         yield sse_asset_created(asset_card_descriptor(asset))
     for asset in await persist_fence_assets(

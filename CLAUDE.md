@@ -207,6 +207,23 @@ Everything that creates ASSET rows lives in
   `assets/chat/{chat_id}/{asset_id}` (`kind=image`,
   `origin=tool_output`, `source.tool_use_id`). Live base64-over-SSE
   rendering is unchanged; persistence is additive.
+- **Generated images** (deterministic, #279) — the Nova Canvas
+  `generate_image(prompt, aspect_ratio)` tool
+  (`src/channel/agents/tools/generate_image.py`) invokes Bedrock
+  `InvokeModel` on `amazon.nova-canvas-v1:0` and stashes the base64 PNG
+  on `agent.generated_image_sink` (out-of-band from SSE — the bytes
+  NEVER ride the wire; the tool's `ToolResult` is a text-only
+  confirmation). The post-stream slot reads that sink and persists each
+  image via `persist_generated_image_assets` (`kind=image`,
+  `origin=generated`, `source.tool_use_id`). Kill-switch:
+  `STARTER_IMAGE_GEN_ENABLED` gates tool registration in
+  `chats._build_tool_registry` (default-on in every deployed env; set
+  `"0"` to remove the tool). Content moderation is Bedrock's built-in
+  Nova Canvas RAI filter — a blocked prompt surfaces as
+  `error_type="content_filtered"`. No cost gating (billing deferred);
+  the only observability is the `ImageGenInvocations` /
+  `ImageGenFailures` EMF counters. `STARTER_IMAGE_GEN_MODEL` overrides
+  the model id.
 - **Fenced-code extraction** (the ONLY heuristic) — post-stream, in
   the same slot as the auto-titler: fenced code blocks ≥ 15 body
   lines (mermaid excluded — #278 renders those inline) become
@@ -230,8 +247,9 @@ never a broken stream.
 
 **Asset content never reaches AgentCore Memory** — code-exec images
 ride `toolResult` blocks (stripped), uploads ride `document`/`image`
-blocks (no `text` key — dropped), extraction never mutates the
-agent's message list. Pinned by
+blocks (no `text` key — dropped), generated-image bytes travel
+out-of-band on the agent sink (never in any message block), and
+extraction never mutates the agent's message list. Pinned by
 `tests/unit/test_memory.py::test_payload_from_messages_never_leaks_asset_content`.
 
 ## AgentCore Memory

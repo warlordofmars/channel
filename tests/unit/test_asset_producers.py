@@ -406,6 +406,155 @@ async def test_code_exec_image_s3_failure_is_isolated(
 
 
 # ----------------------------------------------------------------
+# persist_generated_image_assets (#279)
+# ----------------------------------------------------------------
+
+
+def _gen_entry(
+    *,
+    tool_use_id: str = "tu-1",
+    data: bytes = b"\x89PNG-gen",
+    mime: str = "image/png",
+    title: str = "a red bicycle",
+) -> dict[str, str]:
+    return {
+        "tool_use_id": tool_use_id,
+        "b64": base64.b64encode(data).decode(),
+        "mime": mime,
+        "title": title,
+    }
+
+
+@pytest.mark.asyncio
+async def test_generated_images_persist_to_s3_as_generated(
+    put_asset_capture: list[Asset],
+    put_bytes_capture: list[dict[str, Any]],
+    metrics: AsyncMock,
+) -> None:
+    png = b"\x89PNG-gen-bytes"
+    images = [_gen_entry(tool_use_id="tu-9", data=png, title="a red bicycle")]
+    persisted = await ap.persist_generated_image_assets(
+        chat_id="c-1", owner="u-1", msg_id="m-assistant", images=images
+    )
+    (asset,) = persisted
+    assert asset.kind == "image"
+    assert asset.origin == "generated"
+    assert asset.title == "a red bicycle"
+    assert asset.mime == "image/png"
+    assert asset.source == {"msg_id": "m-assistant", "tool_use_id": "tu-9"}
+    assert asset.s3_key == f"assets/chat/c-1/{asset.asset_id}"
+    assert asset.size_bytes == len(png)
+    assert asset.content is None
+    assert put_bytes_capture[0]["data"] == png
+    assert persisted == put_asset_capture
+    metrics.assert_awaited_once_with(success=True)
+
+
+@pytest.mark.asyncio
+async def test_generated_image_bad_base64_is_skipped(
+    put_asset_capture: list[Asset],
+    put_bytes_capture: list[dict[str, Any]],
+    metrics: AsyncMock,
+) -> None:
+    images = [
+        {"tool_use_id": "tu-1", "b64": "!!!not-base64!!!", "mime": "image/png", "title": "bad"},
+        _gen_entry(tool_use_id="tu-2", title="good"),
+    ]
+    persisted = await ap.persist_generated_image_assets(
+        chat_id="c-1", owner="u-1", msg_id="m-a", images=images
+    )
+    assert [a.title for a in persisted] == ["good"]
+    assert len(put_bytes_capture) == 1
+    assert metrics.await_args_list[0].kwargs == {"success": False}
+    assert metrics.await_args_list[1].kwargs == {"success": True}
+
+
+@pytest.mark.asyncio
+async def test_generated_image_missing_b64_key_is_skipped(
+    put_asset_capture: list[Asset], metrics: AsyncMock
+) -> None:
+    persisted = await ap.persist_generated_image_assets(
+        chat_id="c-1", owner="u-1", msg_id="m-a", images=[{"tool_use_id": "tu-1"}]
+    )
+    assert persisted == []
+    assert put_asset_capture == []
+    metrics.assert_awaited_once_with(success=False)
+
+
+@pytest.mark.asyncio
+async def test_generated_image_defaults_mime_and_title_when_absent(
+    put_asset_capture: list[Asset],
+    put_bytes_capture: list[dict[str, Any]],
+    metrics: AsyncMock,
+) -> None:
+    """A sink entry missing ``mime``/``title`` falls back to image/png +
+    'Generated image' rather than failing the persist."""
+    persisted = await ap.persist_generated_image_assets(
+        chat_id="c-1",
+        owner="u-1",
+        msg_id="m-a",
+        images=[{"tool_use_id": "tu-1", "b64": base64.b64encode(b"raw").decode()}],
+    )
+    assert persisted[0].mime == "image/png"
+    assert persisted[0].title == "Generated image"
+    assert put_bytes_capture[0]["mime"] == "image/png"
+
+
+@pytest.mark.asyncio
+async def test_generated_image_empty_title_falls_back(
+    put_asset_capture: list[Asset], put_bytes_capture: list[dict[str, Any]], metrics: AsyncMock
+) -> None:
+    persisted = await ap.persist_generated_image_assets(
+        chat_id="c-1", owner="u-1", msg_id="m-a", images=[_gen_entry(title="")]
+    )
+    assert persisted[0].title == "Generated image"
+
+
+@pytest.mark.asyncio
+async def test_generated_image_s3_failure_is_isolated(
+    monkeypatch: pytest.MonkeyPatch,
+    put_asset_capture: list[Asset],
+    delete_object_capture: list[tuple[str, str]],
+    metrics: AsyncMock,
+) -> None:
+    def failing_put_bytes(**_kwargs: Any) -> tuple[str, str]:
+        raise RuntimeError("s3 down")
+
+    monkeypatch.setattr("channel.agents.asset_producers.storage.put_asset_bytes", failing_put_bytes)
+    persisted = await ap.persist_generated_image_assets(
+        chat_id="c-1", owner="u-1", msg_id="m-a", images=[_gen_entry()]
+    )
+    assert persisted == []
+    assert put_asset_capture == []
+    # put_asset_bytes never returned coords, so nothing to compensate-delete.
+    assert delete_object_capture == []
+    metrics.assert_awaited_once_with(success=False)
+
+
+@pytest.mark.asyncio
+async def test_generated_image_row_write_failure_cleans_up_s3_object(
+    monkeypatch: pytest.MonkeyPatch,
+    put_bytes_capture: list[dict[str, Any]],
+    delete_object_capture: list[tuple[str, str]],
+    metrics: AsyncMock,
+) -> None:
+    """put_asset_bytes succeeded but the row write failed: the produced
+    S3 object must be compensating-deleted."""
+
+    def exploding_put(_asset: Asset) -> None:
+        raise RuntimeError("ddb down")
+
+    monkeypatch.setattr("channel.agents.asset_producers.storage.put_asset", exploding_put)
+    persisted = await ap.persist_generated_image_assets(
+        chat_id="c-1", owner="u-1", msg_id="m-a", images=[_gen_entry()]
+    )
+    assert persisted == []
+    asset_id = put_bytes_capture[0]["asset_id"]
+    assert delete_object_capture == [("channel-attachments-test", f"assets/chat/c-1/{asset_id}")]
+    metrics.assert_awaited_once_with(success=False)
+
+
+# ----------------------------------------------------------------
 # persist_fence_assets
 # ----------------------------------------------------------------
 
