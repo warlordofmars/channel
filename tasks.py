@@ -51,14 +51,27 @@ def _stack_name(env="prod"):
 
 
 def _infer_next_version(ctx):
-    """Infer the next semver from commits since the last tag using conventional commit rules."""
+    """Infer the next semver from commits since the last release tag (vX.Y.Z).
+
+    Only ``v*`` tags are considered: the ``dev`` pre-release tag is
+    force-recreated on every push to ``development`` by the
+    publish-dev-artifacts CI job (ADR-0010), so an unconstrained
+    ``git describe`` would return ``dev`` and crash the semver parse (#318).
+    """
     try:
-        last_tag = ctx.run("git describe --tags --abbrev=0", hide=True).stdout.strip()
+        last_tag = ctx.run('git describe --tags --match "v*" --abbrev=0', hide=True).stdout.strip()
     except Exception:
         last_tag = "v0.0.0"
 
-    version = last_tag.lstrip("v")
-    major, minor, patch = (int(x) for x in version.split("."))
+    # Defensive parse: a tag can match the ``v*`` glob without being
+    # vX.Y.Z-form (e.g. ``vNext``). Treat an unparseable tag like no
+    # release tag at all rather than crashing (#318).
+    parsed = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)", last_tag)
+    if parsed is None:
+        last_tag = "v0.0.0"
+        major, minor, patch = 0, 0, 0
+    else:
+        major, minor, patch = (int(g) for g in parsed.groups())
 
     try:
         log = ctx.run(f"git log {last_tag}..HEAD --pretty=format:%s", hide=True).stdout.strip()
