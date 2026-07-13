@@ -250,6 +250,55 @@ export async function finalizeAttachment({ presign_token, checksum_sha256 }) {
   return response.json();
 }
 
+// ---- Admin (#238) ----------------------------------------------------------
+//
+// Read-only admin surface (#235); requires an admin-role mgmt JWT — the
+// SPA's AdminLayout client-gates for UX, `require_admin` server-side is
+// the real boundary. CloudFront gotcha: through the deployed domain, API
+// 403 responses are rewritten to a 200 index.html (401s pass through), so
+// an ok-but-non-JSON body from these endpoints must be treated as
+// unauthorized rather than parsed. Defensive only — an admin token never
+// hits it in practice.
+
+async function adminJson(operation, response) {
+  if (!response.ok) {
+    let detail = null;
+    try {
+      detail = (await response.json()).detail ?? null;
+    } catch {
+      /* non-JSON error body — status alone must do */
+    }
+    throw new ApiError(operation, response.status, detail);
+  }
+  try {
+    return await response.json();
+  } catch {
+    throw new ApiError(operation, 403, "unauthorized (non-JSON response)");
+  }
+}
+
+export async function getAdminUsers({ cursor = null, limit = 50, sort = null } = {}) {
+  // `sort` ∈ last_chat_at (desc, server default) | created_at (desc) |
+  // email (asc). A cursor is only valid under the sort it was issued
+  // with — the server 400s on a mismatch and callers restart from page 1.
+  const qs = new URLSearchParams({ limit: String(limit) });
+  if (cursor) qs.set("cursor", cursor);
+  if (sort) qs.set("sort", sort);
+  const response = await fetch(`${BASE}/api/admin/users?${qs}`, {
+    headers: authHeader(),
+  });
+  return adminJson("getAdminUsers", response);
+}
+
+export async function getAdminUser(userId) {
+  // user_id is the JWT sub (an email today) — encode for the path.
+  const response = await fetch(
+    `${BASE}/api/admin/users/${encodeURIComponent(userId)}`,
+    { headers: authHeader() },
+  );
+  return adminJson("getAdminUser", response);
+}
+
 // ---- User preferences ----------------------------------------------------
 
 export async function getPrefs() {

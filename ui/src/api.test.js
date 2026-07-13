@@ -6,6 +6,8 @@ import {
   deleteChat,
   deleteMCPServer,
   finalizeAttachment,
+  getAdminUser,
+  getAdminUsers,
   getChat,
   getChatMCPSettings,
   getPrefs,
@@ -717,5 +719,120 @@ describe("MCP API client", () => {
     await expect(
       putChatMCPSettings("chat-1", { mode: "inherit", explicit_server_ids: [] }),
     ).rejects.toThrow(/putChatMCPSettings 422/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Admin wrappers (#238)
+// ---------------------------------------------------------------------------
+
+describe("admin API client", () => {
+  beforeEach(() => {
+    localStorage.setItem("starter_mgmt_token", "test-token");
+    global.fetch = vi.fn();
+  });
+
+  afterEach(() => {
+    localStorage.removeItem("starter_mgmt_token");
+    vi.restoreAllMocks();
+  });
+
+  it("getAdminUsers GETs with auth and the default limit only", async () => {
+    global.fetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ items: [], next_cursor: null }),
+    });
+    const data = await getAdminUsers();
+    const [url, opts] = global.fetch.mock.calls[0];
+    expect(url).toBe("/api/admin/users?limit=50");
+    expect(opts.headers.Authorization).toBe("Bearer test-token");
+    expect(data).toEqual({ items: [], next_cursor: null });
+  });
+
+  it("getAdminUsers passes cursor, limit, and sort through the query", async () => {
+    global.fetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ items: [], next_cursor: "c2" }),
+    });
+    await getAdminUsers({ cursor: "c1", limit: 5, sort: "email" });
+    const [url] = global.fetch.mock.calls[0];
+    expect(url).toBe("/api/admin/users?limit=5&cursor=c1&sort=email");
+  });
+
+  it("getAdminUsers throws ApiError with status + detail on a JSON error", async () => {
+    global.fetch.mockResolvedValueOnce({
+      ok: false,
+      status: 400,
+      json: () => Promise.resolve({ detail: "invalid cursor" }),
+    });
+    const err = await getAdminUsers({ cursor: "bad" }).catch((e) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err.status).toBe(400);
+    expect(err.detail).toBe("invalid cursor");
+    expect(err.message).toBe("getAdminUsers 400");
+  });
+
+  it("getAdminUsers nulls detail when the error body has none", async () => {
+    global.fetch.mockResolvedValueOnce({
+      ok: false,
+      status: 401,
+      json: () => Promise.resolve({}),
+    });
+    const err = await getAdminUsers().catch((e) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err.status).toBe(401);
+    expect(err.detail).toBeNull();
+  });
+
+  it("getAdminUsers nulls detail when the error body is not JSON", async () => {
+    global.fetch.mockResolvedValueOnce({
+      ok: false,
+      status: 502,
+      json: () => Promise.reject(new Error("not json")),
+    });
+    const err = await getAdminUsers().catch((e) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err.status).toBe(502);
+    expect(err.detail).toBeNull();
+  });
+
+  it("getAdminUsers treats an ok-but-non-JSON body as unauthorized (CloudFront 403 rewrite)", async () => {
+    // Through the deployed domain, CloudFront rewrites API 403s to a
+    // 200 index.html — parsing that as JSON throws, and the wrapper
+    // must surface unauthorized rather than a parse error.
+    global.fetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: () => Promise.reject(new SyntaxError("Unexpected token <")),
+    });
+    const err = await getAdminUsers().catch((e) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err.status).toBe(403);
+    expect(err.detail).toMatch(/unauthorized/);
+  });
+
+  it("getAdminUser GETs the encoded user id with auth", async () => {
+    const body = { user: {}, recent_chats: [], recent_audit_events: [] };
+    global.fetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve(body),
+    });
+    const data = await getAdminUser("amy@ex.com");
+    const [url, opts] = global.fetch.mock.calls[0];
+    expect(url).toBe("/api/admin/users/amy%40ex.com");
+    expect(opts.headers.Authorization).toBe("Bearer test-token");
+    expect(data).toEqual(body);
+  });
+
+  it("getAdminUser throws ApiError 404 for an unknown user", async () => {
+    global.fetch.mockResolvedValueOnce({
+      ok: false,
+      status: 404,
+      json: () => Promise.resolve({ detail: "User not found" }),
+    });
+    const err = await getAdminUser("ghost@ex.com").catch((e) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err.status).toBe(404);
+    expect(err.detail).toBe("User not found");
   });
 });
