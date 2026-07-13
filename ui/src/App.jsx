@@ -15,6 +15,8 @@ import Login from "./app/Login.jsx";
 import ProjectDetail from "./app/views/ProjectDetail.jsx";
 import Projects from "./app/views/Projects.jsx";
 import Shell from "./app/Shell.jsx";
+import UserDetail from "./app/admin/UserDetail.jsx";
+import Users from "./app/admin/Users.jsx";
 import About from "./marketing/pages/About.jsx";
 import Blog from "./marketing/pages/Blog.jsx";
 import Careers from "./marketing/pages/Careers.jsx";
@@ -28,11 +30,10 @@ import Product from "./marketing/pages/Product.jsx";
 
 
 /**
- * Placeholder for admin child routes whose real views land in
- * follow-up issues (#238 users list/detail, #239 dashboard). Those
- * issues replace the `<AdminPlaceholder />` element in the route table
- * below with their component — the route paths and the AdminLayout
- * nesting are already final.
+ * Placeholder for the admin dashboard child route whose real view
+ * lands in #239. That issue replaces the `<AdminPlaceholder />`
+ * element in the route table below with its component — the route
+ * path and the AdminLayout nesting are already final.
  */
 function AdminPlaceholder({ title, testid }) {
   return (
@@ -96,8 +97,8 @@ export default function App() {
                 exactly once for the whole /app/admin/* subtree (#237) */}
             <Route element={<AdminLayout />}>
               <Route path="/app/admin"           element={<AdminHome />} />
-              <Route path="/app/admin/users"     element={<AdminPlaceholder title="Users" testid="admin-users-placeholder" />} />
-              <Route path="/app/admin/users/:id" element={<AdminPlaceholder title="User detail" testid="admin-user-detail-placeholder" />} />
+              <Route path="/app/admin/users"     element={<Users />} />
+              <Route path="/app/admin/users/:id" element={<UserDetail />} />
               <Route path="/app/admin/dashboard" element={<AdminPlaceholder title="Dashboard" testid="admin-dashboard-placeholder" />} />
             </Route>
           </Route>
