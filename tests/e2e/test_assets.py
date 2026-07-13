@@ -195,14 +195,14 @@ def _wait_asset_gone_from_browse(api_url: str, jwt: str, asset_id: str) -> None:
 
 def _uploads_supported(api_url: str, jwt: str) -> bool:
     """True when the API can presign an upload (an attachments bucket is
-    configured). Local ``inv dev`` sets no bucket, so ``presign`` raises
-    ``KeyError`` → 500 (the ONLY expected "unsupported" signal); the
-    deployed stacks return 200.
+    configured). The ONLY expected "unsupported" case is the local
+    ``inv dev`` stack, which provisions no bucket, so ``presign`` raises
+    ``KeyError`` → 500; deployed stacks return 200.
 
-    Any other outcome — a 4xx (the endpoint is wired but the request or the
-    freshly-minted JWT was rejected) or a network error — is unexpected and
-    surfaces rather than silently skipping the test on a real regression
-    (Copilot review).
+    A 500 counts as "unsupported" ONLY against a localhost API. A
+    deployed-env 500 (or any 4xx, or a network error) is a real regression
+    that surfaces via ``raise_for_status`` so it fails the test loudly
+    rather than silently skipping it (Copilot review).
     """
     resp = httpx.post(
         f"{api_url}/api/attachments/presign",
@@ -210,10 +210,13 @@ def _uploads_supported(api_url: str, jwt: str) -> bool:
         headers=_auth(jwt),
         timeout=15.0,
     )
-    if resp.status_code == 500:
+    if resp.status_code == 200:
+        return True
+    is_local = "localhost" in api_url or "127.0.0.1" in api_url
+    if is_local and resp.status_code == 500:
         return False
     resp.raise_for_status()
-    return True
+    return False
 
 
 # ----------------------------------------------------------------------
@@ -454,8 +457,9 @@ async def test_browse_view_and_chatless_deeplink() -> None:
 @pytest.mark.asyncio
 async def test_upload_projection_creates_asset() -> None:
     """An uploaded image is projected into an ``origin=upload`` asset that
-    renders as an inline card. Skips where the API has no attachments
-    bucket (local ``inv dev`` — the presign probe returns non-200)."""
+    renders as an inline card. Skips only against a localhost API with no
+    attachments bucket (local ``inv dev`` — presign 500s); a deployed
+    presign failure fails the test rather than skipping it."""
     ui_url, api_url = _skip_if_no_ui()
     _, email = _tag("upload")
     jwt = _mint_jwt_via_bypass(api_url, email)
