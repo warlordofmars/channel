@@ -33,7 +33,7 @@ from aws_cdk import assertions
 _INFRA = Path(__file__).resolve().parents[2] / "infra"
 sys.path.insert(0, str(_INFRA))
 
-from stacks.channel_stack import ChannelStack  # noqa: E402
+from stacks.channel_stack import LAMBDA_ASSET_EXCLUDE, ChannelStack  # noqa: E402
 
 
 def _synth(env_name: str) -> assertions.Template:
@@ -708,3 +708,73 @@ def test_docs_root_rewrites_to_index_not_redirect_to_missing_path(dev_template):
     assert "/docs/index.html" in code
     # The broken redirect target must be gone.
     assert "/docs/getting-started/" not in code
+
+
+# ---------------------------------------------------------------------------
+# Lambda asset fingerprint excludes (#316)
+# ---------------------------------------------------------------------------
+
+
+def test_lambda_asset_root_is_pinned_to_repo_root():
+    """#316 — relative ``from_asset`` paths resolve against the *process
+    cwd* (jsii's node child inherits it), so the old ``".."`` literal
+    meant "repo root" only under the cdk CLI (cwd = ``infra/``). Under
+    pytest (cwd = repo root) it resolved to the repo's PARENT directory,
+    fingerprinting every sibling project. The root must be pinned to the
+    repo root via the stack module's own location, cwd-independent.
+    """
+    from stacks.channel_stack import _ASSET_ROOT
+
+    assert Path(_ASSET_ROOT) == Path(__file__).resolve().parents[2]
+    assert Path(_ASSET_ROOT).is_absolute()
+
+
+def test_lambda_asset_exclude_covers_volatile_agent_paths():
+    """#316 — both ``from_asset("..")`` calls must exclude the volatile
+    paths that sibling ``.claude/worktrees/`` sessions churn during
+    concurrent ``inv pre-push`` runs. Without these, CDK's source
+    fingerprint walks the entire repo tree and races sibling-worktree
+    cache deletion (ENOENT mid-walk). The load-bearing patterns are the
+    directory names themselves — CDK checks a directory against the
+    ignore list BEFORE recursing, so a bare name prunes the subtree.
+    """
+    for required in (
+        ".claude",  # the actual race trigger (agent worktrees + tmp state)
+        ".git",
+        "**/__pycache__",
+        "**/.mypy_cache",
+        "**/.pytest_cache",
+        "**/.ruff_cache",
+        "**/.venv",
+        "**/node_modules",
+        "**/coverage",
+        "htmlcov",
+        "ui/dist",
+        "desktop/dist-main",
+        "desktop/dist-renderer",
+        "desktop/release",
+        "docs-site/.vitepress/dist",
+        "**/cdk.out",
+    ):
+        assert required in LAMBDA_ASSET_EXCLUDE, f"missing exclude pattern: {required}"
+
+
+def test_lambda_asset_exclude_never_matches_bundling_inputs():
+    """#316 — the Docker bundling commands stage from the asset source,
+    so the exclude list must never shadow an input either bundler needs:
+    ``pyproject.toml`` + ``uv.lock`` (``uv export``), ``run.sh`` (AWSLWA
+    entrypoint), and the ``src/channel`` tree (both Lambdas, including
+    ``src/channel/sandbox/requirements.txt``). Guard the list against a
+    future pattern that would prune them.
+    """
+    protected = ("src", "pyproject.toml", "uv.lock", "run.sh")
+    for pattern in LAMBDA_ASSET_EXCLUDE:
+        stripped = pattern.removeprefix("**/")
+        for path in protected:
+            assert stripped != path and not stripped.startswith(f"{path}/"), (
+                f"exclude pattern {pattern!r} would shadow bundling input {path!r}"
+            )
+        # No pattern may reach into the shipped source tree at any depth.
+        assert "channel/" not in pattern and not pattern.endswith("requirements.txt"), (
+            f"exclude pattern {pattern!r} touches the src/channel bundling inputs"
+        )
