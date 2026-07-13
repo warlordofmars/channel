@@ -447,3 +447,35 @@ export async function getAdminMetricsTimeseries({ metric, window, bucket = null 
   });
   return adminJson("getAdminMetricsTimeseries", response);
 }
+
+// ---- Assets browse (#328, epic #321) --------------------------------------
+//
+// Cross-chat browse + single-descriptor fetch for the Artifacts view.
+// (`getAssetContent` for the viewer bytes lives with the #325/#327
+// per-chat surface above — the Artifacts panel reuses it.) PAGINATION
+// RULE: page on ``next_cursor`` (null = exhausted), NEVER on
+// ``items.length``. The browse endpoint drops orphaned rows mid-page and
+// lazily reaps them, so a page can come back short or even empty while
+// ``next_cursor`` is still live. A malformed/foreign cursor is a 400
+// (surfaced as ``ApiError`` with ``status === 400``) — restart from page 1.
+
+export async function listAssets({ limit = 50, cursor = null } = {}) {
+  const qs = new URLSearchParams({ limit: String(limit) });
+  if (cursor) qs.set("cursor", cursor);
+  const response = await fetch(`${BASE}/api/assets?${qs}`, {
+    headers: authHeader(),
+  });
+  if (!response.ok) throw new ApiError("listAssets", response.status);
+  return response.json();
+}
+
+export async function getAsset(chatId, assetId) {
+  // Single card descriptor for a cold deep-link (bookmark/refresh) where
+  // the asset isn't on the loaded browse page. The route is per-chat, so
+  // callers must carry both ids in the URL.
+  const response = await fetch(`${BASE}/api/chats/${chatId}/assets/${assetId}`, {
+    headers: authHeader(),
+  });
+  if (!response.ok) throw new ApiError("getAsset", response.status);
+  return response.json();
+}

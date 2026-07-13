@@ -109,18 +109,9 @@ export const PROJECTS = [
   { id: "p6", name: "Side Project: Tally", desc: "A tiny budgeting app. Specs, copy, and code.",        chats: 22, docs: 19, color: 310 },
 ];
 
-// Mock artifacts — used by /app/artifacts (list) and the ArtifactPanel
-// overlay. `kind` drives the renderer switch in ArtifactPanel.
-// `project` is null when the artifact isn't scoped to one. Lifted
-// verbatim from design-sources/app/data.jsx.
-export const ARTIFACTS = [
-  { id: "a1", title: "Pricing tier comparison", kind: "Document",    updated: "2h ago",     lines: "—",         project: "Q3 Planning" },
-  { id: "a2", title: "rate-limiter.ts",         kind: "Code",        updated: "5h ago",     lines: "142 lines", project: "Analytics Rewrite" },
-  { id: "a3", title: "Onboarding flow mockup",  kind: "Interactive", updated: "Yesterday",  lines: "React",     project: null },
-  { id: "a4", title: "Trail elevation chart",   kind: "Chart",       updated: "Yesterday",  lines: "SVG",       project: "Field Guide" },
-  { id: "a5", title: "Migration runbook",       kind: "Document",    updated: "3d ago",     lines: "—",         project: "Analytics Rewrite" },
-  { id: "a6", title: "budget-summary.csv",      kind: "Data",        updated: "4d ago",     lines: "380 rows",  project: "Side Project: Tally" },
-];
+// The artifacts browse view (/app/artifacts) is now backed by the real
+// asset REST surface (#328) — the former `ARTIFACTS` mock was removed
+// once the view + ArtifactPanel started fetching `GET /api/assets`.
 
 // Mock docs attached to every project (placeholder until project knowledge
 // is real). Lifted from design-sources/app/views.jsx's PROJECT_DOCS const.

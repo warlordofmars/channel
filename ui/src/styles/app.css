@@ -688,6 +688,28 @@ html.is-electron-mac .sb-top {
 .art-ph { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; height: 240px; border: 1px dashed var(--border); border-radius: var(--r-md); color: var(--ink-faint); font-size: 14px; }
 .art-ph .mono { font-size: 11.5px; }
 
+/* ---------- artifacts browse (#328) ---------- */
+.art-empty { padding: 28px 4px; color: var(--ink-soft); font-size: 14px; text-align: center; }
+.art-loadmore {
+  display: block; margin: 16px auto 0; padding: 8px 18px;
+  border: 1px solid var(--border); border-radius: var(--r-pill);
+  background: var(--raised); color: var(--ink);
+  font-family: var(--font-sans); font-size: 13px; font-weight: 600; cursor: pointer;
+  transition: border-color .12s, background .12s;
+}
+.art-loadmore:hover { border-color: var(--ink-faint); background: var(--raised-2); }
+.art-loadmore:disabled { opacity: 0.6; cursor: default; }
+.art-image { display: flex; justify-content: center; }
+.art-image img { max-width: 100%; height: auto; border-radius: var(--r-md); border: 1px solid var(--border-soft); }
+.art-loading { color: var(--ink-faint); font-size: 13.5px; padding: 8px 2px; }
+.art-error { color: var(--ink-soft); font-size: 14px; line-height: 1.6; padding: 8px 2px; }
+.art-fallback {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 12px; height: 240px; border: 1px dashed var(--border); border-radius: var(--r-md);
+  color: var(--ink-faint); font-size: 14px; text-align: center;
+}
+.art-fallback .art-loadmore { margin-top: 0; }
+
 /* ---------- auth / sign-in ---------- */
 .auth { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 24px; position: relative; min-height: 0; }
 .auth-top { position: absolute; top: 0; left: 0; right: 0; height: 46px; display: flex; align-items: center; padding: 0 16px; -webkit-app-region: drag; }

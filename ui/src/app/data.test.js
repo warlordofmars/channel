@@ -10,7 +10,6 @@ import {
   EFFORTS,
   QUICK_ACTIONS,
   PROJECTS,
-  ARTIFACTS,
   PROJECT_DOCS,
   MODEL_DISPLAY_META,
   cachedModels,
@@ -42,13 +41,6 @@ describe("data mocks", () => {
       expect(typeof p.docs).toBe("number");
       expect(typeof p.color).toBe("number");
     }
-  });
-
-  it("exports ARTIFACTS with the verbatim 6-entry mock array", () => {
-    expect(ARTIFACTS).toHaveLength(6);
-    const kinds = new Set(ARTIFACTS.map((a) => a.kind));
-    expect(kinds).toEqual(new Set(["Document", "Code", "Interactive", "Chart", "Data"]));
-    expect(ARTIFACTS.find((a) => a.id === "a3").project).toBeNull();
   });
 
   it("exports PROJECT_DOCS as a 4-string array used by ProjectDetail", () => {
