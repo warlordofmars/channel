@@ -34,6 +34,7 @@ vi.mock("../api.js", () => ({
 
 import Composer, {
   failedAttachmentMessage,
+  filesFromClipboard,
   formatAttachmentSize,
   iconForMime,
   truncateName,
@@ -975,6 +976,162 @@ describe("Composer", () => {
       });
       const chip = screen.getByText("bad.pdf").closest(".attach-chip");
       expect(chip.getAttribute("data-status")).toBe("failed");
+    });
+  });
+
+  // ----------------------------------------------------------------
+  // Paste to attach (#384)
+  // ----------------------------------------------------------------
+  describe("paste to attach (#384)", () => {
+    // A real clipboard file item reports kind "file" and yields the
+    // File via getAsFile(); a pasted text run reports kind "string"
+    // and yields null. These stubs mirror that DataTransferItem shape.
+    function fileItem(file) {
+      return { kind: "file", getAsFile: () => file };
+    }
+    function stringItem() {
+      return { kind: "string", getAsFile: () => null };
+    }
+
+    // Fire a synthetic paste on the composer textarea, then let the
+    // async attach pipeline settle. Returns true when the default text
+    // paste was blocked (preventDefault called) — mirroring the
+    // drag-drop tests' use of fireEvent's cancelled-return value.
+    async function pasteClipboard(clipboardData) {
+      const ta = screen.getByRole("textbox");
+      let prevented;
+      await act(async () => {
+        prevented = !fireEvent.paste(ta, { clipboardData });
+        await new Promise((r) => setTimeout(r, 0));
+      });
+      return prevented;
+    }
+
+    it("filesFromClipboard covers every extraction branch directly", () => {
+      const png = makeFile("x.png", "image/png", 1);
+      // null clipboardData → []
+      expect(filesFromClipboard(null)).toEqual([]);
+      // kind:"file" item whose getAsFile yields a File → [File]
+      expect(
+        filesFromClipboard({ items: [{ kind: "file", getAsFile: () => png }] }),
+      ).toEqual([png]);
+      // kind:"file" item whose getAsFile yields null → dropped, and with
+      // no files key the `files ?? []` nullish arm returns []
+      expect(
+        filesFromClipboard({ items: [{ kind: "file", getAsFile: () => null }] }),
+      ).toEqual([]);
+      // only a text run (kind:"string") and no files key → []
+      expect(
+        filesFromClipboard({ items: [{ kind: "string", getAsFile: () => null }] }),
+      ).toEqual([]);
+      // no items at all → fall back to clipboardData.files
+      expect(filesFromClipboard({ files: [png] })).toEqual([png]);
+    });
+
+    it("pasting an image file routes it through the pipeline and blocks the default text paste", async () => {
+      const api = await getApiMocks();
+      api.presignAttachment.mockClear();
+      api.finalizeAttachment.mockResolvedValueOnce({
+        id: "att-paste-1",
+        user_id: "u",
+        name: "pasted.png",
+        mime: "image/png",
+        size_bytes: 2048,
+        s3_key: "k",
+        s3_bucket: "bk",
+        checksum_sha256: "sha",
+        created_at: "t",
+      });
+      render(<Composer {...defaultProps()} />);
+      const png = makeFile("pasted.png", "image/png", 2048);
+      const prevented = await pasteClipboard({ items: [fileItem(png)], files: [png] });
+      expect(prevented).toBe(true);
+      expect(api.presignAttachment).toHaveBeenCalledTimes(1);
+      const chip = screen.getByText("pasted.png").closest(".attach-chip");
+      expect(chip.getAttribute("data-status")).toBe("attached");
+    });
+
+    it("pasting multiple file items routes all of them", async () => {
+      render(<Composer {...defaultProps()} />);
+      const a = makeFile("a.png", "image/png", 1024);
+      const b = makeFile("b.png", "image/png", 1024);
+      const prevented = await pasteClipboard({
+        items: [fileItem(a), fileItem(b)],
+        files: [a, b],
+      });
+      expect(prevented).toBe(true);
+      expect(screen.getByText("a.png")).toBeTruthy();
+      expect(screen.getByText("b.png")).toBeTruthy();
+    });
+
+    it("a text-only paste is left untouched — no attach, no preventDefault", async () => {
+      const api = await getApiMocks();
+      api.presignAttachment.mockClear();
+      const { container } = render(<Composer {...defaultProps()} />);
+      const prevented = await pasteClipboard({ items: [stringItem()], files: [] });
+      expect(prevented).toBe(false);
+      expect(api.presignAttachment).not.toHaveBeenCalled();
+      expect(container.querySelector(".attach-chip")).toBeNull();
+    });
+
+    it("a file item whose getAsFile yields null is ignored", async () => {
+      const api = await getApiMocks();
+      api.presignAttachment.mockClear();
+      const { container } = render(<Composer {...defaultProps()} />);
+      const prevented = await pasteClipboard({
+        items: [{ kind: "file", getAsFile: () => null }],
+        files: [],
+      });
+      expect(prevented).toBe(false);
+      expect(api.presignAttachment).not.toHaveBeenCalled();
+      expect(container.querySelector(".attach-chip")).toBeNull();
+    });
+
+    it("falls back to clipboardData.files when items is absent", async () => {
+      const api = await getApiMocks();
+      api.presignAttachment.mockClear();
+      api.finalizeAttachment.mockResolvedValueOnce({
+        id: "att-paste-fb",
+        user_id: "u",
+        name: "fromfiles.pdf",
+        mime: "application/pdf",
+        size_bytes: 1,
+        s3_key: "k",
+        s3_bucket: "bk",
+        checksum_sha256: "sha",
+        created_at: "t",
+      });
+      render(<Composer {...defaultProps()} />);
+      const pdf = makeFile("fromfiles.pdf", "application/pdf", 1);
+      // No ``items`` key at all — exercises the files fallback path.
+      const prevented = await pasteClipboard({ files: [pdf] });
+      expect(prevented).toBe(true);
+      expect(api.presignAttachment).toHaveBeenCalledTimes(1);
+      expect(screen.getByText("fromfiles.pdf")).toBeTruthy();
+    });
+
+    it("a paste with no clipboardData is a defensive no-op", async () => {
+      const api = await getApiMocks();
+      api.presignAttachment.mockClear();
+      const { container } = render(<Composer {...defaultProps()} />);
+      const prevented = await pasteClipboard(null);
+      expect(prevented).toBe(false);
+      expect(api.presignAttachment).not.toHaveBeenCalled();
+      expect(container.querySelector(".attach-chip")).toBeNull();
+    });
+
+    it("a pasted file with a disallowed MIME still flows through handleFiles' rejection", async () => {
+      const api = await getApiMocks();
+      api.presignAttachment.mockClear();
+      render(<Composer {...defaultProps()} />);
+      const evil = makeFile("evil.exe", "application/x-msdownload", 1);
+      const prevented = await pasteClipboard({ items: [fileItem(evil)], files: [evil] });
+      // File items were present, so the default text paste is still blocked…
+      expect(prevented).toBe(true);
+      // …but handleFiles rejects the disallowed MIME: no pipeline call,
+      // inline error surfaced (rejection logic is not duplicated here).
+      expect(api.presignAttachment).not.toHaveBeenCalled();
+      expect(screen.getByRole("alert").textContent).toMatch(/file type not supported/i);
     });
   });
 
