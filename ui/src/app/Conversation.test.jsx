@@ -646,7 +646,7 @@ describe("Conversation", () => {
     expect(screen.getByText("report.pdf")).toBeTruthy();
   });
 
-  it("swaps a fenced code block for its card by ordinal (#327)", () => {
+  it("decorates a fenced code block by ordinal instead of swapping a card (#362)", () => {
     mockStream({
       turns: [
         {
@@ -668,9 +668,54 @@ describe("Conversation", () => {
       ],
     });
     const { container } = renderAt("/app/c/c1");
-    expect(screen.getByText("snippet.py")).toBeTruthy();
-    // The raw fence was swapped — no <pre><code> remains.
-    expect(container.querySelector("pre code")).toBeNull();
+    // The fence renders as its native code block with an open-in-panel
+    // affordance — not swapped to a card.
+    const code = container.querySelector(".code-decorated pre code");
+    expect(code).toBeTruthy();
+    expect(code.textContent).toContain("x = 1");
+    expect(screen.getByText("Open in panel")).toBeTruthy();
+    // No double-render: the fence-origin code asset is excluded from the
+    // standalone-card partition, so there is no AssetCard for it.
+    expect(container.querySelector(".art-inline")).toBeNull();
+    expect(screen.queryByText("snippet.py")).toBeNull();
+    // Exactly one rendering of the code — no duplicate block.
+    expect(container.querySelectorAll("pre code").length).toBe(1);
+  });
+
+  it("opens ArtifactPanel via the browse route when the open-in-panel affordance is clicked (#362)", () => {
+    mockStream({
+      turns: [
+        {
+          msg_id: "a1",
+          role: "assistant",
+          text: "```python\nx = 1\ny = 2\n```",
+          streaming: false,
+          assets: [
+            {
+              asset_id: "as-code",
+              msg_id: "a1",
+              kind: "code",
+              title: "snippet.py",
+              size_bytes: 300,
+              source: { msg_id: "a1", fence_index: 0, lang: "python" },
+            },
+          ],
+        },
+      ],
+    });
+    render(
+      <MemoryRouter initialEntries={["/app/c/c1"]}>
+        <Routes>
+          <Route path="/app/c/:id" element={<Conversation />} />
+          <Route
+            path="/app/artifacts"
+            element={<div>ARTIFACTS BROWSE ROUTE</div>}
+          />
+        </Routes>
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByText("Open in panel"));
+    expect(screen.getByText("ARTIFACTS BROWSE ROUTE")).toBeTruthy();
   });
 
   it("navigates to the browse route when an asset card is clicked (#327)", () => {

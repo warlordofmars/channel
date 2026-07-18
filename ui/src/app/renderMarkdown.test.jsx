@@ -205,20 +205,48 @@ describe("scanFences", () => {
   });
 });
 
-describe("renderMarkdown — fence → asset-card swap (#327)", () => {
-  it("swaps the matching fence for an AssetCard and drops the code block", () => {
+describe("renderMarkdown — fence-decorate (#362, reconciles #327)", () => {
+  it("renders the matching fence as native code + an open-in-panel affordance (no card)", () => {
     const md = "```python\nx = 1\ny = 2\n```";
     const codeAssets = new Map([[0, codeAsset(0)]]);
     const { container, getByText } = wrap(
       renderMarkdown(md, false, { codeAssets, onOpenAsset: vi.fn() }),
     );
-    expect(container.querySelector(".art-inline")).toBeTruthy();
-    expect(getByText("snippet-0.py")).toBeTruthy();
-    // The raw fenced block is gone — replaced by the card.
-    expect(container.querySelector("pre code")).toBeNull();
+    // The fence renders as its OWN code block — not swapped to a card.
+    const code = container.querySelector(".code-decorated pre code");
+    expect(code).toBeTruthy();
+    expect(code.textContent).toContain("x = 1");
+    expect(code.textContent).toContain("y = 2");
+    // No AssetCard, and no card title text.
+    expect(container.querySelector(".art-inline")).toBeNull();
+    // The open-in-panel affordance is present and reachable.
+    expect(getByText("Open in panel")).toBeTruthy();
+    expect(container.querySelector(".code-open-panel")).toBeTruthy();
   });
 
-  it("keeps surrounding prose (pre + tail segments) around the card", () => {
+  it("renders exactly one code block — no double-render of the fence", () => {
+    const md = "```python\nx = 1\ny = 2\n```";
+    const codeAssets = new Map([[0, codeAsset(0)]]);
+    const { container } = wrap(
+      renderMarkdown(md, false, { codeAssets, onOpenAsset: vi.fn() }),
+    );
+    expect(container.querySelectorAll("pre code").length).toBe(1);
+    expect(container.querySelectorAll(".code-open-panel").length).toBe(1);
+  });
+
+  it("preserves the fence text byte-for-byte in the decorated block", () => {
+    const md = "```python\ndef f(x):\n    return x * 2\n```";
+    const codeAssets = new Map([[0, codeAsset(0)]]);
+    const { container } = wrap(
+      renderMarkdown(md, false, { codeAssets, onOpenAsset: vi.fn() }),
+    );
+    // react-markdown appends a trailing newline to the code block; the
+    // author's exact source (incl. the indented body) is otherwise intact.
+    const code = container.querySelector(".code-decorated pre code");
+    expect(code.textContent).toBe("def f(x):\n    return x * 2\n");
+  });
+
+  it("keeps surrounding prose (pre + tail segments) around the decorated fence", () => {
     const md = "intro text\n\n```python\nx = 1\ny = 2\n```\n\noutro text";
     const codeAssets = new Map([[0, codeAsset(0)]]);
     const { container, getByText } = wrap(
@@ -226,46 +254,63 @@ describe("renderMarkdown — fence → asset-card swap (#327)", () => {
     );
     expect(getByText("intro text")).toBeTruthy();
     expect(getByText("outro text")).toBeTruthy();
-    expect(container.querySelector(".art-inline")).toBeTruthy();
-    expect(container.querySelector("pre code")).toBeNull();
+    expect(container.querySelector(".code-decorated pre code")).toBeTruthy();
+    expect(container.querySelector(".art-inline")).toBeNull();
   });
 
-  it("leaves a non-matching fence rendered as code (no locatable ordinal)", () => {
+  it("leaves a non-matching fence as plain code with no affordance (no locatable ordinal)", () => {
     const md = "```python\nx = 1\n```";
     const codeAssets = new Map([[5, codeAsset(5)]]);
     const { container } = wrap(
       renderMarkdown(md, false, { codeAssets, onOpenAsset: vi.fn() }),
     );
     expect(container.querySelector(".art-inline")).toBeNull();
+    expect(container.querySelector(".code-decorated")).toBeNull();
+    expect(container.querySelector(".code-open-panel")).toBeNull();
+    // The code is still there — degraded to a plain single-block render.
     expect(container.querySelector("pre code")).toBeTruthy();
   });
 
-  it("swaps only the matching fence and leaves the other as code", () => {
+  it("decorates only the matching fence and leaves the other as plain code", () => {
     const md = "```js\na()\n```\n\nmid\n\n```py\nb = 2\n```";
     const codeAssets = new Map([[1, codeAsset(1)]]);
-    const { container, getByText } = wrap(
+    const { container } = wrap(
       renderMarkdown(md, false, { codeAssets, onOpenAsset: vi.fn() }),
     );
-    // Fence 0 still renders as code; fence 1 became a card.
-    expect(container.querySelector("pre code").textContent).toContain("a()");
-    expect(getByText("snippet-1.py")).toBeTruthy();
+    // Both fences render as code; only fence 1 carries the affordance.
+    const blocks = container.querySelectorAll("pre code");
+    expect(blocks.length).toBe(2);
+    expect(container.querySelectorAll(".code-open-panel").length).toBe(1);
+    // The decorated block is fence 1 (b = 2), not fence 0 (a()).
+    expect(
+      container.querySelector(".code-decorated pre code").textContent,
+    ).toContain("b = 2");
   });
 
-  it("forwards clicks on the swapped card to onOpenAsset", () => {
+  it("forwards clicks on the affordance to onOpenAsset", () => {
     const md = "```python\nx = 1\n```";
     const asset = codeAsset(0);
     const onOpenAsset = vi.fn();
-    const { getByRole } = wrap(
+    const { getByText } = wrap(
       renderMarkdown(md, false, {
         codeAssets: new Map([[0, asset]]),
         onOpenAsset,
       }),
     );
-    fireEvent.click(getByRole("button"));
+    fireEvent.click(getByText("Open in panel"));
     expect(onOpenAsset).toHaveBeenCalledWith(asset);
   });
 
-  it("appends the streaming cursor in the swap path too", () => {
+  it("tolerates a missing onOpenAsset when the affordance is clicked", () => {
+    const md = "```python\nx = 1\n```";
+    const { getByText } = wrap(
+      renderMarkdown(md, false, { codeAssets: new Map([[0, codeAsset(0)]]) }),
+    );
+    // No onOpenAsset supplied — the optional-chain call must not throw.
+    expect(() => fireEvent.click(getByText("Open in panel"))).not.toThrow();
+  });
+
+  it("appends the streaming cursor in the decorate path too", () => {
     const md = "```python\nx = 1\n```";
     const { container } = wrap(
       renderMarkdown(md, true, {
@@ -273,7 +318,7 @@ describe("renderMarkdown — fence → asset-card swap (#327)", () => {
         onOpenAsset: vi.fn(),
       }),
     );
-    expect(container.querySelector(".art-inline")).toBeTruthy();
+    expect(container.querySelector(".code-decorated pre code")).toBeTruthy();
     expect(container.querySelector(".cursor")).toBeTruthy();
   });
 
@@ -284,6 +329,7 @@ describe("renderMarkdown — fence → asset-card swap (#327)", () => {
     );
     // Empty map → unchanged single-ReactMarkdown render.
     expect(container.querySelector("pre code")).toBeTruthy();
+    expect(container.querySelector(".code-decorated")).toBeNull();
     expect(container.querySelector(".art-inline")).toBeNull();
   });
 });

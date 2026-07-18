@@ -41,12 +41,15 @@ function modelLabelFromList(raw, models) {
 
 const COPIED_FEEDBACK_MS = 1500;
 
-// #327: a `kind=code` asset carrying a `source.fence_index` swaps the
-// corresponding fenced code block for its card inline (see
-// renderMarkdown). Every other asset — uploads, code-exec images, and
+// #327 → #362: a `kind=code` asset carrying a `source.fence_index` has its
+// corresponding fenced code block DECORATED in place — the native code block
+// renders with an "open in panel" affordance (see renderMarkdown's
+// renderWithFenceDecorations), not swapped for a card. Such assets are
+// therefore excluded from the standalone-card partition below so the fence
+// isn't double-rendered. Every other asset — uploads, code-exec images, and
 // any code asset without a locatable fence — renders as a standalone card
 // below the message.
-function isFenceSwapAsset(a) {
+function isFenceDecorateAsset(a) {
   return (
     a.kind === "code" &&
     a.source != null &&
@@ -54,18 +57,19 @@ function isFenceSwapAsset(a) {
   );
 }
 
-// Map<fence_index, asset> for the fenced blocks this turn swaps inline.
+// Map<fence_index, asset> for the fenced blocks this turn decorates inline.
 export function codeAssetsByFence(assets) {
   const map = new Map();
   for (const a of assets || []) {
-    if (isFenceSwapAsset(a)) map.set(a.source.fence_index, a);
+    if (isFenceDecorateAsset(a)) map.set(a.source.fence_index, a);
   }
   return map;
 }
 
-// The assets rendered as standalone cards under the message.
+// The assets rendered as standalone cards under the message. Fence-origin
+// code assets are excluded — they decorate their native code block inline.
 export function standaloneAssets(assets) {
-  return (assets || []).filter((a) => !isFenceSwapAsset(a));
+  return (assets || []).filter((a) => !isFenceDecorateAsset(a));
 }
 
 /**
