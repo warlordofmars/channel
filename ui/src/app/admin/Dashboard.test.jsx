@@ -2,6 +2,7 @@
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import Dashboard, {
+  ChartTooltip,
   fmtTick,
   fmtTooltipLabel,
   formatCount,
@@ -311,5 +312,52 @@ describe("Dashboard formatting helpers", () => {
 
   it("fmtTooltipLabel gives a minute-precision UTC stamp", () => {
     expect(fmtTooltipLabel("2026-07-13T12:05:00+00:00")).toBe("2026-07-13 12:05");
+  });
+});
+
+// Recharts is mocked at the module level (the visual hover box can't be
+// exercised through the stubbed <Tooltip>), so the custom content component
+// is unit-tested directly with the props Recharts would inject. This covers
+// the #367 fix: a token-themed panel (readable in dark AND light) whose value
+// line reads the series name ("Tool calls: 6"), not the raw "v" dataKey.
+describe("ChartTooltip", () => {
+  const point = [{ dataKey: "v", name: "Tool calls", value: 6 }];
+  const label = "2026-07-08T00:00:00+00:00";
+
+  it("renders nothing until a point is hovered (inactive)", () => {
+    render(<ChartTooltip active={false} payload={point} label={label} />);
+    expect(screen.queryByTestId("chart-tooltip")).toBeNull();
+  });
+
+  it("renders nothing when active but the payload is absent", () => {
+    render(<ChartTooltip active payload={undefined} label={label} />);
+    expect(screen.queryByTestId("chart-tooltip")).toBeNull();
+  });
+
+  it("renders nothing when active but the payload is empty", () => {
+    render(<ChartTooltip active payload={[]} label={label} />);
+    expect(screen.queryByTestId("chart-tooltip")).toBeNull();
+  });
+
+  it("renders a token-themed panel with the metric name and formatted date on hover", () => {
+    render(<ChartTooltip active payload={point} label={label} />);
+
+    const box = screen.getByTestId("chart-tooltip");
+    // The core #367 fix: background comes from the theme token, not Recharts'
+    // hardcoded white — readable in both light and dark. CSS vars are stored
+    // verbatim by jsdom (no hex→rgb normalisation applies to a var()).
+    expect(box.style.background).toBe("var(--raised)");
+    expect(box.style.borderRadius).toBe("var(--r-md)");
+    expect(box.style.boxShadow).toBe("var(--shadow-md)");
+
+    // The value line reads the series name, not the raw "v" dataKey.
+    const value = screen.getByText("Tool calls: 6");
+    expect(value.style.color).toBe("var(--ink)");
+    expect(value.style.fontWeight).toBe("600");
+    expect(screen.queryByText(/^v\b/)).toBeNull();
+
+    // The date label keeps the existing minute-precision UTC format.
+    const dateLabel = screen.getByText("2026-07-08 00:00");
+    expect(dateLabel.style.color).toBe("var(--ink-soft)");
   });
 });
