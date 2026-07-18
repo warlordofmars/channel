@@ -74,7 +74,7 @@ aren't yet documented in CLAUDE.md; keep the two in sync):
 | --- | --- | --- | --- | --- |
 | `LOG#{date}#{hour}` | `{timestamp}#{event_id}` | Activity log | no | Hour-sharded (§4). |
 | `AUDIT#{date}#{hour}` | `{timestamp}#{event_id}` | Immutable compliance audit trail | yes | Hour-sharded (§4). TTL via `STARTER_AUDIT_RETENTION_DAYS` (default 365). |
-| `USER#{user_id}` | `META` | User record | no | Surfaced on `UserEmailIndex` via `GSI4PK=EMAIL#{email}`. |
+| `USER#{user_id}` | `META` | User record | no | Would surface on `UserEmailIndex` via `GSI4PK=EMAIL#{email}`, but no current `src/channel/` code sets `GSI4PK` (the index is provisioned, not yet written). |
 | `MGMT_STATE#{state}` | `META` | Google OAuth state parameter | yes | Short single-use TTL. |
 | `DENY#{jti}` | `META` | JWT revocation denylist | yes | Point-read by the mgmt JWT's `jti`; written on `/auth/logout`; `ttl` = the denied token's own `exp` so the row self-prunes (#240). |
 | `USER#{user_id}` | `CHAT#{created_at}#{chat_id}` | Chat-index row (one per chat) | no | Sortable so Recents is a single `Query(ScanIndexForward=False)`; projects onto `ChatByIdIndex`. |
@@ -86,7 +86,7 @@ aren't yet documented in CLAUDE.md; keep the two in sync):
 | `USER#{user_id}` | `MCPTOKEN#{server_id}` | MCP OAuth tokens (sibling to MCPSERVER) | yes | Access/refresh tokens KMS-encrypted at the app layer; `ttl` = `expires_at + 30d` as an orphan-row upper bound. |
 | `CHAT#{chat_id}` | `MCPSERVERS#META` | Per-chat MCP override | no | `mode=inherit` or `mode=explicit`. |
 | `CHAT#{chat_id}` | `ASSET#{created_at}#{asset_id}` | Chat asset row | no | Mirrors `MSG#` so chat deletion cascades with one partition Query. Carries `owner_pk=ASSETOWNER#{owner}` / `owner_sk={created_at}#{asset_id}` projecting onto `AssetOwnerIndex`. Inline text ≤ 100 KB in `content`; larger text + binary in the assets bucket. |
-| `EMAIL#{email}` | — (GSI key only, not a base PK) | Email → user lookup | n/a | Set as `GSI4PK` on `USER#` items to surface them on `UserEmailIndex`. No item has `PK="EMAIL#..."`; querying the GSI returns the underlying `USER#` row. |
+| `EMAIL#{email}` | — (GSI key only, not a base PK) | Email → user lookup | n/a | The `GSI4PK` value that would project a `USER#` row onto `UserEmailIndex`. Provisioned but not written by any current `src/channel/` code; no item has `PK="EMAIL#..."` (a GSI query returns the underlying `USER#` row). |
 
 Adding a new family:
 
@@ -194,17 +194,19 @@ index uses named attributes. The authoritative shape lives in
 | `KeyIndex` (GSI1) | `GSI1PK` | `GSI1SK` | Generic secondary index; not projected by any current row family. |
 | `TagIndex` (GSI2) | `GSI2PK` | `GSI2SK` | Generic secondary index; not projected by any current row family. |
 | `ChatByIdIndex` (GSI3) | `GSI3PK` | `GSI3SK` | Direct chat-id → chat-index-row lookup. Chat-index rows set `GSI3PK=CHAT_ID#{chat_id}`, `GSI3SK=META`. Sparse. |
-| `UserEmailIndex` (GSI4) | `GSI4PK` | — | User lookup by email. `USER#` rows set `GSI4PK=EMAIL#{email}`. |
+| `UserEmailIndex` (GSI4) | `GSI4PK` | — | User lookup by email. **Provisioned but not yet written by any `src/channel/` code** — a writer would set `GSI4PK=EMAIL#{email}` on the `USER#` row to project it. |
 | `AssetOwnerIndex` | `owner_pk` | `owner_sk` | Cross-chat asset browse, newest first. Asset rows set `owner_pk=ASSETOWNER#{owner}`, `owner_sk={created_at}#{asset_id}`. Sparse. |
 
 To put an item on a GSI, set the matching attribute(s) on the item:
 
 ```python
-# User item — also queryable on UserEmailIndex
+# User item — how you'd project a USER# row onto UserEmailIndex.
+# GSI4PK is an indexing-only attribute; no current storage code writes
+# it (UserEmailIndex is provisioned but unused today).
 item = {
     "PK": f"USER#{user_id}",
     "SK": "META",
-    "GSI4PK": f"EMAIL#{email}",   # surfaces this row on UserEmailIndex
+    "GSI4PK": f"EMAIL#{email}",   # set this to surface the row on UserEmailIndex
     ...
 }
 
