@@ -17,7 +17,7 @@ import {
 import { useChannelPrefs } from "../hooks/useChannelPrefs.js";
 import { useChats } from "../hooks/ChatsContext.jsx";
 import { useChatStream } from "../hooks/useChatStream.js";
-import { renderMarkdown } from "./renderMarkdown.jsx";
+import { renderMarkdown, scanFences } from "./renderMarkdown.jsx";
 import { cachedModels, loadModels, mergeWithDisplayMeta } from "./data.js";
 
 // Strip Bedrock's id wrappers down to the short id the API serves.
@@ -41,12 +41,9 @@ function modelLabelFromList(raw, models) {
 
 const COPIED_FEEDBACK_MS = 1500;
 
-// #327: a `kind=code` asset carrying a `source.fence_index` swaps the
-// corresponding fenced code block for its card inline (see
-// renderMarkdown). Every other asset — uploads, code-exec images, and
-// any code asset without a locatable fence — renders as a standalone card
-// below the message.
-function isFenceSwapAsset(a) {
+// #327 → #362: a `kind=code` asset carrying a numeric `source.fence_index`
+// originates from fence extraction and is a candidate for inline decoration.
+function isFenceCodeAsset(a) {
   return (
     a.kind === "code" &&
     a.source != null &&
@@ -54,18 +51,52 @@ function isFenceSwapAsset(a) {
   );
 }
 
-// Map<fence_index, asset> for the fenced blocks this turn swaps inline.
-export function codeAssetsByFence(assets) {
+// The set of fence ordinals actually present in this turn's message text.
+// Mirrors renderMarkdown's own scan so the partition and the decorate path
+// agree on which fences are locatable.
+function locatedFenceIndices(text) {
+  return new Set(scanFences(text || "").map((f) => f.fenceIndex));
+}
+
+// A fence-code asset is DECORATED inline only when its ordinal is actually
+// located in the message text — renderMarkdown then renders the native code
+// block with an "open in panel" affordance in place (not a card). A located
+// asset must therefore be excluded from the standalone-card partition so the
+// fence isn't double-rendered. A fence-code asset whose ordinal is NOT
+// located (scan drift / text mismatch) is NOT decorated, so it must still
+// fall through to a standalone card — otherwise the asset and its panel
+// affordances would silently disappear (#362 acceptance: non-located
+// fence-origin code still cards).
+function isDecoratedInline(a, located) {
+  return isFenceCodeAsset(a) && located.has(a.source.fence_index);
+}
+
+// Map<fence_index, asset> for the fenced blocks this turn decorates inline —
+// keyed off fences actually located in `text`. Runs per render, so it skips
+// the O(text) fence scan entirely unless the turn actually carries a
+// fence-code candidate (the common turn has none).
+export function codeAssetsByFence(assets, text) {
+  const list = assets || [];
+  if (!list.some(isFenceCodeAsset)) return new Map();
+  const located = locatedFenceIndices(text);
   const map = new Map();
-  for (const a of assets || []) {
-    if (isFenceSwapAsset(a)) map.set(a.source.fence_index, a);
+  for (const a of list) {
+    if (isDecoratedInline(a, located)) map.set(a.source.fence_index, a);
   }
   return map;
 }
 
-// The assets rendered as standalone cards under the message.
-export function standaloneAssets(assets) {
-  return (assets || []).filter((a) => !isFenceSwapAsset(a));
+// The assets rendered as standalone cards under the message. Only fences
+// decorated inline (located) are excluded; uploads, code-exec images, code
+// assets without a fence_index, AND non-located fence-code assets (scan
+// drift) all still card. Called per render for BOTH turn branches, so the
+// no-fence-code common case short-circuits to O(#assets) without scanning
+// the message text.
+export function standaloneAssets(assets, text) {
+  const list = assets || [];
+  if (!list.some(isFenceCodeAsset)) return list;
+  const located = locatedFenceIndices(text);
+  return list.filter((a) => !isDecoratedInline(a, located));
 }
 
 /**
@@ -573,7 +604,7 @@ export default function Conversation() {
                   </div>
                 )}
                 <div className="bubble">{t.text}</div>
-                {standaloneAssets(t.assets).map(renderStandalone)}
+                {standaloneAssets(t.assets, t.text).map(renderStandalone)}
               </div>
             ) : (
               <div
@@ -588,11 +619,11 @@ export default function Conversation() {
                 </div>
                 <div className="msg">
                   {renderMarkdown(t.text, t.streaming, {
-                    codeAssets: codeAssetsByFence(t.assets),
+                    codeAssets: codeAssetsByFence(t.assets, t.text),
                     onOpenAsset: openAsset,
                   })}
                 </div>
-                {standaloneAssets(t.assets).map(renderStandalone)}
+                {standaloneAssets(t.assets, t.text).map(renderStandalone)}
                 {t.toolSteps && t.toolSteps.length > 0 && (
                   <ToolStepList
                     steps={t.toolSteps}

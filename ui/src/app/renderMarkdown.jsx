@@ -3,15 +3,15 @@ import React from "react";
 import ReactMarkdown from "react-markdown";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
-import AssetCard from "./AssetCard.jsx";
+import Icon from "../components/Icon.jsx";
 
 const REMARK_PLUGINS = [remarkGfm, remarkBreaks];
 
 // Opening fence: up to 3 leading spaces (CommonMark), 3+ backticks,
 // optional info string. Mirrors `_FENCE_OPEN_RE` in the backend producer
 // (src/channel/agents/asset_producers.py) so client fence ordinals line
-// up 1:1 with the `source.fence_index` the extraction records — the swap
-// is deterministic by ordinal, no content hashing.
+// up 1:1 with the `source.fence_index` the extraction records — the
+// decoration is deterministic by ordinal, no content hashing.
 const FENCE_OPEN_RE = /^ {0,3}(`{3,})(.*)$/;
 
 /**
@@ -81,29 +81,70 @@ function markdownBlock(key, text, streaming) {
 }
 
 /**
- * Render `text` with a subset of its fenced code blocks swapped for
- * persisted asset cards. `codeAssets` is a Map<fenceIndex, asset>; each
- * fence whose ordinal is present is replaced in-place by an `<AssetCard>`,
- * and the surrounding markdown (including any NON-swapped fences) renders
- * as contiguous `react-markdown` segments so their context is preserved.
+ * A located fence for a persisted `kind=code` asset. Per the #360 design
+ * (Q3, option a+affordance), the fence is NO LONGER swapped for an
+ * `AssetCard` — it renders as its OWN native `<pre><code>` block from the
+ * fence's own source text (the persisted message text is unchanged;
+ * `react-markdown` may normalize the rendered display, e.g. a trailing
+ * newline in the code block) decorated with a small "open in panel" button.
+ * The button reuses the existing `openAsset` URL seam via `onOpen(asset)` so
+ * the full `ArtifactPanel` (Copy / Download / full-height) stays reachable;
+ * the inline render is the code, the panel is the tooling.
  */
-function renderWithFenceCards(text, streaming, codeAssets, onOpenAsset) {
-  const swaps = scanFences(text).filter((f) => codeAssets.has(f.fenceIndex));
-  if (swaps.length === 0) {
-    // The asset references a fence we couldn't locate (text edited, or a
-    // producer/SPA scan drift) — degrade to a plain render rather than
-    // dropping the code.
+function CodeFenceDecorated({ fenceText, asset, onOpen }) {
+  function handleOpen() {
+    onOpen?.(asset);
+  }
+  return (
+    <div className="code-decorated">
+      <ReactMarkdown remarkPlugins={REMARK_PLUGINS}>{fenceText}</ReactMarkdown>
+      <button
+        type="button"
+        className="code-open-panel"
+        onClick={handleOpen}
+        title="Open in panel"
+      >
+        <span className="code-open-panel-ic" aria-hidden="true">
+          <Icon name="expand" size={13} />
+        </span>
+        Open in panel
+      </button>
+    </div>
+  );
+}
+
+/**
+ * Render `text` with each fence that matches a persisted `kind=code` asset
+ * DECORATED in place. `codeAssets` is a Map<fenceIndex, asset>; each fence
+ * whose ordinal is present renders as its native fenced code block wrapped
+ * in a `<CodeFenceDecorated>` carrying the "open in panel" affordance — the
+ * fence text is preserved, not replaced. The surrounding markdown (including
+ * any NON-located fences) renders as contiguous `react-markdown` segments so
+ * their context is preserved. When no ordinal is locatable (text edited, or
+ * a producer/SPA scan drift) we degrade to a plain single-block render
+ * rather than dropping the code.
+ */
+function renderWithFenceDecorations(text, streaming, codeAssets, onOpenAsset) {
+  const located = scanFences(text).filter((f) => codeAssets.has(f.fenceIndex));
+  if (located.length === 0) {
     return markdownBlock("md", text, streaming);
   }
   const segments = [];
   let cut = 0;
-  swaps.forEach((f, k) => {
+  located.forEach((f, k) => {
     const pre = text.slice(cut, f.start);
     if (pre.trim() !== "") {
       segments.push(<ReactMarkdown key={`md-${k}`} remarkPlugins={REMARK_PLUGINS}>{pre}</ReactMarkdown>);
     }
     const asset = codeAssets.get(f.fenceIndex);
-    segments.push(<AssetCard key={`card-${asset.asset_id}`} asset={asset} onOpen={onOpenAsset} />);
+    segments.push(
+      <CodeFenceDecorated
+        key={`code-${asset.asset_id}`}
+        fenceText={text.slice(f.start, f.end)}
+        asset={asset}
+        onOpen={onOpenAsset}
+      />,
+    );
     cut = f.end;
   });
   const tail = text.slice(cut);
@@ -138,13 +179,14 @@ function renderWithFenceCards(text, streaming, codeAssets, onOpenAsset) {
  * indicator at the trailing edge of the most-recently emitted bytes.
  *
  * ``opts.codeAssets`` (Map<fenceIndex, asset>) + ``opts.onOpenAsset``
- * (#327) swap specific fenced code blocks for persisted asset cards. The
- * common case — no code assets — takes the single-``ReactMarkdown`` fast
- * path unchanged.
+ * (#327 → #362) DECORATE specific fenced code blocks for persisted code
+ * assets: the fence renders as its native code block with an "open in
+ * panel" affordance (no card swap — see #360 Q3). The common case — no
+ * code assets — takes the single-``ReactMarkdown`` fast path unchanged.
  */
 export function renderMarkdown(text, streaming, { codeAssets, onOpenAsset } = {}) {
   if (!codeAssets || codeAssets.size === 0) {
     return markdownBlock("md", text, streaming);
   }
-  return renderWithFenceCards(text, streaming, codeAssets, onOpenAsset);
+  return renderWithFenceDecorations(text, streaming, codeAssets, onOpenAsset);
 }

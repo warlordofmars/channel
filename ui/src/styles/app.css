@@ -568,6 +568,25 @@ html.is-electron-mac .sb-top {
 .art-inline .as { font-size: 11.5px; color: var(--ink-faint); font-family: var(--font-mono); }
 .art-inline .expand-ic { margin-left: auto; color: var(--ink-faint); display: flex; flex-shrink: 0; }
 
+/* fence-decorate (#362) — a located fence for a kind=code asset renders as
+   its native <pre><code> block (NOT swapped to a card) decorated with a
+   small "open in panel" button so ArtifactPanel's Copy / Download /
+   full-height view stays reachable. The wrapper owns the block's bottom
+   margin so the affordance tucks directly under the code. */
+.code-decorated { margin: 0 0 14px; }
+.code-decorated pre { margin-bottom: 6px; }
+.code-open-panel {
+  display: inline-flex; align-items: center; gap: 5px;
+  appearance: none; -webkit-appearance: none;
+  background: transparent; border: 1px solid var(--border);
+  border-radius: var(--r-pill); padding: 3px 10px;
+  color: var(--ink-faint); font-size: 12px; font-weight: 500;
+  font-family: inherit; cursor: pointer;
+  transition: border-color .12s, color .12s;
+}
+.code-open-panel:hover { border-color: var(--accent); color: var(--accent); }
+.code-open-panel-ic { display: flex; }
+
 /* inline transcript image (#361) — a <button> wrapping a responsive <img>.
    Bytes are Bearer-fetched into a blob object URL (see useAssetContent), so
    there is never a plain remote src. The height cap is the whole point: a
