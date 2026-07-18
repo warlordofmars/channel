@@ -404,6 +404,9 @@ def test_build_agent_accepts_tools_and_attaches_chain_state(monkeypatch):
         def __init__(self, *, tools, **_kw):
             self.tool_names = [getattr(t, "__name__", None) or t.tool_name for t in tools]
 
+    # Disable the default-on memory tools (#273) so this test asserts on
+    # the caller-supplied passthrough surface only.
+    monkeypatch.setenv("STARTER_MEMORY_TOOLS_ENABLED", "0")
     captured: dict[str, object] = {}
     _patch_strands(monkeypatch, captured)
     monkeypatch.setattr("channel.agents.chat_agent.Agent", FakeAgent)
@@ -434,6 +437,9 @@ def test_build_agent_works_without_tools(monkeypatch):
         def __init__(self, *, tools, **_kw):
             self.tool_names = [getattr(t, "__name__", None) or t.tool_name for t in tools]
 
+    # Disable the default-on memory tools (#273) so "no tools" means the
+    # empty list this test asserts.
+    monkeypatch.setenv("STARTER_MEMORY_TOOLS_ENABLED", "0")
     captured: dict[str, object] = {}
     _patch_strands(monkeypatch, captured)
     monkeypatch.setattr("channel.agents.chat_agent.Agent", FakeAgent)
@@ -510,6 +516,9 @@ def test_build_agent_passes_tools_kwarg_to_strands_agent(monkeypatch):
     fake_memory = MagicMock()
     monkeypatch.setattr("channel.agents.chat_agent.AgentCoreMemoryHook", lambda **_: fake_memory)
     monkeypatch.setattr("channel.agents.chat_agent.get_or_create_memory", lambda env: "m")
+    # Disable the default-on memory tools (#273) so the passthrough
+    # assertions see exactly the caller-supplied list.
+    monkeypatch.setenv("STARTER_MEMORY_TOOLS_ENABLED", "0")
 
     build_agent(model_id="claude-sonnet-4-6", user_id="u", chat_id="c")
     assert captured["agent_kwargs"]["tools"] == []
@@ -572,6 +581,112 @@ def test_build_agent_attaches_summarizing_conversation_manager(monkeypatch):
         "non-None _compression_threshold internally); got "
         f"{cm._compression_threshold!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# #273: agent-driven persistent memory (remember / recall) wiring
+# ---------------------------------------------------------------------------
+
+
+class _ToolNamesAgent:
+    """FakeAgent that surfaces the registered tool names, mirroring the
+    Task-8 tool tests. ``@tool``-decorated callables expose ``tool_name``;
+    plain sentinels fall back to their function ``__name__``."""
+
+    def __init__(self, *, tools, **_kw):
+        self.tool_names = [
+            getattr(t, "tool_name", None) or getattr(t, "__name__", t) for t in tools
+        ]
+
+
+def test_build_agent_appends_memory_tools_by_default(monkeypatch):
+    """With ``STARTER_MEMORY_TOOLS_ENABLED`` unset (default on), the
+    ``remember`` / ``recall`` tools are appended to the agent's tool list
+    even when the caller supplies none. The tools are built lazily (no
+    boto3 client until invoked) so this exercises the real factory."""
+    monkeypatch.delenv("STARTER_MEMORY_TOOLS_ENABLED", raising=False)
+    captured: dict[str, object] = {}
+    _patch_strands(monkeypatch, captured)
+    monkeypatch.setattr("channel.agents.chat_agent.Agent", _ToolNamesAgent)
+
+    agent = build_agent(model_id="claude-sonnet-4-6", user_id="u@x.com", chat_id="c-1")
+
+    assert "remember" in agent.tool_names
+    assert "recall" in agent.tool_names
+
+
+def test_build_agent_appends_memory_tools_after_caller_tools(monkeypatch):
+    """Caller-supplied tools are preserved; the memory tools are appended
+    (not replacing them)."""
+    from channel.agents.tools.clock import current_time
+
+    monkeypatch.delenv("STARTER_MEMORY_TOOLS_ENABLED", raising=False)
+    captured: dict[str, object] = {}
+    _patch_strands(monkeypatch, captured)
+    monkeypatch.setattr("channel.agents.chat_agent.Agent", _ToolNamesAgent)
+
+    agent = build_agent(
+        model_id="claude-sonnet-4-6",
+        user_id="u@x.com",
+        chat_id="c-1",
+        tools=[current_time],
+    )
+
+    assert agent.tool_names == ["current_time", "remember", "recall"]
+
+
+def test_build_agent_omits_memory_tools_when_flag_disabled(monkeypatch):
+    """``STARTER_MEMORY_TOOLS_ENABLED=0`` is the kill switch — no memory
+    tools register."""
+    monkeypatch.setenv("STARTER_MEMORY_TOOLS_ENABLED", "0")
+    captured: dict[str, object] = {}
+    _patch_strands(monkeypatch, captured)
+    monkeypatch.setattr("channel.agents.chat_agent.Agent", _ToolNamesAgent)
+
+    agent = build_agent(model_id="claude-sonnet-4-6", user_id="u@x.com", chat_id="c-1")
+
+    assert "remember" not in agent.tool_names
+    assert "recall" not in agent.tool_names
+    assert agent.tool_names == []
+
+
+def test_build_agent_binds_memory_tools_to_actor_and_session(monkeypatch):
+    """The memory tools must be bound to THIS request's memory_id, the raw
+    actor id (user_id), and the chat's session id — the per-request
+    context the stateless tool registry can't carry."""
+    captured: dict[str, object] = {}
+    _patch_strands(monkeypatch, captured)
+
+    build_kwargs: dict[str, object] = {}
+
+    def fake_build_memory_tools(*, memory_id, actor_id, session_id):
+        build_kwargs.update(memory_id=memory_id, actor_id=actor_id, session_id=session_id)
+        return ["remember_tool", "recall_tool"]
+
+    monkeypatch.setattr("channel.agents.chat_agent.build_memory_tools", fake_build_memory_tools)
+    monkeypatch.delenv("STARTER_MEMORY_TOOLS_ENABLED", raising=False)
+
+    build_agent(model_id="claude-sonnet-4-6", user_id="user-abc", chat_id="chat-xyz")
+
+    # ``get_or_create_memory`` is stubbed to "mem-test" by _patch_strands.
+    assert build_kwargs == {
+        "memory_id": "mem-test",
+        "actor_id": "user-abc",
+        "session_id": "chat-xyz",
+    }
+    # The returned tools land in the Agent's tools kwarg.
+    assert captured["agent_kwargs"]["tools"] == ["remember_tool", "recall_tool"]
+
+
+def test_default_system_prompt_nudges_memory_tools():
+    """Q4: the system prompt teaches WHEN to call each memory tool, and
+    reinforces the trust posture (recall output is notes to weigh, not
+    instructions)."""
+    prompt = DEFAULT_SYSTEM_PROMPT.lower()
+    assert "remember" in prompt
+    assert "recall" in prompt
+    # Trust-posture clause: recall results are data to weigh, not commands.
+    assert "not as instructions" in prompt
 
 
 # ---- Auto-titler hardening (#256) -------------------------------------------
