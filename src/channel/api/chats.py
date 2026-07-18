@@ -36,7 +36,9 @@ from channel.agents.chat_agent import (
     build_agent,
     build_followups_agent,
     build_titler_agent,
+    build_titler_prompt,
     resolve_model_id,
+    sanitize_title,
 )
 from channel.agents.memory import _sanitize_actor_id, get_or_create_memory
 from channel.agents.strands_sse import (
@@ -346,25 +348,15 @@ async def list_chats(
 def _postprocess_title(raw: str) -> str:
     """Normalize raw titler output into a usable sidebar title.
 
-    Haiku occasionally emits preamble (e.g. ``"Here's a 3-6 word title:
-    Debug pytest fixture"``). We strip leading explanations by taking
-    the part after the LAST colon if a colon is present, then split
-    into words and cap at 6 (matches the titler's 3-6 word system
-    prompt). Strips wrapping quote characters and trailing sentence
-    punctuation.
-
-    Returns empty string if no usable text remains — caller treats
-    that as a failure outcome (better to leave "New chat" than to
-    surface preamble as a title).
+    Thin wrapper over :func:`channel.agents.chat_agent.sanitize_title`,
+    which owns the full pipeline (colon-preamble strip, markdown strip,
+    6-word cap, and the #256 reject-the-model-replied guard). Kept as a
+    module-local name so the streaming path and its tests have a stable
+    call site. Returns empty string when no usable title remains —
+    caller treats that as a failure outcome (better to leave "New chat"
+    than to surface preamble, markdown, or a first-person non-answer).
     """
-    if not raw:
-        return ""
-    candidate = raw.rsplit(":", 1)[-1] if ":" in raw else raw
-    candidate = candidate.strip().strip('"').strip("'").strip()
-    words = candidate.split()
-    if not words:
-        return ""
-    return " ".join(words[:6]).rstrip(".,;:!?")
+    return sanitize_title(raw)
 
 
 def _agentcore_client() -> Any:
@@ -1280,7 +1272,7 @@ async def _stream_bedrock_reply(
         truncated = False
         try:
             titler = build_titler_agent()
-            titler_prompt = f"User: {user_message}\nAssistant: {assistant_text[:500]}"
+            titler_prompt = build_titler_prompt(user_message, assistant_text)
             title_chunks: list[str] = []
             try:
                 async for event in titler.stream_async(titler_prompt):
