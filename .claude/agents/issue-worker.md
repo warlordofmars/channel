@@ -138,7 +138,7 @@ The W4 shadow-branch fast-forward in `## Push discipline` does **not** apply her
 
 ### 2.5. Prepare the worktree environment
 
-A fresh worktree (or clone) has **no installed dependencies** — `node_modules` is per-directory and the Python venv may be bare. The `inv pre-push` gate then fails before it does any useful work: `test_frontend` and `desktop_test` (both deps of `pre_push` in `tasks.py`) die with `vitest: command not found`, and the mypy `typecheck` step fails importing `aws_cdk`. Install everything before §3:
+A fresh worktree (or clone) has **no installed dependencies** — `node_modules` is per-directory and the Python venv may be bare. The `inv pre-push` gate then fails before it does useful work: its `test_frontend` and `desktop_test` steps die with `vitest: command not found`, and its `test_unit` step fails at collection when `tests/unit/test_channel_stack.py` runs `import aws_cdk` (the `aws_cdk` dependency ships in the `infra` group). All three are `pre_push` dependencies in `tasks.py`. Note the `aws_cdk` failure surfaces in `test_unit`, **not** in `typecheck` — `typecheck` only runs `mypy src/channel`, and nothing under `src/channel` imports `aws_cdk`. Install everything before §3:
 
 ```bash
 uv sync --all-extras --group infra     # matches ci.yml infra jobs; the dev group installs by default
@@ -330,7 +330,7 @@ Runs on **every** agent-created PR. The `agent-safe` label only gates whether th
    - **Pure style nit** (Tailwind class order, const-vs-let, naming preference, import sort) — reply declining with a citation to project conventions, resolve the thread.
    - **Ambiguous or architecturally significant** — emit `HUMAN_INPUT_REQUIRED: Copilot flagged X on #NNN — unclear call` and stop. Leave the thread open.
 
-   **Note — re-requesting a Copilot review retriggers CI.** Each `gh pr edit <PR-NUMBER> --add-reviewer "@copilot"` fires a `review_requested` event, which **starts a fresh full CI run** for the PR. Expect this: every review iteration produces a new CI run that must go green before the next Copilot pass is meaningful. Watch it with the same §7 loop and treat it as normal, not as an unexpected/spurious run.
+   **Note — where each iteration's CI run actually comes from.** Re-requesting a Copilot review (`gh pr edit <PR-NUMBER> --add-reviewer "@copilot"`) starts only Copilot's own `copilot-pull-request-reviewer` check-run — it does **not** start a project CI run, because `ci.yml` triggers on `pull_request` (`opened`/`synchronize`/`reopened`) and `push`, and no workflow in this repo listens for `review_requested`. The fresh full CI run you see on most iterations comes from the fix `git push` in the step-3 correctness/clarity path (a `synchronize` event), not from the re-request. Practical rule: on any iteration where you push a fix, expect a new CI run and wait for it to go green (same §7 loop) before the next Copilot pass is meaningful; on a pure-decline iteration (all findings are style nits, resolved with no commit) **no** new project CI run fires — don't wait for one.
 4. **Hard cap: 5 iterations, early-exit on convergence.** Stop when 5 round-trips are done OR two consecutive iterations produce no new actionable findings. If unresolved findings remain, emit `HUMAN_INPUT_REQUIRED: Copilot loop ended with open findings on #NNN`.
 5. **Agent-safe PRs**: arm auto-merge:
    ```bash
