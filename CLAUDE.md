@@ -38,8 +38,10 @@ channel/
 │           ├── main.py        # FastAPI app + routes
 │           ├── _auth.py       # Shared mgmt-JWT dependency for /api/* routes
 │           ├── _debug.py      # /api/_debug/* — dev-only, gated by STARTER_ENABLE_DEBUG_ENDPOINTS
+│           ├── admin.py       # Admin REST — user list/detail (#235) + CloudWatch metrics (#236); every route require_admin-gated
 │           ├── assets.py      # Asset REST surface — per-chat list/get/content/delete + browse
 │           ├── chats.py       # Chat CRUD + SSE streaming + regenerate
+│           ├── mcp.py         # MCP-server registry REST (list/register/rename/delete/reauth) + per-chat override + /auth/mcp/callback
 │           ├── models.py      # GET /api/models — server allowlist
 │           └── csp.py         # CSP violation reporting endpoint
 ├── ui/
@@ -60,8 +62,7 @@ channel/
 │   │   │   ├── useChannelPrefs.js   # theme/accent/density/shape/font/model/effort + siteTheme
 │   │   │   ├── useChatList.js       # Sidebar Recents + optimistic create/rename/archive
 │   │   │   ├── useChatStream.js     # SSE chat stream: history load, send, abort, status/error
-│   │   │   ├── ChatsContext.jsx     # ChatsProvider + useChats() — single useChatList instance app-wide
-│   │   │   └── useRelativeTime.js
+│   │   │   └── ChatsContext.jsx     # ChatsProvider + useChats() — single useChatList instance app-wide
 │   │   ├── components/
 │   │   │   ├── AuthGate.jsx       # Redirects /app/* visits to /app/login when no JWT
 │   │   │   ├── ChannelMark.jsx    # Brand mark SVG (rounded square + two bars)
@@ -183,6 +184,12 @@ require a valid Bearer mgmt JWT. JWT validation enforces `iss`,
   `owner` is user_id today, `{workspace_id}/{user_id}` when workspaces
   land — single-attribute migration, never a second tenancy field)
 - GSIs:
+  - `KeyIndex` — `GSI1PK`/`GSI1SK` (provisioned generic reserved index
+    carried from the single-table template; no current query path in
+    `storage.py`)
+  - `TagIndex` — `GSI2PK`/`GSI2SK` (provisioned generic reserved index
+    carried from the single-table template; no current query path in
+    `storage.py`)
   - `UserEmailIndex` — `PK=EMAIL#{email}` (for user lookups by email)
   - `ChatByIdIndex` — `PK=CHAT_ID#{chat_id}`, `SK=META`
     (sparse; only chat-index rows project onto it; used for direct
