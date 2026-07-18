@@ -249,7 +249,7 @@ describe("renderMarkdown — fence-decorate (#362, reconciles #327)", () => {
     expect(container.querySelectorAll(".code-open-panel").length).toBe(1);
   });
 
-  it("preserves the fence text byte-for-byte in the decorated block", () => {
+  it("preserves the author's fence source (indented body) in the decorated block", () => {
     const md = "```python\ndef f(x):\n    return x * 2\n```";
     const codeAssets = new Map([[0, codeAsset(0)]]);
     const { container } = wrap(

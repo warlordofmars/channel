@@ -83,11 +83,13 @@ function markdownBlock(key, text, streaming) {
 /**
  * A located fence for a persisted `kind=code` asset. Per the #360 design
  * (Q3, option a+affordance), the fence is NO LONGER swapped for an
- * `AssetCard` — it renders as its OWN native `<pre><code>` block (the code
- * the author already wrote, byte-identical) decorated with a small "open in
- * panel" button. The button reuses the existing `openAsset` URL seam via
- * `onOpen(asset)` so the full `ArtifactPanel` (Copy / Download / full-height)
- * stays reachable; the inline render is the code, the panel is the tooling.
+ * `AssetCard` — it renders as its OWN native `<pre><code>` block from the
+ * fence's own source text (the persisted message text is unchanged;
+ * `react-markdown` may normalize the rendered display, e.g. a trailing
+ * newline in the code block) decorated with a small "open in panel" button.
+ * The button reuses the existing `openAsset` URL seam via `onOpen(asset)` so
+ * the full `ArtifactPanel` (Copy / Download / full-height) stays reachable;
+ * the inline render is the code, the panel is the tooling.
  */
 function CodeFenceDecorated({ fenceText, asset, onOpen }) {
   function handleOpen() {
