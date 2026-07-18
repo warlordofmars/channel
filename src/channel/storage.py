@@ -1374,8 +1374,9 @@ def _mcp_server_item(server: MCPServer) -> dict[str, Any]:
         "updated_at": server.updated_at,
     }
     # Keep the item sparse: a static-token server has no DCR client, so
-    # never write a null client_id attribute (DynamoDB has no NULL for a
-    # string key we later read via item.get).
+    # omit client_id entirely rather than storing DynamoDB's NULL type for
+    # it. The read path uses ``item.get("client_id")``, which yields None
+    # for an absent attribute — no NULL round-trip needed.
     if server.client_id is not None:
         item["client_id"] = server.client_id
     return item
