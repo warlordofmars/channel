@@ -646,14 +646,18 @@ html.is-electron-mac .sb-top {
    full-fidelity panel. */
 .convo-doc { margin: 8px 0 0; }
 .convo-doc-body {
-  position: relative; overflow: hidden;
+  position: relative; overflow: auto;
   font-size: 14px; line-height: 1.6; color: var(--ink);
   border: 1px solid var(--border-soft); border-radius: var(--r-md);
   background: var(--raised); padding: 12px 16px;
 }
 .convo-doc-body > :first-child { margin-top: 0; }
 .convo-doc-body > :last-child { margin-bottom: 0; }
-.convo-doc.is-clamped .convo-doc-body { max-height: 340px; }
+/* Only the CLAMPED preview clips (max-height + hidden) so the bottom fade
+   reads as "there's more". A non-clamped preview keeps `overflow: auto` so
+   wide content (e.g. a long code line) scrolls rather than being clipped —
+   the preview stays selectable/scrollable per design Q4. */
+.convo-doc.is-clamped .convo-doc-body { max-height: 340px; overflow: hidden; }
 .convo-doc.is-clamped .convo-doc-body::after {
   content: ""; position: absolute; left: 0; right: 0; bottom: 0;
   height: 72px; pointer-events: none;

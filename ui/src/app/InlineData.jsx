@@ -45,23 +45,32 @@ const MAX_INLINE_COLS = 8;
 // low-MB S3-backed exports — still previews inline.
 const MAX_INLINE_DATA_BYTES = 5 * 1024 * 1024;
 
+// CSV-ish text MIMEs we parse into an inline table. An explicit allowlist
+// rather than a `text/*` prefix test: a `kind=data` asset carrying
+// `text/markdown` / `text/html` is NOT tabular and would render a garbage
+// one-column table, so those (and the binary xlsx `application/…sheet`) card
+// instead. `text/csv` is the canonical CSV mime; `text/plain` is a tolerant
+// fallback for a producer that emits CSV without the precise type. Kept
+// module-level so `isInlineData` stays a pure, importable predicate.
+const INLINE_DATA_MIMES = new Set(["text/csv", "text/plain"]);
+
 /**
  * Whether an asset descriptor should render inline as a CSV table (vs. a
- * card). True only for a `kind=data` asset carrying a text MIME — i.e. CSV —
+ * card). True only for a `kind=data` asset carrying a CSV-ish text MIME
  * within the byte cap. ORIGIN-AGNOSTIC by design (#363): an uploaded CSV and
  * a generated CSV render identically; the predicate never inspects `origin`.
- * Binary spreadsheet uploads (xlsx — `application/…sheet`), any missing-MIME
- * data asset, and oversized payloads fall through to the card, which is the
- * correct fallback for a payload `parseCsv` can't sensibly render inline.
- * Pure — the fetch-success / parseable half of the design's inline condition
- * is enforced by the component's card fallback, not here.
+ * Binary spreadsheet uploads (xlsx — `application/…sheet`), non-CSV text
+ * types, any missing-MIME data asset, and oversized payloads fall through to
+ * the card, which is the correct fallback for a payload `parseCsv` can't
+ * sensibly render inline. Pure — the fetch-success / parseable half of the
+ * design's inline condition is enforced by the component's card fallback,
+ * not here.
  */
 export function isInlineData(asset) {
   return (
     asset != null &&
     asset.kind === "data" &&
-    typeof asset.mime === "string" &&
-    asset.mime.startsWith("text/") &&
+    INLINE_DATA_MIMES.has(asset.mime) &&
     typeof asset.size_bytes === "number" &&
     asset.size_bytes <= MAX_INLINE_DATA_BYTES
   );

@@ -59,6 +59,10 @@ describe("isInlineDocument", () => {
     expect(isInlineDocument(docAsset({ mime: "application/pdf" }))).toBe(false);
   });
 
+  it("is false for a non-markdown text mime (html) — allowlist, not text/* prefix", () => {
+    expect(isInlineDocument(docAsset({ mime: "text/html" }))).toBe(false);
+  });
+
   it("is false when the mime is missing or non-string", () => {
     expect(isInlineDocument(docAsset({ mime: null }))).toBe(false);
     expect(isInlineDocument(docAsset({ mime: undefined }))).toBe(false);

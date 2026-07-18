@@ -45,23 +45,32 @@ const MAX_INLINE_CHARS = 2048;
 // S3-backed ones the design contemplates rendering inline — still previews.
 const MAX_INLINE_DOCUMENT_BYTES = 5 * 1024 * 1024;
 
+// Text MIMEs `renderMarkdown` can sensibly render inline. An explicit
+// allowlist rather than a `text/*` prefix test: `text/html` (and other text
+// types) get dropped/mishandled by react-markdown and would show a blank
+// preview beneath the affordance, so they card instead. `text/markdown` is
+// the canonical doc mime; `text/plain` is rendered as prose. A PDF
+// (`application/pdf`) is `kind=document` but not text — no inline markdown
+// path in #363's scope, so it cards. Module-level so `isInlineDocument`
+// stays a pure, importable predicate.
+const INLINE_DOCUMENT_MIMES = new Set(["text/markdown", "text/plain"]);
+
 /**
  * Whether an asset descriptor should render inline as a markdown preview
- * (vs. a card). True only for a `kind=document` asset carrying a text MIME
- * (`text/markdown`, `text/plain`) within the byte cap. ORIGIN-AGNOSTIC by
- * design (#363): an uploaded markdown file and a generated one render
- * identically; the predicate never inspects `origin`. A PDF
- * (`application/pdf`), any missing-MIME document, and oversized payloads fall
- * through to the card — PDFs have no inline markdown path in #363's scope.
- * Pure — the fetch-success half of the design's inline condition is enforced
- * by the component's card fallback, not here.
+ * (vs. a card). True only for a `kind=document` asset carrying a markdown /
+ * plain-text MIME within the byte cap. ORIGIN-AGNOSTIC by design (#363): an
+ * uploaded markdown file and a generated one render identically; the
+ * predicate never inspects `origin`. A PDF (`application/pdf`), non-markdown
+ * text types (`text/html`), any missing-MIME document, and oversized
+ * payloads fall through to the card. Pure — the fetch-success half of the
+ * design's inline condition is enforced by the component's card fallback,
+ * not here.
  */
 export function isInlineDocument(asset) {
   return (
     asset != null &&
     asset.kind === "document" &&
-    typeof asset.mime === "string" &&
-    asset.mime.startsWith("text/") &&
+    INLINE_DOCUMENT_MIMES.has(asset.mime) &&
     typeof asset.size_bytes === "number" &&
     asset.size_bytes <= MAX_INLINE_DOCUMENT_BYTES
   );

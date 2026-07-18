@@ -65,6 +65,11 @@ describe("isInlineData", () => {
     ).toBe(false);
   });
 
+  it("is false for a non-CSV text mime (markdown / html) — allowlist, not text/* prefix", () => {
+    expect(isInlineData(dataAsset({ mime: "text/markdown" }))).toBe(false);
+    expect(isInlineData(dataAsset({ mime: "text/html" }))).toBe(false);
+  });
+
   it("is false when the mime is missing or non-string", () => {
     expect(isInlineData(dataAsset({ mime: null }))).toBe(false);
     expect(isInlineData(dataAsset({ mime: undefined }))).toBe(false);
