@@ -659,8 +659,8 @@ def test_post_message_falls_back_to_prefs_effort_when_payload_omits_it(
 # ``current_time`` is "0" in prod / "1" in dev (smoke-test only,
 # strategy spec policy P2); ``web_search`` ships "1" in all deployed
 # envs (kill-switch on default-on); ``code_exec`` ships "1" in all
-# deployed envs (kill-switch on default-on); ``generate_image`` (Nova
-# Canvas, #279) ships "1" in all deployed envs (kill-switch on
+# deployed envs (kill-switch on default-on); ``generate_image`` (Stable
+# Image Core, #279) ships "1" in all deployed envs (kill-switch on
 # default-on). ``web_fetch`` rides ``STARTER_WEB_SEARCH_ENABLED`` rather
 # than its own flag — both tools are backed by the same Exa API key, so
 # one availability signal covers the discover/deep-read pair (#232).

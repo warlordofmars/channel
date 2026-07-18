@@ -598,7 +598,7 @@ def _build_tool_registry() -> list[Any]:
       * ``STARTER_CODE_EXEC_ENABLED`` — "1" everywhere (kill switch
         only; default-on posture once deployed)
       * ``STARTER_IMAGE_GEN_ENABLED`` — "1" everywhere (kill switch
-        only; gates the Nova Canvas ``generate_image`` tool, #279)
+        only; gates the Stable Image Core ``generate_image`` tool, #279)
       * ``STARTER_CLOCK_TOOL_ENABLED`` — "1" in dev, "0" in prod
         (strategy spec policy P2: clock is a smoke-test tool, not a
         user-visible capability)
@@ -1250,7 +1250,7 @@ async def _stream_bedrock_reply(
         images_by_tool=code_exec_images,
     ):
         yield sse_asset_created(asset_card_descriptor(asset))
-    # #279 — generated images (Nova Canvas ``generate_image``). The tool
+    # #279 — generated images (Stable Image Core ``generate_image``). The tool
     # stashed the base64 payloads on ``agent.generated_image_sink`` during
     # the stream (out-of-band from SSE — decision 6: never base64 on the
     # wire); persist them here where the assistant ``msg_id`` exists. The

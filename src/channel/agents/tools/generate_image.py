@@ -1,10 +1,10 @@
 # Copyright (c) 2026 John Carter. All rights reserved.
-"""``generate_image`` — Amazon Nova Canvas image generation (#279).
+"""``generate_image`` — Stability Stable Image Core image generation (#279).
 
 A single narrow tool: ``generate_image(prompt, aspect_ratio)``. It calls
-Bedrock ``InvokeModel`` on Amazon Nova Canvas (``amazon.nova-canvas-v1:0``)
-with the ``TEXT_IMAGE`` task, decodes the returned base64 PNG, and hands
-the bytes to the post-stream asset pipeline (#326) for durable
+Bedrock ``InvokeModel`` on Stability AI Stable Image Core
+(``stability.stable-image-core-v1:1``), decodes the returned base64 PNG,
+and hands the bytes to the post-stream asset pipeline (#326) for durable
 persistence — the generated image is surfaced to the user as an
 ``origin=generated`` ASSET via the ``asset_created`` SSE frame + inline
 card, NEVER as base64 over SSE (epic #321 decision 6).
@@ -21,21 +21,27 @@ it made, and is dropped by the memory hook's ``toolResult`` strip); the
 image bytes never ride the ``ToolResult`` content, so ``translate_event``
 emits a generic ``tool_finished`` with no payload.
 
-Content moderation is Bedrock's built-in Nova Canvas RAI filter — no
-custom layer (decision 3). A fully-blocked generation returns an empty
-``images`` list with an ``error`` field; the tool then returns a
-``ToolResult``-shaped error whose reason token is ``content_filtered``
-(carried in the first content block's ``text``, NOT an ``error_type``
-key on the dict). ``translate_event`` extracts that token into the SSE
-``tool_error`` frame's ``error_type`` field, mirroring ``code_exec``'s
-error-shape contract — so the SPA sees ``error_type="content_filtered"``.
+Content moderation is Bedrock's built-in Stability RAI filter — no
+custom layer (decision 3). A blocked generation returns a non-null first
+``finish_reasons`` entry (``"Filter reason: prompt"`` /
+``"Filter reason: output image"`` / ``"Filter reason: input image"``) with
+``images`` absent; the tool then returns a ``ToolResult``-shaped error
+whose reason token is ``content_filtered`` (carried in the first content
+block's ``text``, NOT an ``error_type`` key on the dict). A non-filter
+``"Inference error"`` maps to ``generation_failed``. ``translate_event``
+extracts that token into the SSE ``tool_error`` frame's ``error_type``
+field, mirroring ``code_exec``'s error-shape contract — so the SPA sees
+``error_type="content_filtered"``.
 
 There is NO cost gating — billing is deferred (product decision). The
 only controls are the ``STARTER_IMAGE_GEN_ENABLED`` registration
 kill-switch (gated in ``chats._build_tool_registry``) and the
 ``ImageGenInvocations`` / ``ImageGenFailures`` EMF counters
 (``record_image_gen_outcome`` emits the invocation counter on every
-call and the failure counter on each non-success).
+call and the failure counter on each non-success). All three Stability
+text-to-image generators (Core / Ultra / SD3.5 Large) share ONE
+InvokeModel request/response contract, so a later switch to a premium
+tier is a pure ``STARTER_IMAGE_GEN_MODEL`` env flip — no code change.
 
 NOTE: this module deliberately does NOT use ``from __future__ import
 annotations``. Strands' ``@tool`` decorator validates the injected
@@ -60,12 +66,28 @@ from channel.metrics import record_image_gen_outcome
 
 logger = logging.getLogger(__name__)
 
-# Default Nova Canvas model id. Overridable via ``STARTER_IMAGE_GEN_MODEL``
-# for a personal dev env pointed at a different image model. Verified
-# against the AWS Nova user guide (image-gen request/response structure)
-# 2026-07-13 — invoked directly by base model id (no cross-region
+# Default image model id. Overridable via ``STARTER_IMAGE_GEN_MODEL`` —
+# the fallback mechanism to a premium generator, since all three
+# Stability text-to-image models (Stable Image Core / Ultra / SD3.5
+# Large) share the SAME InvokeModel request/response contract. Verified
+# against the AWS Bedrock Stable Image Core request/response docs
+# 2026-07-17 — invoked directly by base model id (no cross-region
 # inference profile for image models).
-_DEFAULT_MODEL_ID = "amazon.nova-canvas-v1:0"
+_DEFAULT_MODEL_ID = "stability.stable-image-core-v1:1"
+
+# Region the generate_image tool invokes Bedrock in. This is the app's
+# FIRST cross-region service dependency: the Channel stack runs entirely
+# in us-east-1, but the Stability text-to-image generators are ACTIVE
+# only in us-west-2 (absent from us-east-1, and there is no us-east-1
+# cross-region inference profile for them), so ONLY this tool's
+# bedrock-runtime client targets us-west-2. The returned PNG comes back
+# to the us-east-1 Lambda and persists to the us-east-1 assets bucket via
+# the unchanged pipeline — data at rest stays in us-east-1. The matching
+# IAM foundation-model ARNs in ``channel_stack.py`` are region-pinned to
+# us-west-2 to authorize this call. ``STARTER_IMAGE_GEN_REGION`` overrides
+# the region (e.g. a personal dev env); default us-west-2.
+_IMAGE_GEN_REGION_ENV = "STARTER_IMAGE_GEN_REGION"
+_DEFAULT_IMAGE_GEN_REGION = "us-west-2"
 
 # Attribute name of the per-turn sink stashed on the invoking Agent. The
 # tool appends ``{"tool_use_id", "b64", "mime", "title"}`` entries; the
@@ -74,37 +96,35 @@ _DEFAULT_MODEL_ID = "amazon.nova-canvas-v1:0"
 # name (no stringly-typed drift).
 GENERATED_IMAGE_SINK_ATTR = "generated_image_sink"
 
-# Aspect-ratio -> (width, height). All dimensions satisfy Nova Canvas's
-# constraints: each side 320-4096 and divisible by 16, aspect between
-# 1:4 and 4:1, total pixels < 4,194,304 (verified against the Nova user
-# guide 2026-07-13). Unknown ratios fall back to 1:1 — never error on a
-# ratio the model invented (mirrors the effort-tier fallback in
-# ``chat_agent.max_tokens_for_effort``).
-_ASPECT_RATIO_DIMENSIONS: dict[str, tuple[int, int]] = {
-    "1:1": (1024, 1024),
-    "16:9": (1280, 720),
-    "9:16": (720, 1280),
-    "4:3": (1024, 768),
-    "3:4": (768, 1024),
-}
+# Stability's ``aspect_ratio`` enum (verified against the AWS Bedrock
+# Stable Image Core text-to-image request docs 2026-07-17). Any caller
+# ratio outside this set — including Nova Canvas's old ``4:3`` / ``3:4``,
+# which Stability does NOT support — falls back to ``1:1`` rather than
+# erroring, the same fail-open posture as the effort-tier fallback in
+# ``chat_agent.max_tokens_for_effort``. The tool advertises a curated
+# subset of these in its docstring; the full set is accepted so a
+# model-chosen valid ratio is never needlessly coerced.
+_SUPPORTED_ASPECT_RATIOS: frozenset[str] = frozenset(
+    {"16:9", "1:1", "21:9", "2:3", "3:2", "4:5", "5:4", "9:16", "9:21"}
+)
 _DEFAULT_ASPECT_RATIO = "1:1"
 
-# Nova Canvas caps the prompt at 1024 characters; a longer prompt is a
+# Stability caps the prompt at 10,000 characters; a longer prompt is a
 # guaranteed ValidationException. Truncate rather than burn an invocation
-# — a 1024-char prompt is already far longer than any useful description.
-_PROMPT_MAX_CHARS = 1024
+# — 10,000 chars is already far longer than any useful description.
+_PROMPT_MAX_CHARS = 10_000
 
 # Asset card title derived from the prompt's first line, capped so the
 # inline card stays legible.
 _TITLE_MAX_CHARS = 80
 
-# The generated PNG bytes always carry this MIME — Nova Canvas returns
-# PNG for TEXT_IMAGE.
+# The generated PNG bytes always carry this MIME — we request
+# ``output_format: "png"`` so Stability returns PNG.
 _OUTPUT_MIME = "image/png"
 
-# boto3's default read timeout is 60s; Nova Canvas can exceed that for
-# larger / premium requests (per the AWS user guide's read_timeout
-# note). 300s matches the streaming-chat Lambda timeout envelope.
+# boto3's default read timeout is 60s; image generation can exceed that
+# for larger / premium requests. 300s matches the streaming-chat Lambda
+# timeout envelope.
 _READ_TIMEOUT_SECONDS = 300
 
 
@@ -118,6 +138,17 @@ def _error_result(error_type: str) -> dict[str, Any]:
     return {"status": "error", "content": [{"text": error_type}]}
 
 
+def _image_gen_region() -> str:
+    """Region to invoke the image model in — default ``us-west-2``.
+
+    ``STARTER_IMAGE_GEN_REGION`` overrides it (unset or empty → the
+    default). See ``_IMAGE_GEN_REGION_ENV`` for why this crosses regions:
+    the Stability text-to-image generators are offered only in us-west-2,
+    so this tool's client targets us-west-2 even though the rest of the
+    stack is us-east-1."""
+    return os.environ.get(_IMAGE_GEN_REGION_ENV) or _DEFAULT_IMAGE_GEN_REGION
+
+
 @functools.lru_cache(maxsize=1)
 def _get_bedrock_runtime_client():  # type: ignore[no-untyped-def]
     """Lazy-load the boto3 ``bedrock-runtime`` client with a long read
@@ -126,24 +157,28 @@ def _get_bedrock_runtime_client():  # type: ignore[no-untyped-def]
     Mirrors ``code_exec._get_lambda_client`` / ``web_search._get_exa_search``
     — deferring the boto3 import and client construction until the model
     actually calls ``generate_image`` keeps them off the cold-start path
-    for turns that don't generate an image."""
+    for turns that don't generate an image. ``region_name`` comes from the
+    ``_image_gen_region`` seam (default ``us-west-2`` — the image models'
+    only region; see ``_IMAGE_GEN_REGION_ENV``)."""
     import boto3  # noqa: PLC0415  # pragma: no cover
     from botocore.config import Config  # noqa: PLC0415  # pragma: no cover
 
     return boto3.client(  # pragma: no cover
         "bedrock-runtime",
+        region_name=_image_gen_region(),
         config=Config(read_timeout=_READ_TIMEOUT_SECONDS),
     )
 
 
-def _resolve_dimensions(aspect_ratio: str) -> tuple[int, int]:
-    """Map a caller-supplied aspect ratio to (width, height).
+def _resolve_aspect_ratio(aspect_ratio: str) -> str:
+    """Return a Stability-supported aspect ratio, falling back to 1:1.
 
-    Unknown ratios fall back to the 1:1 dimensions — never raise on a
-    ratio string the model invented."""
-    return _ASPECT_RATIO_DIMENSIONS.get(
-        aspect_ratio, _ASPECT_RATIO_DIMENSIONS[_DEFAULT_ASPECT_RATIO]
-    )
+    Any ratio outside Stability's enum (including the model inventing one,
+    or a Nova-era ``4:3`` / ``3:4``) falls back to ``1:1`` — never raise on
+    a ratio string the model supplied."""
+    if aspect_ratio in _SUPPORTED_ASPECT_RATIOS:
+        return aspect_ratio
+    return _DEFAULT_ASPECT_RATIO
 
 
 def _title_from_prompt(prompt: str) -> str:
@@ -160,18 +195,17 @@ def _classify_client_error(exc: botocore.exceptions.ClientError) -> str:
 
     The SPA renders distinct affordances per token, so the set stays
     small: ``rate_limit`` (throttling), ``model_access_denied`` (the
-    account hasn't enabled Nova Canvas — account state, not a code bug),
-    and ``generation_failed`` for everything else (validation, service
-    errors).
+    account hasn't enabled the Stability image model — account state, not
+    a code bug), and ``generation_failed`` for everything else
+    (validation, service errors).
 
     ``ResourceNotFoundException`` also maps to ``model_access_denied``:
     Bedrock raises it (not ``AccessDeniedException``) both for an
     unknown model id AND for a model the account can't currently invoke
-    — including a provider-``LEGACY`` model deactivated after 30 days of
-    disuse ("This Model is marked by provider as Legacy … Please upgrade
-    to an active model"). All of those are account/model-access state
-    the caller resolves by enabling the model, so they share the token
-    rather than degrading to the generic ``generation_failed``."""
+    — including a Stability generator that has not been access-enabled in
+    the Bedrock console. All of those are account/model-access state the
+    caller resolves by enabling the model, so they share the token rather
+    than degrading to the generic ``generation_failed``."""
     code = (getattr(exc, "response", None) or {}).get("Error", {}).get("Code", "")
     if code in ("ThrottlingException", "TooManyRequestsException"):
         return "rate_limit"
@@ -180,31 +214,53 @@ def _classify_client_error(exc: botocore.exceptions.ClientError) -> str:
     return "generation_failed"
 
 
-def _invoke_nova_canvas(prompt: str, width: int, height: int) -> tuple[str | None, str | None]:
-    """Invoke Nova Canvas ``TEXT_IMAGE`` and return ``(b64, error_type)``.
+def _classify_finish_reason(reason: str) -> str:
+    """Map a Stability ``finish_reasons[0]`` string to an error token.
+
+    Stability signals a content block via ``"Filter reason: prompt"`` /
+    ``"Filter reason: output image"`` / ``"Filter reason: input image"``
+    → ``content_filtered``. Any other non-null reason (e.g.
+    ``"Inference error"``) → ``generation_failed``. The reason string is a
+    bounded enum (model metadata, not prompt content) so it is safe to log
+    — but it is never echoed verbatim to the model / SPA; only the bounded
+    token is surfaced."""
+    if reason.startswith("Filter reason:"):
+        return "content_filtered"
+    return "generation_failed"
+
+
+def _invoke_image_model(prompt: str, aspect_ratio: str) -> tuple[str | None, str | None]:
+    """Invoke the Stability image model and return ``(b64, error_type)``.
 
     Exactly one of the two is non-None: ``(b64, None)`` on success,
     ``(None, error_type)`` on failure. Synchronous (boto3 ``invoke_model``
     is blocking) — the async ``generate_image`` wrapper runs this off the
     event loop via ``asyncio.to_thread``.
 
-    Content-filter rejections come back as an empty ``images`` list with
-    an ``error`` field (per the Nova user guide's RAI note) → mapped to
-    ``content_filtered``."""
+    The flat request body (``{prompt, aspect_ratio, output_format}``) and
+    the ``{images, seeds, finish_reasons}`` response are shared by all
+    three Stability text-to-image generators, so ``STARTER_IMAGE_GEN_MODEL``
+    can switch to Ultra / SD3.5 Large with no code change. A content-filter
+    rejection comes back as a non-null ``finish_reasons[0]`` with ``images``
+    absent → mapped via ``_classify_finish_reason``."""
     model_id = os.environ.get("STARTER_IMAGE_GEN_MODEL", _DEFAULT_MODEL_ID)
     body = {
-        "taskType": "TEXT_IMAGE",
-        "textToImageParams": {"text": prompt[:_PROMPT_MAX_CHARS]},
-        "imageGenerationConfig": {
-            "width": width,
-            "height": height,
-            "quality": "standard",
-            "numberOfImages": 1,
-        },
+        "prompt": prompt[:_PROMPT_MAX_CHARS],
+        "aspect_ratio": aspect_ratio,
+        "output_format": "png",
     }
     client = _get_bedrock_runtime_client()
     try:
-        resp = client.invoke_model(modelId=model_id, body=json.dumps(body).encode())
+        # ``contentType`` / ``accept`` are explicit (both "application/json")
+        # to match the AWS Bedrock InvokeModel docs; boto3 defaults them to
+        # the same value, but pinning them is self-documenting and immune to
+        # a future default change.
+        resp = client.invoke_model(
+            modelId=model_id,
+            contentType="application/json",
+            accept="application/json",
+            body=json.dumps(body).encode(),
+        )
     except botocore.exceptions.ClientError as exc:
         error_type = _classify_client_error(exc)
         logger.warning("generate_image.client_error type=%s prompt_len=%d", error_type, len(prompt))
@@ -219,14 +275,21 @@ def _invoke_nova_canvas(prompt: str, width: int, height: int) -> tuple[str | Non
     except (KeyError, ValueError, TypeError) as exc:
         logger.warning("generate_image.invalid_payload %r prompt_len=%d", exc, len(prompt))
         return None, "generation_failed"
+    # Stability puts a non-null first finish_reason on a blocked / failed
+    # generation (``[null]`` on success). Its raw text is NOT surfaced
+    # verbatim — only the bounded token — but is safe to log (S5145: it's
+    # model metadata, never prompt content).
+    finish_reasons = payload.get("finish_reasons") or []
+    if finish_reasons and finish_reasons[0] is not None:
+        error_type = _classify_finish_reason(str(finish_reasons[0]))
+        logger.warning("generate_image.blocked type=%s prompt_len=%d", error_type, len(prompt))
+        return None, error_type
     images = payload.get("images") or []
     if not images:
-        # Fully blocked by the RAI content filter (numberOfImages=1, so an
-        # empty list means the single image was blocked). The ``error``
-        # field carries Nova's reason but is NOT surfaced verbatim — it can
-        # echo prompt content (S5145).
-        logger.warning("generate_image.content_filtered prompt_len=%d", len(prompt))
-        return None, "content_filtered"
+        # Defensive: no finish_reason but also no image — treat as a failed
+        # generation rather than crashing on an empty index.
+        logger.warning("generate_image.no_image prompt_len=%d", len(prompt))
+        return None, "generation_failed"
     return images[0], None
 
 
@@ -250,7 +313,7 @@ async def generate_image(
     *,
     tool_context: ToolContext,
 ) -> dict[str, Any]:
-    """Generate an image from a text description using Amazon Nova Canvas.
+    """Generate an image from a text description using Stable Image Core.
 
     Use when the user asks you to create, draw, design, illustrate, or
     imagine a picture — concept art, a scene, a character, a logo, a
@@ -269,11 +332,11 @@ async def generate_image(
             setting, style, lighting, mood. Use positive phrasing:
             describe what you WANT to see, not what to leave out.
         aspect_ratio: One of "1:1" (square, the default), "16:9"
-            (landscape), "9:16" (portrait), "4:3", or "3:4". Any other
+            (landscape), "9:16" (portrait), "3:2", or "2:3". Any other
             value falls back to "1:1".
     """
-    width, height = _resolve_dimensions(aspect_ratio)
-    b64, error_type = await asyncio.to_thread(_invoke_nova_canvas, prompt, width, height)
+    ratio = _resolve_aspect_ratio(aspect_ratio)
+    b64, error_type = await asyncio.to_thread(_invoke_image_model, prompt, ratio)
     await record_image_gen_outcome(success=b64 is not None)
     if b64 is None:
         return _error_result(error_type or "generation_failed")
@@ -286,17 +349,16 @@ async def generate_image(
         }
     )
     logger.info(
-        "generate_image.generated tool_use_id_hash=%s width=%d height=%d",
+        "generate_image.generated tool_use_id_hash=%s aspect_ratio=%s",
         fingerprint_id(tool_context.tool_use["toolUseId"]),
-        width,
-        height,
+        ratio,
     )
     return {
         "status": "success",
         "content": [
             {
                 "text": (
-                    f"Image generated ({width}x{height}) and rendered inline "
+                    f"Image generated ({ratio}) and rendered inline "
                     "for the user. Briefly describe what you created."
                 )
             }

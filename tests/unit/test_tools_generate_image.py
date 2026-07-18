@@ -1,11 +1,12 @@
 # Copyright (c) 2026 John Carter. All rights reserved.
-"""Unit tests for the ``generate_image`` Nova Canvas tool (#279).
+"""Unit tests for the ``generate_image`` Stable Image Core tool (#279).
 
 The tool does no rendering itself — it invokes Bedrock ``InvokeModel``
-on Nova Canvas, decodes the base64 PNG, stashes it on the invoking
-Agent's per-turn sink, and returns a text-only ``ToolResult``. All AWS
-calls are mocked. The error_type taxonomy, the sink-harvest channel,
-and the EMF invocation counter are covered here."""
+on Stability Stable Image Core, decodes the base64 PNG, stashes it on
+the invoking Agent's per-turn sink, and returns a text-only
+``ToolResult``. All AWS calls are mocked. The error_type taxonomy
+(including the ``finish_reasons``-based content-filter detection), the
+sink-harvest channel, and the EMF invocation counter are covered here."""
 
 from __future__ import annotations
 
@@ -42,6 +43,11 @@ def _b64(data: bytes = b"PNGDATA") -> str:
     return base64.b64encode(data).decode()
 
 
+def _success_payload(data: bytes = b"PNGDATA") -> dict:
+    """A successful Stability response: base64 image, null finish_reason."""
+    return {"images": [_b64(data)], "seeds": [2130420379], "finish_reasons": [None]}
+
+
 def _fake_context(tool_use_id: str = "tu-1", agent: Any | None = None) -> SimpleNamespace:
     """A minimal stand-in for Strands' ``ToolContext``.
 
@@ -61,38 +67,58 @@ def _fake_context(tool_use_id: str = "tu-1", agent: Any | None = None) -> Simple
 
 
 @pytest.mark.parametrize(
-    ("ratio", "expected"),
-    [
-        ("1:1", (1024, 1024)),
-        ("16:9", (1280, 720)),
-        ("9:16", (720, 1280)),
-        ("4:3", (1024, 768)),
-        ("3:4", (768, 1024)),
-    ],
+    "ratio",
+    ["16:9", "1:1", "21:9", "2:3", "3:2", "4:5", "5:4", "9:16", "9:21"],
 )
-def test_resolve_dimensions_known_ratios(ratio, expected):
-    from channel.agents.tools.generate_image import _resolve_dimensions
+def test_resolve_aspect_ratio_supported_passthrough(ratio):
+    """Every value in Stability's enum passes straight through."""
+    from channel.agents.tools.generate_image import _resolve_aspect_ratio
 
-    assert _resolve_dimensions(ratio) == expected
-
-
-def test_resolve_dimensions_unknown_falls_back_to_square():
-    """A ratio the model invented falls back to 1:1 — never raises."""
-    from channel.agents.tools.generate_image import _resolve_dimensions
-
-    assert _resolve_dimensions("banana") == (1024, 1024)
+    assert _resolve_aspect_ratio(ratio) == ratio
 
 
-def test_all_dimensions_satisfy_nova_constraints():
-    """Every mapped resolution: sides 320-4096 and divisible by 16,
-    aspect 1:4..4:1, total pixels < 4,194,304 (Nova user-guide caps)."""
-    from channel.agents.tools.generate_image import _ASPECT_RATIO_DIMENSIONS
+@pytest.mark.parametrize("ratio", ["4:3", "3:4", "banana", "", "1:2"])
+def test_resolve_aspect_ratio_unsupported_falls_back_to_square(ratio):
+    """A ratio outside Stability's enum — including Nova's old 4:3 / 3:4 —
+    falls back to 1:1, never raises."""
+    from channel.agents.tools.generate_image import _resolve_aspect_ratio
 
-    for width, height in _ASPECT_RATIO_DIMENSIONS.values():
-        assert 320 <= width <= 4096 and width % 16 == 0
-        assert 320 <= height <= 4096 and height % 16 == 0
-        assert 0.25 <= width / height <= 4.0
-        assert width * height < 4_194_304
+    assert _resolve_aspect_ratio(ratio) == "1:1"
+
+
+def test_advertised_ratios_are_all_supported():
+    """Every aspect ratio the tool docstring advertises must be a real
+    Stability enum value (else the model would pick one that silently
+    coerces to 1:1)."""
+    from channel.agents.tools.generate_image import _SUPPORTED_ASPECT_RATIOS
+
+    advertised = {"1:1", "16:9", "9:16", "3:2", "2:3"}
+    assert advertised <= _SUPPORTED_ASPECT_RATIOS
+
+
+def test_image_gen_region_defaults_to_us_west_2(monkeypatch):
+    """Unset defaults to us-west-2 — the only region offering the Stability
+    generators (the app's sole cross-region service dependency)."""
+    from channel.agents.tools.generate_image import _image_gen_region
+
+    monkeypatch.delenv("STARTER_IMAGE_GEN_REGION", raising=False)
+    assert _image_gen_region() == "us-west-2"
+
+
+def test_image_gen_region_env_overrides(monkeypatch):
+    """STARTER_IMAGE_GEN_REGION overrides the default region."""
+    from channel.agents.tools.generate_image import _image_gen_region
+
+    monkeypatch.setenv("STARTER_IMAGE_GEN_REGION", "eu-central-1")
+    assert _image_gen_region() == "eu-central-1"
+
+
+def test_image_gen_region_empty_falls_back_to_default(monkeypatch):
+    """An empty override falls back to the us-west-2 default."""
+    from channel.agents.tools.generate_image import _image_gen_region
+
+    monkeypatch.setenv("STARTER_IMAGE_GEN_REGION", "")
+    assert _image_gen_region() == "us-west-2"
 
 
 def test_title_from_prompt_uses_first_non_empty_line():
@@ -120,7 +146,7 @@ def test_title_from_prompt_blank_falls_back():
         ("ThrottlingException", "rate_limit"),
         ("TooManyRequestsException", "rate_limit"),
         ("AccessDeniedException", "model_access_denied"),
-        # Bedrock surfaces a deactivated provider-LEGACY model (and an
+        # Bedrock surfaces a not-access-enabled Stability model (and an
         # unknown model id) as ResourceNotFoundException, not
         # AccessDeniedException — both are account/model-access state.
         ("ResourceNotFoundException", "model_access_denied"),
@@ -137,93 +163,150 @@ def test_classify_client_error(code, expected):
     assert _classify_client_error(exc) == expected
 
 
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    [
+        ("Filter reason: prompt", "content_filtered"),
+        ("Filter reason: output image", "content_filtered"),
+        ("Filter reason: input image", "content_filtered"),
+        ("Inference error", "generation_failed"),
+        ("something unexpected", "generation_failed"),
+    ],
+)
+def test_classify_finish_reason(reason, expected):
+    from channel.agents.tools.generate_image import _classify_finish_reason
+
+    assert _classify_finish_reason(reason) == expected
+
+
 # --------------------------------------------------------------------------
-# _invoke_nova_canvas — the sync Bedrock call
+# _invoke_image_model — the sync Bedrock call
 # --------------------------------------------------------------------------
 
 
 def test_invoke_success_returns_b64(monkeypatch):
     fake_client = MagicMock()
-    fake_client.invoke_model.return_value = _fake_invoke_response({"images": [_b64()]})
+    fake_client.invoke_model.return_value = _fake_invoke_response(_success_payload())
     monkeypatch.setattr(
         "channel.agents.tools.generate_image._get_bedrock_runtime_client",
         lambda: fake_client,
     )
-    from channel.agents.tools.generate_image import _invoke_nova_canvas
+    from channel.agents.tools.generate_image import _invoke_image_model
 
-    b64, error = _invoke_nova_canvas("a cat", 1024, 1024)
+    b64, error = _invoke_image_model("a cat", "1:1")
     assert error is None
     assert b64 == _b64()
 
 
-def test_invoke_builds_text_image_request_body(monkeypatch):
-    """Request body carries the TEXT_IMAGE task + resolved dimensions +
-    numberOfImages=1, and the default model id."""
+def test_invoke_builds_stability_request_body(monkeypatch):
+    """Request body is Stability's flat shape (prompt / aspect_ratio /
+    output_format=png) and carries the default model id."""
     fake_client = MagicMock()
-    fake_client.invoke_model.return_value = _fake_invoke_response({"images": [_b64()]})
+    fake_client.invoke_model.return_value = _fake_invoke_response(_success_payload())
     monkeypatch.setattr(
         "channel.agents.tools.generate_image._get_bedrock_runtime_client",
         lambda: fake_client,
     )
     monkeypatch.delenv("STARTER_IMAGE_GEN_MODEL", raising=False)
-    from channel.agents.tools.generate_image import _invoke_nova_canvas
+    from channel.agents.tools.generate_image import _invoke_image_model
 
-    _invoke_nova_canvas("a photo of a fox", 1280, 720)
+    _invoke_image_model("a photo of a fox", "16:9")
 
     kwargs = fake_client.invoke_model.call_args.kwargs
-    assert kwargs["modelId"] == "amazon.nova-canvas-v1:0"
+    assert kwargs["modelId"] == "stability.stable-image-core-v1:1"
+    assert kwargs["contentType"] == "application/json"
+    assert kwargs["accept"] == "application/json"
     body = json.loads(kwargs["body"])
-    assert body["taskType"] == "TEXT_IMAGE"
-    assert body["textToImageParams"]["text"] == "a photo of a fox"
-    assert body["imageGenerationConfig"]["width"] == 1280
-    assert body["imageGenerationConfig"]["height"] == 720
-    assert body["imageGenerationConfig"]["numberOfImages"] == 1
+    assert body == {
+        "prompt": "a photo of a fox",
+        "aspect_ratio": "16:9",
+        "output_format": "png",
+    }
 
 
 def test_invoke_honours_model_override_env(monkeypatch):
+    """STARTER_IMAGE_GEN_MODEL flips to a premium Stability generator with
+    no code change (identical request contract)."""
     fake_client = MagicMock()
-    fake_client.invoke_model.return_value = _fake_invoke_response({"images": [_b64()]})
+    fake_client.invoke_model.return_value = _fake_invoke_response(_success_payload())
     monkeypatch.setattr(
         "channel.agents.tools.generate_image._get_bedrock_runtime_client",
         lambda: fake_client,
     )
-    monkeypatch.setenv("STARTER_IMAGE_GEN_MODEL", "amazon.nova-canvas-vNEXT:0")
-    from channel.agents.tools.generate_image import _invoke_nova_canvas
+    monkeypatch.setenv("STARTER_IMAGE_GEN_MODEL", "stability.stable-image-ultra-v1:1")
+    from channel.agents.tools.generate_image import _invoke_image_model
 
-    _invoke_nova_canvas("x", 1024, 1024)
-    assert fake_client.invoke_model.call_args.kwargs["modelId"] == "amazon.nova-canvas-vNEXT:0"
+    _invoke_image_model("x", "1:1")
+    assert (
+        fake_client.invoke_model.call_args.kwargs["modelId"] == "stability.stable-image-ultra-v1:1"
+    )
 
 
 def test_invoke_truncates_overlong_prompt(monkeypatch):
     fake_client = MagicMock()
-    fake_client.invoke_model.return_value = _fake_invoke_response({"images": [_b64()]})
+    fake_client.invoke_model.return_value = _fake_invoke_response(_success_payload())
     monkeypatch.setattr(
         "channel.agents.tools.generate_image._get_bedrock_runtime_client",
         lambda: fake_client,
     )
-    from channel.agents.tools.generate_image import _PROMPT_MAX_CHARS, _invoke_nova_canvas
+    from channel.agents.tools.generate_image import _PROMPT_MAX_CHARS, _invoke_image_model
 
-    _invoke_nova_canvas("z" * 5000, 1024, 1024)
+    _invoke_image_model("z" * (_PROMPT_MAX_CHARS + 5000), "1:1")
     body = json.loads(fake_client.invoke_model.call_args.kwargs["body"])
-    assert len(body["textToImageParams"]["text"]) == _PROMPT_MAX_CHARS
+    assert len(body["prompt"]) == _PROMPT_MAX_CHARS
 
 
-def test_invoke_empty_images_is_content_filtered(monkeypatch):
-    """A fully-blocked generation returns ``images: []`` + ``error`` →
-    ``content_filtered``."""
+def test_invoke_filter_finish_reason_is_content_filtered(monkeypatch):
+    """A blocked generation returns a non-null ``Filter reason: *`` first
+    finish_reason with ``images`` absent → ``content_filtered``."""
     fake_client = MagicMock()
     fake_client.invoke_model.return_value = _fake_invoke_response(
-        {"images": [], "error": "blocked by responsible AI policy"}
+        {"finish_reasons": ["Filter reason: prompt"], "seeds": [0]}
     )
     monkeypatch.setattr(
         "channel.agents.tools.generate_image._get_bedrock_runtime_client",
         lambda: fake_client,
     )
-    from channel.agents.tools.generate_image import _invoke_nova_canvas
+    from channel.agents.tools.generate_image import _invoke_image_model
 
-    b64, error = _invoke_nova_canvas("something disallowed", 1024, 1024)
+    b64, error = _invoke_image_model("something disallowed", "1:1")
     assert b64 is None
     assert error == "content_filtered"
+
+
+def test_invoke_inference_error_finish_reason_is_generation_failed(monkeypatch):
+    """A non-filter ``Inference error`` finish_reason → generation_failed."""
+    fake_client = MagicMock()
+    fake_client.invoke_model.return_value = _fake_invoke_response(
+        {"finish_reasons": ["Inference error"], "seeds": [0]}
+    )
+    monkeypatch.setattr(
+        "channel.agents.tools.generate_image._get_bedrock_runtime_client",
+        lambda: fake_client,
+    )
+    from channel.agents.tools.generate_image import _invoke_image_model
+
+    b64, error = _invoke_image_model("x", "1:1")
+    assert b64 is None
+    assert error == "generation_failed"
+
+
+def test_invoke_no_image_defensive_is_generation_failed(monkeypatch):
+    """Null finish_reason but no image (shouldn't happen per the contract)
+    → generation_failed, not a crash on an empty index."""
+    fake_client = MagicMock()
+    fake_client.invoke_model.return_value = _fake_invoke_response(
+        {"finish_reasons": [None], "images": [], "seeds": [0]}
+    )
+    monkeypatch.setattr(
+        "channel.agents.tools.generate_image._get_bedrock_runtime_client",
+        lambda: fake_client,
+    )
+    from channel.agents.tools.generate_image import _invoke_image_model
+
+    b64, error = _invoke_image_model("x", "1:1")
+    assert b64 is None
+    assert error == "generation_failed"
 
 
 def test_invoke_client_error_maps_error_type(monkeypatch):
@@ -235,9 +318,9 @@ def test_invoke_client_error_maps_error_type(monkeypatch):
         "channel.agents.tools.generate_image._get_bedrock_runtime_client",
         lambda: fake_client,
     )
-    from channel.agents.tools.generate_image import _invoke_nova_canvas
+    from channel.agents.tools.generate_image import _invoke_image_model
 
-    b64, error = _invoke_nova_canvas("x", 1024, 1024)
+    b64, error = _invoke_image_model("x", "1:1")
     assert b64 is None
     assert error == "model_access_denied"
 
@@ -251,9 +334,9 @@ def test_invoke_boto_core_error_is_generation_failed(monkeypatch):
         "channel.agents.tools.generate_image._get_bedrock_runtime_client",
         lambda: fake_client,
     )
-    from channel.agents.tools.generate_image import _invoke_nova_canvas
+    from channel.agents.tools.generate_image import _invoke_image_model
 
-    b64, error = _invoke_nova_canvas("x", 1024, 1024)
+    b64, error = _invoke_image_model("x", "1:1")
     assert b64 is None
     assert error == "generation_failed"
 
@@ -269,9 +352,9 @@ def test_invoke_invalid_response_payload_is_generation_failed(monkeypatch):
         "channel.agents.tools.generate_image._get_bedrock_runtime_client",
         lambda: fake_client,
     )
-    from channel.agents.tools.generate_image import _invoke_nova_canvas
+    from channel.agents.tools.generate_image import _invoke_image_model
 
-    b64, error = _invoke_nova_canvas("x", 1024, 1024)
+    b64, error = _invoke_image_model("x", "1:1")
     assert b64 is None
     assert error == "generation_failed"
 
@@ -283,9 +366,9 @@ def test_invoke_missing_body_key_is_generation_failed(monkeypatch):
         "channel.agents.tools.generate_image._get_bedrock_runtime_client",
         lambda: fake_client,
     )
-    from channel.agents.tools.generate_image import _invoke_nova_canvas
+    from channel.agents.tools.generate_image import _invoke_image_model
 
-    b64, error = _invoke_nova_canvas("x", 1024, 1024)
+    b64, error = _invoke_image_model("x", "1:1")
     assert b64 is None
     assert error == "generation_failed"
 
@@ -310,8 +393,8 @@ def _patch_metric(monkeypatch) -> list[bool]:
 async def test_generate_image_success_appends_to_sink(monkeypatch):
     recorded = _patch_metric(monkeypatch)
     monkeypatch.setattr(
-        "channel.agents.tools.generate_image._invoke_nova_canvas",
-        lambda prompt, w, h: (_b64(b"IMG"), None),
+        "channel.agents.tools.generate_image._invoke_image_model",
+        lambda prompt, ratio: (_b64(b"IMG"), None),
     )
     from channel.agents.tools.generate_image import (
         GENERATED_IMAGE_SINK_ATTR,
@@ -324,6 +407,7 @@ async def test_generate_image_success_appends_to_sink(monkeypatch):
 
     assert result["status"] == "success"
     assert "rendered inline" in result["content"][0]["text"]
+    assert "16:9" in result["content"][0]["text"]
     sink = getattr(agent, GENERATED_IMAGE_SINK_ATTR)
     assert sink == [
         {
@@ -336,11 +420,29 @@ async def test_generate_image_success_appends_to_sink(monkeypatch):
     assert recorded == [True]
 
 
+async def test_generate_image_resolves_unsupported_ratio(monkeypatch):
+    """An unsupported aspect ratio is coerced to 1:1 before the invoke, and
+    the success text reflects the resolved ratio."""
+    _patch_metric(monkeypatch)
+    seen: list[str] = []
+
+    def _fake_invoke(prompt, ratio):
+        seen.append(ratio)
+        return _b64(), None
+
+    monkeypatch.setattr("channel.agents.tools.generate_image._invoke_image_model", _fake_invoke)
+    from channel.agents.tools.generate_image import generate_image
+
+    result = await generate_image(prompt="x", aspect_ratio="4:3", tool_context=_fake_context())
+    assert seen == ["1:1"]
+    assert "1:1" in result["content"][0]["text"]
+
+
 async def test_generate_image_error_returns_tool_result_shape(monkeypatch):
     recorded = _patch_metric(monkeypatch)
     monkeypatch.setattr(
-        "channel.agents.tools.generate_image._invoke_nova_canvas",
-        lambda prompt, w, h: (None, "content_filtered"),
+        "channel.agents.tools.generate_image._invoke_image_model",
+        lambda prompt, ratio: (None, "content_filtered"),
     )
     from channel.agents.tools.generate_image import (
         GENERATED_IMAGE_SINK_ATTR,
@@ -362,8 +464,8 @@ async def test_generate_image_error_defaults_error_type(monkeypatch):
     """Defensive: a None error_type still yields a bounded token."""
     _patch_metric(monkeypatch)
     monkeypatch.setattr(
-        "channel.agents.tools.generate_image._invoke_nova_canvas",
-        lambda prompt, w, h: (None, None),
+        "channel.agents.tools.generate_image._invoke_image_model",
+        lambda prompt, ratio: (None, None),
     )
     from channel.agents.tools.generate_image import generate_image
 
@@ -375,8 +477,8 @@ async def test_generate_image_reuses_existing_sink(monkeypatch):
     """A second generation in the same turn appends to the same list."""
     _patch_metric(monkeypatch)
     monkeypatch.setattr(
-        "channel.agents.tools.generate_image._invoke_nova_canvas",
-        lambda prompt, w, h: (_b64(), None),
+        "channel.agents.tools.generate_image._invoke_image_model",
+        lambda prompt, ratio: (_b64(), None),
     )
     from channel.agents.tools.generate_image import (
         GENERATED_IMAGE_SINK_ATTR,

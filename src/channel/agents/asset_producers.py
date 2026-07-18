@@ -405,7 +405,7 @@ async def persist_generated_image_assets(
     msg_id: str,
     images: list[dict[str, Any]],
 ) -> list[Asset]:
-    """Persist ``generate_image`` (Nova Canvas) outputs as assets (#279).
+    """Persist ``generate_image`` (Stable Image Core) outputs as assets (#279).
 
     ``images`` is the per-turn sink the ``generate_image`` tool stashed on
     the invoking Agent (``generated_image_sink``); each entry is
@@ -429,8 +429,8 @@ async def persist_generated_image_assets(
     for entry in images:
         try:
             # ``validate=True`` — strict alphabet check; the b64 comes from
-            # Nova Canvas via our own tool, so any non-alphabet byte means a
-            # malformed payload rather than something to silently drop.
+            # the Stability image model via our own tool, so any non-alphabet
+            # byte means a malformed payload rather than something to drop.
             data = base64.b64decode(entry["b64"], validate=True)
         except (KeyError, TypeError, ValueError, binascii.Error) as exc:
             await _record_persist_failure(producer="generate_image", chat_id=chat_id, exc=exc)

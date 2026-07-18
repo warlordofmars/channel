@@ -498,26 +498,38 @@ def test_dev_stack_enables_web_search(dev_template):
 
 
 def test_prod_stack_enables_image_gen(prod_template):
-    """STARTER_IMAGE_GEN_ENABLED = '1' in prod (#279 kill switch, on default)."""
+    """STARTER_IMAGE_GEN_ENABLED = '1' in prod (#279 kill switch, on default);
+    STARTER_IMAGE_GEN_REGION pins the cross-region image call to us-west-2."""
     api_fn = _api_function(prod_template)
     env_vars = api_fn["Properties"]["Environment"]["Variables"]
     assert env_vars.get("STARTER_IMAGE_GEN_ENABLED") == "1"
+    assert env_vars.get("STARTER_IMAGE_GEN_REGION") == "us-west-2"
 
 
 def test_dev_stack_enables_image_gen(dev_template):
-    """STARTER_IMAGE_GEN_ENABLED = '1' in non-prod."""
+    """STARTER_IMAGE_GEN_ENABLED = '1' in non-prod; STARTER_IMAGE_GEN_REGION
+    pins the cross-region image call to us-west-2."""
     api_fn = _api_function(dev_template)
     env_vars = api_fn["Properties"]["Environment"]["Variables"]
     assert env_vars.get("STARTER_IMAGE_GEN_ENABLED") == "1"
+    assert env_vars.get("STARTER_IMAGE_GEN_REGION") == "us-west-2"
 
 
-def test_lambda_role_grants_nova_canvas_invoke_model(dev_template):
-    """#279 — the ``generate_image`` tool calls ``bedrock:InvokeModel`` on
-    Nova Canvas, so the region-pinned foundation-model ARN must appear in
-    the API Lambda role's IAM policies. Without it every generation fails
-    with AccessDeniedException. Scan every IAM::Policy resource because
-    CDK distributes statements across multiple Policy resources."""
-    nova_arn = "arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-canvas-v1:0"
+def test_lambda_role_grants_stability_image_invoke_model(dev_template):
+    """#279 — the ``generate_image`` tool calls ``bedrock:InvokeModel`` on the
+    Stability text-to-image generators in **us-west-2** (a cross-region call —
+    these models are ACTIVE only in us-west-2, absent from the stack's
+    us-east-1 region), so all three region-pinned foundation-model ARNs must
+    appear in the API Lambda role's IAM policies. All three (Core / Ultra /
+    SD3.5 Large) are granted so a ``STARTER_IMAGE_GEN_MODEL`` switch needs no
+    redeploy. Without the grant every generation fails with
+    AccessDeniedException. Scan every IAM::Policy resource because CDK
+    distributes statements across multiple Policy resources."""
+    stability_arns = {
+        "arn:aws:bedrock:us-west-2::foundation-model/stability.stable-image-core-v1:1",
+        "arn:aws:bedrock:us-west-2::foundation-model/stability.stable-image-ultra-v1:1",
+        "arn:aws:bedrock:us-west-2::foundation-model/stability.sd3-5-large-v1:0",
+    }
     policies = dev_template.find_resources("AWS::IAM::Policy")
     granted_resources: set[str] = set()
     for pol in policies.values():
@@ -526,8 +538,10 @@ def test_lambda_role_grants_nova_canvas_invoke_model(dev_template):
             if isinstance(resources, str):
                 resources = [resources]
             granted_resources.update(r for r in resources if isinstance(r, str))
-    assert nova_arn in granted_resources, (
-        f"Nova Canvas InvokeModel ARN missing from synth; got {sorted(granted_resources)}"
+    missing = stability_arns - granted_resources
+    assert not missing, (
+        f"Stability image-model InvokeModel ARN(s) missing from synth: "
+        f"{sorted(missing)}; granted {sorted(granted_resources)}"
     )
 
 
