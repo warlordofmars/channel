@@ -46,6 +46,7 @@ from channel.models import (
     ChatMCPSettings,
     MCPServer,
     MCPServerAuthStatus,
+    MCPServerAuthType,
 )
 
 logger = logging.getLogger(__name__)
@@ -149,6 +150,13 @@ def _to_out(s: MCPServer) -> _ServerOut:
     )
 
 
+# Hard upper bound on a pasted static token. A PAT / bearer token is a
+# small opaque string; 4 KB is far beyond any real token and keeps a
+# hostile client from stuffing the encrypt path / DDB item with a
+# multi-megabyte blob.
+_STATIC_TOKEN_MAX_LEN = 4096
+
+
 class _RegisterRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=64)
     url: str = Field(..., min_length=10, max_length=2048)
@@ -156,11 +164,74 @@ class _RegisterRequest(BaseModel):
     # truncates to _TOOL_PREFIX_MAX_LEN, but a 422 here is friendlier
     # than silently dropping the tail of the user's input.
     tool_prefix: str | None = Field(default=None, max_length=_TOOL_PREFIX_MAX_LEN)
+    # oauth_dcr (default; unchanged behaviour) or static_token (paste a
+    # pre-issued bearer token / PAT). See #375.
+    auth_type: MCPServerAuthType = MCPServerAuthType.OAUTH_DCR
+    # Only meaningful when auth_type=static_token. min_length=1 rejects
+    # an empty string at the boundary; the coherence check in
+    # register_server rejects the None/wrong-auth_type combinations.
+    token: str | None = Field(default=None, min_length=1, max_length=_STATIC_TOKEN_MAX_LEN)
 
 
 class _RegisterResponse(BaseModel):
     server_id: str
-    auth_start_url: str
+    # None for a static-token registration — the SPA uses the presence of
+    # this URL to decide whether to open the OAuth authorization tab.
+    auth_start_url: str | None = None
+
+
+# A static PAT has no refresh token and no token_endpoint, so it must
+# never enter the refresh-skew path in get_valid_access_token. Persist a
+# far-future expiry (~100 years) as a sentinel so the refresh check
+# treats the token as valid forever. See #375.
+_STATIC_TOKEN_EXPIRY_SENTINEL_SECONDS = 100 * 365 * 86400
+
+
+def _register_static_token(
+    *,
+    user_id: str,
+    name: str,
+    url: str,
+    tool_prefix: str | None,
+    token: str,
+) -> _RegisterResponse:
+    """Register a static-token (PAT) MCP server.
+
+    No discovery / DCR / auth-code dance: the caller supplies the bearer
+    token directly, we encrypt + persist it via the existing MCPToken
+    path, mark the server ACTIVE, and return no ``auth_start_url``.
+
+    The token itself is never logged or echoed — only the fingerprinted
+    user/server ids appear in the success log line, matching the
+    callback path's ``fingerprint_id`` discipline.
+    """
+    tool_prefix_norm = _normalize_tool_prefix(tool_prefix, url)
+    server = storage.create_mcp_server(
+        user_id=user_id,
+        name=name,
+        url=url,
+        client_id=None,
+        tool_prefix=tool_prefix_norm,
+        auth_type=MCPServerAuthType.STATIC_TOKEN,
+        auth_status=MCPServerAuthStatus.ACTIVE,
+    )
+    expires_at = int(time.time()) + _STATIC_TOKEN_EXPIRY_SENTINEL_SECONDS
+    storage.put_mcp_token(
+        user_id=user_id,
+        server_id=server.server_id,
+        access_token_ciphertext=crypto.encrypt_blob(token),
+        refresh_token_ciphertext=None,
+        expires_at=expires_at,
+        granted_scope="",
+    )
+    logger.info(
+        "mcp.register.static_token",
+        extra={
+            "user_id_hash": fingerprint_id(user_id),
+            "server_id_hash": fingerprint_id(server.server_id),
+        },
+    )
+    return _RegisterResponse(server_id=server.server_id, auth_start_url=None)
 
 
 @router.post("/api/mcp/servers", response_model=_RegisterResponse)
@@ -169,15 +240,47 @@ async def register_server(
     claims: dict[str, Any] = Depends(require_mgmt_user),
 ) -> _RegisterResponse:
     validate_mcp_server_url(body.url)
+    # Branch on the credential type. Reject the incoherent combinations
+    # at the boundary — never silently drop a pasted secret, never run a
+    # tokenless static-token registration.
+    if body.auth_type == MCPServerAuthType.STATIC_TOKEN:
+        if not body.token:
+            raise HTTPException(
+                status_code=400,
+                detail="A static-token registration requires a token",
+            )
+        return _register_static_token(
+            user_id=claims["sub"],
+            name=body.name,
+            url=body.url,
+            tool_prefix=body.tool_prefix,
+            token=body.token,
+        )
+    if body.token is not None:
+        raise HTTPException(
+            status_code=400,
+            detail="A token may only be supplied with auth_type=static_token",
+        )
+
     redirect_uri = _redirect_uri()
     try:
         prm = await mcp_auth.discover_resource_metadata(body.url)
         as_url = str(prm.authorization_servers[0]) if prm.authorization_servers else body.url
         as_meta = await mcp_auth.discover_auth_server_metadata(as_url)
         if not as_meta.registration_endpoint:
+            # Distinguishable, machine-readable reason so the SPA can
+            # branch on ``code`` (and steer the user into the
+            # static-token path) instead of matching prose. This is the
+            # ONLY branch that carries dcr_unsupported — genuine
+            # URL/discovery failures keep their 400/502 shapes below.
             raise HTTPException(
                 status_code=400,
-                detail="MCP server's auth server does not support dynamic client registration",
+                detail={
+                    "code": "dcr_unsupported",
+                    "message": (
+                        "MCP server's auth server does not support dynamic client registration"
+                    ),
+                },
             )
         client_info = await mcp_auth.register_dynamic_client(
             registration_endpoint=str(as_meta.registration_endpoint),
@@ -235,6 +338,15 @@ def _begin_auth_flow(
     auth_endpoint: str,
     redirect_uri: str,
 ) -> str:
+    # Only DCR servers have an OAuth authorization flow. A static-token
+    # server has no DCR client_id, so there's nothing to authorize — guard
+    # here so a stray reauth on a static-token server returns a clear 400
+    # instead of building an authorization URL with a None client_id.
+    if server.client_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail="This server uses a static token — there is no OAuth flow to start",
+        )
     code_verifier, code_challenge = mcp_auth.generate_pkce()
     state = secrets.token_urlsafe(32)
     state_store.put_state(
@@ -314,6 +426,14 @@ async def mcp_callback(
     except HTTPException:
         return RedirectResponse(
             url=_customize_redirect(mcp_authed="error", reason="blocked_url"),
+            status_code=302,
+        )
+    # A static-token server has no DCR client_id and never starts an OAuth
+    # flow, so no valid state should ever land here for one. Guard the
+    # type-level None anyway — exchange_code requires a client_id.
+    if server.client_id is None:
+        return RedirectResponse(
+            url=_customize_redirect(mcp_authed="error", reason="not_oauth"),
             status_code=302,
         )
     try:
@@ -419,6 +539,16 @@ async def reauth_server(
     s = storage.get_mcp_server(user_id=claims["sub"], server_id=server_id)
     if s is None:
         raise HTTPException(status_code=404, detail="server not found")
+    # Guard static-token servers BEFORE discovery. A static-token server
+    # has no OAuth flow to re-authorize, and it's precisely the kind of
+    # server (e.g. GitHub's MCP) whose discovery may fail — running
+    # discovery first would surface a misleading 502 instead of this
+    # clear 400. See #375 / Copilot review.
+    if s.client_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail="This server uses a static token — there is no OAuth flow to re-authorize",
+        )
     validate_mcp_server_url(s.url)
     redirect_uri = _redirect_uri()
     try:

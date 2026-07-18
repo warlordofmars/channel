@@ -145,6 +145,180 @@ def test_register_server_runs_dcr_and_returns_auth_url(
     assert created["client_id"] == "dcr-new"
 
 
+def test_register_static_token_skips_dcr_and_stores_encrypted_token(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    public_dns: None,
+) -> None:
+    """A static_token registration must NOT touch discovery / DCR /
+    _begin_auth_flow. It creates the server row ACTIVE with client_id=None
+    and auth_type=static_token, persists the token encrypted, and returns
+    no auth_start_url."""
+    from channel import storage
+    from channel.mcp import auth as _mcp_auth
+    from channel.mcp import crypto
+    from channel.models import MCPServer, MCPServerAuthStatus, MCPServerAuthType
+
+    async def must_not_run(*_a: Any, **_kw: Any) -> Any:  # pragma: no cover
+        raise AssertionError("static-token path must not call discovery/DCR")
+
+    monkeypatch.setattr(_mcp_auth, "discover_resource_metadata", must_not_run)
+    monkeypatch.setattr(_mcp_auth, "discover_auth_server_metadata", must_not_run)
+    monkeypatch.setattr(_mcp_auth, "register_dynamic_client", must_not_run)
+
+    def begin_boom(*_a: Any, **_kw: Any) -> Any:  # pragma: no cover
+        raise AssertionError("_begin_auth_flow must not run for static_token")
+
+    monkeypatch.setattr("channel.api.mcp._begin_auth_flow", begin_boom)
+    monkeypatch.setattr(crypto, "encrypt_blob", lambda s: ("ENC::" + s).encode())
+
+    created: dict[str, Any] = {}
+
+    def fake_create(**kwargs: Any) -> MCPServer:
+        created.update(kwargs)
+        return MCPServer(
+            server_id="srv-static",
+            user_id="user-1",
+            name=kwargs["name"],
+            url=kwargs["url"],
+            client_id=kwargs["client_id"],
+            tool_prefix=kwargs["tool_prefix"],
+            auth_type=kwargs["auth_type"],
+            auth_status=kwargs["auth_status"],
+            created_at="x",
+            updated_at="x",
+        )
+
+    monkeypatch.setattr(storage, "create_mcp_server", fake_create)
+    persisted: dict[str, Any] = {}
+    monkeypatch.setattr(storage, "put_mcp_token", lambda **kw: persisted.update(kw))
+
+    resp = client.post(
+        "/api/mcp/servers",
+        json={
+            "name": "GitHub",
+            "url": "https://api.githubcopilot.com/mcp/",
+            "auth_type": "static_token",
+            "token": "ghp_dummy_pat_value",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["server_id"] == "srv-static"
+    assert body["auth_start_url"] is None
+    # Server row created ACTIVE, static_token, no DCR client.
+    assert created["client_id"] is None
+    assert created["auth_type"] == MCPServerAuthType.STATIC_TOKEN
+    assert created["auth_status"] == MCPServerAuthStatus.ACTIVE
+    # Token persisted ENCRYPTED (never the plaintext), no refresh token.
+    assert persisted["access_token_ciphertext"] == b"ENC::ghp_dummy_pat_value"
+    assert persisted["access_token_ciphertext"] != b"ghp_dummy_pat_value"
+    assert persisted["refresh_token_ciphertext"] is None
+    # Far-future expiry sentinel keeps the PAT out of the refresh path.
+    assert persisted["expires_at"] > 1_900_000_000
+
+
+def test_register_static_token_without_token_returns_400(
+    client: TestClient,
+    public_dns: None,
+) -> None:
+    resp = client.post(
+        "/api/mcp/servers",
+        json={
+            "name": "GitHub",
+            "url": "https://api.githubcopilot.com/mcp/",
+            "auth_type": "static_token",
+        },
+    )
+    assert resp.status_code == 400
+    assert "requires a token" in resp.json()["detail"]
+
+
+def test_register_oauth_dcr_with_token_returns_400(
+    client: TestClient,
+    public_dns: None,
+) -> None:
+    """A token supplied to an oauth_dcr registration is an incoherent
+    combo — reject it rather than silently dropping a secret."""
+    resp = client.post(
+        "/api/mcp/servers",
+        json={
+            "name": "Hive",
+            "url": "https://hive.example.com/mcp",
+            "auth_type": "oauth_dcr",
+            "token": "should-not-be-here",
+        },
+    )
+    assert resp.status_code == 400
+    assert "static_token" in resp.json()["detail"]
+
+
+def test_register_static_token_never_logs_the_token(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    public_dns: None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The pasted PAT must never reach a log sink — the success log line
+    carries only fingerprinted ids."""
+    import logging
+
+    from channel import storage
+    from channel.mcp import crypto
+    from channel.models import MCPServer, MCPServerAuthStatus, MCPServerAuthType
+
+    monkeypatch.setattr(crypto, "encrypt_blob", lambda s: b"ENC")
+    monkeypatch.setattr(
+        storage,
+        "create_mcp_server",
+        lambda **kw: MCPServer(
+            server_id="srv-static",
+            user_id="user-1",
+            name=kw["name"],
+            url=kw["url"],
+            client_id=None,
+            tool_prefix=kw["tool_prefix"],
+            auth_type=MCPServerAuthType.STATIC_TOKEN,
+            auth_status=MCPServerAuthStatus.ACTIVE,
+            created_at="x",
+            updated_at="x",
+        ),
+    )
+    monkeypatch.setattr(storage, "put_mcp_token", lambda **_kw: None)
+
+    secret = "ghp_super_secret_should_never_be_logged"
+    with caplog.at_level(logging.DEBUG):
+        resp = client.post(
+            "/api/mcp/servers",
+            json={
+                "name": "GitHub",
+                "url": "https://api.githubcopilot.com/mcp/",
+                "auth_type": "static_token",
+                "token": secret,
+            },
+        )
+    assert resp.status_code == 200, resp.text
+    assert secret not in caplog.text
+
+
+def test_register_static_token_empty_string_rejected_at_boundary(
+    client: TestClient,
+    public_dns: None,
+) -> None:
+    """An empty-string token fails Field(min_length=1) → 422 before the
+    handler runs."""
+    resp = client.post(
+        "/api/mcp/servers",
+        json={
+            "name": "GitHub",
+            "url": "https://api.githubcopilot.com/mcp/",
+            "auth_type": "static_token",
+            "token": "",
+        },
+    )
+    assert resp.status_code == 422
+
+
 def test_register_rejects_userinfo_in_url(
     client: TestClient,
 ) -> None:
@@ -493,11 +667,15 @@ def test_tool_prefix_fallback_to_host(
     assert captured["tool_prefix"] == "hive"
 
 
-def test_register_502_when_no_dcr_endpoint(
+def test_register_no_dcr_endpoint_returns_distinguishable_code(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
     public_dns: None,
 ) -> None:
+    """When the auth server has no registration_endpoint (e.g. GitHub's
+    MCP server), the 400 carries a machine-readable ``dcr_unsupported``
+    code so the SPA can steer the user into the static-token path rather
+    than showing a misleading 'check the URL' error."""
     from mcp.shared.auth import OAuthMetadata, ProtectedResourceMetadata
 
     from channel.mcp import auth as _mcp_auth
@@ -534,7 +712,9 @@ def test_register_502_when_no_dcr_endpoint(
         json={"name": "X", "url": "https://hive.example.com/mcp"},
     )
     assert resp.status_code == 400
-    assert "dynamic client registration" in resp.json()["detail"]
+    detail = resp.json()["detail"]
+    assert detail["code"] == "dcr_unsupported"
+    assert "dynamic client registration" in detail["message"]
 
 
 def test_register_502_when_discovery_raises(
@@ -696,6 +876,98 @@ def test_delete_server_happy_path(
     resp = client.delete("/api/mcp/servers/srv-1")
     assert resp.status_code == 204
     assert deleted["server_id"] == "srv-1"
+
+
+def _make_static_server() -> Any:
+    from channel.models import MCPServer, MCPServerAuthStatus, MCPServerAuthType
+
+    return MCPServer(
+        server_id="srv-static",
+        user_id="user-1",
+        name="GitHub",
+        url="https://api.githubcopilot.com/mcp/",
+        client_id=None,
+        tool_prefix="github",
+        auth_type=MCPServerAuthType.STATIC_TOKEN,
+        auth_status=MCPServerAuthStatus.ACTIVE,
+        created_at="x",
+        updated_at="x",
+    )
+
+
+def test_reauth_on_static_token_server_returns_400_before_discovery(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A static-token server has no OAuth flow — reauth must 400 BEFORE
+    running discovery. Discovery is stubbed to blow up: if the guard ran
+    after discovery, this would surface a misleading 502 instead. (Static-
+    token servers are exactly the ones whose discovery may fail.)"""
+    from channel import storage as _storage
+    from channel.mcp import auth as _mcp_auth
+
+    monkeypatch.setattr(_storage, "get_mcp_server", lambda **_: _make_static_server())
+
+    async def discovery_must_not_run(*_a: Any, **_kw: Any) -> Any:  # pragma: no cover
+        raise AssertionError("reauth must not run discovery for a static-token server")
+
+    monkeypatch.setattr(_mcp_auth, "discover_resource_metadata", discovery_must_not_run)
+    resp = client.post("/api/mcp/servers/srv-static/reauth")
+    assert resp.status_code == 400
+    assert "static token" in resp.json()["detail"]
+
+
+def test_begin_auth_flow_rejects_static_token_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Direct defense-in-depth guard: _begin_auth_flow refuses a server
+    with no client_id (static-token) rather than building an authorization
+    URL with a None client_id. Both routes guard earlier, so this is the
+    belt-and-suspenders path that keeps a future caller honest."""
+    from fastapi import HTTPException
+
+    from channel.api.mcp import _begin_auth_flow
+
+    with pytest.raises(HTTPException) as exc:
+        _begin_auth_flow(
+            user_id="user-1",
+            server=_make_static_server(),
+            auth_endpoint="https://auth.example.com/authorize",
+            redirect_uri="https://channel.example.com/auth/mcp/callback",
+        )
+    assert exc.value.status_code == 400
+    assert "static token" in exc.value.detail
+
+
+def test_callback_static_token_server_redirects_not_oauth(
+    monkeypatch: pytest.MonkeyPatch,
+    public_dns: None,
+) -> None:
+    """Defensive: if an OAuth callback somehow resolves to a static-token
+    server (no client_id), redirect with reason=not_oauth instead of
+    calling exchange_code with a None client_id."""
+    from channel import storage as _storage
+    from channel.auth import state_store
+
+    monkeypatch.setattr(
+        state_store,
+        "consume_state",
+        lambda _: {
+            "purpose": "mcp",
+            "user_id": "u1",
+            "server_id": "srv-static",
+            "code_verifier": "v",
+            "redirect_uri": "https://channel.example.com/auth/mcp/callback",
+        },
+    )
+    monkeypatch.setattr(_storage, "get_mcp_server", lambda **_: _make_static_server())
+    raw = TestClient(app)
+    resp = raw.get(
+        "/auth/mcp/callback?state=ok&code=auth-code",
+        follow_redirects=False,
+    )
+    assert resp.status_code == 302
+    assert "reason=not_oauth" in resp.headers["location"]
 
 
 def test_reauth_404_when_missing(

@@ -690,6 +690,28 @@ describe("MCP API client", () => {
       tool_prefix: "hive",
     });
     expect(out.auth_start_url).toBe("https://x");
+    // Body defaults auth_type to oauth_dcr with a null token.
+    const body = JSON.parse(global.fetch.mock.calls[0][1].body);
+    expect(body.auth_type).toBe("oauth_dcr");
+    expect(body.token).toBeNull();
+  });
+
+  it("registerMCPServer sends auth_type + token for the static-token path", async () => {
+    global.fetch.mockResolvedValueOnce({
+      ok: true,
+      json: () =>
+        Promise.resolve({ server_id: "srv-static", auth_start_url: null }),
+    });
+    const out = await registerMCPServer({
+      name: "GitHub",
+      url: "https://api.githubcopilot.com/mcp/",
+      auth_type: "static_token",
+      token: "ghp_dummy",
+    });
+    expect(out.auth_start_url).toBeNull();
+    const body = JSON.parse(global.fetch.mock.calls[0][1].body);
+    expect(body.auth_type).toBe("static_token");
+    expect(body.token).toBe("ghp_dummy");
   });
 
   it("registerMCPServer throws on non-ok response", async () => {
@@ -697,6 +719,54 @@ describe("MCP API client", () => {
     await expect(
       registerMCPServer({ name: "X", url: "https://x/mcp" }),
     ).rejects.toThrow(/registerMCPServer 502/);
+  });
+
+  it("registerMCPServer surfaces the dcr_unsupported code from the error body", async () => {
+    global.fetch.mockResolvedValueOnce({
+      ok: false,
+      status: 400,
+      json: () =>
+        Promise.resolve({
+          detail: { code: "dcr_unsupported", message: "no DCR here" },
+        }),
+    });
+    await expect(
+      registerMCPServer({ name: "GitHub", url: "https://api.githubcopilot.com/mcp/" }),
+    ).rejects.toMatchObject({ code: "dcr_unsupported", status: 400 });
+  });
+
+  it("registerMCPServer defaults detail to null when the body has no detail key", async () => {
+    global.fetch.mockResolvedValueOnce({
+      ok: false,
+      status: 500,
+      json: () => Promise.resolve({}),
+    });
+    let caught;
+    try {
+      await registerMCPServer({ name: "X", url: "https://x/mcp" });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(ApiError);
+    expect(caught.detail).toBeNull();
+    expect(caught.code).toBeUndefined();
+  });
+
+  it("registerMCPServer tolerates a string detail (no code hoisted)", async () => {
+    global.fetch.mockResolvedValueOnce({
+      ok: false,
+      status: 400,
+      json: () => Promise.resolve({ detail: "A static-token registration requires a token" }),
+    });
+    let caught;
+    try {
+      await registerMCPServer({ name: "X", url: "https://x/mcp" });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(ApiError);
+    expect(caught.code).toBeUndefined();
+    expect(caught.detail).toBe("A static-token registration requires a token");
   });
 
   it("patchMCPServer PATCHes a subset of fields", async () => {

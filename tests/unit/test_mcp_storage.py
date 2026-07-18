@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 
 from channel import storage
-from channel.models import MCPServerAuthStatus
+from channel.models import MCPServerAuthStatus, MCPServerAuthType
 
 
 class _FakeTable:
@@ -80,10 +80,68 @@ def test_create_and_get_mcp_server(fake_table: _FakeTable) -> None:
     )
     assert server.auth_status == MCPServerAuthStatus.NEVER_AUTHED
     assert server.globally_enabled is True
+    # Default auth_type is oauth_dcr (unchanged behaviour).
+    assert server.auth_type == MCPServerAuthType.OAUTH_DCR
 
     fetched = storage.get_mcp_server(user_id="user-1", server_id=server.server_id)
     assert fetched is not None
     assert fetched.name == "Hive"
+    assert fetched.auth_type == MCPServerAuthType.OAUTH_DCR
+    assert fetched.client_id == "dcr-1"
+
+
+def test_create_static_token_server_persists_type_and_null_client_id(
+    fake_table: _FakeTable,
+) -> None:
+    """A static-token server persists with auth_type=static_token,
+    client_id=None (attribute omitted from the item), and whatever
+    auth_status the caller passes (ACTIVE for a pasted PAT)."""
+    server = storage.create_mcp_server(
+        user_id="user-1",
+        name="GitHub",
+        url="https://api.githubcopilot.com/mcp/",
+        client_id=None,
+        tool_prefix="github",
+        auth_type=MCPServerAuthType.STATIC_TOKEN,
+        auth_status=MCPServerAuthStatus.ACTIVE,
+    )
+    assert server.client_id is None
+    assert server.auth_type == MCPServerAuthType.STATIC_TOKEN
+    assert server.auth_status == MCPServerAuthStatus.ACTIVE
+
+    # The persisted DynamoDB item must NOT carry a client_id attribute —
+    # keep the item sparse so the read path's ``item.get("client_id")``
+    # returns None rather than tripping over a null value.
+    key = ("USER#user-1", storage._mcp_server_sk(server.server_id))
+    stored_item = fake_table.items[key]
+    assert "client_id" not in stored_item
+    assert stored_item["auth_type"] == "static_token"
+
+    fetched = storage.get_mcp_server(user_id="user-1", server_id=server.server_id)
+    assert fetched is not None
+    assert fetched.client_id is None
+    assert fetched.auth_type == MCPServerAuthType.STATIC_TOKEN
+    assert fetched.auth_status == MCPServerAuthStatus.ACTIVE
+
+
+def test_mcp_server_from_item_defaults_auth_type_for_legacy_row() -> None:
+    """A pre-#375 MCPSERVER row has no ``auth_type`` attribute — it must
+    read back as oauth_dcr so existing servers keep working."""
+    legacy_item = {
+        "server_id": "srv-legacy",
+        "user_id": "user-1",
+        "name": "Hive",
+        "url": "https://hive.example.com/mcp",
+        "client_id": "dcr-1",
+        "tool_prefix": "hive",
+        "auth_status": "active",
+        "globally_enabled": True,
+        "created_at": "x",
+        "updated_at": "x",
+    }
+    server = storage._mcp_server_from_item(legacy_item)
+    assert server.auth_type == MCPServerAuthType.OAUTH_DCR
+    assert server.client_id == "dcr-1"
 
 
 def test_list_mcp_servers_for_user(fake_table: _FakeTable) -> None:

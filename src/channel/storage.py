@@ -40,6 +40,7 @@ from channel.models import (
     FeedbackKind,
     MCPServer,
     MCPServerAuthStatus,
+    MCPServerAuthType,
     MCPToken,
     Message,
     MessageRole,
@@ -1358,20 +1359,26 @@ def _mcp_chat_override_sk() -> str:
 
 
 def _mcp_server_item(server: MCPServer) -> dict[str, Any]:
-    return {
+    item: dict[str, Any] = {
         "PK": f"USER#{server.user_id}",
         "SK": _mcp_server_sk(server.server_id),
         "server_id": server.server_id,
         "user_id": server.user_id,
         "name": server.name,
         "url": server.url,
-        "client_id": server.client_id,
         "tool_prefix": server.tool_prefix,
+        "auth_type": server.auth_type.value,
         "auth_status": server.auth_status.value,
         "globally_enabled": server.globally_enabled,
         "created_at": server.created_at,
         "updated_at": server.updated_at,
     }
+    # Keep the item sparse: a static-token server has no DCR client, so
+    # never write a null client_id attribute (DynamoDB has no NULL for a
+    # string key we later read via item.get).
+    if server.client_id is not None:
+        item["client_id"] = server.client_id
+    return item
 
 
 def _mcp_server_from_item(item: dict[str, Any]) -> MCPServer:
@@ -1380,8 +1387,12 @@ def _mcp_server_from_item(item: dict[str, Any]) -> MCPServer:
         user_id=item["user_id"],
         name=item["name"],
         url=item["url"],
-        client_id=item["client_id"],
+        # ``.get`` — a static-token row has no client_id attribute.
+        client_id=item.get("client_id"),
         tool_prefix=item["tool_prefix"],
+        # Default to oauth_dcr so pre-#375 rows (no auth_type attribute)
+        # read back with today's behaviour.
+        auth_type=MCPServerAuthType(item.get("auth_type", MCPServerAuthType.OAUTH_DCR.value)),
         auth_status=MCPServerAuthStatus(item["auth_status"]),
         globally_enabled=bool(item.get("globally_enabled", True)),
         created_at=item["created_at"],
@@ -1394,15 +1405,20 @@ def create_mcp_server(
     user_id: str,
     name: str,
     url: str,
-    client_id: str,
     tool_prefix: str,
+    client_id: str | None = None,
+    auth_type: MCPServerAuthType = MCPServerAuthType.OAUTH_DCR,
+    auth_status: MCPServerAuthStatus = MCPServerAuthStatus.NEVER_AUTHED,
 ) -> MCPServer:
     """Persist a freshly-registered MCP server row.
 
-    Caller supplies the DCR-issued ``client_id`` and a normalized
-    ``tool_prefix``. Auth status starts ``NEVER_AUTHED`` — the user
-    completes the auth-code flow next and the callback handler flips
-    this to ``ACTIVE``.
+    Caller supplies a normalized ``tool_prefix``. For the OAuth-DCR flow
+    (the default) the caller passes the DCR-issued ``client_id`` and the
+    row starts ``NEVER_AUTHED`` — the user completes the auth-code flow
+    next and the callback handler flips this to ``ACTIVE``. For a
+    static-token (PAT) server the caller passes
+    ``auth_type=STATIC_TOKEN``, ``client_id=None``, and
+    ``auth_status=ACTIVE`` (there is no auth-code step to complete).
     """
     now = _now_iso()
     server = MCPServer(
@@ -1412,7 +1428,8 @@ def create_mcp_server(
         url=url,
         client_id=client_id,
         tool_prefix=tool_prefix,
-        auth_status=MCPServerAuthStatus.NEVER_AUTHED,
+        auth_type=auth_type,
+        auth_status=auth_status,
         globally_enabled=True,
         created_at=now,
         updated_at=now,

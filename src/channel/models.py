@@ -318,6 +318,19 @@ class MCPServerAuthStatus(str, Enum):
     REVOKED = "revoked"
 
 
+class MCPServerAuthType(str, Enum):
+    """How Channel acquires the bearer credential for an MCP server.
+
+    ``oauth_dcr`` is the original flow (discovery → Dynamic Client
+    Registration → auth-code → token). ``static_token`` skips all of
+    that: the user pastes a pre-issued bearer token (PAT) that Channel
+    encrypts and uses directly. See #375.
+    """
+
+    OAUTH_DCR = "oauth_dcr"
+    STATIC_TOKEN = "static_token"
+
+
 class MCPServer(BaseModel):
     """A user-registered MCP server. Matches the spike's MCPSERVER row."""
 
@@ -327,8 +340,11 @@ class MCPServer(BaseModel):
     user_id: str
     name: str
     url: str  # e.g. "https://hive.warlordofmars.net/mcp"
-    client_id: str  # DCR-issued; opaque to Channel
+    # DCR-issued client id, opaque to Channel. ``None`` for a
+    # static-token server — there is no DCR client for a pasted PAT.
+    client_id: str | None = None
     tool_prefix: str  # passed to MCPClient(prefix=...) — must be [a-z0-9_]+
+    auth_type: MCPServerAuthType = MCPServerAuthType.OAUTH_DCR
     auth_status: MCPServerAuthStatus
     globally_enabled: bool = True  # spike default — see §Question 2 rationale
     created_at: str
@@ -336,7 +352,14 @@ class MCPServer(BaseModel):
 
 
 class MCPToken(BaseModel):
-    """Per-(user, server) OAuth token bundle. Encrypted at application layer."""
+    """Per-(user, server) OAuth token bundle. Encrypted at application layer.
+
+    A static-token (PAT) server stores its bearer token in
+    ``access_token_ciphertext`` with ``refresh_token_ciphertext=None``
+    and a far-future ``expires_at`` sentinel — a PAT is effectively
+    non-expiring, so it must never enter the refresh path (see #375 and
+    ``mcp.auth.get_valid_access_token``).
+    """
 
     model_config = ConfigDict(extra="forbid")
 

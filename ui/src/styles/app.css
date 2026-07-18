@@ -1225,6 +1225,12 @@ html.is-electron-mac .sb-top {
   border-radius: var(--r-sm);
   padding: 8px 10px;
 }
+.mcp-authtype { display: flex; flex-direction: column; gap: 6px; }
+.mcp-authtype-opt {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 0.9rem; color: var(--ink); cursor: pointer;
+}
+.mcp-authtype-opt > input { accent-color: var(--accent); }
 .mcp-consent {
   font-size: 0.85rem;
   color: var(--ink-faint);
