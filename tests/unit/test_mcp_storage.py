@@ -124,6 +124,20 @@ def test_create_static_token_server_persists_type_and_null_client_id(
     assert fetched.auth_status == MCPServerAuthStatus.ACTIVE
 
 
+def test_create_mcp_server_oauth_dcr_requires_client_id(fake_table: _FakeTable) -> None:
+    """Storage-boundary invariant: an oauth_dcr server must carry a
+    client_id. Persisting one with client_id=None would later fail with
+    500s on the auth/refresh path, so reject it at creation."""
+    with pytest.raises(ValueError, match="oauth_dcr MCP server requires a client_id"):
+        storage.create_mcp_server(
+            user_id="user-1",
+            name="Broken",
+            url="https://hive.example.com/mcp",
+            client_id=None,  # incoherent with the default oauth_dcr auth_type
+            tool_prefix="hive",
+        )
+
+
 def test_mcp_server_from_item_defaults_auth_type_for_legacy_row() -> None:
     """A pre-#375 MCPSERVER row has no ``auth_type`` attribute — it must
     read back as oauth_dcr so existing servers keep working."""

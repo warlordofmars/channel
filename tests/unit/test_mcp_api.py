@@ -328,6 +328,71 @@ def test_register_static_token_empty_string_rejected_at_boundary(
     assert resp.status_code == 422
 
 
+def test_register_static_token_whitespace_only_returns_400(
+    client: TestClient,
+    public_dns: None,
+) -> None:
+    """A whitespace-only token passes Field(min_length=1) but must be
+    rejected by the handler's strip-and-check so no unusable credential is
+    persisted (easy for a non-UI client to hit)."""
+    resp = client.post(
+        "/api/mcp/servers",
+        json={
+            "name": "GitHub",
+            "url": "https://api.githubcopilot.com/mcp/",
+            "auth_type": "static_token",
+            "token": "   ",
+        },
+    )
+    assert resp.status_code == 400
+    assert "requires a token" in resp.json()["detail"]
+
+
+def test_register_static_token_strips_surrounding_whitespace_before_storage(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    public_dns: None,
+) -> None:
+    """A padded token (e.g. from a paste with a trailing newline) is
+    stripped server-side before it is encrypted + persisted."""
+    from channel import storage
+    from channel.mcp import crypto
+    from channel.models import MCPServer, MCPServerAuthStatus, MCPServerAuthType
+
+    monkeypatch.setattr(crypto, "encrypt_blob", lambda s: ("ENC::" + s).encode())
+    monkeypatch.setattr(
+        storage,
+        "create_mcp_server",
+        lambda **kw: MCPServer(
+            server_id="srv-static",
+            user_id="user-1",
+            name=kw["name"],
+            url=kw["url"],
+            client_id=None,
+            tool_prefix=kw["tool_prefix"],
+            auth_type=MCPServerAuthType.STATIC_TOKEN,
+            auth_status=MCPServerAuthStatus.ACTIVE,
+            created_at="x",
+            updated_at="x",
+        ),
+    )
+    persisted: dict[str, Any] = {}
+    monkeypatch.setattr(storage, "put_mcp_token", lambda **kw: persisted.update(kw))
+
+    resp = client.post(
+        "/api/mcp/servers",
+        json={
+            "name": "GitHub",
+            "url": "https://api.githubcopilot.com/mcp/",
+            "auth_type": "static_token",
+            "token": "  " + _FAKE_BEARER + "\n",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    # Stored ciphertext is over the STRIPPED token, not the padded input.
+    assert persisted["access_token_ciphertext"] == ("ENC::" + _FAKE_BEARER).encode()
+
+
 def test_register_rejects_userinfo_in_url(
     client: TestClient,
 ) -> None:

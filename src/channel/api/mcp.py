@@ -244,7 +244,12 @@ async def register_server(
     # at the boundary — never silently drop a pasted secret, never run a
     # tokenless static-token registration.
     if body.auth_type == MCPServerAuthType.STATIC_TOKEN:
-        if not body.token:
+        # Strip server-side and reject a blank/whitespace-only token — the
+        # Field(min_length=1) only rejects the empty string, so "   " would
+        # otherwise persist an unusable credential (easy for a non-UI
+        # client to hit). Store the stripped value. See #375 / Copilot.
+        token = body.token.strip() if body.token else ""
+        if not token:
             raise HTTPException(
                 status_code=400,
                 detail="A static-token registration requires a token",
@@ -254,7 +259,7 @@ async def register_server(
             name=body.name,
             url=body.url,
             tool_prefix=body.tool_prefix,
-            token=body.token,
+            token=token,
         )
     if body.token is not None:
         raise HTTPException(

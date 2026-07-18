@@ -1419,7 +1419,14 @@ def create_mcp_server(
     static-token (PAT) server the caller passes
     ``auth_type=STATIC_TOKEN``, ``client_id=None``, and
     ``auth_status=ACTIVE`` (there is no auth-code step to complete).
+
+    Enforces the data-model invariant at the storage boundary: an
+    ``oauth_dcr`` server must carry a DCR-issued ``client_id``. Persisting
+    an oauth_dcr row with ``client_id=None`` would later surface as 500s
+    on the auth/refresh path, so reject it here. See #375 / Copilot.
     """
+    if auth_type == MCPServerAuthType.OAUTH_DCR and client_id is None:
+        raise ValueError("oauth_dcr MCP server requires a client_id")
     now = _now_iso()
     server = MCPServer(
         server_id=str(uuid.uuid4()),
