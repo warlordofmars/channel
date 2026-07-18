@@ -16,6 +16,7 @@ Usage:
     uv run inv synth                        # synthesize CDK template (runs Docker asset bundling; needs Docker running)
     uv run inv outputs                      # print CloudFormation stack outputs
     uv run inv install-hooks               # install pre-push hook (run once after clone)
+    uv run inv worktree-setup              # prep a fresh worktree: python + ui/ + desktop/ deps
     uv run inv pre-push                    # full local CI gate (lint+typecheck+unit+combined-coverage+frontend+desktop)
     uv run inv test-combined-coverage      # unit+integration combined 100% gate (matches CI; requires DynamoDB Local)
 """
@@ -489,6 +490,27 @@ def e2e_local(ctx, tests="tests/e2e", n=1):
 
 
 # ── Local dev ─────────────────────────────────────────────────────────────────
+
+
+@task
+def worktree_setup(ctx):
+    """Prepare a fresh worktree/checkout: Python deps (incl. infra group) + ui/ and desktop/ node_modules.
+
+    Idempotent, re-runnable dependency prep so a freshly-created worktree can
+    pass ``inv pre-push`` without hunting for missing ``aws_cdk`` (mypy /
+    synth) or ``vitest`` (frontend / desktop tests) deps. The Python step
+    mirrors the install line CI's infra jobs run
+    (``uv sync --all-extras --group infra`` — the ``dev`` group installs by
+    default; ``--all-extras`` is a no-op today, kept for parity with CI).
+
+    Uses ``npm install`` (not ``npm ci``) in both node projects — matching the
+    ``deploy`` / ``desktop_dev`` precedent — so re-running on an already-prepared
+    checkout is fast and non-destructive (``npm ci`` wipes ``node_modules`` on
+    every run, the wrong shape for a re-runnable prep task).
+    """
+    ctx.run("uv sync --all-extras --group infra", pty=True)
+    ctx.run(f"cd {UI} && npm install", pty=True)
+    ctx.run(f"cd {DESKTOP} && npm install", pty=True)
 
 
 @task

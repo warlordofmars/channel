@@ -131,3 +131,48 @@ def test_unparseable_tag_resets_log_range_to_v000():
     ctx = FakeCtx(describe="dev", log="")
     _infer_next_version(ctx)
     assert ctx.commands[1].startswith("git log v0.0.0..HEAD")
+
+
+# ── worktree_setup runs the fresh-checkout dependency prep (#333) ─────────────
+
+
+class RecordingCtx:
+    """Context stand-in that records every ``run`` command, ignoring kwargs.
+
+    ``worktree_setup`` shells out with ``pty=True``; this fake accepts (and
+    discards) any keyword args so the recorded command list is all the test
+    needs to assert against.
+    """
+
+    def __init__(self) -> None:
+        self.commands: list[str] = []
+
+    def run(self, cmd: str, *args: object, **kwargs: object) -> None:
+        self.commands.append(cmd)
+
+
+def test_worktree_setup_runs_python_then_node_dep_prep():
+    """The three prep commands run in order: python sync, then ui/, then desktop/."""
+    ctx = RecordingCtx()
+    channel_tasks.worktree_setup.body(ctx)
+    assert ctx.commands == [
+        "uv sync --all-extras --group infra",
+        f"cd {channel_tasks.UI} && npm install",
+        f"cd {channel_tasks.DESKTOP} && npm install",
+    ]
+
+
+def test_worktree_setup_python_sync_matches_ci_infra_jobs():
+    """The Python step must carry --all-extras --group infra (matches ci.yml infra jobs)."""
+    ctx = RecordingCtx()
+    channel_tasks.worktree_setup.body(ctx)
+    assert ctx.commands[0] == "uv sync --all-extras --group infra"
+
+
+def test_worktree_setup_uses_npm_install_not_ci():
+    """npm install (not npm ci) keeps re-runs idempotent + non-destructive."""
+    ctx = RecordingCtx()
+    channel_tasks.worktree_setup.body(ctx)
+    node_cmds = [c for c in ctx.commands if "npm" in c]
+    assert len(node_cmds) == 2
+    assert all("npm install" in c and "npm ci" not in c for c in node_cmds)
