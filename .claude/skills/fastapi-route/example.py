@@ -4,12 +4,12 @@ Reference example for the ``fastapi-route`` skill.
 
 This file is documentation, not application code — it lives under
 ``.claude/skills/`` and is not imported by the running app or tests.
-Copy it into ``src/starter/api/<area>.py`` and adapt the names when
+Copy it into ``src/channel/api/<area>.py`` and adapt the names when
 adding a real endpoint.
 
 Mirrors every convention captured in ``SKILL.md``:
 
-1. File location — ``src/starter/api/<area>.py``
+1. File location — ``src/channel/api/<area>.py``
 2. Router wiring — registered from ``main.py`` with ``prefix="/api"``
 3. Auth dependency — ``Depends(require_mgmt_user)``
 4. Streaming pattern — ``StreamingResponse`` with the ADR-0002 event schema
@@ -28,7 +28,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from starter.api._auth import require_mgmt_user
+from channel.api._auth import require_mgmt_user
 
 router = APIRouter()
 
@@ -71,7 +71,7 @@ def create_widget(
         # ``test_create_widget_rejects_blank_name`` in the companion test file.
         raise HTTPException(status_code=400, detail="name must not be blank")
 
-    # Replace this with a real call into ``starter.storage`` or wherever the
+    # Replace this with a real call into ``channel.storage`` or wherever the
     # widget is persisted.
     widget_id = f"w-{body.name.lower().replace(' ', '-')}"
     return WidgetResponse(id=widget_id, name=body.name, owner_id=claims["sub"])
@@ -100,9 +100,10 @@ def stream_widgets(
     """
 
     def _stream() -> Iterator[str]:
-        # Real code yields from a domain helper (e.g. ``converse_stream`` in
-        # ``starter.agents.bedrock``). Inline two yields here so the example
-        # is self-contained.
+        # Real code yields from a domain helper (e.g. the Strands stream in
+        # ``channel.api.chats``, which formats each frame via
+        # ``translate_event`` in ``channel.agents.strands_sse``). Inline two
+        # yields here so the example is self-contained.
         yield f"data: {json.dumps({'type': 'delta', 'text': 'first'})}\n\n"
         yield f"data: {json.dumps({'type': 'done', 'count': 1})}\n\n"
 
@@ -110,10 +111,10 @@ def stream_widgets(
 
 
 # ---------------------------------------------------------------------------
-# Wiring (lives in src/starter/api/main.py, shown here for completeness)
+# Wiring (lives in src/channel/api/main.py, shown here for completeness)
 # ---------------------------------------------------------------------------
 #
-# from starter.api.widgets import router as widgets_router
+# from channel.api.widgets import router as widgets_router
 #
 # # Widget endpoints (require management JWT)
 # app.include_router(widgets_router, prefix="/api")

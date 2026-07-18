@@ -4,8 +4,8 @@ Reference example for the ``dynamodb-item`` skill.
 
 This file is documentation, not application code — it lives under
 ``.claude/skills/`` and is not imported by the running app or tests.
-Copy the relevant block into ``src/starter/storage.py`` (or
-``src/starter/models.py`` for the Pydantic side) and adapt the names
+Copy the relevant block into ``src/channel/storage.py`` (or
+``src/channel/models.py`` for the Pydantic side) and adapt the names
 when introducing a new item type.
 
 Mirrors every convention captured in ``SKILL.md``:
@@ -36,21 +36,22 @@ import boto3
 # ---------------------------------------------------------------------------
 #
 # The project contract is ``STARTER_TABLE_NAME`` (the ``STARTER_*`` prefix
-# scopes config to this template). The Lambda runtime sets it via
-# ``infra/stacks/starter_stack.py:271``; tests set it via
-# ``tests/integration/conftest.py:21``. The default below is a local-dev
-# convenience matching the pattern in ``src/starter/README.md``; production
-# code paths always go through the env var so the Lambda environment
-# variable is the single source of truth at runtime.
+# scopes config across the codebase). The Lambda runtime sets it via
+# ``infra/stacks/channel_stack.py``; the integration suite sets it via
+# ``tests/integration/conftest.py``; local dev provisions the ``channel``
+# table via ``scripts/reset_dev_table.py``. Production ``_get_table()`` in
+# ``src/channel/storage.py`` reads the var as *required* (no silent
+# default) so a misconfigured environment fails loudly rather than
+# writing to the wrong table.
 
 
 def _get_table() -> Any:
-    # Local-dev default ``"agentcore-starter-dev"`` is intentional — it
-    # matches the StarterStorage constructor pattern documented in
-    # src/starter/README.md and is overridden in every non-local context.
-    table_name = os.environ.get("STARTER_TABLE_NAME", "agentcore-starter-dev")
+    # ``STARTER_TABLE_NAME`` is required — mirrors ``_get_table()`` in
+    # ``src/channel/storage.py``, which raises ``KeyError`` if it is unset
+    # rather than falling back to a default table.
+    table_name = os.environ["STARTER_TABLE_NAME"]
     endpoint_url = os.environ.get("DYNAMODB_ENDPOINT")  # set for DynamoDB Local
-    region = os.environ.get("AWS_REGION", "us-east-1")
+    region = os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
     dynamodb = boto3.resource("dynamodb", region_name=region, endpoint_url=endpoint_url)
     return dynamodb.Table(table_name)
 
@@ -60,7 +61,7 @@ def _get_table() -> Any:
 # ---------------------------------------------------------------------------
 #
 # Pattern: a single record per entity, keyed ``TYPE#id`` / ``META``, with
-# automatic expiry via the ``ttl`` attribute. Mirrors how ``TOKEN#`` and
+# automatic expiry via the ``ttl`` attribute. Mirrors how ``DENY#`` and
 # ``MGMT_STATE#`` are stored.
 
 

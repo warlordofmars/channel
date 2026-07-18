@@ -4,19 +4,22 @@ description: Conventions for adding a new item type to the DynamoDB single-table
 status: full
 triggers:
   paths:
-    - "src/starter/storage.py"
-    - "src/starter/models.py"
+    - "src/channel/storage.py"
+    - "src/channel/models.py"
+    - "src/channel/_table_schema.py"
   areas: []
 ---
 
 # dynamodb-item
 
-Adding a new item type to the AgentCore Starter single-table
-DynamoDB design follows a fixed set of conventions. Each is
-mechanically checkable against the existing codebase; the canonical
-reference is `src/starter/storage.py` (the `StarterStorage`
-wrapper) plus the table definition at
-`infra/stacks/starter_stack.py:84-127`.
+Adding a new item type to Channel's single-table DynamoDB design
+follows a fixed set of conventions. Each is mechanically checkable
+against the existing codebase; the canonical reference is
+`src/channel/storage.py` (module-level read/write functions — there
+is no wrapper class), the shared schema at
+`src/channel/_table_schema.py` (attribute definitions + GSI shape,
+used by DynamoDB Local and the integration suite), and the
+production table declared in CDK at `infra/stacks/channel_stack.py`.
 
 The conventions exist because single-table design only stays
 discoverable when keys are predictable. A new prefix that doesn't
@@ -41,6 +44,14 @@ PK = "LOG#2026-04-25#14"     # hour-sharded partition (see §4)
 SK = "1745595600#evt-abc"    # {unix_timestamp}#{event_id}
 ```
 
+The same PK prefix can carry several SK shapes — this is how a
+single partition owns a heterogeneous collection. `USER#{user_id}`
+holds `SK=META` (the user record), `SK=CHAT#{created_at}#{chat_id}`
+(the Recents index), `SK=MCPSERVER#{server_id}`, and more;
+`CHAT#{chat_id}` holds `SK=MSG#...`, `SK=ASSET#...`, and
+`SK=MCPSERVERS#META`. Order every SK collection so a single
+`begins_with` Query returns it.
+
 Two patterns to avoid:
 
 - **Unprefixed keys.** A bare `PK="alice-123"` collides with any
@@ -54,26 +65,36 @@ Two patterns to avoid:
 
 ## 2. Prefix taxonomy
 
-Current item types in the single table (canonical list — keep
-CLAUDE.md §"DynamoDB single table design" in sync):
+Current item families in the single table (canonical list — mirrors
+CLAUDE.md §"DynamoDB single table design", plus the `PREFS` and
+`ATTACHMENT#` families that live in `src/channel/storage.py` but
+aren't yet documented in CLAUDE.md; keep the two in sync):
 
-| Prefix | Purpose | TTL | Notes |
-| --- | --- | --- | --- |
-| `CLIENT#{client_id}` | OAuth 2.1 client registration (RFC 7591) | no | `SK="META"`. Indexed by `ClientIndex` GSI on `GSI3PK`. |
-| `TOKEN#{jti}` | Issued access / refresh tokens | yes | `SK="META"`. TTL drives automatic expiry of expired tokens. |
-| `LOG#{date}#{hour}` | Activity log entries | no | Hour-sharded; SK is `{timestamp}#{event_id}`. See §4. |
-| `AUDIT#{date}#{hour}` | Immutable compliance audit trail | yes | Hour-sharded same as `LOG#`. TTL via `STARTER_AUDIT_RETENTION_DAYS` (default 365). |
-| `USER#{user_id}` | Human user records | no | `SK="META"`. Indexed by `UserEmailIndex` GSI on `GSI4PK=EMAIL#{email}`. |
-| `MGMT_STATE#{state}` | OAuth state parameter for mgmt UI login | yes | `SK="META"`. Short TTL — state is single-use. |
-| `EMAIL#{email}` | GSI key only (not a base PK) | n/a | Set as `GSI4PK` on `USER#` items to surface them on `UserEmailIndex`. There is no item with `PK="EMAIL#..."` — querying the GSI returns the underlying `USER#` row. |
+| PK pattern | SK pattern | Purpose | TTL | Notes |
+| --- | --- | --- | --- | --- |
+| `LOG#{date}#{hour}` | `{timestamp}#{event_id}` | Activity log | no | Hour-sharded (§4). |
+| `AUDIT#{date}#{hour}` | `{timestamp}#{event_id}` | Immutable compliance audit trail | yes | Hour-sharded (§4). TTL via `STARTER_AUDIT_RETENTION_DAYS` (default 365). |
+| `USER#{user_id}` | `META` | User record | no | Would surface on `UserEmailIndex` via `GSI4PK=EMAIL#{email}`, but no current `src/channel/` code sets `GSI4PK` (the index is provisioned, not yet written). |
+| `MGMT_STATE#{state}` | `META` | Google OAuth state parameter | yes | Short single-use TTL. |
+| `DENY#{jti}` | `META` | JWT revocation denylist | yes | Point-read by the mgmt JWT's `jti`; written on `/auth/logout`; `ttl` = the denied token's own `exp` so the row self-prunes (#240). |
+| `USER#{user_id}` | `CHAT#{created_at}#{chat_id}` | Chat-index row (one per chat) | no | Sortable so Recents is a single `Query(ScanIndexForward=False)`; projects onto `ChatByIdIndex`. |
+| `CHAT#{chat_id}` | `MSG#{created_at}#{msg_id}` | Chat message row (one per turn) | no | UUID suffix avoids same-microsecond collisions across Lambda instances. |
+| `IDEMP#{user_id}` | `{key}` | Idempotency reservation | yes | TTL = 1h after reserve; streaming POST replay short-circuit. |
+| `USER#{user_id}` | `PREFS` | Per-user UI preferences | no | Single row per user; read/written by `get_prefs` / `put_prefs`. |
+| `USER#{user_id}` | `ATTACHMENT#{att_id}` | Uploaded attachment metadata | no | Canonical attachment row (S3 object lives in the attachments bucket). |
+| `USER#{user_id}` | `MCPSERVER#{server_id}` | Registered MCP server | no | DCR `client_id` + `tool_prefix` + `globally_enabled`; no GSI projection. |
+| `USER#{user_id}` | `MCPTOKEN#{server_id}` | MCP OAuth tokens (sibling to MCPSERVER) | yes | Access/refresh tokens KMS-encrypted at the app layer; `ttl` = `expires_at + 30d` as an orphan-row upper bound. |
+| `CHAT#{chat_id}` | `MCPSERVERS#META` | Per-chat MCP override | no | `mode=inherit` or `mode=explicit`. |
+| `CHAT#{chat_id}` | `ASSET#{created_at}#{asset_id}` | Chat asset row | no | Mirrors `MSG#` so chat deletion cascades with one partition Query. Carries `owner_pk=ASSETOWNER#{owner}` / `owner_sk={created_at}#{asset_id}` projecting onto `AssetOwnerIndex`. Inline text ≤ 100 KB in `content`; larger text + binary in the assets bucket. |
+| `EMAIL#{email}` | — (GSI key only, not a base PK) | Email → user lookup | n/a | The `GSI4PK` value that would project a `USER#` row onto `UserEmailIndex`. Provisioned but not written by any current `src/channel/` code; no item has `PK="EMAIL#..."` (a GSI query returns the underlying `USER#` row). |
 
-Adding a new prefix:
+Adding a new family:
 
-1. Pick a `TYPE#id` form that doesn't collide with the table
-   above.
+1. Pick a `TYPE#id` PK and a `TYPE#...` SK shape that don't collide
+   with the table above.
 2. Decide TTL up-front — see §3.
-3. If the item needs a secondary lookup path (e.g. by email,
-   by tag), pick or add a GSI per §5.
+3. If the item needs a secondary lookup path (by email, by owner,
+   by chat id), pick or add a GSI per §5.
 4. **Update CLAUDE.md §"DynamoDB single table design" in the
    same PR.** This is non-negotiable; the taxonomy table is the
    discovery contract for every future agent and stale entries
@@ -81,15 +102,19 @@ Adding a new prefix:
 
 ## 3. TTL semantics
 
-The table has `time_to_live_attribute="ttl"` configured at
-`infra/stacks/starter_stack.py:96`. To enable expiry on a new
-item type, set the `ttl` attribute on the item.
+The table has its TTL attribute set to `ttl` — configured in CDK at
+`infra/stacks/channel_stack.py` and mirrored for local dev in
+`src/channel/_table_schema.py` (`provision(...)` calls
+`update_time_to_live` with `AttributeName="ttl"`). To enable expiry
+on a new item type, set the `ttl` attribute on the item.
 
-Two rules, both enforced by `code-reviewer` check 8:
+Two rules, both enforced by `code-reviewer`'s DynamoDB review
+(check 8 — its example snippets still show the pre-fork layout, but
+the `ttl` rules it enforces are current):
 
-- **Attribute name is `ttl`** — lowercase, exact. The CDK
-  configuration only honours that one name; setting `expires_at`
-  or `TTL` is silently ignored by DynamoDB.
+- **Attribute name is `ttl`** — lowercase, exact. The table config
+  only honours that one name; setting `expires_at` or `TTL` is
+  silently ignored by DynamoDB.
 - **Value is a Unix timestamp integer.** Never an ISO-8601 string,
   never a `datetime` object — DynamoDB's TTL service reads
   unsigned integers and discards anything else. Compute via
@@ -100,11 +125,12 @@ Two rules, both enforced by `code-reviewer` check 8:
 import time
 
 item = {
-    "PK": f"TOKEN#{jti}",
+    "PK": f"DENY#{jti}",
     "SK": "META",
-    "client_id": client_id,
-    "scope": scope,
-    "ttl": int(time.time()) + 3600,  # 1 hour from now, integer
+    "reason": "logout",
+    # For DENY# the ttl is the denied token's own exp, so the row
+    # self-prunes exactly when the token would have expired anyway.
+    "ttl": int(token_exp),  # absolute Unix timestamp, integer
 }
 ```
 
@@ -120,7 +146,7 @@ ttl_value = int(time.time()) + retention_days * 86400
 
 When introducing a new retention-tunable item type, follow the
 same `STARTER_<ITEM>_RETENTION_DAYS` env-var naming and document
-the default in CLAUDE.md alongside the prefix entry.
+the default in CLAUDE.md alongside the family entry.
 
 ## 4. Hour-shard pattern for log items
 
@@ -157,28 +183,41 @@ day), a daily shard is fine — pick the granularity that keeps
 each partition under DynamoDB's 1000 WCU / 3000 RCU limit at
 peak.
 
-## 5. GSI naming and the GSI3PK/GSI4PK convention
+## 5. GSI naming and the GSIxPK convention
 
-The table has four GSIs defined in
-`infra/stacks/starter_stack.py:99-127`. Each GSI's partition key
-attribute name encodes its slot number:
+The table defines five GSIs. The four numbered indexes name their
+partition/sort attributes by slot (`GSI1PK`…`GSI4PK`); the asset
+index uses named attributes. The authoritative shape lives in
+`src/channel/_table_schema.py` (mirrored into
+`infra/stacks/channel_stack.py` for production):
 
 | GSI | Partition key attr | Sort key attr | Purpose |
 | --- | --- | --- | --- |
-| `KeyIndex` (GSI1) | `GSI1PK` | `GSI1SK` | (legacy — being removed in #29) |
-| `TagIndex` (GSI2) | `GSI2PK` | `GSI2SK` | (legacy — being removed in #29) |
-| `ClientIndex` (GSI3) | `GSI3PK` | — | OAuth client lookups by `client_id` |
-| `UserEmailIndex` (GSI4) | `GSI4PK` | — | User lookups by email (`EMAIL#{email}`) |
+| `KeyIndex` (GSI1) | `GSI1PK` | `GSI1SK` | Generic secondary index; not projected by any current row family. |
+| `TagIndex` (GSI2) | `GSI2PK` | `GSI2SK` | Generic secondary index; not projected by any current row family. |
+| `ChatByIdIndex` (GSI3) | `GSI3PK` | `GSI3SK` | Direct chat-id → chat-index-row lookup. Chat-index rows set `GSI3PK=CHAT_ID#{chat_id}`, `GSI3SK=META`. Sparse. |
+| `UserEmailIndex` (GSI4) | `GSI4PK` | — | User lookup by email. **Provisioned but not yet written by any `src/channel/` code** — a writer would set `GSI4PK=EMAIL#{email}` on the `USER#` row to project it. |
+| `AssetOwnerIndex` | `owner_pk` | `owner_sk` | Cross-chat asset browse, newest first. Asset rows set `owner_pk=ASSETOWNER#{owner}`, `owner_sk={created_at}#{asset_id}`. Sparse. |
 
-To put an item on a GSI, set the matching attribute on the item:
+To put an item on a GSI, set the matching attribute(s) on the item:
 
 ```python
-# OAuth client item — also queryable on ClientIndex
+# User item — how you'd project a USER# row onto UserEmailIndex.
+# GSI4PK is an indexing-only attribute; no current storage code writes
+# it (UserEmailIndex is provisioned but unused today).
 item = {
-    "PK": f"CLIENT#{client_id}",
+    "PK": f"USER#{user_id}",
     "SK": "META",
-    "GSI3PK": f"CLIENT#{client_id}",
-    "client_secret_hash": ...,
+    "GSI4PK": f"EMAIL#{email}",   # set this to surface the row on UserEmailIndex
+    ...
+}
+
+# Asset row — also queryable on AssetOwnerIndex (sort-keyed, newest first)
+item = {
+    "PK": f"CHAT#{chat_id}",
+    "SK": f"ASSET#{created_at}#{asset_id}",
+    "owner_pk": f"ASSETOWNER#{owner}",
+    "owner_sk": f"{created_at}#{asset_id}",
     ...
 }
 ```
@@ -186,56 +225,61 @@ item = {
 Conventions:
 
 - **GSI naming.** `<Domain>Index` (PascalCase, "Index" suffix).
-  Existing examples: `ClientIndex`, `UserEmailIndex`. Note that
-  CLAUDE.md historically referred to `ClientIdIndex`; the actual
-  CDK name is `ClientIndex`. Issue #29 tracks the reconciliation
-  and the removal of the unused `KeyIndex` and `TagIndex` GSIs —
-  do not add references to the legacy two indexes.
-- **Sparse indexes are fine.** Items without the matching `GSIxPK`
-  attribute simply do not appear on that GSI. This is the
-  standard way to scope an index to a subset of item types.
-- **Adding a new GSI is an infra change.** Update
-  `infra/stacks/starter_stack.py` to declare the index, then add
-  the storage code that writes the GSI keys. New GSI →
+  Existing examples: `ChatByIdIndex`, `UserEmailIndex`,
+  `AssetOwnerIndex`.
+- **Sparse indexes are fine.** Items without the matching GSI key
+  attribute simply do not appear on that GSI. This is the standard
+  way to scope an index to a subset of item types (only chat-index
+  rows carry `GSI3PK`; only asset rows carry `owner_pk`).
+- **Adding a new GSI is an infra change — in two places.** Declare
+  the index in **both** `src/channel/_table_schema.py` (so
+  DynamoDB Local and the integration suite get it) **and**
+  `infra/stacks/channel_stack.py` (so the deployed table gets it),
+  then add the storage code that writes the GSI keys. New GSI →
   per-environment migration; coordinate via a dedicated PR if
   prod data exists.
 
 ## 6. Table name source
 
 Storage code reads the table name from the environment. The
-project-specific env var is `STARTER_TABLE_NAME` (the
-`STARTER_*` prefix scopes config to this template):
+project-specific env var is `STARTER_TABLE_NAME` (the `STARTER_*`
+prefix scopes config across the codebase). `_get_table()` in
+`src/channel/storage.py` reads it as a **required** variable — no
+silent default; an unset value is a `KeyError` at first use:
 
 ```python
 import os
 
-# Mirrors the StarterStorage constructor pattern documented in
-# src/starter/README.md — env-driven with a sensible default for
-# local dev.
-table_name = os.environ.get("STARTER_TABLE_NAME", "agentcore-starter-dev")
+import boto3
+
+def _get_table():
+    table_name = os.environ["STARTER_TABLE_NAME"]      # required
+    endpoint = os.environ.get("DYNAMODB_ENDPOINT")      # set for DynamoDB Local
+    region = os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
+    ddb = boto3.resource("dynamodb", region_name=region, endpoint_url=endpoint)
+    return ddb.Table(table_name)
 ```
 
 Wired across the project at:
 
-- `infra/stacks/starter_stack.py:271` — Lambda environment sets
+- `infra/stacks/channel_stack.py` — Lambda environment sets
   `STARTER_TABLE_NAME` to the per-env table name
-- `tests/integration/conftest.py:21,26` — integration tests set
-  the var before importing storage
-- `infra/README.md` — documents the var as the storage contract
+- `tests/integration/conftest.py` — sets the var before importing
+  storage (provisions `channel-test` via `channel._table_schema`)
+- `scripts/reset_dev_table.py` — recreates the local `channel`
+  table (`TABLE = "channel"`) after each `inv dev` restart
 
 Never hardcode the table name — `code-reviewer` check 8 enforces
-this. The runtime contract is `STARTER_TABLE_NAME`; CLAUDE.md
-and `code-reviewer.md` use the shorter `TABLE_NAME` as a generic
-shorthand, but production code and tests must read from
-`STARTER_TABLE_NAME`. Code that reads only `TABLE_NAME` will fail
-at runtime because the CDK stack and integration-test fixtures
-do not set that alias.
+this. The runtime contract is `STARTER_TABLE_NAME`. Some older docs
+(including `code-reviewer.md`) still refer to a bare `TABLE_NAME`,
+but that name is **not** set by the CDK stack or the test fixtures —
+production code and tests must read `STARTER_TABLE_NAME`, and code
+that reads only `TABLE_NAME` will fail at runtime.
 
-The endpoint URL is also env-driven (`DYNAMODB_ENDPOINT`) so
-tests point at DynamoDB Local without code changes. The
-constructor pattern resolves all three at *call time*, not
-import time — see `src/starter/README.md` — which keeps test
-fixtures isolated from each other.
+The endpoint URL is also env-driven (`DYNAMODB_ENDPOINT`) so tests
+point at DynamoDB Local without code changes. `_get_table()`
+resolves all three at *call time*, not import time, which keeps
+test fixtures isolated from each other.
 
 ## 7. Update CLAUDE.md in the same PR
 
@@ -253,42 +297,37 @@ If the new item type also adds a GSI or a retention env var,
 extend §5 or §3 of this skill and the matching CLAUDE.md
 sections in the same PR.
 
-## 8. Anticipated: workspace_id partition (per ADR-0004 / #37)
+## 8. Workspace tenancy (anticipated single-attribute migration)
 
-Per ADR-0004 §inputs to #48 and the `workspace_id:user_id`
-actor convention from #37, conversation and audit items are
-expected to carry `workspace_id` and `user_id` columns once the
-workspace primitive lands. The likely shape is:
+Per the **"workspaces are the tenancy root"** product decision
+(CLAUDE.md §"Product decisions"), multi-tenancy consumes the
+workspace model rather than introducing a second tenancy axis. The
+data model is already shaped for this: the asset row's `owner`
+(encoded as `owner_pk=ASSETOWNER#{owner}`) is `user_id` today and
+becomes `f"{workspace_id}/{user_id}"` when workspaces land — a
+**single-attribute migration, never a second tenancy field**. The
+AgentCore Memory `actorId` follows the same shape
+(`f"{workspace_id}/{user_id}"`, slash-separated — CLAUDE.md
+§"AgentCore Memory").
 
-```python
-# anticipated — lock in once #37 ships
-item = {
-    "PK": f"AUDIT#{date}#{hour}",
-    "SK": f"{timestamp}#{event_id}",
-    "workspace_id": "ws-...",
-    "user_id": "usr-...",
-    "actor_id": f"{workspace_id}:{user_id}",  # composite for cross-workspace queries
-    ...
-}
-```
-
-**Status: anticipated, not active.** Don't add `workspace_id`
-columns to existing item types in advance — wait for #37 to land
-and update this skill's §8 plus CLAUDE.md once the convention is
-real.
+**Status: anticipated, not active.** Don't add a separate
+`workspace_id` column to existing item types in advance — when
+workspaces ship, the tenancy prefix folds into the existing
+`owner` / `actorId` value. Update this section and CLAUDE.md once
+the workspace primitive is real.
 
 ## See also
 
 - [`example.py`](./example.py) — copy-pasteable item shape for a
-  new prefix, covering PK/SK, TTL, GSI keys, and the table-name
+  new family, covering PK/SK, TTL, GSI keys, and the table-name
   resolution pattern.
-- CLAUDE.md §"DynamoDB single table design" — current prefix
+- CLAUDE.md §"DynamoDB single table design" — current family
   taxonomy (must stay in sync with §2 above).
-- `infra/stacks/starter_stack.py:84-127` — table + GSI
-  definitions.
+- `src/channel/_table_schema.py` — shared attribute definitions +
+  GSI shape (DynamoDB Local + integration suite).
+- `infra/stacks/channel_stack.py` — production table + GSI
+  definitions (CDK).
 - `.claude/agents/code-reviewer.md` §8 — review-time enforcement
   of the conventions above.
-- ADR-0004 §inputs to #48 — workspace_id partition rationale
-  (`docs/adr/0004-agentcore-runtime-feasibility.md`).
-- Issue #29 — GSI reconciliation (`ClientIdIndex` vs
-  `ClientIndex`, removal of `KeyIndex` / `TagIndex`).
+- CLAUDE.md §"Product decisions" ("workspaces are the tenancy
+  root") — the workspace-tenancy rationale behind §8.
