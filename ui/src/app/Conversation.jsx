@@ -2,6 +2,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import AssetCard from "./AssetCard.jsx";
+import InlineImage, { isInlineImage } from "./InlineImage.jsx";
 import ChannelMark from "../components/ChannelMark.jsx";
 import ChatHeader from "./ChatHeader.jsx";
 import Composer from "./Composer.jsx";
@@ -513,6 +514,20 @@ export default function Conversation() {
     navigate(`/app/artifacts?artifact=${encodeURIComponent(asset.asset_id)}`);
   }
 
+  // #361: a standalone image asset within the inline threshold renders as a
+  // responsive inline `<img>` (InlineImage); everything else — uploads,
+  // documents, data, over-threshold or non-raster images, and any code
+  // asset without a locatable fence — keeps the compact AssetCard. Applied
+  // to both the user-turn and assistant-turn branches below so upload-origin
+  // images (grouped under the user turn) render inline too.
+  function renderStandalone(a) {
+    return isInlineImage(a) ? (
+      <InlineImage key={a.asset_id} asset={a} onOpen={openAsset} />
+    ) : (
+      <AssetCard key={a.asset_id} asset={a} onOpen={openAsset} />
+    );
+  }
+
   return (
     <>
       <ChatHeader chat={currentChat} />
@@ -558,9 +573,7 @@ export default function Conversation() {
                   </div>
                 )}
                 <div className="bubble">{t.text}</div>
-                {standaloneAssets(t.assets).map((a) => (
-                  <AssetCard key={a.asset_id} asset={a} onOpen={openAsset} />
-                ))}
+                {standaloneAssets(t.assets).map(renderStandalone)}
               </div>
             ) : (
               <div
@@ -579,9 +592,7 @@ export default function Conversation() {
                     onOpenAsset: openAsset,
                   })}
                 </div>
-                {standaloneAssets(t.assets).map((a) => (
-                  <AssetCard key={a.asset_id} asset={a} onOpen={openAsset} />
-                ))}
+                {standaloneAssets(t.assets).map(renderStandalone)}
                 {t.toolSteps && t.toolSteps.length > 0 && (
                   <ToolStepList
                     steps={t.toolSteps}

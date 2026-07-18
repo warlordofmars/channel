@@ -2,6 +2,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import Icon from "../../components/Icon.jsx";
 import { getAssetContent } from "../../api.js";
+import { useAssetContent } from "../../hooks/useAssetContent.js";
 import { renderMarkdown } from "../renderMarkdown.jsx";
 import { artIcon, formatBytes, kindLabel } from "./artifactHelpers.js";
 
@@ -86,7 +87,18 @@ export default function ArtifactPanel({ artifact, onClose }) {
   const chatId = asset ? asset.chat_id : null;
   const kind = asset ? asset.kind : null;
 
-  const [content, setContent] = useState({ state: "idle" });
+  const isImage = kind === "image";
+  const isText = TEXT_KINDS.has(kind);
+  // Fetch the payload via the shared hook (#361). Bytes are only needed for
+  // the image + text renderers; diagram/unknown kinds render download-only,
+  // so the fetch is suppressed via `enabled` (the hook then reports `idle`,
+  // which maps to the fallback body). Image → blob object URL; the rest →
+  // text.
+  const { status, url, text, httpStatus } = useAssetContent(chatId, assetId, {
+    mode: isImage ? "blob" : "text",
+    enabled: isImage || isText,
+  });
+
   const [copied, setCopied] = useState(false);
   const copyTimerRef = useRef(null);
 
@@ -96,51 +108,15 @@ export default function ArtifactPanel({ artifact, onClose }) {
     };
   }, []);
 
-  useEffect(function fetchAssetContent() {
-    // Reset the copy affordance whenever the open asset changes.
+  // Reset the copy affordance whenever the open asset changes.
+  useEffect(function resetCopiedOnAssetChange() {
     setCopied(false);
-    // Both ids are required for the per-chat content route; guard against
-    // a malformed/absent card so we never issue `/api/chats/null/...`, and
-    // clear any stale content left over from a previously-open asset.
-    if (!assetId || !chatId) {
-      setContent({ state: "fallback" });
-      return undefined;
-    }
-    if (!TEXT_KINDS.has(kind) && kind !== "image") {
-      setContent({ state: "fallback" });
-      return undefined;
-    }
-    let cancelled = false;
-    let objectUrl = null;
-    setContent({ state: "loading" });
-    getAssetContent(chatId, assetId)
-      .then(async function onResponse(response) {
-        if (kind === "image") {
-          const blob = await response.blob();
-          objectUrl = URL.createObjectURL(blob);
-          if (cancelled) {
-            URL.revokeObjectURL(objectUrl);
-            return;
-          }
-          setContent({ state: "image", url: objectUrl });
-        } else {
-          const text = await response.text();
-          if (!cancelled) setContent({ state: "text", text });
-        }
-      })
-      .catch(function onError(err) {
-        if (!cancelled) setContent({ state: "error", status: err?.status ?? null });
-      });
-    return function cleanup() {
-      cancelled = true;
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
-    };
   }, [assetId, chatId, kind]);
 
   async function handleCopy() {
-    // Only ever bound to the Copy button, which renders only for text
-    // content — so `content.text` is always present here.
-    const ok = await copyAssetText(content.text);
+    // Only ever bound to the Copy button, which renders only for ready text
+    // content — so `text` is always present here.
+    const ok = await copyAssetText(text);
     if (!ok) return;
     setCopied(true);
     if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
@@ -162,7 +138,7 @@ export default function ArtifactPanel({ artifact, onClose }) {
 
   if (!asset) return null;
 
-  const canCopy = content.state === "text";
+  const canCopy = status === "ready" && isText;
   const sizeLabel = formatBytes(asset.size_bytes);
   const sub = sizeLabel ? `${kindLabel(kind)} · ${sizeLabel}` : kindLabel(kind);
 
@@ -210,7 +186,11 @@ export default function ArtifactPanel({ artifact, onClose }) {
           <ArtifactBody
             kind={kind}
             title={asset.title}
-            content={content}
+            status={status}
+            url={url}
+            text={text}
+            httpStatus={httpStatus}
+            isImage={isImage}
             onDownload={handleDownload}
           />
         </div>
@@ -220,13 +200,13 @@ export default function ArtifactPanel({ artifact, onClose }) {
 }
 
 /** The kind- and fetch-state-driven body of the open panel. */
-function ArtifactBody({ kind, title, content, onDownload }) {
-  if (content.state === "loading") {
+function ArtifactBody({ kind, title, status, url, text, httpStatus, isImage, onDownload }) {
+  if (status === "loading") {
     return <div className="art-loading">Loading…</div>;
   }
-  if (content.state === "error") {
+  if (status === "error") {
     const message =
-      content.status === 404
+      httpStatus === 404
         ? "This artifact's content is no longer available."
         : "Couldn't load this artifact right now. Try again in a moment.";
     return (
@@ -235,23 +215,27 @@ function ArtifactBody({ kind, title, content, onDownload }) {
       </div>
     );
   }
-  if (content.state === "image") {
-    return (
-      <div className="art-image">
-        <img src={content.url} alt={title} />
-      </div>
-    );
-  }
-  if (content.state === "text") {
+  if (status === "ready") {
+    // A `ready` payload is either an image (blob URL) or text — the hook's
+    // `enabled` gate guarantees no other kind fetches, so text kinds fall
+    // through the image check.
+    if (isImage) {
+      return (
+        <div className="art-image">
+          <img src={url} alt={title} />
+        </div>
+      );
+    }
     if (kind === "code") {
-      return <pre className="art-code"><code>{content.text}</code></pre>;
+      return <pre className="art-code"><code>{text}</code></pre>;
     }
     if (kind === "data") {
-      return <CsvTable text={content.text} />;
+      return <CsvTable text={text} />;
     }
-    return <div className="art-doc">{renderMarkdown(content.text, false)}</div>;
+    return <div className="art-doc">{renderMarkdown(text, false)}</div>;
   }
-  // fallback / idle — download-only affordance for diagram + unknown kinds.
+  // idle — download-only affordance for diagram + unknown kinds (and the
+  // defensive missing-id case).
   return (
     <div className="art-fallback">
       <Icon name="download" size={22} />

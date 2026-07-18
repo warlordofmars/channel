@@ -14,6 +14,10 @@ vi.mock("../api.js", () => ({
     Promise.resolve({ mode: "inherit", explicit_server_ids: [] }),
   ),
   putChatMCPSettings: vi.fn(() => Promise.resolve()),
+  // #361: InlineImage's useAssetContent hook Bearer-fetches image bytes.
+  getAssetContent: vi.fn(() =>
+    Promise.resolve({ blob: async () => new Blob(["PNGBYTES"]) }),
+  ),
 }));
 
 import * as api from "../api.js";
@@ -96,6 +100,10 @@ describe("Conversation", () => {
     api.listModels.mockResolvedValue({ models: SERVER_ALLOWLIST });
     api.submitFeedback.mockReset();
     api.submitFeedback.mockResolvedValue(undefined);
+    api.getAssetContent.mockReset();
+    api.getAssetContent.mockResolvedValue({
+      blob: async () => new Blob(["PNGBYTES"]),
+    });
     // Pre-warm the module-level cache so synchronous renders see the
     // models immediately — the production component reads `cachedModels()`
     // in its useState initializer.
@@ -698,6 +706,161 @@ describe("Conversation", () => {
       </MemoryRouter>,
     );
     fireEvent.click(screen.getByText("Figure 1"));
+    expect(screen.getByText("ARTIFACTS BROWSE ROUTE")).toBeTruthy();
+  });
+
+  it("renders a within-threshold image asset inline as an <img> on an assistant turn (#361)", async () => {
+    mockStream({
+      turns: [
+        {
+          msg_id: "a1",
+          role: "assistant",
+          text: "here is your image",
+          streaming: false,
+          assets: [
+            {
+              asset_id: "gen-1",
+              chat_id: "c1",
+              msg_id: "a1",
+              kind: "image",
+              title: "sunset.png",
+              mime: "image/png",
+              size_bytes: 3.8 * 1024 * 1024,
+              source: { msg_id: "a1", tool_use_id: "t1" },
+            },
+          ],
+        },
+      ],
+    });
+    renderAt("/app/c/c1");
+    const img = await screen.findByRole("img");
+    expect(img.getAttribute("src")).toBe("blob:test-url");
+    expect(img.getAttribute("alt")).toBe("sunset.png");
+    expect(api.getAssetContent).toHaveBeenCalledWith("c1", "gen-1");
+  });
+
+  it("renders an upload-origin image inline on a user turn (#361)", async () => {
+    mockStream({
+      turns: [
+        {
+          msg_id: "u1",
+          role: "user",
+          text: "have a look",
+          assets: [
+            {
+              asset_id: "up-img",
+              chat_id: "c1",
+              msg_id: "u1",
+              kind: "image",
+              title: "screenshot.png",
+              mime: "image/png",
+              size_bytes: 120 * 1024,
+              origin: "upload",
+              source: { msg_id: "u1", attachment_id: "att-1" },
+            },
+          ],
+        },
+      ],
+    });
+    renderAt("/app/c/c1");
+    const img = await screen.findByRole("img");
+    expect(img.getAttribute("alt")).toBe("screenshot.png");
+  });
+
+  it("falls back to the card for an over-threshold image (#361)", () => {
+    mockStream({
+      turns: [
+        {
+          msg_id: "a1",
+          role: "assistant",
+          text: "big one",
+          streaming: false,
+          assets: [
+            {
+              asset_id: "big-1",
+              chat_id: "c1",
+              msg_id: "a1",
+              kind: "image",
+              title: "huge.png",
+              mime: "image/png",
+              size_bytes: 6 * 1024 * 1024,
+              source: { msg_id: "a1" },
+            },
+          ],
+        },
+      ],
+    });
+    renderAt("/app/c/c1");
+    // Card, not an inline <img>; the oversized image never fetches inline.
+    expect(screen.getByText("huge.png")).toBeTruthy();
+    expect(screen.queryByRole("img")).toBeNull();
+    expect(api.getAssetContent).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the card for a non-raster image mime (#361)", () => {
+    mockStream({
+      turns: [
+        {
+          msg_id: "a1",
+          role: "assistant",
+          text: "vector",
+          streaming: false,
+          assets: [
+            {
+              asset_id: "svg-1",
+              chat_id: "c1",
+              msg_id: "a1",
+              kind: "image",
+              title: "diagram.svg",
+              mime: "image/svg+xml",
+              size_bytes: 4096,
+              source: { msg_id: "a1" },
+            },
+          ],
+        },
+      ],
+    });
+    renderAt("/app/c/c1");
+    expect(screen.getByText("diagram.svg")).toBeTruthy();
+    expect(screen.queryByRole("img")).toBeNull();
+  });
+
+  it("opens the browse route when an inline image is clicked (#361)", async () => {
+    mockStream({
+      turns: [
+        {
+          msg_id: "a1",
+          role: "assistant",
+          text: "here is your image",
+          streaming: false,
+          assets: [
+            {
+              asset_id: "gen-1",
+              chat_id: "c1",
+              msg_id: "a1",
+              kind: "image",
+              title: "sunset.png",
+              mime: "image/png",
+              size_bytes: 1024,
+              source: { msg_id: "a1" },
+            },
+          ],
+        },
+      ],
+    });
+    render(
+      <MemoryRouter initialEntries={["/app/c/c1"]}>
+        <Routes>
+          <Route path="/app/c/:id" element={<Conversation />} />
+          <Route
+            path="/app/artifacts"
+            element={<div>ARTIFACTS BROWSE ROUTE</div>}
+          />
+        </Routes>
+      </MemoryRouter>,
+    );
+    const img = await screen.findByRole("img");
+    fireEvent.click(img);
     expect(screen.getByText("ARTIFACTS BROWSE ROUTE")).toBeTruthy();
   });
 
