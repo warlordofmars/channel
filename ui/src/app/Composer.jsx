@@ -542,7 +542,7 @@ const Composer = forwardRef(function Composer(
               anyAttaching
                 ? "Waiting for attachments…"
                 : anyFailed
-                  ? "Retry or remove the failed attachment to send"
+                  ? failedAttachmentMessage(failedAtts.length)
                   : "Send"
             }
           >

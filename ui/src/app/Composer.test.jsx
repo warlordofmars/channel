@@ -1294,7 +1294,11 @@ describe("Composer", () => {
       // silently dropped. Now the failed chip gates the send.
       const ta = screen.getByRole("textbox");
       fireEvent.change(ta, { target: { value: "look at this screenshot" } });
-      const send = screen.getByTitle("Retry or remove the failed attachment to send");
+      // The disabled send button's tooltip reuses the banner copy so it
+      // stays accurate for 1-vs-N failures (#379 review follow-up).
+      const send = screen.getByTitle(
+        "1 attachment failed to attach — retry or remove it to send.",
+      );
       expect(send.disabled).toBe(true);
       // The blocking banner is visible and names both affordances.
       const banner = screen.getByText(
@@ -1334,9 +1338,10 @@ describe("Composer", () => {
       const ta = screen.getByRole("textbox");
       fireEvent.change(ta, { target: { value: "hi" } });
       expect(screen.getByText(/failed to attach/i)).toBeTruthy();
-      expect(screen.getByTitle("Retry or remove the failed attachment to send").disabled).toBe(
-        true,
-      );
+      expect(
+        screen.getByTitle("1 attachment failed to attach — retry or remove it to send.")
+          .disabled,
+      ).toBe(true);
       const removeBtn = screen
         .getByText("gone.png")
         .closest(".attach-chip")
