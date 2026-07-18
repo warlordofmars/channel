@@ -20,7 +20,7 @@ export const DEFAULTS = Object.freeze({
   density:           "cozy",
   shape:             "soft",
   font:              "figtree",
-  model:             "claude-opus-4-6",
+  model:             "claude-sonnet-4-6",
   effort:            "High",
   sendOnEnter:       "1",
   showReasoning:     "0",
