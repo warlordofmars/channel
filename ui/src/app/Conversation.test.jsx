@@ -942,6 +942,207 @@ describe("Conversation", () => {
     expect(screen.getByText("ARTIFACTS BROWSE ROUTE")).toBeTruthy();
   });
 
+  it("renders a kind=data CSV asset inline as a table (#363)", async () => {
+    api.getAssetContent.mockResolvedValue({
+      text: async () => "name,score\nada,9\nlin,7",
+    });
+    mockStream({
+      turns: [
+        {
+          msg_id: "a1",
+          role: "assistant",
+          text: "here is the data",
+          streaming: false,
+          assets: [
+            {
+              asset_id: "csv-1",
+              chat_id: "c1",
+              msg_id: "a1",
+              kind: "data",
+              title: "scores.csv",
+              mime: "text/csv",
+              size_bytes: 40,
+              source: { msg_id: "a1", tool_use_id: "t1" },
+            },
+          ],
+        },
+      ],
+    });
+    const { container } = renderAt("/app/c/c1");
+    expect(await screen.findByText("ada")).toBeTruthy();
+    expect(container.querySelector(".convo-data-table")).toBeTruthy();
+    expect(api.getAssetContent).toHaveBeenCalledWith("c1", "csv-1");
+  });
+
+  it("renders an upload-origin CSV inline on a user turn (#363 origin-agnostic)", async () => {
+    api.getAssetContent.mockResolvedValue({
+      text: async () => "a,b\n1,2",
+    });
+    mockStream({
+      turns: [
+        {
+          msg_id: "u1",
+          role: "user",
+          text: "have a look at this sheet",
+          assets: [
+            {
+              asset_id: "up-csv",
+              chat_id: "c1",
+              msg_id: "u1",
+              kind: "data",
+              title: "upload.csv",
+              mime: "text/csv",
+              size_bytes: 12,
+              origin: "upload",
+              source: { msg_id: "u1", attachment_id: "att-1" },
+            },
+          ],
+        },
+      ],
+    });
+    const { container } = renderAt("/app/c/c1");
+    // Inline table — NOT a card — even though origin=upload.
+    expect(await screen.findByText("Open full table")).toBeTruthy();
+    expect(container.querySelector(".convo-data-table")).toBeTruthy();
+    expect(container.querySelector(".art-inline")).toBeNull();
+  });
+
+  it("renders a kind=document markdown asset inline (#363)", async () => {
+    api.getAssetContent.mockResolvedValue({
+      text: async () => "# Design notes\n\nInline preview body.",
+    });
+    mockStream({
+      turns: [
+        {
+          msg_id: "a1",
+          role: "assistant",
+          text: "see the doc",
+          streaming: false,
+          assets: [
+            {
+              asset_id: "doc-1",
+              chat_id: "c1",
+              msg_id: "a1",
+              kind: "document",
+              title: "design.md",
+              mime: "text/markdown",
+              size_bytes: 42,
+              source: { msg_id: "a1", tool_use_id: "t1" },
+            },
+          ],
+        },
+      ],
+    });
+    const { container } = renderAt("/app/c/c1");
+    expect(await screen.findByText("Design notes")).toBeTruthy();
+    expect(container.querySelector(".convo-doc-body")).toBeTruthy();
+    expect(screen.getByText("Open full document")).toBeTruthy();
+  });
+
+  it("renders an upload-origin markdown inline on a user turn (#363 origin-agnostic)", async () => {
+    api.getAssetContent.mockResolvedValue({
+      text: async () => "# Uploaded\n\nfrom the picker",
+    });
+    mockStream({
+      turns: [
+        {
+          msg_id: "u1",
+          role: "user",
+          text: "here are my notes",
+          assets: [
+            {
+              asset_id: "up-doc",
+              chat_id: "c1",
+              msg_id: "u1",
+              kind: "document",
+              title: "notes.md",
+              mime: "text/markdown",
+              size_bytes: 24,
+              origin: "upload",
+              source: { msg_id: "u1", attachment_id: "att-2" },
+            },
+          ],
+        },
+      ],
+    });
+    const { container } = renderAt("/app/c/c1");
+    // Inline markdown preview — NOT a card — even though origin=upload.
+    expect(await screen.findByText("Uploaded")).toBeTruthy();
+    expect(container.querySelector(".convo-doc-body")).toBeTruthy();
+    expect(container.querySelector(".art-inline")).toBeNull();
+  });
+
+  it("falls back to a card for a PDF document (#363 — no inline markdown path)", () => {
+    mockStream({
+      turns: [
+        {
+          msg_id: "u1",
+          role: "user",
+          text: "the report",
+          assets: [
+            {
+              asset_id: "pdf-1",
+              chat_id: "c1",
+              msg_id: "u1",
+              kind: "document",
+              title: "report.pdf",
+              mime: "application/pdf",
+              size_bytes: 90000,
+              origin: "upload",
+              source: { msg_id: "u1", attachment_id: "att-3" },
+            },
+          ],
+        },
+      ],
+    });
+    const { container } = renderAt("/app/c/c1");
+    expect(screen.getByText("report.pdf")).toBeTruthy();
+    expect(container.querySelector(".art-inline")).toBeTruthy();
+    expect(container.querySelector(".convo-doc-body")).toBeNull();
+    expect(api.getAssetContent).not.toHaveBeenCalled();
+  });
+
+  it("opens the browse route when the data Open-full affordance is clicked (#363)", async () => {
+    api.getAssetContent.mockResolvedValue({
+      text: async () => "a,b\n1,2",
+    });
+    mockStream({
+      turns: [
+        {
+          msg_id: "a1",
+          role: "assistant",
+          text: "data",
+          streaming: false,
+          assets: [
+            {
+              asset_id: "csv-2",
+              chat_id: "c1",
+              msg_id: "a1",
+              kind: "data",
+              title: "t.csv",
+              mime: "text/csv",
+              size_bytes: 8,
+              source: { msg_id: "a1" },
+            },
+          ],
+        },
+      ],
+    });
+    render(
+      <MemoryRouter initialEntries={["/app/c/c1"]}>
+        <Routes>
+          <Route path="/app/c/:id" element={<Conversation />} />
+          <Route
+            path="/app/artifacts"
+            element={<div>ARTIFACTS BROWSE ROUTE</div>}
+          />
+        </Routes>
+      </MemoryRouter>,
+    );
+    fireEvent.click(await screen.findByText("Open full table"));
+    expect(screen.getByText("ARTIFACTS BROWSE ROUTE")).toBeTruthy();
+  });
+
   it("sends firstMessage from route state on mount", () => {
     const stream = mockStream();
     const firstMessage = {
