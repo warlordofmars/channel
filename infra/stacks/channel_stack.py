@@ -675,6 +675,17 @@ class ChannelStack(cdk.Stack):
         if not is_prod:
             attachments_cors_origins += [f"http://localhost:{port}" for port in range(5173, 5180)]
 
+        # The Electron desktop app loads the SPA from the custom ``app://``
+        # scheme (``desktop/main/window.js`` → ``loadURL("app://-/app")``;
+        # the scheme is registered ``standard: true`` in
+        # ``desktop/main/protocol.js``), so the desktop renderer's Origin is
+        # the fixed string ``app://-`` — not an opaque ``null``. The presigned
+        # browser→S3 attachment PUT is a cross-origin request, so this origin
+        # must be in the bucket CORS allowlist or the desktop upload is blocked
+        # while Chrome (allowed via the domain above) works (#378). Added
+        # unconditionally: the desktop origin is env-independent.
+        attachments_cors_origins.append("app://-")
+
         # SSE-KMS via the AWS-managed ``aws/s3`` key. No dedicated CMK —
         # the AWS-managed key auto-grants any IAM principal in the account
         # that has the matching ``s3:`` permission on the bucket. The

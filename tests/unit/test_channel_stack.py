@@ -287,6 +287,27 @@ def test_attachments_bucket_cors_allows_localhost_in_dev(dev_template):
         )
 
 
+@pytest.mark.parametrize("template_name", ["dev_template", "prod_template"])
+def test_attachments_bucket_cors_allows_desktop_app_origin(template_name, request):
+    """#378 — the Electron desktop app loads the SPA from the ``app://``
+    scheme (``desktop/main/window.js`` → ``loadURL("app://-/app")`` with the
+    scheme registered ``standard: true`` in ``desktop/main/protocol.js``), so
+    its renderer Origin is the fixed string ``app://-``. The presigned
+    browser→S3 attachment PUT is cross-origin, so ``app://-`` must be in the
+    bucket CORS allowlist in EVERY environment (added unconditionally) or the
+    desktop upload is blocked while Chrome works.
+    """
+    template = request.getfixturevalue(template_name)
+    bucket = _attachments_bucket(template)
+    cors_rules = bucket["Properties"]["CorsConfiguration"]["CorsRules"]
+    assert len(cors_rules) == 1
+    rule = cors_rules[0]
+    assert "PUT" in rule["AllowedMethods"]
+    assert "app://-" in rule["AllowedOrigins"], (
+        f"{template_name} CORS missing the desktop app origin 'app://-'"
+    )
+
+
 def test_lambda_env_has_attachments_bucket_var(dev_template):
     api_fn = _api_function(dev_template)
     env_vars = api_fn["Properties"]["Environment"]["Variables"]
