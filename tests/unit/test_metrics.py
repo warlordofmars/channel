@@ -245,6 +245,44 @@ def test_record_tool_call_outcome_signature_locks_out_dimensions():
 
 
 @pytest.mark.asyncio
+async def test_record_image_gen_outcome_success_emits_only_invocations():
+    """A successful generation counts one ``ImageGenInvocations`` and no
+    failure counter (#279)."""
+    from channel.metrics import record_image_gen_outcome
+
+    with patch("channel.metrics.emit_metric", new=AsyncMock()) as mock_emit:
+        await record_image_gen_outcome(success=True)
+
+    mock_emit.assert_awaited_once_with("ImageGenInvocations")
+
+
+@pytest.mark.asyncio
+async def test_record_image_gen_outcome_failure_emits_both_counters():
+    """A failed / content-filtered generation counts BOTH the invocation
+    and a failure, so the failure rate is Failures / Invocations."""
+    from channel.metrics import record_image_gen_outcome
+
+    with patch("channel.metrics.emit_metric", new=AsyncMock()) as mock_emit:
+        await record_image_gen_outcome(success=False)
+
+    mock_emit.assert_any_await("ImageGenInvocations")
+    mock_emit.assert_any_await("ImageGenFailures")
+    assert mock_emit.await_count == 2
+
+
+def test_record_image_gen_outcome_signature_locks_out_dimensions():
+    """No per-actor / per-chat / per-model dimension can slip in — and,
+    because billing is deferred, deliberately no cost/quota dimension."""
+    from channel.metrics import record_image_gen_outcome
+
+    sig = inspect.signature(record_image_gen_outcome)
+    assert list(sig.parameters.keys()) == ["success"]
+    param = sig.parameters["success"]
+    assert param.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+    assert param.annotation == "bool"
+
+
+@pytest.mark.asyncio
 async def test_record_chat_delete_asset_wipe_outcome_success_emits_success_counter():
     from channel.metrics import record_chat_delete_asset_wipe_outcome
 

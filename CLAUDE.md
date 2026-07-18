@@ -207,6 +207,36 @@ Everything that creates ASSET rows lives in
   `assets/chat/{chat_id}/{asset_id}` (`kind=image`,
   `origin=tool_output`, `source.tool_use_id`). Live base64-over-SSE
   rendering is unchanged; persistence is additive.
+- **Generated images** (deterministic, #279) — the Stable Image Core
+  `generate_image(prompt, aspect_ratio)` tool
+  (`src/channel/agents/tools/generate_image.py`) invokes Bedrock
+  `InvokeModel` on `stability.stable-image-core-v1:1` and stashes the
+  base64 PNG on `agent.generated_image_sink` (out-of-band from SSE — the
+  bytes NEVER ride the wire; the tool's `ToolResult` is a text-only
+  confirmation). The post-stream slot reads that sink and persists each
+  image via `persist_generated_image_assets` (`kind=image`,
+  `origin=generated`, `source.tool_use_id`). Kill-switch:
+  `STARTER_IMAGE_GEN_ENABLED` gates tool registration in
+  `chats._build_tool_registry` (default-on in every deployed env; set
+  `"0"` to remove the tool). Content moderation is Bedrock's built-in
+  Stability RAI filter — a blocked generation returns a non-null first
+  `finish_reasons` entry, which the tool maps to a `ToolResult` error
+  whose reason token `content_filtered` (in `content[0].text`)
+  `translate_event` extracts into the SSE `tool_error` `error_type`, so
+  the SPA sees `error_type="content_filtered"`. No cost gating (billing
+  deferred);
+  the only observability is the `ImageGenInvocations` /
+  `ImageGenFailures` EMF counters. `STARTER_IMAGE_GEN_MODEL` overrides
+  the model id (Ultra / SD3.5 Large share the identical request
+  contract). **Cross-region (the app's only one):** `generate_image`
+  invokes Bedrock in **us-west-2** because the Stability text-to-image
+  generators are not offered in us-east-1 (and have no us-east-1
+  cross-region inference profile). Only this image call leaves
+  us-east-1 — the returned PNG persists to the us-east-1 assets bucket
+  via the unchanged pipeline, so data at rest stays in us-east-1.
+  `STARTER_IMAGE_GEN_REGION` (default `us-west-2`) makes it
+  configurable; `channel_stack.py` pins the three Stability
+  foundation-model ARNs to us-west-2 to authorize the call.
 - **Fenced-code extraction** (the ONLY heuristic) — post-stream, in
   the same slot as the auto-titler: fenced code blocks ≥ 15 body
   lines (mermaid excluded — #278 renders those inline) become
@@ -230,8 +260,9 @@ never a broken stream.
 
 **Asset content never reaches AgentCore Memory** — code-exec images
 ride `toolResult` blocks (stripped), uploads ride `document`/`image`
-blocks (no `text` key — dropped), extraction never mutates the
-agent's message list. Pinned by
+blocks (no `text` key — dropped), generated-image bytes travel
+out-of-band on the agent sink (never in any message block), and
+extraction never mutates the agent's message list. Pinned by
 `tests/unit/test_memory.py::test_payload_from_messages_never_leaks_asset_content`.
 
 ## AgentCore Memory

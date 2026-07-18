@@ -527,6 +527,21 @@ class ChannelStack(cdk.Stack):
                     f"arn:aws:bedrock:{self.region}:{self.account}:inference-profile/us.anthropic.claude-sonnet-4-6",
                     f"arn:aws:bedrock:{self.region}:{self.account}:inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0",
                     f"arn:aws:bedrock:{self.region}:{self.account}:inference-profile/us.anthropic.claude-opus-4-6-v1",
+                    # Stability text-to-image generation (#279 — generate_image
+                    # tool). CROSS-REGION: these models are ACTIVE only in
+                    # us-west-2 (absent from us-east-1, and no us-east-1
+                    # cross-region inference profile exists for them), so the
+                    # tool's bedrock-runtime client targets us-west-2 and the
+                    # ARN region segment is HARDCODED us-west-2 — NOT this
+                    # stack's region (``self.region`` is us-east-1). Empty
+                    # account segment (``::``) is the foundation-model ARN
+                    # shape. All three generators are granted so a
+                    # ``STARTER_IMAGE_GEN_MODEL`` switch to Ultra / SD3.5 Large
+                    # needs no redeploy — still least-privilege (three pinned
+                    # ARNs, no wildcard).
+                    "arn:aws:bedrock:us-west-2::foundation-model/stability.stable-image-core-v1:1",
+                    "arn:aws:bedrock:us-west-2::foundation-model/stability.stable-image-ultra-v1:1",
+                    "arn:aws:bedrock:us-west-2::foundation-model/stability.sd3-5-large-v1:0",
                 ],
             )
         )
@@ -607,6 +622,20 @@ class ChannelStack(cdk.Stack):
         common_env["STARTER_EXA_API_KEY_PARAM"] = f"/channel/{env_name}/exa-api-key"
         # Default enabled in every env; flag is a kill switch, not a rollout knob
         common_env["STARTER_WEB_SEARCH_ENABLED"] = "1"
+
+        # #279 Stable Image Core image generation — kill switch only,
+        # default-on in every deployed env (image gen is v0.1 scope). Set
+        # explicitly so a future default-shift can't flip it on/off by
+        # accident; the IAM grant for the us-west-2 Stability generators
+        # rides the InvokeModel statement above. Billing is deferred, so
+        # there is no cost/quota gate — this flag is the only control
+        # besides the EMF counter. STARTER_IMAGE_GEN_REGION is pinned to
+        # us-west-2 here (the image models' only region — this is the app's
+        # sole cross-region call; the rest of the stack stays us-east-1) so
+        # the deployed region is auditable in the template rather than only
+        # a code default.
+        common_env["STARTER_IMAGE_GEN_ENABLED"] = "1"
+        common_env["STARTER_IMAGE_GEN_REGION"] = "us-west-2"
 
         # #207 MCP registry — dedicated CMK + redirect-URI env + IAM.
         # The CMK has annual rotation enabled and is destroyed on stack
