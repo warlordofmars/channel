@@ -159,6 +159,30 @@ const DEGRADED_ICON_STYLE = {
 };
 
 /**
+ * Hover-tooltip chrome. Themed from the design tokens so it stays readable in
+ * BOTH light and dark themes — the Recharts default is a hardcoded white box
+ * (unreadable on the dark canvas, #367). `--raised` bg + `--border` matches
+ * the surrounding cards.
+ */
+const TOOLTIP_STYLE = {
+  background: "var(--raised)",
+  border: "1px solid var(--border)",
+  borderRadius: "var(--r-md)",
+  boxShadow: "var(--shadow-md)",
+  padding: "8px 11px",
+  fontSize: 12,
+};
+
+const TOOLTIP_LABEL_STYLE = {
+  color: "var(--ink-soft)",
+  fontFamily: "var(--font-mono)",
+  fontSize: 11,
+  marginBottom: 4,
+};
+
+const TOOLTIP_ITEM_STYLE = { color: "var(--ink)", fontWeight: 600 };
+
+/**
  * Format a raw counter value for a stat tile. CloudWatch SUM stats arrive as
  * floats (0.0 when no data); rounding drops the ".0" and any float noise, and
  * avoiding `toLocaleString` keeps the output deterministic under any CI
@@ -282,6 +306,27 @@ function SummarySection() {
   );
 }
 
+/**
+ * Custom hover tooltip. Replaces Recharts' default white box (unreadable in
+ * the dark theme, #367) with a token-themed panel, and renders the series
+ * `name` ("Memory writes" / "Tool calls") instead of the raw `v` dataKey.
+ * Recharts injects `active` / `payload` / `label`; render nothing until a
+ * point is actually hovered.
+ */
+export function ChartTooltip({ active, payload, label }) {
+  if (!active || !payload || payload.length === 0) return null;
+  return (
+    <div style={TOOLTIP_STYLE} data-testid="chart-tooltip">
+      <div style={TOOLTIP_LABEL_STYLE}>{fmtTooltipLabel(label)}</div>
+      {payload.map((entry) => (
+        <div key={entry.dataKey} style={TOOLTIP_ITEM_STYLE}>
+          {`${entry.name}: ${entry.value}`}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /** The chart plot area, keyed on load / empty / degraded / data. */
 function ChartBody({ degraded, points, label }) {
   if (degraded) return <DegradedPanel label={label} />;
@@ -294,10 +339,14 @@ function ChartBody({ degraded, points, label }) {
           <CartesianGrid stroke="var(--border-soft)" strokeDasharray="3 3" />
           <XAxis dataKey="t" tickFormatter={fmtTick} stroke="var(--ink-faint)" fontSize={11} minTickGap={28} />
           <YAxis allowDecimals={false} stroke="var(--ink-faint)" fontSize={11} width={36} />
-          <Tooltip labelFormatter={fmtTooltipLabel} />
+          <Tooltip
+            content={<ChartTooltip />}
+            cursor={{ stroke: "var(--border)", strokeWidth: 1 }}
+          />
           <Line
             type="monotone"
             dataKey="v"
+            name={label}
             stroke="var(--accent)"
             strokeWidth={2}
             dot={false}
