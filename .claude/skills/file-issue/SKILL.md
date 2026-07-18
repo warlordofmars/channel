@@ -46,9 +46,11 @@ signal:
   (AI), not a human — weigh accordingly in triage"*. The label
   already exists in the repo — do not recreate it.
 - **Filterable** — `gh issue list --label channel-authored` and
-  visible in list view without opening the body. `backlog-manager`
-  and `design-review` weight Channel-filed issues during triage by
-  filtering on it.
+  visible in list view without opening the body. The label makes it
+  possible for `backlog-manager` and `design-review` to weight
+  Channel-filed issues during triage by filtering on it — an enabling
+  signal; the weighting behaviour itself is not yet codified in those
+  agent specs.
 - **Edit-stable** — a label survives body edits; a footer drifts.
 
 A one-line body footer naming the provenance/session is
@@ -102,10 +104,13 @@ a new issue — re-opening is the maintainer's call, not Channel's.
 
 ## 3. Body templates
 
-Three shapes, keyed by issue type. These reuse the structures in
-`.claude/agents/backlog-manager.md` §4 verbatim so `issue-worker` and
-`design-review` consume Channel-filed issues unchanged. Pick by type;
-do not invent new section names.
+Three shapes, keyed by issue type, so `issue-worker` and
+`design-review` consume Channel-filed issues unchanged. The two
+enhancement shapes (§3.2, §3.3) reuse the structures in
+`.claude/agents/backlog-manager.md` §4 verbatim; the bug shape (§3.1)
+follows the form fixed in the #388 design-review decisions comment
+(`backlog-manager.md` §4 carries no bug template). Pick by type; do
+not invent new section names.
 
 ### 3.1 bug
 
