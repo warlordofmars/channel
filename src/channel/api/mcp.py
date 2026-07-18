@@ -338,14 +338,16 @@ def _begin_auth_flow(
     auth_endpoint: str,
     redirect_uri: str,
 ) -> str:
-    # Only DCR servers have an OAuth authorization flow. A static-token
-    # server has no DCR client_id, so there's nothing to authorize — guard
-    # here so a stray reauth on a static-token server returns a clear 400
-    # instead of building an authorization URL with a None client_id.
+    # Callers guard static-token servers earlier (register never routes
+    # them here; reauth checks auth_type first). This guard is the
+    # remaining defense: an oauth_dcr row with no client_id is a corrupted
+    # registration — surface it as a distinct 500 (not a "static token"
+    # message) rather than building an authorization URL with a None
+    # client_id. See #375 / Copilot review.
     if server.client_id is None:
         raise HTTPException(
-            status_code=400,
-            detail="This server uses a static token — there is no OAuth flow to start",
+            status_code=500,
+            detail="Server is missing its OAuth client_id (corrupted registration)",
         )
     code_verifier, code_challenge = mcp_auth.generate_pkce()
     state = secrets.token_urlsafe(32)
@@ -428,12 +430,20 @@ async def mcp_callback(
             url=_customize_redirect(mcp_authed="error", reason="blocked_url"),
             status_code=302,
         )
-    # A static-token server has no DCR client_id and never starts an OAuth
-    # flow, so no valid state should ever land here for one. Guard the
-    # type-level None anyway — exchange_code requires a client_id.
-    if server.client_id is None:
+    # A static-token server never starts an OAuth flow, so no valid state
+    # should ever resolve to one here. Key off auth_type for the clear
+    # "not an OAuth server" case.
+    if server.auth_type == MCPServerAuthType.STATIC_TOKEN:
         return RedirectResponse(
             url=_customize_redirect(mcp_authed="error", reason="not_oauth"),
+            status_code=302,
+        )
+    # Distinct from the static-token case: an oauth_dcr row with no
+    # client_id is a corrupted registration. exchange_code requires a
+    # client_id, so redirect rather than pass None downstream.
+    if server.client_id is None:
+        return RedirectResponse(
+            url=_customize_redirect(mcp_authed="error", reason="server_misconfigured"),
             status_code=302,
         )
     try:
@@ -543,8 +553,11 @@ async def reauth_server(
     # has no OAuth flow to re-authorize, and it's precisely the kind of
     # server (e.g. GitHub's MCP) whose discovery may fail — running
     # discovery first would surface a misleading 502 instead of this
-    # clear 400. See #375 / Copilot review.
-    if s.client_id is None:
+    # clear 400. Key off auth_type (not client_id) so a corrupted
+    # oauth_dcr row with a missing client_id gets its own distinct error
+    # in _begin_auth_flow rather than a misleading "static token" message.
+    # See #375 / Copilot review.
+    if s.auth_type == MCPServerAuthType.STATIC_TOKEN:
         raise HTTPException(
             status_code=400,
             detail="This server uses a static token — there is no OAuth flow to re-authorize",

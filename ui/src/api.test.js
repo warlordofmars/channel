@@ -755,6 +755,34 @@ describe("MCP API client", () => {
     expect(caught.code).toBeUndefined();
   });
 
+  it("registerMCPServer never parses/propagates detail when a token was supplied (no PAT echo)", async () => {
+    // A static-token 422 body can echo the pasted PAT back in
+    // detail[].input. With a token supplied, registerMCPServer must NOT
+    // parse the body at all — the secret must not land on the error.
+    const pastedSecret = "dummy-" + "pasted-secret";
+    const jsonSpy = vi.fn(() =>
+      Promise.resolve({ detail: [{ msg: "too short", input: pastedSecret }] }),
+    );
+    global.fetch.mockResolvedValueOnce({ ok: false, status: 422, json: jsonSpy });
+    let caught;
+    try {
+      await registerMCPServer({
+        name: "GitHub",
+        url: "https://api.githubcopilot.com/mcp/",
+        auth_type: "static_token",
+        token: pastedSecret,
+      });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(ApiError);
+    // Body was never read, so the secret can't be on the error object.
+    expect(jsonSpy).not.toHaveBeenCalled();
+    expect(caught.detail).toBeNull();
+    expect(caught.code).toBeUndefined();
+    expect(JSON.stringify(caught)).not.toContain(pastedSecret);
+  });
+
   it("registerMCPServer tolerates a string detail (no code hoisted)", async () => {
     global.fetch.mockResolvedValueOnce({
       ok: false,

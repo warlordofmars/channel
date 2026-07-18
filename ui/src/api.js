@@ -377,11 +377,20 @@ export async function registerMCPServer({
     // Surface the FastAPI error detail so AddMCPServerModal can branch on
     // a machine-readable reason (the dcr_unsupported code that steers the
     // user into the static-token path) rather than string-matching prose.
+    //
+    // SECURITY: only parse the detail for the oauth_dcr path (token == null).
+    // A static-token 422 body can echo the pasted PAT back in
+    // ``detail[].input``; parsing it would land the secret on
+    // ``ApiError.detail`` where a caller's ``console.error`` could leak it.
+    // dcr_unsupported only ever arises on the oauth_dcr path, so we lose
+    // nothing by skipping the parse whenever a token was supplied.
     let detail = null;
-    try {
-      detail = (await response.json()).detail ?? null;
-    } catch {
-      /* non-JSON error body — status alone must do */
+    if (token == null) {
+      try {
+        detail = (await response.json()).detail ?? null;
+      } catch {
+        /* non-JSON error body — status alone must do */
+      }
     }
     const err = new ApiError("registerMCPServer", response.status, detail);
     // The dcr_unsupported branch raises detail={code, message}; hoist the

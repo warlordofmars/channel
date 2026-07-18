@@ -926,13 +926,34 @@ def test_reauth_on_static_token_server_returns_400_before_discovery(
     assert "static token" in resp.json()["detail"]
 
 
-def test_begin_auth_flow_rejects_static_token_server(
+def _make_dcr_server_without_client_id() -> Any:
+    """A corrupted oauth_dcr row: auth_type=oauth_dcr but no client_id.
+    This can't arise through normal registration (DCR without a client_id
+    is rejected at register time), so the guards below are pure
+    defense-in-depth for a data-corruption edge."""
+    from channel.models import MCPServer, MCPServerAuthStatus, MCPServerAuthType
+
+    return MCPServer(
+        server_id="srv-dcr-broken",
+        user_id="user-1",
+        name="Broken",
+        url="https://hive.example.com/mcp",
+        client_id=None,
+        tool_prefix="hive",
+        auth_type=MCPServerAuthType.OAUTH_DCR,
+        auth_status=MCPServerAuthStatus.NEVER_AUTHED,
+        created_at="x",
+        updated_at="x",
+    )
+
+
+def test_begin_auth_flow_rejects_missing_client_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Direct defense-in-depth guard: _begin_auth_flow refuses a server
-    with no client_id (static-token) rather than building an authorization
-    URL with a None client_id. Both routes guard earlier, so this is the
-    belt-and-suspenders path that keeps a future caller honest."""
+    """Direct defense-in-depth guard: _begin_auth_flow refuses an
+    oauth_dcr server with no client_id (a corrupted registration) with a
+    distinct 500 — NOT a misleading "static token" message — rather than
+    building an authorization URL with a None client_id."""
     from fastapi import HTTPException
 
     from channel.api.mcp import _begin_auth_flow
@@ -940,12 +961,12 @@ def test_begin_auth_flow_rejects_static_token_server(
     with pytest.raises(HTTPException) as exc:
         _begin_auth_flow(
             user_id="user-1",
-            server=_make_static_server(),
+            server=_make_dcr_server_without_client_id(),
             auth_endpoint="https://auth.example.com/authorize",
             redirect_uri="https://channel.example.com/auth/mcp/callback",
         )
-    assert exc.value.status_code == 400
-    assert "static token" in exc.value.detail
+    assert exc.value.status_code == 500
+    assert "client_id" in exc.value.detail
 
 
 def test_callback_static_token_server_redirects_not_oauth(
@@ -977,6 +998,40 @@ def test_callback_static_token_server_redirects_not_oauth(
     )
     assert resp.status_code == 302
     assert "reason=not_oauth" in resp.headers["location"]
+
+
+def test_callback_dcr_server_missing_client_id_redirects_misconfigured(
+    monkeypatch: pytest.MonkeyPatch,
+    public_dns: None,
+) -> None:
+    """Defensive: an oauth_dcr callback whose server row has no client_id
+    (corrupted) redirects with a DISTINCT reason=server_misconfigured
+    rather than the static-token reason=not_oauth or a None client_id
+    reaching exchange_code."""
+    from channel import storage as _storage
+    from channel.auth import state_store
+
+    monkeypatch.setattr(
+        state_store,
+        "consume_state",
+        lambda _: {
+            "purpose": "mcp",
+            "user_id": "u1",
+            "server_id": "srv-dcr-broken",
+            "code_verifier": "v",
+            "redirect_uri": "https://channel.example.com/auth/mcp/callback",
+        },
+    )
+    monkeypatch.setattr(
+        _storage, "get_mcp_server", lambda **_: _make_dcr_server_without_client_id()
+    )
+    raw = TestClient(app)
+    resp = raw.get(
+        "/auth/mcp/callback?state=ok&code=auth-code",
+        follow_redirects=False,
+    )
+    assert resp.status_code == 302
+    assert "reason=server_misconfigured" in resp.headers["location"]
 
 
 def test_reauth_404_when_missing(

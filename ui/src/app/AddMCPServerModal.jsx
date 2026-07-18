@@ -55,7 +55,9 @@ export default function AddMCPServerModal({ open, onClose, onRegistered }) {
         name: name.trim(),
         url: url.trim(),
         auth_type: authType,
-        token: isStatic ? token : null,
+        // Trim: a pasted PAT often carries a trailing newline/space that
+        // would otherwise make an otherwise-valid token fail downstream.
+        token: isStatic ? token.trim() : null,
       });
       // Static-token registrations return no auth_start_url — there is
       // no OAuth tab to open, the server is ready immediately.
@@ -65,7 +67,10 @@ export default function AddMCPServerModal({ open, onClose, onRegistered }) {
       onRegistered?.(out.server_id);
       onClose?.();
     } catch (e) {
-      console.error("registerMCPServer failed", e);
+      // Log only String(e) (name + message, e.g. "ApiError: registerMCPServer
+      // 400") — never the full error object, whose parsed FastAPI detail
+      // could otherwise surface a pasted PAT in the browser/Electron console.
+      console.error("registerMCPServer failed", String(e));
       if (e?.code === "dcr_unsupported") {
         // This server can't be auto-registered via DCR. Steer the user
         // into the static-token path added in #375 — flip the toggle,
@@ -126,7 +131,12 @@ export default function AddMCPServerModal({ open, onClose, onRegistered }) {
               name="mcp-auth-type"
               value="oauth_dcr"
               checked={!isStatic}
-              onChange={() => setAuthType("oauth_dcr")}
+              onChange={() => {
+                setAuthType("oauth_dcr");
+                // Drop any pasted token when leaving the PAT path — no
+                // stale secret lingering in component state (#375 Copilot).
+                setToken("");
+              }}
             />
             <span>OAuth (Dynamic Client Registration)</span>
           </label>

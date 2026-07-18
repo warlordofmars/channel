@@ -145,6 +145,42 @@ describe("AddMCPServerModal", () => {
     expect(submit).not.toBeDisabled();
   });
 
+  it("trims whitespace from the pasted token before submitting", async () => {
+    registerMCPServer.mockResolvedValueOnce({
+      server_id: "srv-static",
+      auth_start_url: null,
+    });
+    render(<AddMCPServerModal open onClose={() => {}} onRegistered={() => {}} />);
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "GitHub" } });
+    fireEvent.change(screen.getByLabelText("Server URL"), {
+      target: { value: "https://api.githubcopilot.com/mcp/" },
+    });
+    fireEvent.click(screen.getByRole("radio", { name: /Access token \/ PAT/i }));
+    fireEvent.change(screen.getByLabelText("Access token"), {
+      target: { value: "  dummy-" + "bearer-value\n" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /add server/i }));
+    await waitFor(() => expect(registerMCPServer).toHaveBeenCalled());
+    expect(registerMCPServer).toHaveBeenCalledWith(
+      expect.objectContaining({ token: "dummy-bearer-value" }),
+    );
+  });
+
+  it("clears the pasted token when toggling back to OAuth", () => {
+    render(<AddMCPServerModal open onClose={() => {}} onRegistered={() => {}} />);
+    fireEvent.click(screen.getByRole("radio", { name: /Access token \/ PAT/i }));
+    fireEvent.change(screen.getByLabelText("Access token"), {
+      target: { value: "dummy-" + "bearer-value" },
+    });
+    // Toggle back to OAuth, then back to PAT — the field must be empty (no
+    // stale secret lingering in component state).
+    fireEvent.click(
+      screen.getByRole("radio", { name: /OAuth \(Dynamic Client Registration\)/i }),
+    );
+    fireEvent.click(screen.getByRole("radio", { name: /Access token \/ PAT/i }));
+    expect(screen.getByLabelText("Access token").value).toBe("");
+  });
+
   it("dcr_unsupported failure steers into the static-token path, preserving name + url", async () => {
     const err = Object.assign(new Error("registerMCPServer 400"), {
       code: "dcr_unsupported",
