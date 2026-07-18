@@ -187,12 +187,10 @@ require a valid Bearer mgmt JWT. JWT validation enforces `iss`,
   `owner` is user_id today, `{workspace_id}/{user_id}` when workspaces
   land — single-attribute migration, never a second tenancy field)
 - GSIs:
-  - `KeyIndex` — `GSI1PK`/`GSI1SK` (provisioned generic reserved index
-    carried from the single-table template; no current query path in
-    `storage.py`)
-  - `TagIndex` — `GSI2PK`/`GSI2SK` (provisioned generic reserved index
-    carried from the single-table template; no current query path in
-    `storage.py`)
+  - `KeyIndex` — `GSI1PK`/`GSI1SK` (provisioned but currently unused by
+    `src/channel` — no query path in `storage.py`)
+  - `TagIndex` — `GSI2PK`/`GSI2SK` (provisioned but currently unused by
+    `src/channel` — no query path in `storage.py`)
   - `UserEmailIndex` — `PK=EMAIL#{email}` (for user lookups by email)
   - `ChatByIdIndex` — `PK=CHAT_ID#{chat_id}`, `SK=META`
     (sparse; only chat-index rows project onto it; used for direct
