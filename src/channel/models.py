@@ -302,7 +302,7 @@ class Prefs(BaseModel):
     density: str = "cozy"
     shape: str = "soft"
     font: str = "figtree"
-    model: str = "claude-opus-4-6"
+    model: str = "claude-sonnet-4-6"
     effort: str = "High"
     send_on_enter: bool = True
     show_reasoning: bool = False
