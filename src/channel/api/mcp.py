@@ -216,14 +216,38 @@ def _register_static_token(
         auth_status=MCPServerAuthStatus.ACTIVE,
     )
     expires_at = int(time.time()) + _STATIC_TOKEN_EXPIRY_SENTINEL_SECONDS
-    storage.put_mcp_token(
-        user_id=user_id,
-        server_id=server.server_id,
-        access_token_ciphertext=crypto.encrypt_blob(token),
-        refresh_token_ciphertext=None,
-        expires_at=expires_at,
-        granted_scope="",
-    )
+    # Make registration effectively atomic: the server row is already
+    # ACTIVE, so if the token encrypt/persist fails (KMS/DDB transient) we
+    # must roll the server row back — otherwise the user is left with an
+    # ACTIVE static-token server that has no credential and no reauth flow
+    # to fix it (unrecoverable except by delete + re-register). See #375 /
+    # Copilot review.
+    try:
+        storage.put_mcp_token(
+            user_id=user_id,
+            server_id=server.server_id,
+            access_token_ciphertext=crypto.encrypt_blob(token),
+            refresh_token_ciphertext=None,
+            expires_at=expires_at,
+            granted_scope="",
+        )
+    except Exception as exc:
+        # Best-effort rollback of the just-created server row. Never log the
+        # token / the raw exception message — only fingerprinted ids.
+        try:
+            storage.delete_mcp_server(user_id=user_id, server_id=server.server_id)
+        except Exception:
+            logger.warning(
+                "mcp.register.static_token.rollback_failed",
+                extra={
+                    "user_id_hash": fingerprint_id(user_id),
+                    "server_id_hash": fingerprint_id(server.server_id),
+                },
+            )
+        raise HTTPException(
+            status_code=502,
+            detail="Failed to persist the MCP server credential",
+        ) from exc
     logger.info(
         "mcp.register.static_token",
         extra={

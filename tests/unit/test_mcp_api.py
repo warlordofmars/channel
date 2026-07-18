@@ -393,6 +393,93 @@ def test_register_static_token_strips_surrounding_whitespace_before_storage(
     assert persisted["access_token_ciphertext"] == ("ENC::" + _FAKE_BEARER).encode()
 
 
+def _static_server_factory(kw: dict[str, Any]) -> Any:
+    from channel.models import MCPServer, MCPServerAuthStatus, MCPServerAuthType
+
+    return MCPServer(
+        server_id="srv-static",
+        user_id="user-1",
+        name=kw["name"],
+        url=kw["url"],
+        client_id=None,
+        tool_prefix=kw["tool_prefix"],
+        auth_type=MCPServerAuthType.STATIC_TOKEN,
+        auth_status=MCPServerAuthStatus.ACTIVE,
+        created_at="x",
+        updated_at="x",
+    )
+
+
+def test_register_static_token_rolls_back_server_when_token_persist_fails(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    public_dns: None,
+) -> None:
+    """If token persistence fails, the just-created ACTIVE server row must
+    be rolled back (else the user is stuck with a credential-less server
+    that has no reauth flow) and the request must 502."""
+    from channel import storage
+    from channel.mcp import crypto
+
+    monkeypatch.setattr(crypto, "encrypt_blob", lambda s: b"ENC")
+    monkeypatch.setattr(storage, "create_mcp_server", lambda **kw: _static_server_factory(kw))
+
+    def boom(**_kw: Any) -> None:
+        raise RuntimeError("DDB transient")
+
+    monkeypatch.setattr(storage, "put_mcp_token", boom)
+    rolled_back: dict[str, Any] = {}
+    monkeypatch.setattr(storage, "delete_mcp_server", lambda **kw: rolled_back.update(kw))
+
+    resp = client.post(
+        "/api/mcp/servers",
+        json={
+            "name": "GitHub",
+            "url": "https://api.githubcopilot.com/mcp/",
+            "auth_type": "static_token",
+            "token": _FAKE_BEARER,
+        },
+    )
+    assert resp.status_code == 502
+    assert "credential" in resp.json()["detail"]
+    # Rollback deleted exactly the server row we just created.
+    assert rolled_back["server_id"] == "srv-static"
+
+
+def test_register_static_token_502_even_when_rollback_delete_also_fails(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    public_dns: None,
+) -> None:
+    """A best-effort rollback that itself fails must NOT mask the 502 — the
+    failure is logged (fingerprinted) and the user still gets the error."""
+    from channel import storage
+    from channel.mcp import crypto
+
+    monkeypatch.setattr(crypto, "encrypt_blob", lambda s: b"ENC")
+    monkeypatch.setattr(storage, "create_mcp_server", lambda **kw: _static_server_factory(kw))
+
+    def boom_put(**_kw: Any) -> None:
+        raise RuntimeError("DDB transient")
+
+    def boom_delete(**_kw: Any) -> None:
+        raise RuntimeError("rollback also failed")
+
+    monkeypatch.setattr(storage, "put_mcp_token", boom_put)
+    monkeypatch.setattr(storage, "delete_mcp_server", boom_delete)
+
+    resp = client.post(
+        "/api/mcp/servers",
+        json={
+            "name": "GitHub",
+            "url": "https://api.githubcopilot.com/mcp/",
+            "auth_type": "static_token",
+            "token": _FAKE_BEARER,
+        },
+    )
+    assert resp.status_code == 502
+
+
 def test_register_rejects_userinfo_in_url(
     client: TestClient,
 ) -> None:
