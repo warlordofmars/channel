@@ -59,7 +59,12 @@ app.include_router(chats_router, prefix="/api")
 
 Conventions:
 
-- Authenticated domain routers carry `prefix="/api"`.
+- Most authenticated domain routers are mounted with `prefix="/api"`
+  (chats, models, assets, attachments, admin). A few (e.g. `prefs`,
+  `mcp`) are included **without** a prefix and instead declare their
+  full `/api/...` paths on the router itself. Both shapes work; prefer
+  the `prefix="/api"` form on new routers unless you have a reason not
+  to.
 - Auth routers do **not** carry `/api` (they expose well-known
   paths like `/auth/login` and `/auth/callback`).
 - Add a one-line comment above each `include_router` call stating
