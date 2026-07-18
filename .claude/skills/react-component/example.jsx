@@ -10,8 +10,11 @@
 //
 // Mirrors every convention captured in `SKILL.md`:
 //
-//   1. Hand-rolled primitives — a plain `<button>` styled via a CSS
-//      class + tokens (Channel has no shadcn/ui `Button`).
+//   1. Hand-rolled primitives — a plain `<button>` (Channel has no
+//      shadcn/ui `Button`) with a semantic `className`; the
+//      container uses inline `style` with tokens to stay
+//      self-contained. Real components prefer semantic classes from
+//      `styles/app.css` (SKILL.md §2) over inline style.
 //   2. CSS variables — colours via `var(--ink)`, `var(--border)`,
 //      `var(--raised)`, `var(--accent)`, `var(--danger)`; never hex.
 //   3. Icons — `Icon` from `ui/src/components/Icon.jsx` (the 24×24

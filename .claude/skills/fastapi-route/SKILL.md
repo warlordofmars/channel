@@ -25,6 +25,9 @@ matches the issue's area label. The current router files include:
 - `src/channel/api/models.py` — `GET /api/models` server allowlist
 - `src/channel/api/assets.py` — per-chat asset list/get/content/delete
 - `src/channel/api/attachments.py` — upload endpoints
+- `src/channel/api/prefs.py` — per-user UI preferences
+- `src/channel/api/mcp.py` — MCP server registry (mounted only when
+  `STARTER_MCP_REGISTRY_ENABLED=1`, the default)
 - `src/channel/api/admin.py` — admin-only metrics
 - `src/channel/api/csp.py` — CSP violation report receiver
 - `src/channel/api/main.py` — app construction, middleware,

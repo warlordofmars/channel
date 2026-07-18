@@ -6,6 +6,7 @@ triggers:
   paths:
     - "src/channel/storage.py"
     - "src/channel/models.py"
+    - "src/channel/_table_schema.py"
   areas: []
 ---
 
@@ -65,7 +66,9 @@ Two patterns to avoid:
 ## 2. Prefix taxonomy
 
 Current item families in the single table (canonical list — mirrors
-CLAUDE.md §"DynamoDB single table design"; keep the two in sync):
+CLAUDE.md §"DynamoDB single table design", plus the `PREFS` and
+`ATTACHMENT#` families that live in `src/channel/storage.py` but
+aren't yet documented in CLAUDE.md; keep the two in sync):
 
 | PK pattern | SK pattern | Purpose | TTL | Notes |
 | --- | --- | --- | --- | --- |
@@ -77,6 +80,8 @@ CLAUDE.md §"DynamoDB single table design"; keep the two in sync):
 | `USER#{user_id}` | `CHAT#{created_at}#{chat_id}` | Chat-index row (one per chat) | no | Sortable so Recents is a single `Query(ScanIndexForward=False)`; projects onto `ChatByIdIndex`. |
 | `CHAT#{chat_id}` | `MSG#{created_at}#{msg_id}` | Chat message row (one per turn) | no | UUID suffix avoids same-microsecond collisions across Lambda instances. |
 | `IDEMP#{user_id}` | `{key}` | Idempotency reservation | yes | TTL = 1h after reserve; streaming POST replay short-circuit. |
+| `USER#{user_id}` | `PREFS` | Per-user UI preferences | no | Single row per user; read/written by `get_prefs` / `put_prefs`. |
+| `USER#{user_id}` | `ATTACHMENT#{att_id}` | Uploaded attachment metadata | no | Canonical attachment row (S3 object lives in the attachments bucket). |
 | `USER#{user_id}` | `MCPSERVER#{server_id}` | Registered MCP server | no | DCR `client_id` + `tool_prefix` + `globally_enabled`; no GSI projection. |
 | `USER#{user_id}` | `MCPTOKEN#{server_id}` | MCP OAuth tokens (sibling to MCPSERVER) | yes | Access/refresh tokens KMS-encrypted at the app layer; `ttl` = `expires_at + 30d` as an orphan-row upper bound. |
 | `CHAT#{chat_id}` | `MCPSERVERS#META` | Per-chat MCP override | no | `mode=inherit` or `mode=explicit`. |
@@ -261,12 +266,11 @@ Wired across the project at:
   table (`TABLE = "channel"`) after each `inv dev` restart
 
 Never hardcode the table name — `code-reviewer` check 8 enforces
-this. The runtime contract is `STARTER_TABLE_NAME`; CLAUDE.md and
-`code-reviewer.md` sometimes use the shorter `TABLE_NAME` as a
-generic shorthand, but production code and tests must read from
-`STARTER_TABLE_NAME`. Code that reads only `TABLE_NAME` will fail
-at runtime because neither the CDK stack nor the test fixtures set
-that alias.
+this. The runtime contract is `STARTER_TABLE_NAME`. Some older docs
+(including `code-reviewer.md`) still refer to a bare `TABLE_NAME`,
+but that name is **not** set by the CDK stack or the test fixtures —
+production code and tests must read `STARTER_TABLE_NAME`, and code
+that reads only `TABLE_NAME` will fail at runtime.
 
 The endpoint URL is also env-driven (`DYNAMODB_ENDPOINT`) so tests
 point at DynamoDB Local without code changes. `_get_table()`
