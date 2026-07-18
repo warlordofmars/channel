@@ -646,7 +646,7 @@ describe("Conversation", () => {
     expect(screen.getByText("report.pdf")).toBeTruthy();
   });
 
-  it("swaps a fenced code block for its card by ordinal (#327)", () => {
+  it("decorates a fenced code block by ordinal instead of swapping a card (#362)", () => {
     mockStream({
       turns: [
         {
@@ -668,9 +668,87 @@ describe("Conversation", () => {
       ],
     });
     const { container } = renderAt("/app/c/c1");
-    expect(screen.getByText("snippet.py")).toBeTruthy();
-    // The raw fence was swapped — no <pre><code> remains.
-    expect(container.querySelector("pre code")).toBeNull();
+    // The fence renders as its native code block with an open-in-panel
+    // affordance — not swapped to a card.
+    const code = container.querySelector(".code-decorated pre code");
+    expect(code).toBeTruthy();
+    expect(code.textContent).toContain("x = 1");
+    expect(screen.getByText("Open in panel")).toBeTruthy();
+    // No double-render: the fence-origin code asset is excluded from the
+    // standalone-card partition, so there is no AssetCard for it.
+    expect(container.querySelector(".art-inline")).toBeNull();
+    expect(screen.queryByText("snippet.py")).toBeNull();
+    // Exactly one rendering of the code — no duplicate block.
+    expect(container.querySelectorAll("pre code").length).toBe(1);
+  });
+
+  it("opens ArtifactPanel via the browse route when the open-in-panel affordance is clicked (#362)", () => {
+    mockStream({
+      turns: [
+        {
+          msg_id: "a1",
+          role: "assistant",
+          text: "```python\nx = 1\ny = 2\n```",
+          streaming: false,
+          assets: [
+            {
+              asset_id: "as-code",
+              msg_id: "a1",
+              kind: "code",
+              title: "snippet.py",
+              size_bytes: 300,
+              source: { msg_id: "a1", fence_index: 0, lang: "python" },
+            },
+          ],
+        },
+      ],
+    });
+    render(
+      <MemoryRouter initialEntries={["/app/c/c1"]}>
+        <Routes>
+          <Route path="/app/c/:id" element={<Conversation />} />
+          <Route
+            path="/app/artifacts"
+            element={<div>ARTIFACTS BROWSE ROUTE</div>}
+          />
+        </Routes>
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByText("Open in panel"));
+    expect(screen.getByText("ARTIFACTS BROWSE ROUTE")).toBeTruthy();
+  });
+
+  it("degrades a non-located fence-code asset to a standalone card (#362 scan drift)", () => {
+    mockStream({
+      turns: [
+        {
+          msg_id: "a1",
+          role: "assistant",
+          text: "```python\nx = 1\n```",
+          streaming: false,
+          assets: [
+            {
+              asset_id: "as-drift",
+              msg_id: "a1",
+              kind: "code",
+              // Ordinal 5 can't be located in a one-fence message → the
+              // asset isn't decorated inline, so it must still card rather
+              // than silently disappear.
+              title: "orphan.py",
+              size_bytes: 300,
+              source: { msg_id: "a1", fence_index: 5, lang: "python" },
+            },
+          ],
+        },
+      ],
+    });
+    const { container } = renderAt("/app/c/c1");
+    // No inline decoration (the ordinal wasn't located)...
+    expect(container.querySelector(".code-decorated")).toBeNull();
+    expect(screen.queryByText("Open in panel")).toBeNull();
+    // ...but the asset still renders as a standalone card (reachable panel).
+    expect(container.querySelector(".art-inline")).toBeTruthy();
+    expect(screen.getByText("orphan.py")).toBeTruthy();
   });
 
   it("navigates to the browse route when an asset card is clicked (#327)", () => {
@@ -1943,7 +2021,9 @@ describe("Conversation", () => {
   });
 });
 
-describe("asset partition helpers (#327)", () => {
+describe("asset partition helpers (#327, #362)", () => {
+  // Text with three locatable fences → ordinals 0, 1, 2.
+  const text3 = "```\na\n```\n\n```\nb\n```\n\n```\nc\n```";
   const fenceAsset = {
     asset_id: "c1",
     kind: "code",
@@ -1952,32 +2032,64 @@ describe("asset partition helpers (#327)", () => {
   const imageAsset = { asset_id: "i1", kind: "image", source: { msg_id: "m" } };
   const codeNoSource = { asset_id: "c2", kind: "code" };
   const codeNoFence = { asset_id: "c3", kind: "code", source: { msg_id: "m" } };
+  // A fence-origin code asset whose ordinal is NOT present in the text
+  // (scan drift / text mismatch) — must still card, never disappear (#362).
+  const driftAsset = {
+    asset_id: "c4",
+    kind: "code",
+    source: { fence_index: 9 },
+  };
 
-  it("codeAssetsByFence keys fence-swap code assets by ordinal", () => {
-    const map = codeAssetsByFence([fenceAsset, imageAsset]);
+  it("codeAssetsByFence keys LOCATED fence-code assets by ordinal", () => {
+    const map = codeAssetsByFence([fenceAsset, imageAsset], text3);
     expect(map.get(2)).toBe(fenceAsset);
     expect(map.size).toBe(1);
   });
 
   it("codeAssetsByFence excludes code assets without a numeric fence_index", () => {
-    expect(codeAssetsByFence([codeNoSource, codeNoFence]).size).toBe(0);
+    expect(codeAssetsByFence([codeNoSource, codeNoFence], text3).size).toBe(0);
   });
 
-  it("codeAssetsByFence tolerates undefined", () => {
-    expect(codeAssetsByFence(undefined).size).toBe(0);
+  it("codeAssetsByFence excludes a fence-code asset whose ordinal is not located (scan drift)", () => {
+    expect(codeAssetsByFence([driftAsset], text3).size).toBe(0);
   });
 
-  it("standaloneAssets keeps everything that is not a fence swap", () => {
-    const out = standaloneAssets([
-      fenceAsset,
-      imageAsset,
-      codeNoSource,
-      codeNoFence,
-    ]);
+  it("codeAssetsByFence short-circuits (no text scan) when no fence-code candidate exists", () => {
+    // No candidate → empty map; the O(text) scan is skipped. `text3` has
+    // three fences, but none is claimed by a fence-code asset here.
+    expect(codeAssetsByFence([imageAsset, codeNoFence], text3).size).toBe(0);
+  });
+
+  it("codeAssetsByFence tolerates undefined assets and text", () => {
+    expect(codeAssetsByFence(undefined, undefined).size).toBe(0);
+  });
+
+  it("codeAssetsByFence with a candidate but undefined text locates nothing (empty-string guard)", () => {
+    // Candidate present (so the scan runs), but text is undefined → the
+    // `scanFences(text || "")` guard scans an empty string → nothing located
+    // → the fence-code asset degrades out of the decorate map.
+    expect(codeAssetsByFence([fenceAsset], undefined).size).toBe(0);
+  });
+
+  it("standaloneAssets excludes ONLY located (decorated) fence-code assets", () => {
+    const out = standaloneAssets(
+      [fenceAsset, imageAsset, codeNoSource, codeNoFence],
+      text3,
+    );
     expect(out.map((a) => a.asset_id)).toEqual(["i1", "c2", "c3"]);
   });
 
-  it("standaloneAssets tolerates undefined", () => {
-    expect(standaloneAssets(undefined)).toEqual([]);
+  it("standaloneAssets still cards a non-located fence-code asset (scan drift)", () => {
+    const out = standaloneAssets([driftAsset, imageAsset], text3);
+    expect(out.map((a) => a.asset_id)).toEqual(["c4", "i1"]);
+  });
+
+  it("standaloneAssets returns all assets (no text scan) when no fence-code candidate exists", () => {
+    const out = standaloneAssets([imageAsset, codeNoFence], text3);
+    expect(out.map((a) => a.asset_id)).toEqual(["i1", "c3"]);
+  });
+
+  it("standaloneAssets tolerates undefined assets and text", () => {
+    expect(standaloneAssets(undefined, undefined)).toEqual([]);
   });
 });
