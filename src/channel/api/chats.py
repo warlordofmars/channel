@@ -16,13 +16,16 @@ import json
 import logging
 import os
 import re
+from collections.abc import Sequence
 from typing import Any
 
 import boto3
 from fastapi import APIRouter, Depends, Header, HTTPException, Path, Response
 from fastapi.responses import StreamingResponse
+from strands.tools import ToolProvider
 from strands.tools.mcp import MCPClient
 from strands.types.exceptions import MaxTokensReachedException
+from strands.types.tools import AgentTool
 
 from channel import storage
 from channel.agents.asset_producers import (
@@ -71,6 +74,7 @@ from channel.metrics import (
     record_chat_delete_attachment_wipe_outcome,
     record_chat_delete_memory_wipe_outcome,
     record_followup_outcome,
+    record_mcp_tools_capped,
 )
 from channel.models import (
     Attachment,
@@ -95,6 +99,18 @@ _DEFAULT_MODEL = "claude-sonnet-4-6"
 # chats; Bedrock model-context-window caps the real upper bound.
 # A future ConversationManager can trim/summarise beyond this.
 _HISTORY_TURNS_LIMIT = 100
+
+# #389 — per-server MCP tool-set budget. A single heavy MCP server (e.g.
+# GitHub, which advertises ~50-80 tool schemas) blows up per-turn token
+# cost: Strands' ``BedrockModel`` ships the ENTIRE tool set in the
+# Converse ``toolConfig`` on EVERY turn — whether or not any tool fires —
+# so 50-80 schemas add ~15-20K tokens of pure overhead per turn (~10x the
+# normal per-turn burn, which exhausted the account's Bedrock daily-token
+# quota). This caps how many tools any single server contributes so one
+# heavy server can't dominate every chat's budget. Overridable via
+# ``STARTER_MCP_MAX_TOOLS_PER_SERVER``; a non-positive override disables
+# the cap (see ``_mcp_max_tools_per_server``).
+_DEFAULT_MCP_MAX_TOOLS_PER_SERVER = 24
 
 
 def _to_strands_messages(messages: list[Message]) -> list[dict[str, Any]]:
@@ -624,11 +640,108 @@ def _build_tool_registry() -> list[Any]:
     return registry
 
 
+def _mcp_max_tools_per_server() -> int:
+    """Resolve the per-server MCP tool budget from the environment (#389).
+
+    ``STARTER_MCP_MAX_TOOLS_PER_SERVER`` overrides
+    ``_DEFAULT_MCP_MAX_TOOLS_PER_SERVER``. Semantics:
+
+    * unset → the default (``_DEFAULT_MCP_MAX_TOOLS_PER_SERVER``).
+    * a positive integer ``N`` → cap each server at ``N`` tools.
+    * ``0`` or any non-positive integer → cap disabled; every advertised
+      tool is exposed (explicit opt-out for a user who genuinely wants a
+      server's full tool set and accepts the token cost).
+    * a non-integer value → ignored, falls back to the default with a
+      warning — a fat-fingered env var must not silently drop tool
+      coverage.
+    """
+    raw = os.environ.get("STARTER_MCP_MAX_TOOLS_PER_SERVER")
+    if raw is None:
+        return _DEFAULT_MCP_MAX_TOOLS_PER_SERVER
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning(
+            "mcp.tool_budget_invalid raw=%s falling_back=%d",
+            raw,
+            _DEFAULT_MCP_MAX_TOOLS_PER_SERVER,
+        )
+        return _DEFAULT_MCP_MAX_TOOLS_PER_SERVER
+
+
+class _CappedMCPToolProvider(ToolProvider):
+    """Wrap an ``MCPClient`` and cap the tools it contributes per turn (#389).
+
+    ``MCPClient`` is itself a Strands ``ToolProvider`` — the Agent
+    enumerates its tools via ``load_tools()`` at registry-build time, and
+    every enumerated tool's JSON schema is shipped in the Bedrock Converse
+    ``toolConfig`` on EVERY turn. A server that advertises 50-80 tools
+    therefore adds ~15-20K tokens of pure schema overhead per turn. This
+    wrapper delegates the whole ``ToolProvider`` lifecycle
+    (``add_consumer`` / ``load_tools`` / ``remove_consumer``, and thus the
+    inner client's background-thread start/stop) to the inner client, but
+    truncates the enumerated tool list to ``max_tools`` before it reaches
+    the registry — so the cap constrains the ``toolConfig`` at its source.
+
+    Ordering is deterministic: tools are sorted by ``tool_name`` and the
+    lexicographically-first ``max_tools`` are kept. A stable name sort
+    means the model sees the same subset on every turn (no tool flicker
+    between turns) regardless of the order the server happens to advertise
+    them in. The name-sorted prefix is a blind heuristic — v1 ships fast;
+    a user-selectable per-server allowlist is the phase-2 follow-on
+    tracked on #389.
+
+    ``max_tools <= 0`` disables truncation — the inner client's full tool
+    set passes through unchanged.
+
+    Dropped tools are never silently truncated: each cap emits a
+    structured ``mcp.tools_capped`` log line naming every dropped tool and
+    increments the ``MCPToolsCapped`` EMF counter.
+    """
+
+    def __init__(self, inner: MCPClient, *, server_id: str, max_tools: int) -> None:
+        self._inner = inner
+        self._server_id = server_id
+        self._max_tools = max_tools
+
+    @property
+    def inner(self) -> MCPClient:
+        """The wrapped ``MCPClient`` (read-only; used by tests + callers
+        that need the underlying transport identity)."""
+        return self._inner
+
+    async def load_tools(self, **kwargs: Any) -> Sequence[AgentTool]:
+        tools = list(await self._inner.load_tools(**kwargs))
+        if self._max_tools <= 0 or len(tools) <= self._max_tools:
+            return tools
+        # Sort by tool name so the kept subset is stable across turns —
+        # the same N tools every time, not whatever order the server
+        # paginated them in.
+        ordered = sorted(tools, key=lambda tool: tool.tool_name)
+        kept = ordered[: self._max_tools]
+        dropped = ordered[self._max_tools :]
+        logger.warning(
+            "mcp.tools_capped server_id_hash=%s advertised=%d kept=%d dropped=%s",
+            fingerprint_id(self._server_id),
+            len(tools),
+            len(kept),
+            [tool.tool_name for tool in dropped],
+        )
+        await record_mcp_tools_capped()
+        return kept
+
+    def add_consumer(self, consumer_id: Any, **kwargs: Any) -> None:
+        self._inner.add_consumer(consumer_id, **kwargs)
+
+    def remove_consumer(self, consumer_id: Any, **kwargs: Any) -> None:
+        self._inner.remove_consumer(consumer_id, **kwargs)
+
+
 async def _build_mcp_clients_for_chat(
     *,
     user_id: str,
     chat_id: str,
-) -> list[MCPClient]:
+) -> list[ToolProvider]:
     """Resolve active MCP servers + tokens for one chat turn.
 
     Per the spike (§Question 2): chats inherit user-level
@@ -652,6 +765,7 @@ async def _build_mcp_clients_for_chat(
     if os.environ.get("STARTER_MCP_REGISTRY_ENABLED", "1") != "1":
         return []
 
+    max_tools = _mcp_max_tools_per_server()
     registered = storage.list_mcp_servers_for_user(user_id)
     settings = storage.get_chat_mcp_settings(chat_id)
     if settings.mode == ChatMCPMode.EXPLICIT:
@@ -672,7 +786,7 @@ async def _build_mcp_clients_for_chat(
     # so this mirrors that behavior at the runtime layer.
     active = [s for s in active if s.auth_status == MCPServerAuthStatus.ACTIVE]
 
-    clients: list[MCPClient] = []
+    clients: list[ToolProvider] = []
     for server in active:
         # DNS-rebinding defense: re-validate the persisted URL with a
         # fresh DNS lookup before each turn. A hostname that resolved
@@ -720,13 +834,24 @@ async def _build_mcp_clients_for_chat(
                 status=MCPServerAuthStatus.EXPIRED,
             )
             continue
+        # #389 — wrap every MCPClient in a per-server tool-budget cap so
+        # one heavy server (GitHub ships ~50-80 tools) can't 10x per-turn
+        # token cost. The cap is applied lazily inside ``load_tools()``,
+        # which the Agent calls once at registry-build time; wrapping
+        # (rather than pre-enumerating here) keeps the whole native
+        # MCPClient lifecycle — background-thread start on load, consumer
+        # cleanup on ``agent.cleanup()`` — intact.
         clients.append(
-            MCPClient(
-                make_authenticated_transport(
-                    server_url=server.url,
-                    access_token=token,
+            _CappedMCPToolProvider(
+                MCPClient(
+                    make_authenticated_transport(
+                        server_url=server.url,
+                        access_token=token,
+                    ),
+                    prefix=server.tool_prefix,
                 ),
-                prefix=server.tool_prefix,
+                server_id=server.server_id,
+                max_tools=max_tools,
             )
         )
     return clients
@@ -962,9 +1087,10 @@ async def _stream_bedrock_reply(
         yield sse_attachment_error(**err)
 
     tool_registry = _build_tool_registry()
-    # #207 — append MCPClient instances. Resolution failures are
-    # swallowed inside _build_mcp_clients_for_chat (the helper flips
-    # the MCPSERVER row to EXPIRED so the SPA can surface Reconnect).
+    # #207 — append MCP tool providers (each a per-server tool-budget cap
+    # wrapping an MCPClient, #389). Resolution failures are swallowed
+    # inside _build_mcp_clients_for_chat (the helper flips the MCPSERVER
+    # row to EXPIRED so the SPA can surface Reconnect).
     mcp_clients = await _build_mcp_clients_for_chat(
         user_id=claims["sub"],
         chat_id=chat.chat_id,
