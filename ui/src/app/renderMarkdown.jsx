@@ -102,7 +102,9 @@ function CodeFenceDecorated({ fenceText, asset, onOpen }) {
         onClick={handleOpen}
         title="Open in panel"
       >
-        <Icon name="expand" size={13} />
+        <span className="code-open-panel-ic" aria-hidden="true">
+          <Icon name="expand" size={13} />
+        </span>
         Open in panel
       </button>
     </div>

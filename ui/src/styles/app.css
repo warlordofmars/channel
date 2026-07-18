@@ -585,6 +585,7 @@ html.is-electron-mac .sb-top {
   transition: border-color .12s, color .12s;
 }
 .code-open-panel:hover { border-color: var(--accent); color: var(--accent); }
+.code-open-panel-ic { display: flex; }
 
 /* inline transcript image (#361) — a <button> wrapping a responsive <img>.
    Bytes are Bearer-fetched into a blob object URL (see useAssetContent), so

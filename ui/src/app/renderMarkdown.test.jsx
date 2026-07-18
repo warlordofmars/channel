@@ -224,6 +224,21 @@ describe("renderMarkdown — fence-decorate (#362, reconciles #327)", () => {
     expect(container.querySelector(".code-open-panel")).toBeTruthy();
   });
 
+  it("hides the decorative affordance icon from assistive tech (aria-hidden)", () => {
+    const md = "```python\nx = 1\n```";
+    const { container } = wrap(
+      renderMarkdown(md, false, {
+        codeAssets: new Map([[0, codeAsset(0)]]),
+        onOpenAsset: vi.fn(),
+      }),
+    );
+    const iconWrap = container.querySelector(
+      ".code-open-panel .code-open-panel-ic",
+    );
+    expect(iconWrap).toBeTruthy();
+    expect(iconWrap.getAttribute("aria-hidden")).toBe("true");
+  });
+
   it("renders exactly one code block — no double-render of the fence", () => {
     const md = "```python\nx = 1\ny = 2\n```";
     const codeAssets = new Map([[0, codeAsset(0)]]);
