@@ -108,7 +108,9 @@ The table has its TTL attribute set to `ttl` — configured in CDK at
 `update_time_to_live` with `AttributeName="ttl"`). To enable expiry
 on a new item type, set the `ttl` attribute on the item.
 
-Two rules, both enforced by `code-reviewer` check 8:
+Two rules, both enforced by `code-reviewer`'s DynamoDB review
+(check 8 — its example snippets still show the pre-fork layout, but
+the `ttl` rules it enforces are current):
 
 - **Attribute name is `ttl`** — lowercase, exact. The table config
   only honours that one name; setting `expires_at` or `TTL` is
