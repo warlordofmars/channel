@@ -460,6 +460,12 @@ Don't re-derive sub-project boundaries (A/B/C/D) here — cite the spec.
 - E2e tests: run against deployed AWS dev environment
 - **100% coverage required** — both Python (pytest-cov) and JS (vitest v8);
   CI fails below 100%
+- **Gotcha: the local pre-push gate does NOT enforce JS coverage.**
+  `inv test-frontend` (and thus `inv pre-push`) runs `npm test`
+  (`vitest run`, no coverage), so a per-file branch/line gap passes
+  locally but fails CI, which runs `npm run test:coverage`
+  (`vitest run --coverage`) with the 100% v8 threshold. Before pushing a
+  UI change, run `cd ui && npm run test:coverage` to match CI.
 - Every new UI component needs a co-located `*.test.jsx` file
 
 ### E2e test conventions
