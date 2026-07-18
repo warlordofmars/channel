@@ -72,11 +72,15 @@ function isDecoratedInline(a, located) {
 }
 
 // Map<fence_index, asset> for the fenced blocks this turn decorates inline —
-// keyed off fences actually located in `text`.
+// keyed off fences actually located in `text`. Runs per render, so it skips
+// the O(text) fence scan entirely unless the turn actually carries a
+// fence-code candidate (the common turn has none).
 export function codeAssetsByFence(assets, text) {
+  const list = assets || [];
+  if (!list.some(isFenceCodeAsset)) return new Map();
   const located = locatedFenceIndices(text);
   const map = new Map();
-  for (const a of assets || []) {
+  for (const a of list) {
     if (isDecoratedInline(a, located)) map.set(a.source.fence_index, a);
   }
   return map;
@@ -85,10 +89,14 @@ export function codeAssetsByFence(assets, text) {
 // The assets rendered as standalone cards under the message. Only fences
 // decorated inline (located) are excluded; uploads, code-exec images, code
 // assets without a fence_index, AND non-located fence-code assets (scan
-// drift) all still card.
+// drift) all still card. Called per render for BOTH turn branches, so the
+// no-fence-code common case short-circuits to O(#assets) without scanning
+// the message text.
 export function standaloneAssets(assets, text) {
+  const list = assets || [];
+  if (!list.some(isFenceCodeAsset)) return list;
   const located = locatedFenceIndices(text);
-  return (assets || []).filter((a) => !isDecoratedInline(a, located));
+  return list.filter((a) => !isDecoratedInline(a, located));
 }
 
 /**

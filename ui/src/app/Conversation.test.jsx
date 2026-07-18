@@ -2054,8 +2054,21 @@ describe("asset partition helpers (#327, #362)", () => {
     expect(codeAssetsByFence([driftAsset], text3).size).toBe(0);
   });
 
+  it("codeAssetsByFence short-circuits (no text scan) when no fence-code candidate exists", () => {
+    // No candidate → empty map; the O(text) scan is skipped. `text3` has
+    // three fences, but none is claimed by a fence-code asset here.
+    expect(codeAssetsByFence([imageAsset, codeNoFence], text3).size).toBe(0);
+  });
+
   it("codeAssetsByFence tolerates undefined assets and text", () => {
     expect(codeAssetsByFence(undefined, undefined).size).toBe(0);
+  });
+
+  it("codeAssetsByFence with a candidate but undefined text locates nothing (empty-string guard)", () => {
+    // Candidate present (so the scan runs), but text is undefined → the
+    // `scanFences(text || "")` guard scans an empty string → nothing located
+    // → the fence-code asset degrades out of the decorate map.
+    expect(codeAssetsByFence([fenceAsset], undefined).size).toBe(0);
   });
 
   it("standaloneAssets excludes ONLY located (decorated) fence-code assets", () => {
@@ -2069,6 +2082,11 @@ describe("asset partition helpers (#327, #362)", () => {
   it("standaloneAssets still cards a non-located fence-code asset (scan drift)", () => {
     const out = standaloneAssets([driftAsset, imageAsset], text3);
     expect(out.map((a) => a.asset_id)).toEqual(["c4", "i1"]);
+  });
+
+  it("standaloneAssets returns all assets (no text scan) when no fence-code candidate exists", () => {
+    const out = standaloneAssets([imageAsset, codeNoFence], text3);
+    expect(out.map((a) => a.asset_id)).toEqual(["i1", "c3"]);
   });
 
   it("standaloneAssets tolerates undefined assets and text", () => {
