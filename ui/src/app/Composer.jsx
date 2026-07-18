@@ -93,6 +93,32 @@ export function failedAttachmentMessage(count) {
 }
 
 /**
+ * Extract pasted ``File`` objects from a paste event's
+ * ``clipboardData`` (#384). A screenshot copied to the OS clipboard
+ * (macOS Cmd+Ctrl+Shift+4, Windows Snip) surfaces as a
+ * ``kind === "file"`` entry in ``clipboardData.items``; a file copied
+ * from the OS file manager surfaces in ``clipboardData.files``. Prefer
+ * the ``items`` path — it cleanly separates the pasted file from the
+ * plain-text representation the same paste also carries (the file's
+ * *name*, which the default textarea paste would otherwise insert) —
+ * then fall back to ``files`` for browsers that only populate that one.
+ *
+ * Returns an empty array for a text-only paste; the caller uses that to
+ * decide whether to intercept (files present → route through the attach
+ * pipeline) or leave the default text paste untouched (empty → normal
+ * Cmd+V of text).
+ */
+export function filesFromClipboard(clipboardData) {
+  if (!clipboardData) return [];
+  const fromItems = Array.from(clipboardData.items ?? [])
+    .filter((item) => item.kind === "file")
+    .map((item) => item.getAsFile())
+    .filter((file) => file != null);
+  if (fromItems.length > 0) return fromItems;
+  return Array.from(clipboardData.files ?? []);
+}
+
+/**
  * Auto-growing textarea + attach + model picker + mic + send. Translated
  * from design-sources/app/chat.jsx `Composer` function.
  *
@@ -361,6 +387,21 @@ const Composer = forwardRef(function Composer(
     handleFiles(e.dataTransfer?.files);
   }
 
+  // ---- paste (#384) -----------------------------------------------
+
+  // Cmd/Ctrl+V of a screenshot or copied file: route the clipboard's
+  // File items through the SAME validate → presign → upload → finalize
+  // pipeline the picker and drag-drop use, rather than letting the
+  // textarea paste the file's *name* as plain text. When the clipboard
+  // carries no file items (an ordinary text paste), preventDefault is
+  // skipped so the normal text paste proceeds untouched.
+  function onPaste(e) {
+    const files = filesFromClipboard(e.clipboardData);
+    if (files.length === 0) return;
+    e.preventDefault();
+    handleFiles(files);
+  }
+
   // ---- submit -----------------------------------------------------
 
   const anyAttaching = atts.some((a) => a.status === "attaching");
@@ -508,6 +549,7 @@ const Composer = forwardRef(function Composer(
           value={text}
           onChange={onTextareaChange}
           onKeyDown={onKeyDown}
+          onPaste={onPaste}
         />
         <div className="composer-row">
           <AttachMenu onFiles={handleFiles} />
