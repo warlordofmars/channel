@@ -136,6 +136,18 @@ git checkout -b chore/issue-<number>-<short-slug> origin/development
 
 The W4 shadow-branch fast-forward in `## Push discipline` does **not** apply here — these `git checkout -b` commands read the remote-tracking ref `origin/development` (just refreshed by `git fetch origin`), never local `development`, so a stale local shadow ref cannot poison the new feature branch's base. W4 governs the §6 rebase + push flow and the §7 CI fix-and-push loop, where the shadow refs can interact with push commands.
 
+### 2.5. Prepare the worktree environment
+
+A fresh worktree (or clone) has **no installed dependencies** — `node_modules` is per-directory and the Python venv may be bare. The `inv pre-push` gate then fails before it does any useful work: `test_frontend` and `desktop_test` (both deps of `pre_push` in `tasks.py`) die with `vitest: command not found`, and the mypy `typecheck` step fails importing `aws_cdk`. Install everything before §3:
+
+```bash
+uv sync --all-extras --group infra     # matches ci.yml infra jobs; the dev group installs by default
+(cd ui && npm install)
+(cd desktop && npm install)
+```
+
+Once issue #333 lands its `inv worktree-setup` task (which wraps exactly these three commands), run `uv run inv worktree-setup` instead of the block above.
+
 ### 3. Implement
 
 Make the necessary changes. Follow all conventions in CLAUDE.md.
@@ -273,6 +285,15 @@ If any check fails:
 
 If the same check fails 3 times without a clear fix, stop and ask.
 
+### 7.1. Wait discipline
+
+These rules govern **every** monitoring/waiting loop in this protocol — §7 (PR CI), §7.5 (Copilot review), and §8 (development pipeline post-merge).
+
+- **Wait only on condition-bearing checks.** Use `gh run watch <run-id>` (it blocks until the run resolves), or a poll loop with an **explicit break condition and bounded scope** — the §8 loop is the model shape: it selects a specific `RUN_ID` and breaks the instant one appears (`[ -n "$RUN_ID" ] && break`). Every wait must be tied to a concrete state transition it is watching for.
+- **Or end the turn.** If there is nothing to actively watch (the awaited run hasn't started, or you've handed off), stop. Completion notifications re-invoke the worker when the awaited run finishes — ending the turn is always preferable to spinning.
+- **Never unconditional `sleep`-loop idle timers.** Do not improvise a bare `while true; do sleep N; done` — or any wait with no state-transition break condition — to "keep the session alive." On 2026-07-12 improvised idle loops kept re-waking finished workers for hours (observed on the #316 and #237 cycles), burning cycle time on sessions that had nothing left to do.
+- **Corollary — never kill processes you didn't spawn.** A sibling session's live `gh run watch` loop is indistinguishable from a stray of your own. On 2026-07-12 one worker nearly killed sibling sessions' watch loops it mistook for strays. Only terminate processes you started in the current cycle.
+
 ### 7.3. Run code-reviewer
 
 Runs on **every** agent-created PR, immediately after CI is green. Invokes the `code-reviewer` agent via the `Agent` tool with the PR number. The agent checks all CLAUDE.md conventions (copyright headers, CSS variables, no hardcoded secrets, DynamoDB patterns, auth safety, GitHub Actions SHA pinning, etc.) and returns a structured report.
@@ -298,7 +319,7 @@ Runs on **every** agent-created PR. The `agent-safe` label only gates whether th
    ```bash
    gh pr edit <PR-NUMBER> --add-reviewer "@copilot"
    ```
-2. Wait for the Copilot **`Agent` check-run** to reach `completed`, then wait an **additional ~90s** before fetching review comments — the Agent check closes before Copilot finishes writing line-level comments (observed: Agent completed at 12:41:52, comments posted at 12:43:03). Poll with:
+2. Wait for the Copilot **`copilot-pull-request-reviewer` check-run** (posted by the `github-actions` app — **not** a check named `Agent`) to reach `completed`, then wait an **additional ~90s** before fetching review comments — the check-run closes before Copilot finishes writing line-level comments (observed: check-run completed at 12:41:52, comments posted at 12:43:03). Poll with:
    ```bash
    gh api repos/{owner}/{repo}/pulls/<PR-NUMBER>/comments --jq '.[].body'
    gh api repos/{owner}/{repo}/pulls/<PR-NUMBER>/reviews --jq '.[] | {state, body: .body[:120]}'
@@ -308,6 +329,8 @@ Runs on **every** agent-created PR. The `agent-safe` label only gates whether th
    - **Correctness / security / clarity finding** — fix on the same branch, run `uv run inv pre-push`, push, reply `Fixed in <SHA> — <one-line summary>`, resolve the thread, re-request Copilot review.
    - **Pure style nit** (Tailwind class order, const-vs-let, naming preference, import sort) — reply declining with a citation to project conventions, resolve the thread.
    - **Ambiguous or architecturally significant** — emit `HUMAN_INPUT_REQUIRED: Copilot flagged X on #NNN — unclear call` and stop. Leave the thread open.
+
+   **Note — re-requesting a Copilot review retriggers CI.** Each `gh pr edit <PR-NUMBER> --add-reviewer "@copilot"` fires a `review_requested` event, which **starts a fresh full CI run** for the PR. Expect this: every review iteration produces a new CI run that must go green before the next Copilot pass is meaningful. Watch it with the same §7 loop and treat it as normal, not as an unexpected/spurious run.
 4. **Hard cap: 5 iterations, early-exit on convergence.** Stop when 5 round-trips are done OR two consecutive iterations produce no new actionable findings. If unresolved findings remain, emit `HUMAN_INPUT_REQUIRED: Copilot loop ended with open findings on #NNN`.
 5. **Agent-safe PRs**: arm auto-merge:
    ```bash
