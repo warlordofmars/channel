@@ -1,6 +1,6 @@
 ---
 name: cdk-construct
-description: "Conventions for authoring CDK constructs in the AgentCore Starter stack — placeholder stub until the partition work in #48 settles props, public-attribute, and CDK Nag suppression patterns."
+description: "Conventions for authoring CDK constructs in the Channel stack (infra/stacks/channel_stack.py) — props pattern, cross-construct value exposure, IAM scoping, and CDK Nag suppression placement. Placeholder stub: conventions not yet codified into a full skill."
 status: stub
 triggers:
   paths:
@@ -9,76 +9,83 @@ triggers:
   areas:
     - "infra"
 ---
-> STUB — full skill blocked by #48 (infra partition); follow-up #68
+> STUB — the infra is a single `ChannelStack`; the partitioned
+> construct conventions are not yet codified. See §Gaps.
 
 # cdk-construct
 
-Skill scope: CDK construct conventions for the AgentCore Starter
-stack — props pattern, cross-construct value exposure, IAM scoping,
-and CDK Nag suppression placement. The conventions are not yet
-stable; the partition work in #48 (which splits
-`infra/stacks/starter_stack.py` into 6-7 constructs) is what
-stabilises them.
+Skill scope: CDK construct conventions for the Channel stack —
+props pattern, cross-construct value exposure, IAM scoping, and
+CDK Nag suppression placement.
 
-Until #48 lands, all infra lives in a single
-`AgentCoreStarterStack` class at
-`infra/stacks/starter_stack.py` — the current shape reference for
-how resources are wired, IAM grants are scoped, and CDK Nag
-suppressions are attached. New infra work should follow the
-existing patterns in that file rather than inventing a partitioned
-shape ahead of #48.
+Today all infra lives in a single `ChannelStack(cdk.Stack)` class
+at `infra/stacks/channel_stack.py` (wired from the CDK app entry
+at `infra/app.py`). That file is the current reference for how
+resources are wired, IAM grants are scoped, and CDK Nag
+suppressions are attached. The stack has **not** been partitioned
+into per-domain constructs, so a construct-authoring convention set
+does not yet exist to document — new infra work should follow the
+existing patterns in `channel_stack.py`.
 
 ## What we know now (intent only)
 
-These three conventions are settled in principle and will carry
-forward into the partitioned shape:
+These are general CDK practices the future full skill is expected
+to formalize; they are not yet mechanically enforced:
 
-- **Each construct owns its own IAM scope.** Cross-construct
-  grants happen at the composer (stack) level, not inside the
-  construct that needs the grant. A construct never reaches into
-  another construct's resource to attach a policy.
+- **Each construct owns its own IAM scope.** Cross-construct grants
+  happen at the composer (stack) level, not inside the construct
+  that needs the grant. A construct never reaches into another
+  construct's resource to attach a policy.
 - **Constructs expose typed values to one another.** The exact
-  shape of the props pattern (typed kwargs vs dataclass) is part
-  of what #48 settles.
+  shape of the props pattern (typed kwargs vs dataclass) is not yet
+  settled — see §Gaps.
 - **CDK Nag suppressions live with the construct that owns the
-  suppressed resource** — per the #48 acceptance criterion. A
-  suppression on a Lambda role lives in the construct that
-  defines that Lambda, not in the composer.
+  suppressed resource.** A suppression on a Lambda role lives in
+  the construct that defines that Lambda, not in the composer.
 
 ## Gaps
 
 ### Props convention not settled
 
-- **What's missing:** Whether constructs accept typed `**kwargs`, a `@dataclass` props object, or a TypedDict — and the naming convention for the props type.
-- **Why deferred:** The partition PR is what picks the shape; picking it here would pre-commit a decision that belongs to the partition design.
-- **Unblocks when:** #48 lands the first partitioned constructs and establishes the props shape used across them.
+- **What's missing:** Whether constructs accept typed `**kwargs`, a
+  `@dataclass` props object, or a TypedDict — and the naming
+  convention for the props type.
+- **Why deferred:** No partitioned constructs exist yet
+  (`channel_stack.py` is a single class); the convention only
+  emerges when the stack is split.
+- **Unblocks when:** a future partition of `channel_stack.py`
+  establishes the props shape; no tracking issue is scheduled yet —
+  file one per the README §"When to add a new skill" soft rule when
+  the friction recurs.
 
 ### Public-attribute pattern for cross-construct exposure
 
-- **What's missing:** The exact convention for how one construct exposes a value (table ARN, function URL, role) to another — attribute on the construct instance, accessor method, or re-exposed via stack-level outputs.
-- **Why deferred:** The pattern only emerges once two or more constructs need to consume each other's outputs at the composer level.
-- **Unblocks when:** #48 wires the first cross-construct consumer and establishes the lookup shape.
+- **What's missing:** The exact convention for how one construct
+  exposes a value (table ARN, function URL, role) to another —
+  attribute on the construct instance, accessor method, or
+  re-exposed via stack-level outputs.
+- **Why deferred:** The pattern only emerges once two or more
+  constructs need to consume each other's outputs at the composer
+  level.
+- **Unblocks when:** the same partition work wires the first
+  cross-construct consumer; no issue scheduled yet.
 
 ### Construct-level vs composer-level helpers
 
-- **What's missing:** Whether per-resource invariant helpers belong on the construct that owns the resource or on the composer that assembles them — for instance, an `Edge` construct *might* expose a `compress: bool` parameter, or a `Secrets` construct *might* expose a `validate_no_placeholders()` method, but the actual APIs will be decided in #48.
-- **Why deferred:** The boundary depends on whether the helper is a per-resource invariant (construct) or a stack-wide validation (composer); the partition PR is what draws the line.
-- **Unblocks when:** #48 places the first such helpers and the construct-vs-composer boundary becomes visible.
-
-## Follow-up
-
-Once #48 lands, #68 (which replaces this stub with a full skill)
-takes over — covering the settled props convention,
-public-attribute pattern, and CDK Nag suppression placement.
+- **What's missing:** Whether per-resource invariant helpers belong
+  on the construct that owns the resource or on the composer that
+  assembles them.
+- **Why deferred:** The boundary depends on whether the helper is a
+  per-resource invariant (construct) or a stack-wide validation
+  (composer); the partition is what draws the line.
+- **Unblocks when:** the same partition places the first such
+  helpers; no issue scheduled yet.
 
 ## See also
 
-- `infra/stacks/starter_stack.py` — current single-class shape;
-  the reference for how resources, IAM grants, and CDK Nag
-  suppressions are wired today.
+- `infra/stacks/channel_stack.py` — the current single-class
+  `ChannelStack`; the reference for how resources, IAM grants, and
+  CDK Nag suppressions are wired today.
+- `infra/app.py` — the CDK app entry point.
 - [ADR-0006](../../../docs/adr/0006-skills-system.md)
-  §"Stub skill convention" — the schema contract this stub
-  follows.
-- #48 — the partition work that stabilises CDK construct
-  conventions in this repo.
-- #68 — the follow-up that replaces this stub with a full skill.
+  §"Stub skill convention" — the schema contract this stub follows.

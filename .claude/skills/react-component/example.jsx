@@ -10,12 +10,12 @@
 //
 // Mirrors every convention captured in `SKILL.md`:
 //
-//   1. shadcn/ui primitives — consumes `Button` from
-//      `ui/src/components/ui/button.jsx` instead of raw `<button>`.
-//   2. CSS variables — colours via `var(--text-muted)`,
-//      `var(--border)`, `var(--surface)`; never hex.
-//   3. Lucide icons — `CheckCircle` / `XCircle` from `lucide-react`,
-//      never emoji.
+//   1. Hand-rolled primitives — a plain `<button>` styled via a CSS
+//      class + tokens (Channel has no shadcn/ui `Button`).
+//   2. CSS variables — colours via `var(--ink)`, `var(--border)`,
+//      `var(--raised)`, `var(--accent)`, `var(--danger)`; never hex.
+//   3. Icons — `Icon` from `ui/src/components/Icon.jsx` (the 24×24
+//      stroke set), never `lucide-react`, never emoji.
 //   4. Co-located tests — see the companion test block below.
 //   5. Vitest gotchas — named handlers (no anonymous arrows on
 //      `onClick`), and `vi.useFakeTimers()` activated *before*
@@ -29,8 +29,7 @@
 // ---------------------------------------------------------------------
 
 import React, { useEffect, useRef, useState } from "react";
-import { CheckCircle, XCircle } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import Icon from "@/components/Icon.jsx";
 
 // Export the constant so the companion test can import it and stay
 // in sync if the duration changes — see the test block below.
@@ -39,9 +38,9 @@ export const AUTO_DISMISS_MS = 5000;
 /**
  * Toast — a transient confirmation banner.
  *
- * Demonstrates the full convention set: shadcn `Button` for the
- * dismiss action, `var(--*)` tokens for every colour, Lucide icons
- * for the status glyph, and named handlers (`handleDismiss`,
+ * Demonstrates the full convention set: a plain `<button>` for the
+ * dismiss action, `var(--*)` tokens for every colour, an `Icon.jsx`
+ * glyph for the status marker, and named handlers (`handleDismiss`,
  * `onAutoDismiss`, `cleanup`) so the v8 counter sees a small,
  * fixed set of named functions instead of one anonymous closure
  * per call site. Naming alone does not satisfy the 100% functions
@@ -89,22 +88,36 @@ export default function Toast({ status, message, onClose }) {
 
   if (!visible) return null;
 
-  const Icon = status === "success" ? CheckCircle : XCircle;
-  // Status colour comes from a token, not a hex literal.
+  // Icon.jsx renders currentColor SVGs, so the glyph inherits the
+  // wrapping element's `color`. Status colour comes from a token,
+  // not a hex literal.
+  const iconName = status === "success" ? "check" : "close";
   const iconColour =
-    status === "success" ? "var(--success)" : "var(--danger)";
+    status === "success" ? "var(--accent)" : "var(--danger)";
 
   return (
     <div
       role="status"
       aria-live="polite"
-      className="fixed bottom-4 right-4 flex items-center gap-3 rounded-md border border-[var(--border)] bg-[var(--surface)] px-4 py-3 text-[var(--text)] shadow-lg"
+      className="toast"
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: "0.75rem",
+        border: "1px solid var(--border)",
+        background: "var(--raised)",
+        color: "var(--ink)",
+        borderRadius: "var(--r-md)",
+        padding: "0.75rem 1rem",
+      }}
     >
-      <Icon size={18} aria-hidden="true" style={{ color: iconColour }} />
-      <span className="text-sm">{message}</span>
-      <Button variant="ghost" size="sm" onClick={handleDismiss}>
+      <span style={{ color: iconColour, display: "inline-flex" }}>
+        <Icon name={iconName} size={18} />
+      </span>
+      <span>{message}</span>
+      <button type="button" className="toast-dismiss" onClick={handleDismiss}>
         Dismiss
-      </Button>
+      </button>
     </div>
   );
 }
@@ -142,20 +155,21 @@ export default function Toast({ status, message, onClose }) {
 //     const { container } = await act(async () =>
 //       render(<Toast status="success" message="OK" />)
 //     );
-//     // Lucide renders SVGs; the icon's inline colour is the success token.
-//     const svg = container.querySelector("svg");
+//     // Icon.jsx renders currentColor SVGs; the colour lives on the
+//     // wrapping <span>, so read it from the svg's parentElement.
+//     const wrapper = container.querySelector("svg").parentElement;
 //     // jsdom normalises var() resolution differently than the browser, so
 //     // assert the *style* attribute string contains the token name rather
 //     // than a resolved rgb() value. The hex→rgb gotcha (§5.1) only applies
 //     // to literal hex values; var() references stay as-is.
-//     expect(svg.getAttribute("style")).toContain("var(--success)");
+//     expect(wrapper.getAttribute("style")).toContain("var(--accent)");
 //   });
 //
 //   it("renders the error icon when status is error", async () => {
 //     const { container } = await act(async () =>
 //       render(<Toast status="error" message="Nope." />)
 //     );
-//     expect(container.querySelector("svg").getAttribute("style"))
+//     expect(container.querySelector("svg").parentElement.getAttribute("style"))
 //       .toContain("var(--danger)");
 //   });
 //
