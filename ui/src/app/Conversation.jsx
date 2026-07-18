@@ -3,6 +3,8 @@ import React, { useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import AssetCard from "./AssetCard.jsx";
 import InlineImage, { isInlineImage } from "./InlineImage.jsx";
+import InlineData, { isInlineData } from "./InlineData.jsx";
+import InlineDocument, { isInlineDocument } from "./InlineDocument.jsx";
 import ChannelMark from "../components/ChannelMark.jsx";
 import ChatHeader from "./ChatHeader.jsx";
 import Composer from "./Composer.jsx";
@@ -545,18 +547,29 @@ export default function Conversation() {
     navigate(`/app/artifacts?artifact=${encodeURIComponent(asset.asset_id)}`);
   }
 
-  // #361: a standalone image asset within the inline threshold renders as a
-  // responsive inline `<img>` (InlineImage); everything else — uploads,
-  // documents, data, over-threshold or non-raster images, and any code
-  // asset without a locatable fence — keeps the compact AssetCard. Applied
-  // to both the user-turn and assistant-turn branches below so upload-origin
-  // images (grouped under the user turn) render inline too.
+  // A standalone asset renders inline when its kind can sensibly render in
+  // the flow, else as a compact AssetCard (the fallback — #360 decision #2
+  // revised). Every predicate keys off `kind` (+ `mime`), NEVER `origin`
+  // (#363 owner requirement), so an uploaded CSV/markdown/image renders
+  // exactly like a generated one:
+  //   - #361 image → responsive inline `<img>` (raster, ≤ 5 MB);
+  //   - #363 data  → capped inline CSV table (text/CSV);
+  //   - #363 document → capped inline markdown preview (text/markdown);
+  //   - everything else — PDFs, xlsx, over-threshold / non-raster images,
+  //     diagrams, and any code asset without a locatable fence — cards.
+  // Applied to both the user-turn and assistant-turn branches below so
+  // upload-origin assets (grouped under the user turn) render inline too.
   function renderStandalone(a) {
-    return isInlineImage(a) ? (
-      <InlineImage key={a.asset_id} asset={a} onOpen={openAsset} />
-    ) : (
-      <AssetCard key={a.asset_id} asset={a} onOpen={openAsset} />
-    );
+    if (isInlineImage(a)) {
+      return <InlineImage key={a.asset_id} asset={a} onOpen={openAsset} />;
+    }
+    if (isInlineData(a)) {
+      return <InlineData key={a.asset_id} asset={a} onOpen={openAsset} />;
+    }
+    if (isInlineDocument(a)) {
+      return <InlineDocument key={a.asset_id} asset={a} onOpen={openAsset} />;
+    }
+    return <AssetCard key={a.asset_id} asset={a} onOpen={openAsset} />;
   }
 
   return (
