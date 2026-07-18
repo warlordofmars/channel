@@ -568,6 +568,39 @@ html.is-electron-mac .sb-top {
 .art-inline .as { font-size: 11.5px; color: var(--ink-faint); font-family: var(--font-mono); }
 .art-inline .expand-ic { margin-left: auto; color: var(--ink-faint); display: flex; flex-shrink: 0; }
 
+/* inline transcript image (#361) — a <button> wrapping a responsive <img>.
+   Bytes are Bearer-fetched into a blob object URL (see useAssetContent), so
+   there is never a plain remote src. The height cap is the whole point: a
+   full-res generated PNG (~3.8 MB) must never dump at full size into the
+   flow — object-fit:contain preserves aspect within the cap. Mirrors the
+   .art-image img token treatment. */
+.convo-img {
+  display: block; position: relative; margin: 4px 0 0; padding: 0;
+  font: inherit; color: inherit; appearance: none; -webkit-appearance: none;
+  border: none; background: none; max-width: 100%; cursor: pointer;
+  line-height: 0; border-radius: var(--r-md);
+}
+.convo-img img {
+  display: block; max-width: 100%; max-height: 360px; height: auto;
+  object-fit: contain; border-radius: var(--r-md);
+  border: 1px solid var(--border-soft);
+}
+.convo-img .convo-img-expand {
+  position: absolute; top: 8px; right: 8px; display: flex;
+  padding: 5px; border-radius: var(--r-sm); color: var(--ink-faint);
+  background: var(--raised); box-shadow: var(--shadow-sm);
+  opacity: 0; transition: opacity .12s;
+}
+.convo-img:hover .convo-img-expand,
+.convo-img:focus-visible .convo-img-expand { opacity: 1; }
+/* placeholder holding the row while the blob resolves so the transcript
+   doesn't reflow when the image lands. */
+.convo-img-loading {
+  margin: 4px 0 0; height: 160px; max-width: 320px;
+  border-radius: var(--r-md); background: var(--raised-2);
+  border: 1px solid var(--border-soft);
+}
+
 .bottom-composer { flex-shrink: 0; padding: 0 24px 18px; }
 .bottom-composer .composer-wrap { margin: 0 auto; }
 .disclaimer { text-align: center; font-size: 11.5px; color: var(--ink-faint); margin-top: 9px; }
