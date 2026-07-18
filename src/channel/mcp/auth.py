@@ -37,7 +37,7 @@ from mcp.shared.auth import (
 from channel import storage
 from channel.mcp import crypto
 from channel.mcp.url_guard import validate_mcp_server_url
-from channel.models import MCPServer
+from channel.models import MCPServer, MCPServerAuthType
 
 # Discovery endpoint suffixes (RFC 8414 / RFC 9728).
 _PRM_PATH = "/.well-known/oauth-protected-resource"
@@ -264,6 +264,22 @@ async def get_valid_access_token(
     token = storage.get_mcp_token(user_id=user_id, server_id=server.server_id)
     if token is None:
         raise MCPAuthFailedError(f"no token row for user={user_id} server={server.server_id}")
+
+    # Static-token (PAT) servers never refresh: no refresh_token, no
+    # token_endpoint, and ``server.client_id is None`` — so the refresh
+    # path below (which passes ``client_id=server.client_id``) must not
+    # be reachable for them. Decrypt + return the pasted bearer token
+    # directly. A decrypt failure surfaces as MCPAuthFailedError just
+    # like the DCR cached-token path. This check is intentionally before
+    # the expiry/refresh logic. See #375.
+    if server.auth_type == MCPServerAuthType.STATIC_TOKEN:
+        try:
+            return crypto.decrypt_blob(token.access_token_ciphertext)
+        except Exception as exc:
+            raise MCPAuthFailedError(
+                f"static access token decrypt failed user={user_id} server={server.server_id}"
+            ) from exc
+
     now = int(time.time())
     if token.expires_at - now > _REFRESH_SKEW_SEC:
         # KMS decrypt can raise (KMS unavailable, corrupted ciphertext,
@@ -288,6 +304,14 @@ async def get_valid_access_token(
         raise MCPAuthFailedError(
             f"refresh token decrypt failed user={user_id} server={server.server_id}"
         ) from exc
+    # A DCR refresh needs the DCR-issued client_id. Static-token servers
+    # (client_id is None) already returned above, so this only guards the
+    # unreachable-in-practice case of a broken oauth_dcr row — surface it
+    # as MCPAuthFailedError rather than passing None into refresh_token.
+    if server.client_id is None:
+        raise MCPAuthFailedError(
+            f"cannot refresh without client_id user={user_id} server={server.server_id}"
+        )
     try:
         prm = await discover_resource_metadata(server.url)
         # MCP servers either point at an external auth server or self-issue.

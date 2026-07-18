@@ -166,8 +166,11 @@ require a valid Bearer mgmt JWT. JWT validation enforces `iss`,
   (TTL = 1 hour after reserve; used for the streaming POST replay
   short-circuit)
 - MCP server items: `PK=USER#{user_id}`, `SK=MCPSERVER#{server_id}`
-  (one row per registered MCP server; persists DCR client_id +
-  tool_prefix + globally_enabled flag; no GSI projection)
+  (one row per registered MCP server; persists `auth_type`
+  (`oauth_dcr` | `static_token`, #375), `tool_prefix` + `globally_enabled`
+  flag; `client_id` is written only for `oauth_dcr` servers (the DCR-issued
+  id) and omitted for `static_token` (PAT) servers; rows with no
+  `auth_type` attribute read back as `oauth_dcr`; no GSI projection)
 - MCP token items: `PK=USER#{user_id}`, `SK=MCPTOKEN#{server_id}`
   (sibling row to MCPSERVER; access/refresh tokens KMS-encrypted at
   application layer; TTL set to `expires_at + 30 days` as a hard

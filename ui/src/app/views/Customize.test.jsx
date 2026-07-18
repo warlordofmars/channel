@@ -290,6 +290,34 @@ describe("Customize", () => {
     ).toBeInTheDocument();
   });
 
+  it("hides Reconnect for static-token servers (no OAuth reauth flow)", async () => {
+    api.listMCPServers.mockResolvedValueOnce({
+      servers: [
+        {
+          server_id: "srv-static",
+          name: "GitHub",
+          url: "https://api.githubcopilot.com/mcp/",
+          tool_prefix: "github",
+          auth_type: "static_token",
+          auth_status: "active",
+          globally_enabled: true,
+          created_at: "x",
+          updated_at: "x",
+        },
+      ],
+    });
+    renderCustomize();
+    expect(await screen.findByText("GitHub")).toBeInTheDocument();
+    // Static-token servers can't be OAuth-reauthorized, so no Reconnect.
+    expect(
+      screen.queryByRole("button", { name: /reconnect/i }),
+    ).not.toBeInTheDocument();
+    // Remove is still available.
+    expect(
+      screen.getByRole("button", { name: /remove/i }),
+    ).toBeInTheDocument();
+  });
+
   it("shows an error message when listMCPServers fails", async () => {
     api.listMCPServers.mockRejectedValueOnce(new Error("boom"));
     renderCustomize();

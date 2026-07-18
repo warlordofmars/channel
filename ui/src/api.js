@@ -361,13 +361,43 @@ export async function listMCPServers() {
   return response.json();
 }
 
-export async function registerMCPServer({ name, url, tool_prefix = null }) {
+export async function registerMCPServer({
+  name,
+  url,
+  tool_prefix = null,
+  auth_type = "oauth_dcr",
+  token = null,
+}) {
   const response = await fetch(`${BASE}/api/mcp/servers`, {
     method: "POST",
     headers: { ...authHeader(), "Content-Type": "application/json" },
-    body: JSON.stringify({ name, url, tool_prefix }),
+    body: JSON.stringify({ name, url, tool_prefix, auth_type, token }),
   });
-  if (!response.ok) throw new Error(`registerMCPServer ${response.status}`);
+  if (!response.ok) {
+    // Surface the FastAPI error detail so AddMCPServerModal can branch on
+    // a machine-readable reason (the dcr_unsupported code that steers the
+    // user into the static-token path) rather than string-matching prose.
+    //
+    // SECURITY: only parse the detail for the oauth_dcr path (token == null).
+    // A static-token 422 body can echo the pasted PAT back in
+    // ``detail[].input``; parsing it would land the secret on
+    // ``ApiError.detail`` where a caller's ``console.error`` could leak it.
+    // dcr_unsupported only ever arises on the oauth_dcr path, so we lose
+    // nothing by skipping the parse whenever a token was supplied.
+    let detail = null;
+    if (token == null) {
+      try {
+        detail = (await response.json()).detail ?? null;
+      } catch {
+        /* non-JSON error body — status alone must do */
+      }
+    }
+    const err = new ApiError("registerMCPServer", response.status, detail);
+    // The dcr_unsupported branch raises detail={code, message}; hoist the
+    // code onto the error so callers needn't know the detail shape.
+    if (detail && typeof detail === "object") err.code = detail.code;
+    throw err;
+  }
   return response.json();
 }
 
