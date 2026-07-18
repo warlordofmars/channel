@@ -80,6 +80,19 @@ export function truncateName(name, max = 20) {
 }
 
 /**
+ * Blocking-banner copy shown (#377) when one or more attachment chips
+ * are stuck in the ``failed`` state. Send stays gated until the user
+ * retries or removes every failed chip, so the message names both
+ * affordances. Uses "attach" terminology per Channel's 2026-06-03 UI
+ * copy convention — never "upload".
+ */
+export function failedAttachmentMessage(count) {
+  const noun = count === 1 ? "attachment" : "attachments";
+  const pronoun = count === 1 ? "it" : "them";
+  return `${count} ${noun} failed to attach — retry or remove ${pronoun} to send.`;
+}
+
+/**
  * Auto-growing textarea + attach + model picker + mic + send. Translated
  * from design-sources/app/chat.jsx `Composer` function.
  *
@@ -351,8 +364,17 @@ const Composer = forwardRef(function Composer(
   // ---- submit -----------------------------------------------------
 
   const anyAttaching = atts.some((a) => a.status === "attaching");
+  // #377: a chip stuck in `failed` is neither attaching (so it never
+  // blocked canSend) nor attached (so it was dropped from sentAtts) —
+  // the pre-fix gating let the message send attachment-less, silently
+  // losing the file. Block send whenever any chip has not reached
+  // `attached`, and surface the blocking banner below so the failure
+  // is visible instead of dropped.
+  const failedAtts = atts.filter((a) => a.status === "failed");
+  const anyFailed = failedAtts.length > 0;
   const attachedOnly = atts.filter((a) => a.status === "attached");
-  const canSend = !anyAttaching && (text.trim() !== "" || attachedOnly.length > 0);
+  const canSend =
+    !anyAttaching && !anyFailed && (text.trim() !== "" || attachedOnly.length > 0);
 
   async function submit() {
     if (!canSend) return;
@@ -474,6 +496,11 @@ const Composer = forwardRef(function Composer(
             {attachError}
           </div>
         )}
+        {anyFailed && (
+          <div className="attach-error" role="alert">
+            {failedAttachmentMessage(failedAtts.length)}
+          </div>
+        )}
         <textarea
           ref={taRef}
           rows={1}
@@ -511,7 +538,13 @@ const Composer = forwardRef(function Composer(
             className="send"
             disabled={!canSend}
             onClick={submit}
-            title={anyAttaching ? "Waiting for attachments…" : "Send"}
+            title={
+              anyAttaching
+                ? "Waiting for attachments…"
+                : anyFailed
+                  ? "Retry or remove the failed attachment to send"
+                  : "Send"
+            }
           >
             <Icon name="arrow-up" size={18} stroke={2} />
           </button>

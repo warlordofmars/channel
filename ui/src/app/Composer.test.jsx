@@ -33,6 +33,7 @@ vi.mock("../api.js", () => ({
 }));
 
 import Composer, {
+  failedAttachmentMessage,
   formatAttachmentSize,
   iconForMime,
   truncateName,
@@ -1251,6 +1252,134 @@ describe("Composer", () => {
       });
       expect(screen.queryByText("first.pdf")).toBeNull();
       expect(screen.getByText("second.pdf")).toBeTruthy();
+    });
+  });
+
+  // #377: a chip stuck in `failed` used to be neither `attaching` (so it
+  // never blocked send) nor `attached` (so it was dropped from the sent
+  // list) — the message shipped attachment-less and the failure was
+  // invisible. Send is now gated until every chip is `attached`, and a
+  // blocking banner surfaces the failure with retry/remove guidance.
+  describe("#377 — failed attachment blocks send + surfaces a banner", () => {
+    async function settle() {
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0));
+      });
+    }
+
+    describe("failedAttachmentMessage", () => {
+      it("uses a singular noun + 'it' for a single failure", () => {
+        expect(failedAttachmentMessage(1)).toBe(
+          "1 attachment failed to attach — retry or remove it to send.",
+        );
+      });
+
+      it("uses a plural noun + 'them' for multiple failures", () => {
+        expect(failedAttachmentMessage(2)).toBe(
+          "2 attachments failed to attach — retry or remove them to send.",
+        );
+      });
+    });
+
+    it("blocks send + shows a banner when a chip failed, even with text present", async () => {
+      const api = await getApiMocks();
+      api.finalizeAttachment.mockRejectedValueOnce(new Error("network reset"));
+      const onSend = vi.fn();
+      render(<Composer {...defaultProps({ onSend })} />);
+      await pickFiles([makeFile("shot.png", "image/png", 2048)]);
+      await settle();
+      const chip = screen.getByText("shot.png").closest(".attach-chip");
+      expect(chip.getAttribute("data-status")).toBe("failed");
+      // Text present — pre-fix this shipped the message with the file
+      // silently dropped. Now the failed chip gates the send.
+      const ta = screen.getByRole("textbox");
+      fireEvent.change(ta, { target: { value: "look at this screenshot" } });
+      const send = screen.getByTitle("Retry or remove the failed attachment to send");
+      expect(send.disabled).toBe(true);
+      // The blocking banner is visible and names both affordances.
+      const banner = screen.getByText(
+        "1 attachment failed to attach — retry or remove it to send.",
+      );
+      expect(banner.getAttribute("role")).toBe("alert");
+      // Neither Enter nor a click can force the send through.
+      fireEvent.keyDown(ta, { key: "Enter" });
+      fireEvent.click(send);
+      expect(onSend).not.toHaveBeenCalled();
+    });
+
+    it("pluralises the banner when more than one attachment fails", async () => {
+      const api = await getApiMocks();
+      api.finalizeAttachment
+        .mockRejectedValueOnce(new Error("net-1"))
+        .mockRejectedValueOnce(new Error("net-2"));
+      render(<Composer {...defaultProps()} />);
+      await pickFiles([
+        makeFile("a.png", "image/png", 1),
+        makeFile("b.png", "image/png", 1),
+      ]);
+      await settle();
+      expect(
+        screen.getByText(
+          "2 attachments failed to attach — retry or remove them to send.",
+        ),
+      ).toBeTruthy();
+    });
+
+    it("removing the failed chip clears the banner and re-enables send", async () => {
+      const api = await getApiMocks();
+      api.finalizeAttachment.mockRejectedValueOnce(new Error("net"));
+      render(<Composer {...defaultProps()} />);
+      await pickFiles([makeFile("gone.png", "image/png", 1)]);
+      await settle();
+      const ta = screen.getByRole("textbox");
+      fireEvent.change(ta, { target: { value: "hi" } });
+      expect(screen.getByText(/failed to attach/i)).toBeTruthy();
+      expect(screen.getByTitle("Retry or remove the failed attachment to send").disabled).toBe(
+        true,
+      );
+      const removeBtn = screen
+        .getByText("gone.png")
+        .closest(".attach-chip")
+        .querySelector(".x");
+      fireEvent.click(removeBtn);
+      expect(screen.queryByText(/failed to attach/i)).toBeNull();
+      // Text still present, no chips left → send is live again.
+      expect(screen.getByTitle("Send").disabled).toBe(false);
+    });
+
+    it("retrying the failed chip clears the banner and a normal send works", async () => {
+      const api = await getApiMocks();
+      api.finalizeAttachment.mockRejectedValueOnce(new Error("net"));
+      const onSend = vi.fn();
+      render(<Composer {...defaultProps({ onSend })} />);
+      await pickFiles([makeFile("retry.png", "image/png", 1)]);
+      await settle();
+      expect(screen.getByText(/failed to attach/i)).toBeTruthy();
+      // Retry resolves happily this time.
+      api.finalizeAttachment.mockResolvedValueOnce({
+        id: "att-ok",
+        user_id: "u",
+        name: "retry.png",
+        mime: "image/png",
+        size_bytes: 1,
+        s3_key: "k",
+        s3_bucket: "bk",
+        checksum_sha256: "sha",
+        created_at: "t",
+      });
+      await act(async () => {
+        fireEvent.click(screen.getByTitle("Retry"));
+      });
+      await settle();
+      // Banner gone, chip attached, normal send carries the id.
+      expect(screen.queryByText(/failed to attach/i)).toBeNull();
+      const chip = screen.getByText("retry.png").closest(".attach-chip");
+      expect(chip.getAttribute("data-status")).toBe("attached");
+      fireEvent.click(screen.getByTitle("Send"));
+      expect(onSend).toHaveBeenCalledWith(
+        "Take a look at the attached files.",
+        [{ id: "att-ok" }],
+      );
     });
   });
 });
