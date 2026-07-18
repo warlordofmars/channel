@@ -720,12 +720,51 @@ def test_sanitize_title_rejects_model_replies(raw):
         "Certainty in mathematics",  # not "certainly"
         "As an aid to recovery",  # not the "as an ai" phrase
         "Heredity and genetics",  # not the "here is" phrase
+        # A trailing "#" is content (language names), never a markdown
+        # marker — it must not be stripped as generic punctuation.
+        "C#",
+        "C# tutorial basics",
+        "F# versus OCaml",
     ],
 )
 def test_sanitize_title_passes_genuine_labels(raw):
     from channel.agents.chat_agent import sanitize_title
 
     assert sanitize_title(raw) == raw
+
+
+def test_sanitize_title_preserves_trailing_hash_when_stripping_leading_markdown():
+    """The leading-marker strip must not eat a content ``#``: a leaked
+    heading in front of a language-name title strips the heading but
+    keeps the trailing ``#`` (#256 Copilot review)."""
+    from channel.agents.chat_agent import sanitize_title
+
+    assert sanitize_title("## C# best practices") == "C# best practices"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "(Sure, here's the image)",  # leading paren must not shield "sure"
+        '"Sure, that works"',  # leading quote must not shield "sure"
+        "(I'm Claude)",  # leading paren must not shield the identity leak
+        "- Sorry, no data found",  # leading bullet marker + reply opener
+    ],
+)
+def test_sanitize_title_rejects_reply_with_leading_punctuation(raw):
+    """Leading punctuation must not let a reply-shaped opener bypass the
+    first-token reject check — the strip (not rstrip) fix (#256)."""
+    from channel.agents.chat_agent import sanitize_title
+
+    assert sanitize_title(raw) == ""
+
+
+def test_looks_like_reply_filters_all_punctuation_tokens():
+    """Tokens that reduce to empty after edge-punctuation stripping are
+    dropped; a candidate of only punctuation is not a reply."""
+    from channel.agents.chat_agent import _looks_like_reply
+
+    assert _looks_like_reply("(( ))") is False
 
 
 # --- sanitize_title: preserved historical normalisation behaviour ------------

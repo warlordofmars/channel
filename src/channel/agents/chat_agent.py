@@ -395,7 +395,12 @@ _REJECT_OPENER_PHRASES = (
 # title. Whole-word, case-insensitive.
 _BANNED_TITLE_WORDS = ("claude", "anthropic")
 
-_LEADING_MARKDOWN_RE = re.compile(r"^\s*(?:#{1,6}|>|[-*+]|\d+\.)\s+")
+# A leading structural marker is a heading / blockquote / list bullet /
+# numbered marker followed by whitespace OR end-of-string. The ``|$``
+# alternative catches a bare ``"##"`` (no trailing text) so it collapses
+# to empty; anchoring at ``^`` means a content ``#`` like "C#" (trailing,
+# not leading) is never touched.
+_LEADING_MARKDOWN_RE = re.compile(r"^\s*(?:#{1,6}|>|[-*+]|\d+\.)(?:\s+|$)")
 
 
 def _strip_title_markdown(text: str) -> str:
@@ -404,11 +409,26 @@ def _strip_title_markdown(text: str) -> str:
     Removes a leading ATX heading / blockquote / list marker (the
     observed ``"## Image Analysis ..."`` symptom) and inline emphasis
     runs (``**bold**`` / ``__bold__`` / `` `code` ``), then trims any
-    stray emphasis punctuation left clinging to the ends.
+    stray emphasis punctuation (``*`` / ``_``) left clinging to the ends.
+
+    ``#`` and ``>`` are deliberately NOT in the end-trim set: stripping
+    them as generic punctuation mangled legitimate titles like "C#" →
+    "C" (#256 Copilot review). Leading heading/blockquote markers are
+    handled by ``_LEADING_MARKDOWN_RE`` above, which only matches at the
+    start of the string.
     """
     text = _LEADING_MARKDOWN_RE.sub("", text)
     text = text.replace("**", "").replace("__", "").replace("`", "")
-    return text.strip(" *_#>")
+    return text.strip(" *_")
+
+
+# Wrapping punctuation stripped from BOTH ends of each token before the
+# reject checks — leading punctuation ("(Sure,", '"Sure"') would
+# otherwise let a reply-shaped opener bypass the first-token match
+# (#256 Copilot review). Kept as a distinct set from the trailing
+# sentence-punctuation strip in ``sanitize_title`` (which shapes the
+# visible title); this set only affects the internal reject comparison.
+_TOKEN_EDGE_PUNCT = "\"'.,;:!?()[]{}"
 
 
 def _looks_like_reply(candidate: str) -> bool:
@@ -417,9 +437,12 @@ def _looks_like_reply(candidate: str) -> bool:
 
     Matching is token-based (not raw ``startswith``) so a genuine label
     that merely begins with a reject substring — "Suresh asks...",
-    "Heywood plans..." — is not caught by "sure" / "hey".
+    "Heywood plans..." — is not caught by "sure" / "hey". Each token is
+    stripped of wrapping punctuation on BOTH ends so a leading-punctuated
+    opener ("(Sure, ...") is still matched.
     """
-    tokens = [tok.rstrip(".,;:!?'\"") for tok in candidate.casefold().split()]
+    tokens = [tok.strip(_TOKEN_EDGE_PUNCT) for tok in candidate.casefold().split()]
+    tokens = [tok for tok in tokens if tok]
     if not tokens:
         return False
     if tokens[0] in _REJECT_FIRST_TOKENS:
