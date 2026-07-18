@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Image generation via the `generate_image` tool (#279, epic #321).
+  Channel can now draw: a single narrow `generate_image(prompt,
+  aspect_ratio)` Strands tool calls Stability AI Stable Image Core
+  (`stability.stable-image-core-v1:1`) through Bedrock `InvokeModel`,
+  and the generated PNG persists as an `origin=generated` / `kind=image`
+  asset through the #321 pipeline — surfaced via the `asset_created` SSE
+  frame + inline card, never as base64 over the wire. Content
+  moderation is Bedrock's built-in Stability RAI filter (a blocked
+  prompt surfaces over SSE as a `tool_error` with
+  `error_type="content_filtered"`); there is no cost gating (billing
+  deferred), only the `STARTER_IMAGE_GEN_ENABLED` kill-switch and the
+  `ImageGenInvocations` / `ImageGenFailures` EMF counters. The API
+  Lambda's IAM role gains `bedrock:InvokeModel` on the Stability
+  image-generation foundation model; `STARTER_IMAGE_GEN_MODEL` can flip
+  to Stable Image Ultra or SD3.5 Large with no code change (all three
+  share one request/response contract).
 - Asset producers + `asset_created` SSE (#326, epic #321). Chats now
   persist their assets: verified uploads project into `origin=upload`
   ASSET rows at message-send (same S3 object, no byte copy), code-exec

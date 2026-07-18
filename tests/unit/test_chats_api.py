@@ -659,14 +659,16 @@ def test_post_message_falls_back_to_prefs_effort_when_payload_omits_it(
 # ``current_time`` is "0" in prod / "1" in dev (smoke-test only,
 # strategy spec policy P2); ``web_search`` ships "1" in all deployed
 # envs (kill-switch on default-on); ``code_exec`` ships "1" in all
-# deployed envs (kill-switch on default-on). ``web_fetch`` rides
-# ``STARTER_WEB_SEARCH_ENABLED`` rather than its own flag — both tools
-# are backed by the same Exa API key, so one availability signal
-# covers the discover/deep-read pair (#232).
+# deployed envs (kill-switch on default-on); ``generate_image`` (Stable
+# Image Core, #279) ships "1" in all deployed envs (kill-switch on
+# default-on). ``web_fetch`` rides ``STARTER_WEB_SEARCH_ENABLED`` rather
+# than its own flag — both tools are backed by the same Exa API key, so
+# one availability signal covers the discover/deep-read pair (#232).
 _TOOL_FLAGS: list[tuple[str, list[str]]] = [
     ("STARTER_CLOCK_TOOL_ENABLED", ["current_time"]),
     ("STARTER_WEB_SEARCH_ENABLED", ["web_search", "web_fetch"]),
     ("STARTER_CODE_EXEC_ENABLED", ["code_exec"]),
+    ("STARTER_IMAGE_GEN_ENABLED", ["generate_image"]),
 ]
 
 
@@ -801,6 +803,137 @@ def test_tool_registry_excludes_web_fetch_when_flag_off(
 
     registry = _build_tool_registry()
     assert web_fetch not in registry
+
+
+def test_tool_registry_includes_generate_image_when_flag_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``STARTER_IMAGE_GEN_ENABLED=1`` → ``generate_image`` registered (#279)."""
+    from channel.agents.tools.generate_image import generate_image
+
+    monkeypatch.setenv("STARTER_IMAGE_GEN_ENABLED", "1")
+    monkeypatch.delenv("STARTER_CLOCK_TOOL_ENABLED", raising=False)
+    monkeypatch.delenv("STARTER_WEB_SEARCH_ENABLED", raising=False)
+    monkeypatch.delenv("STARTER_CODE_EXEC_ENABLED", raising=False)
+
+    from channel.api.chats import _build_tool_registry
+
+    registry = _build_tool_registry()
+    assert generate_image in registry
+
+
+def test_tool_registry_excludes_generate_image_when_flag_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``STARTER_IMAGE_GEN_ENABLED`` unset → ``generate_image`` NOT registered."""
+    from channel.agents.tools.generate_image import generate_image
+
+    monkeypatch.delenv("STARTER_IMAGE_GEN_ENABLED", raising=False)
+    monkeypatch.delenv("STARTER_CLOCK_TOOL_ENABLED", raising=False)
+    monkeypatch.delenv("STARTER_WEB_SEARCH_ENABLED", raising=False)
+    monkeypatch.delenv("STARTER_CODE_EXEC_ENABLED", raising=False)
+
+    from channel.api.chats import _build_tool_registry
+
+    registry = _build_tool_registry()
+    assert generate_image not in registry
+
+
+def test_post_message_persists_and_emits_generated_images(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The post-stream slot reads the agent's ``generated_image_sink``,
+    persists each entry via ``persist_generated_image_assets``, and emits
+    an ``asset_created`` frame per persisted asset (#279)."""
+    from channel.agents.tools.generate_image import GENERATED_IMAGE_SINK_ATTR
+    from channel.models import Asset
+
+    _stub_storage_for_one_turn(monkeypatch)
+    monkeypatch.setenv("STARTER_FOLLOWUPS_ENABLED", "0")
+
+    sink = [{"tool_use_id": "tu-1", "b64": "QUJD", "mime": "image/png", "title": "a red bicycle"}]
+
+    async def fake_stream(self, prompt):
+        yield {"event": {"contentBlockDelta": {"delta": {"text": "Here you go"}}}}
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+        yield {"event": {"metadata": {"usage": {"inputTokens": 1, "outputTokens": 1}}}}
+
+    class FakeAgent:
+        stream_async = fake_stream
+
+    agent = FakeAgent()
+    setattr(agent, GENERATED_IMAGE_SINK_ATTR, sink)
+    monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: agent)
+
+    captured: dict[str, Any] = {}
+
+    async def fake_persist(*, chat_id, owner, msg_id, images):
+        captured["images"] = images
+        captured["msg_id"] = msg_id
+        captured["owner"] = owner
+        return [
+            Asset(
+                asset_id="a-1",
+                chat_id=chat_id,
+                owner=owner,
+                kind="image",
+                title="a red bicycle",
+                mime="image/png",
+                size_bytes=3,
+                origin="generated",
+                source={"msg_id": msg_id, "tool_use_id": "tu-1"},
+                s3_bucket="b",
+                s3_key=f"assets/chat/{chat_id}/a-1",
+                created_at="t",
+                updated_at="t",
+            )
+        ]
+
+    monkeypatch.setattr("channel.api.chats.persist_generated_image_assets", fake_persist)
+
+    response = client.post(
+        "/api/chats/c1/messages",
+        json={"message": "draw a red bicycle", "model": "claude-sonnet-4-6"},
+    )
+    assert response.status_code == 200
+    # The sink reached the producer verbatim, keyed to the assistant msg.
+    assert captured["images"] == sink
+    assert captured["owner"] == "u-1"
+    body = response.text
+    assert '"type": "asset_created"' in body
+    assert '"kind": "image"' in body
+    assert '"origin": "generated"' in body
+
+
+def test_post_message_no_generated_images_when_sink_absent(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A turn where ``generate_image`` never fired leaves no sink attribute;
+    the producer is still called with an empty list (default) (#279)."""
+    _stub_storage_for_one_turn(monkeypatch)
+    monkeypatch.setenv("STARTER_FOLLOWUPS_ENABLED", "0")
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        "channel.api.chats.build_agent",
+        _fake_streaming_agent_factory(captured),
+    )
+
+    seen: dict[str, Any] = {}
+
+    async def fake_persist(*, chat_id, owner, msg_id, images):
+        seen["images"] = images
+        return []
+
+    monkeypatch.setattr("channel.api.chats.persist_generated_image_assets", fake_persist)
+
+    response = client.post(
+        "/api/chats/c1/messages",
+        json={"message": "hi", "model": "claude-sonnet-4-6"},
+    )
+    assert response.status_code == 200
+    assert seen["images"] == []
+    assert '"type": "asset_created"' not in response.text
 
 
 def test_regenerate_forwards_payload_effort_to_build_agent(

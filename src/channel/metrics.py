@@ -161,6 +161,23 @@ async def record_asset_persist_outcome(success: bool) -> None:
     await emit_metric(metric)
 
 
+async def record_image_gen_outcome(success: bool) -> None:
+    """Emit CloudWatch counters for one ``generate_image`` invocation (#279).
+
+    ``ImageGenInvocations`` counts EVERY invocation (success, content
+    filter rejection, or error) — the "how much is Channel generating
+    images" signal the epic asks for. ``ImageGenFailures`` additionally
+    counts the non-success invocations so the failure rate is
+    ``ImageGenFailures / ImageGenInvocations``. Counter-only — same
+    cardinality-risk rationale as :func:`record_memory_write_outcome`; no
+    per-actor / per-chat / per-model dimensions (billing is deferred, so
+    there is deliberately no cost or quota dimension either).
+    """
+    await emit_metric("ImageGenInvocations")
+    if not success:
+        await emit_metric("ImageGenFailures")
+
+
 async def record_tool_call_outcome(success: bool) -> None:
     """Emit a CloudWatch counter for one tool-call attempt (epic #128).
 
