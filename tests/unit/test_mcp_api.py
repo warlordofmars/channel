@@ -1422,7 +1422,7 @@ def test_list_servers_serializes_rows_via_to_out(
     monkeypatch.setattr(
         _storage,
         "list_mcp_servers_for_user",
-        lambda _: [_make_server()],
+        lambda _: [_make_server(), _make_static_server()],
     )
     resp = client.get("/api/mcp/servers")
     assert resp.status_code == 200
@@ -1430,6 +1430,10 @@ def test_list_servers_serializes_rows_via_to_out(
     assert body["servers"][0]["server_id"] == "srv-1"
     assert body["servers"][0]["name"] == "Hive"
     assert body["servers"][0]["auth_status"] == "active"
+    # auth_type is surfaced so the Customize view can hide Reconnect for
+    # static-token servers.
+    assert body["servers"][0]["auth_type"] == "oauth_dcr"
+    assert body["servers"][1]["auth_type"] == "static_token"
 
 
 def test_callback_blocked_url_redirects_with_error(

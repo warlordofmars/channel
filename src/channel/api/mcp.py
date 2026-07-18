@@ -117,6 +117,10 @@ class _ServerOut(BaseModel):
     name: str
     url: str
     tool_prefix: str
+    # Surfaced so the Customize view can distinguish static-token servers
+    # (which have no OAuth reauth flow) from oauth_dcr ones and hide the
+    # "Reconnect" affordance accordingly. See #375.
+    auth_type: MCPServerAuthType
     auth_status: MCPServerAuthStatus
     globally_enabled: bool
     created_at: str
@@ -143,6 +147,7 @@ def _to_out(s: MCPServer) -> _ServerOut:
         name=s.name,
         url=s.url,
         tool_prefix=s.tool_prefix,
+        auth_type=s.auth_type,
         auth_status=s.auth_status,
         globally_enabled=s.globally_enabled,
         created_at=s.created_at,

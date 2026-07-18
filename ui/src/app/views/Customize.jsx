@@ -381,13 +381,15 @@ export default function Customize() {
                     >
                       <span className="knob" />
                     </button>
-                    <button
-                      type="button"
-                      className="ck"
-                      onClick={() => reauth(s)}
-                    >
-                      Reconnect
-                    </button>
+                    {s.auth_type !== "static_token" && (
+                      <button
+                        type="button"
+                        className="ck"
+                        onClick={() => reauth(s)}
+                      >
+                        Reconnect
+                      </button>
+                    )}
                     <button
                       type="button"
                       className="ck"
