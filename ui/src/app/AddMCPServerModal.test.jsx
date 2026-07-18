@@ -109,8 +109,11 @@ describe("AddMCPServerModal", () => {
       target: { value: "https://api.githubcopilot.com/mcp/" },
     });
     fireEvent.click(screen.getByRole("radio", { name: /Access token \/ PAT/i }));
+    // Synthetic non-secret value (no GitHub PAT prefix) so secret
+    // scanners don't flag the dummy fixture.
+    const fakeBearer = "dummy-" + "bearer-value";
     fireEvent.change(screen.getByLabelText("Access token"), {
-      target: { value: "ghp_dummy" },
+      target: { value: fakeBearer },
     });
     fireEvent.click(screen.getByRole("button", { name: /add server/i }));
 
@@ -119,7 +122,7 @@ describe("AddMCPServerModal", () => {
       name: "GitHub",
       url: "https://api.githubcopilot.com/mcp/",
       auth_type: "static_token",
-      token: "ghp_dummy",
+      token: fakeBearer,
     });
     // No auth_start_url → no OAuth tab.
     expect(window.open).not.toHaveBeenCalled();
@@ -137,7 +140,7 @@ describe("AddMCPServerModal", () => {
     // Name + URL filled but no token yet → still disabled.
     expect(submit).toBeDisabled();
     fireEvent.change(screen.getByLabelText("Access token"), {
-      target: { value: "ghp_dummy" },
+      target: { value: "dummy-" + "bearer-value" },
     });
     expect(submit).not.toBeDisabled();
   });

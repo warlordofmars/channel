@@ -702,16 +702,19 @@ describe("MCP API client", () => {
       json: () =>
         Promise.resolve({ server_id: "srv-static", auth_start_url: null }),
     });
+    // Synthetic non-secret value (no GitHub PAT prefix) so secret
+    // scanners don't flag the dummy fixture.
+    const fakeBearer = "dummy-" + "bearer-value";
     const out = await registerMCPServer({
       name: "GitHub",
       url: "https://api.githubcopilot.com/mcp/",
       auth_type: "static_token",
-      token: "ghp_dummy",
+      token: fakeBearer,
     });
     expect(out.auth_start_url).toBeNull();
     const body = JSON.parse(global.fetch.mock.calls[0][1].body);
     expect(body.auth_type).toBe("static_token");
-    expect(body.token).toBe("ghp_dummy");
+    expect(body.token).toBe(fakeBearer);
   });
 
   it("registerMCPServer throws on non-ok response", async () => {

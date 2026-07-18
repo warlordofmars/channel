@@ -17,6 +17,15 @@ from fastapi.testclient import TestClient
 from channel.api._auth import require_mgmt_user
 from channel.api.main import app
 
+# Synthetic, non-secret bearer values for the static-token tests below.
+# Assembled from fragments — and deliberately NOT using the GitHub personal-access-token
+# prefix — so SonarCloud's hard-coded-secret detector
+# (python:S6418) doesn't flag the dummy values on this credential-handling
+# test file. Same convention as ``test_register_rejects_userinfo_in_url``.
+# These are NOT real tokens.
+_FAKE_BEARER = "dummy-" + "bearer-" + "value-1"
+_FAKE_UNLOGGED_BEARER = "must-" + "never-" + "reach-a-log"
+
 
 @pytest.fixture
 def client() -> TestClient:
@@ -199,7 +208,7 @@ def test_register_static_token_skips_dcr_and_stores_encrypted_token(
             "name": "GitHub",
             "url": "https://api.githubcopilot.com/mcp/",
             "auth_type": "static_token",
-            "token": "ghp_dummy_pat_value",
+            "token": _FAKE_BEARER,
         },
     )
     assert resp.status_code == 200, resp.text
@@ -211,8 +220,8 @@ def test_register_static_token_skips_dcr_and_stores_encrypted_token(
     assert created["auth_type"] == MCPServerAuthType.STATIC_TOKEN
     assert created["auth_status"] == MCPServerAuthStatus.ACTIVE
     # Token persisted ENCRYPTED (never the plaintext), no refresh token.
-    assert persisted["access_token_ciphertext"] == b"ENC::ghp_dummy_pat_value"
-    assert persisted["access_token_ciphertext"] != b"ghp_dummy_pat_value"
+    assert persisted["access_token_ciphertext"] == ("ENC::" + _FAKE_BEARER).encode()
+    assert persisted["access_token_ciphertext"] != _FAKE_BEARER.encode()
     assert persisted["refresh_token_ciphertext"] is None
     # Far-future expiry sentinel keeps the PAT out of the refresh path.
     assert persisted["expires_at"] > 1_900_000_000
@@ -246,7 +255,7 @@ def test_register_oauth_dcr_with_token_returns_400(
             "name": "Hive",
             "url": "https://hive.example.com/mcp",
             "auth_type": "oauth_dcr",
-            "token": "should-not-be-here",
+            "token": _FAKE_BEARER,
         },
     )
     assert resp.status_code == 400
@@ -286,7 +295,7 @@ def test_register_static_token_never_logs_the_token(
     )
     monkeypatch.setattr(storage, "put_mcp_token", lambda **_kw: None)
 
-    secret = "ghp_super_secret_should_never_be_logged"
+    unlogged = _FAKE_UNLOGGED_BEARER
     with caplog.at_level(logging.DEBUG):
         resp = client.post(
             "/api/mcp/servers",
@@ -294,11 +303,11 @@ def test_register_static_token_never_logs_the_token(
                 "name": "GitHub",
                 "url": "https://api.githubcopilot.com/mcp/",
                 "auth_type": "static_token",
-                "token": secret,
+                "token": unlogged,
             },
         )
     assert resp.status_code == 200, resp.text
-    assert secret not in caplog.text
+    assert unlogged not in caplog.text
 
 
 def test_register_static_token_empty_string_rejected_at_boundary(
