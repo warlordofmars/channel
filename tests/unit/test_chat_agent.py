@@ -628,6 +628,19 @@ def test_build_titler_prompt_caps_assistant_text():
     assert "x" * 501 not in prompt
 
 
+def test_build_titler_prompt_caps_user_message():
+    """A very long first user message (SendMessageRequest.message allows
+    up to 100k chars) must be capped the same way the assistant reply is
+    — only the first 500 chars are framed (#256 Copilot review)."""
+    from channel.agents.chat_agent import build_titler_prompt
+
+    long_msg = "y" * 900
+    prompt = build_titler_prompt(long_msg, "ok")
+
+    assert "y" * 500 in prompt
+    assert "y" * 501 not in prompt
+
+
 def test_build_titler_prompt_defuses_forged_block_delimiters():
     """A crafted user/assistant message that echoes the ``CHAT>>>`` /
     ``<<<CHAT`` delimiter must not be able to close the data block early
