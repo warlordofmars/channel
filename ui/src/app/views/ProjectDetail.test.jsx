@@ -120,7 +120,7 @@ describe("ProjectDetail", () => {
     expect(raw).toBeTruthy();
     const payload = JSON.parse(raw);
     expect(payload.text).toBe("kick off a new chat");
-    expect(payload.modelId).toBe("claude-opus-4-6");
+    expect(payload.modelId).toBe("claude-sonnet-4-6");
     expect(payload.effort).toBe("High");
     expect(getLastPath()).toBe("/app/c/new");
   });

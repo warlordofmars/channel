@@ -126,7 +126,7 @@ def test_prefs_defaults():
     assert p.density == "cozy"
     assert p.shape == "soft"
     assert p.font == "figtree"
-    assert p.model == "claude-opus-4-6"
+    assert p.model == "claude-sonnet-4-6"
     assert p.effort == "High"
     assert p.send_on_enter is True
     assert p.suggest_followups is True

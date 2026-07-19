@@ -117,14 +117,14 @@ describe("ChatHome", () => {
     fireEvent.click(screen.getByTitle("Send"));
 
     await waitFor(() => expect(mockCreateChat).toHaveBeenCalledTimes(1));
-    expect(mockCreateChat).toHaveBeenCalledWith({ modelDefault: "claude-opus-4-6" });
+    expect(mockCreateChat).toHaveBeenCalledWith({ modelDefault: "claude-sonnet-4-6" });
     await waitFor(() => expect(getLastPath()).toBe("/app/c/new-1"));
     expect(getLastState()).toEqual({
       firstMessage: {
         message: "hi there",
         // model is the short id string (not the picker object) — the
         // backend's SendMessageRequest.model is `str | None`.
-        model: "claude-opus-4-6",
+        model: "claude-sonnet-4-6",
         effort: "High",
         attachments: [],
       },
@@ -193,7 +193,7 @@ describe("ChatHome", () => {
     fireEvent.change(ta, { target: { value: "hi" } });
     fireEvent.click(screen.getByTitle("Send"));
     await waitFor(() => expect(mockCreateChat).toHaveBeenCalled());
-    expect(getLastState().firstMessage.model).toBe("claude-opus-4-6");
+    expect(getLastState().firstMessage.model).toBe("claude-sonnet-4-6");
     resolvePromise({ models: SERVER_ALLOWLIST });
   });
 
@@ -210,6 +210,6 @@ describe("ChatHome", () => {
     fireEvent.change(ta, { target: { value: "hello" } });
     fireEvent.click(screen.getByTitle("Send"));
     await waitFor(() => expect(mockCreateChat).toHaveBeenCalled());
-    expect(mockCreateChat).toHaveBeenCalledWith({ modelDefault: "claude-opus-4-6" });
+    expect(mockCreateChat).toHaveBeenCalledWith({ modelDefault: "claude-sonnet-4-6" });
   });
 });
