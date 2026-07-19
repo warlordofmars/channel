@@ -485,6 +485,24 @@ html.is-electron-mac .sb-top {
   font-size: 13.5px;
 }
 
+/* Rendered ```mermaid diagrams (#278). Constrained to the conversation
+   column; the SVG scales down on narrow viewports, scrolls if it can't. */
+.msg .mermaid-block {
+  margin: 0 0 14px; padding: 12px 14px;
+  background: var(--raised-2); border: 1px solid var(--border);
+  border-radius: var(--r-md); overflow-x: auto; max-width: 100%;
+  text-align: center;
+}
+.msg .mermaid-block svg { max-width: 100%; height: auto; }
+/* Parse-error fallback: show the raw source as a normal code block plus a
+   small caption instead of the diagram chrome. */
+.msg .mermaid-error {
+  padding: 0; background: none; border: 0;
+  overflow-x: visible; text-align: left;
+}
+.msg .mermaid-error .mermaid-source { margin: 0 0 6px; }
+.msg .mermaid-error-caption { font-size: 12.5px; color: var(--danger); }
+
 /* Links, quotes, separators. */
 .msg a { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
 .msg a:hover { filter: brightness(1.1); }

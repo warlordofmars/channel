@@ -1,6 +1,16 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
 import { fireEvent, render } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
+
+// Stub the diagram renderer so these tests exercise renderMarkdown's fence
+// ROUTING (which fences become diagrams, and the <pre> unwrap) without pulling
+// in mermaid or its async render. MermaidBlock has its own co-located suite.
+vi.mock("./MermaidBlock.jsx", () => ({
+  default: function MermaidBlockStub({ source }) {
+    return <div data-testid="mermaid-block" data-source={source} />;
+  },
+}));
+
 import { renderMarkdown, scanFences } from "./renderMarkdown.jsx";
 
 function wrap(node) {
@@ -163,6 +173,83 @@ describe("renderMarkdown", () => {
       renderMarkdown("<script>alert('xss')</script> safe", false),
     );
     expect(container.querySelector("script")).toBeNull();
+  });
+});
+
+describe("renderMarkdown — mermaid fences (#278)", () => {
+  const MERMAID = "```mermaid\ngraph TD; A-->B\n```";
+
+  it("renders a completed mermaid fence as a diagram, not a code block", () => {
+    const { container, getByTestId } = wrap(renderMarkdown(MERMAID, false));
+    const block = getByTestId("mermaid-block");
+    expect(block).toBeTruthy();
+    // Source is handed to the diagram renderer verbatim (trailing newline
+    // stripped).
+    expect(block.getAttribute("data-source")).toBe("graph TD; A-->B");
+    // The <pre> wrapper is unwrapped so the diagram is a valid block element.
+    expect(container.querySelector("pre")).toBeNull();
+  });
+
+  it("renders a mermaid fence as plain code while still streaming", () => {
+    const { container, queryByTestId } = wrap(renderMarkdown(MERMAID, true));
+    // Source is still arriving — no diagram yet.
+    expect(queryByTestId("mermaid-block")).toBeNull();
+    const code = container.querySelector("pre code");
+    expect(code).toBeTruthy();
+    expect(code.className).toContain("language-mermaid");
+    expect(code.textContent).toContain("graph TD; A-->B");
+    // The streaming cursor is still appended.
+    expect(container.querySelector(".cursor")).toBeTruthy();
+  });
+
+  it("leaves a non-mermaid fence as a normal code block", () => {
+    const md = "```python\nprint('hi')\n```";
+    const { container, queryByTestId } = wrap(renderMarkdown(md, false));
+    expect(queryByTestId("mermaid-block")).toBeNull();
+    const code = container.querySelector("pre code");
+    expect(code.className).toContain("language-python");
+    expect(code.textContent).toContain("print('hi')");
+  });
+
+  it("leaves a language-less fence as a normal code block", () => {
+    const md = "```\nplain fenced text\n```";
+    const { container, queryByTestId } = wrap(renderMarkdown(md, false));
+    expect(queryByTestId("mermaid-block")).toBeNull();
+    const code = container.querySelector("pre code");
+    expect(code).toBeTruthy();
+    expect(code.textContent).toContain("plain fenced text");
+  });
+
+  it("renders a mermaid fence in the leading prose of the decorate path", () => {
+    // fence 0 = mermaid (surrounding prose), fence 1 = a persisted code asset.
+    const md = `${MERMAID}\n\n\`\`\`python\nx = 1\ny = 2\n\`\`\``;
+    const codeAssets = new Map([[1, codeAsset(1)]]);
+    const { container, getByTestId } = wrap(
+      renderMarkdown(md, false, { codeAssets, onOpenAsset: vi.fn() }),
+    );
+    // The mermaid fence still becomes a diagram even alongside a decorated
+    // code asset.
+    expect(getByTestId("mermaid-block").getAttribute("data-source")).toBe(
+      "graph TD; A-->B",
+    );
+    expect(
+      container.querySelector(".code-decorated pre code").textContent,
+    ).toContain("x = 1");
+  });
+
+  it("renders a mermaid fence in the trailing prose of the decorate path", () => {
+    // fence 0 = persisted code asset, fence 1 = mermaid (trailing prose).
+    const md = `\`\`\`python\nx = 1\ny = 2\n\`\`\`\n\n${MERMAID}`;
+    const codeAssets = new Map([[0, codeAsset(0)]]);
+    const { container, getByTestId } = wrap(
+      renderMarkdown(md, false, { codeAssets, onOpenAsset: vi.fn() }),
+    );
+    expect(getByTestId("mermaid-block").getAttribute("data-source")).toBe(
+      "graph TD; A-->B",
+    );
+    expect(
+      container.querySelector(".code-decorated pre code").textContent,
+    ).toContain("x = 1");
   });
 });
 
