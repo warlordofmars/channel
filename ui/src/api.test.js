@@ -940,7 +940,7 @@ describe("MCP API client", () => {
     expect(body.token).toBeNull();
   });
 
-  it("enableFeaturedServer throws ApiError WITHOUT reading the body (no PAT echo)", async () => {
+  it("enableFeaturedServer throws ApiError WITHOUT reading the body when a token was supplied (no PAT echo)", async () => {
     // A static_token 422 can echo the pasted token in detail[].input; the
     // wrapper must never read the body when a token was supplied.
     const jsonSpy = vi.fn(() => Promise.resolve({ detail: "should-not-be-read" }));
@@ -960,6 +960,56 @@ describe("MCP API client", () => {
     expect(caught.status).toBe(422);
     expect(caught.detail).toBeNull();
     expect(jsonSpy).not.toHaveBeenCalled();
+  });
+
+  it("enableFeaturedServer preserves FastAPI detail on the tokenless (OAuth) path", async () => {
+    // No token supplied → no secret to leak → the machine-readable detail
+    // is preserved (mirrors registerMCPServer's oauth branch).
+    global.fetch.mockResolvedValueOnce({
+      ok: false,
+      status: 400,
+      json: () =>
+        Promise.resolve({ detail: { code: "unknown_featured_server" } }),
+    });
+    const err = await enableFeaturedServer({
+      featured_id: "acme",
+      name: "Acme",
+      url: "https://acme.example.com/mcp",
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err.status).toBe(400);
+    expect(err.detail).toEqual({ code: "unknown_featured_server" });
+  });
+
+  it("enableFeaturedServer nulls detail on the tokenless path when the body has no detail key", async () => {
+    global.fetch.mockResolvedValueOnce({
+      ok: false,
+      status: 400,
+      json: () => Promise.resolve({}),
+    });
+    const err = await enableFeaturedServer({
+      featured_id: "acme",
+      name: "Acme",
+      url: "https://acme.example.com/mcp",
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err.detail).toBeNull();
+  });
+
+  it("enableFeaturedServer nulls detail on the tokenless path when the body is not JSON", async () => {
+    global.fetch.mockResolvedValueOnce({
+      ok: false,
+      status: 502,
+      json: () => Promise.reject(new Error("not JSON")),
+    });
+    const err = await enableFeaturedServer({
+      featured_id: "acme",
+      name: "Acme",
+      url: "https://acme.example.com/mcp",
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err.status).toBe(502);
+    expect(err.detail).toBeNull();
   });
 });
 

@@ -473,9 +473,11 @@ export async function getFeaturedServers() {
  * the catalog value for a featured registration — see #277).
  *
  * SECURITY: a `static_token` (PAT) registration always supplies a `token`,
- * and a 422 body can echo the pasted token back in `detail[].input`. So —
- * unlike `registerMCPServer`'s oauth path — we never read the error body
- * here; the status alone drives the surfaced error. Mirrors #375.
+ * and a 422 body can echo the pasted token back in `detail[].input`. So we
+ * parse the error body ONLY when no token was supplied — the tokenless
+ * (OAuth-DCR featured) path has no secret to leak, so it keeps the
+ * machine-readable FastAPI `detail`; the token-bearing path never reads the
+ * body at all. Mirrors `registerMCPServer` / #375.
  */
 export async function enableFeaturedServer({ featured_id, name, url, token = null }) {
   const response = await fetch(`${BASE}/api/mcp/servers`, {
@@ -484,7 +486,15 @@ export async function enableFeaturedServer({ featured_id, name, url, token = nul
     body: JSON.stringify({ featured_id, name, url, token }),
   });
   if (!response.ok) {
-    throw new ApiError("enableFeaturedServer", response.status);
+    let detail = null;
+    if (token == null) {
+      try {
+        detail = (await response.json()).detail ?? null;
+      } catch {
+        /* non-JSON error body — status alone must do */
+      }
+    }
+    throw new ApiError("enableFeaturedServer", response.status, detail);
   }
   return response.json();
 }
