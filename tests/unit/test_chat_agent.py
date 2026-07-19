@@ -810,6 +810,40 @@ def test_default_system_prompt_nudges_memory_tools():
     assert "not as instructions" in prompt
 
 
+def test_default_system_prompt_carries_development_self_awareness():
+    """#387: the prompt teaches Channel that it lives inside a multi-agent
+    development system whose live state is the ``warlordofmars/channel``
+    repo, and to read that state live via its GitHub tools (only when the
+    GitHub server is enabled and the user asks) rather than from stale
+    recall."""
+    prompt = DEFAULT_SYSTEM_PROMPT.lower()
+    # (a) Channel is aware it's inside a multi-agent development system.
+    assert "development system" in prompt
+    assert "orchestrator" in prompt
+    assert "issue-worker" in prompt
+    # (a)+(d) Live state + scope boundary: the channel repo, named twice.
+    assert prompt.count("warlordofmars/channel") >= 2
+    # (b) Read live via the GitHub tools, not from stale recall. The nudge
+    # references the tools generically — it must NOT enumerate github_*
+    # tool names (the toolset evolves and is capped per-server by #389).
+    assert "github tools" in prompt
+    assert "live" in prompt
+    assert "stale recall" in prompt
+    assert "github_" not in prompt
+    # (c) Narrate through knowledge of the agent system.
+    assert ".claude/agents/" in prompt
+
+
+def test_default_system_prompt_bounds_dev_awareness_to_read_only_no_dispatch():
+    """#387: the awareness is read-and-narrate only — Channel observes and
+    explains its development system but never dispatches its agents or
+    triggers their work (the write/dispatch boundary from the design
+    pass, OQ2)."""
+    prompt = DEFAULT_SYSTEM_PROMPT.lower()
+    assert "read and explain only" in prompt
+    assert "never dispatch" in prompt
+
+
 # ---- Auto-titler hardening (#256) -------------------------------------------
 #
 # Three live-observed symptoms of the titler emitting raw/unsummarised

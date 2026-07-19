@@ -411,6 +411,39 @@ infra**.
   block. Default `"1"`.
 - **Model override** — `STARTER_TITLER_MODEL` (default `claude-haiku-4-5`).
 
+## Development self-awareness (#387)
+
+`DEFAULT_SYSTEM_PROMPT` (`src/channel/agents/chat_agent.py`) teaches
+Channel that it lives inside its own multi-agent development system
+(orchestrator / issue-worker / design-review) whose live state is the
+`warlordofmars/channel` GitHub repo. When the GitHub server is enabled
+on the chat and the user asks about backlog / PR / issue / agent-activity
+state, Channel reads that state **live** via its `github_*` MCP read
+tools (the #277 read surface) rather than guessing or answering from
+stale recall. The prompt names its tools generically ("your GitHub
+tools"); it deliberately does **not** enumerate `github_*` tool names,
+since the toolset evolves and is capped per-server (#389).
+
+- **Live-read only, never persisted.** GitHub read results are tool
+  payloads — they stay in the tool-result register and are **never**
+  persisted to AgentCore Memory (per the "tool payloads never persist to
+  AgentCore Memory" product decision) or to the Hive pool. A cached
+  backlog snapshot would be both stale-within-minutes and a
+  confused-deputy hazard (#299); the live-read/no-persist posture
+  sidesteps both, so #387 does not create or inherit the #299 boundary.
+- **Scope: the `warlordofmars/channel` repo only. Read + narrate, never
+  dispatch.** Channel observes and explains its dev system; it never
+  triggers the orchestrator or dispatches agents (that step is out of
+  scope — #299 territory). Sibling-repo awareness is #286 / #397, not
+  here. No bespoke tool wraps `github_*` — the composition is
+  prompt-level (per "don't build a parallel tool-calling shim").
+- **#393 ↔ #387 seam.** #393 stores *what each agent IS* (distilled
+  agent-contract summaries in AgentCore own-data, surfaced by recall);
+  #387 reads *what the system is DOING now* (live GitHub state) and
+  narrates it through that identity knowledge. #387 ships independently
+  of #393 (falling back to the `.claude/agents/` files) and gets richer
+  when #393 lands.
+
 ## Management UI
 
 - React SPA (Vite), runs on port 5173 in dev
