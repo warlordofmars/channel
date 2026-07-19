@@ -14,6 +14,7 @@ import base64
 import binascii
 import json
 import logging
+import math
 import os
 import re
 from collections.abc import AsyncIterator, Callable, Sequence
@@ -987,9 +988,16 @@ def _stream_keepalive_interval() -> float:
     if raw is None:
         return _DEFAULT_STREAM_KEEPALIVE_INTERVAL
     try:
-        return float(raw)
+        parsed = float(raw)
     except ValueError:
         return _DEFAULT_STREAM_KEEPALIVE_INTERVAL
+    # Reject non-finite values: float() accepts "nan" / "inf", but a nan
+    # timeout makes asyncio.wait behave unpredictably (nan comparisons
+    # are always False, risking a tight keepalive loop) and inf would
+    # silently pin the interval open. Fall back to the default on either.
+    if not math.isfinite(parsed):
+        return _DEFAULT_STREAM_KEEPALIVE_INTERVAL
+    return parsed
 
 
 async def _events_with_keepalive(

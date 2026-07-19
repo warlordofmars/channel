@@ -4312,6 +4312,22 @@ def test_stream_keepalive_interval_falls_back_on_non_numeric(
     assert _stream_keepalive_interval() == _DEFAULT_STREAM_KEEPALIVE_INTERVAL
 
 
+@pytest.mark.parametrize("bad", ["nan", "inf", "-inf"])
+def test_stream_keepalive_interval_rejects_non_finite(
+    monkeypatch: pytest.MonkeyPatch, bad: str
+) -> None:
+    # float() accepts "nan"/"inf", but a nan timeout makes asyncio.wait
+    # behave unpredictably and inf would silently pin the interval open —
+    # both fall back to the default.
+    from channel.api.chats import (
+        _DEFAULT_STREAM_KEEPALIVE_INTERVAL,
+        _stream_keepalive_interval,
+    )
+
+    monkeypatch.setenv("STARTER_STREAM_KEEPALIVE_INTERVAL", bad)
+    assert _stream_keepalive_interval() == _DEFAULT_STREAM_KEEPALIVE_INTERVAL
+
+
 def test_post_message_emits_keepalive_before_first_delta(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
