@@ -45,8 +45,8 @@ geo-restrictions, and CSP headers.
 | Env var (SSM path) | `STARTER_ORIGIN_VERIFY_PARAM` |
 | SSM parameter path | `/channel/origin-verify-secret` (prod) or `/channel/<env_name>/origin-verify-secret` |
 | Header name | `X-Origin-Verify` |
-| Consumer (Lambda) | `src/starter/auth/tokens.py` (`_origin_verify_secret()`) |
-| Consumer (middleware) | `src/starter/api/main.py` (`_verify_origin_secret`) |
+| Consumer (Lambda) | `src/channel/auth/tokens.py` (`_origin_verify_secret()`) |
+| Consumer (middleware) | `src/channel/api/main.py` (`_verify_origin_secret`) |
 | Injector (CloudFront) | `infra/stacks/starter_stack.py` (`origin_verify_header`, all environments) |
 
 ### Current behaviour
@@ -68,7 +68,7 @@ CI smoke test for the dev environment trips the pipeline red. **Rotate
 the secret immediately after the first deploy in any environment**
 using the procedure below.
 
-The resolver in `src/starter/auth/tokens.py` (`_origin_verify_secret`)
+The resolver in `src/channel/auth/tokens.py` (`_origin_verify_secret`)
 returns `None` on any SSM exception (missing parameter, IAM denial,
 network error). When `None` is returned, the middleware skips
 verification — but the startup validator already proved the parameter
@@ -302,7 +302,7 @@ yet.
 | SSM parameter path | `/channel/jwt-secret` (prod) or `/channel/<env_name>/jwt-secret` |
 | Algorithm | HS256 (symmetric) |
 | Issuer claim (`iss`) | `https://<custom_domain>` (set via `STARTER_ISSUER`) |
-| Consumer | `src/starter/auth/tokens.py` (`_jwt_secret()`, `decode_jwt`, `decode_mgmt_jwt`) |
+| Consumer | `src/channel/auth/tokens.py` (`_jwt_secret()`, `decode_jwt`, `decode_mgmt_jwt`) |
 
 ### Current behaviour
 
@@ -359,7 +359,7 @@ doubles as the admin-role grant list.
 | Allowlist SSM path | `/channel/allowed-emails` (prod) or `/channel/<env_name>/allowed-emails` |
 | Allowlist default | `"[]"` — empty list, denies all |
 | Redirect URI | `https://<custom_domain>/auth/callback` |
-| Consumer | `src/starter/auth/google.py`; login flow in `src/starter/auth/mgmt_auth.py` |
+| Consumer | `src/channel/auth/google.py`; login flow in `src/channel/auth/mgmt_auth.py` |
 
 ### Current behaviour
 
@@ -376,7 +376,7 @@ doubles as the admin-role grant list.
   deployer's own. Populate the parameter before expecting anyone to
   log in.
 - Admin role is granted by the `is_admin_email` heuristic in
-  `src/starter/auth/google.py`, which today maps to membership in
+  `src/channel/auth/google.py`, which today maps to membership in
   the same allowlist — every allowlisted email is an admin. Replace
   this if you need a more granular role split.
 
@@ -435,10 +435,10 @@ time — so a stolen token is valid until its `exp` passes.
 | `role` claim | `"admin"` or `"user"` (set at login from `is_admin_email`) |
 | `typ` claim | `"mgmt"` (distinguishes from API access tokens) |
 | `iat` / `exp` claims | seconds since epoch; TTL = 8 hours |
-| TTL constant | `MGMT_JWT_TTL_SECONDS = 28800` in `src/starter/auth/tokens.py` |
+| TTL constant | `MGMT_JWT_TTL_SECONDS = 28800` in `src/channel/auth/tokens.py` |
 | Browser storage key | `localStorage["starter_mgmt_token"]` |
-| Issuer (server) | `src/starter/auth/tokens.py` (`issue_mgmt_jwt`) via `src/starter/auth/mgmt_auth.py` |
-| Validator (server) | `src/starter/auth/tokens.py` (`decode_mgmt_jwt`) via `src/starter/api/_auth.py` (`require_mgmt_user`, `require_admin`) |
+| Issuer (server) | `src/channel/auth/tokens.py` (`issue_mgmt_jwt`) via `src/channel/auth/mgmt_auth.py` |
+| Validator (server) | `src/channel/auth/tokens.py` (`decode_mgmt_jwt`) via `src/channel/api/_auth.py` (`require_mgmt_user`, `require_admin`) |
 | Issuer (UI) | server-side `mgmt_callback` returns an HTML redirect that writes the token |
 | Sender (UI) | `ui/src/api.js` reads the token and sets the `Authorization` header |
 

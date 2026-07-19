@@ -22,7 +22,7 @@ get the header injected automatically.
 | Method | `GET` |
 | Auth | Unauthenticated |
 | Path | `/health` |
-| Implementation | `src/starter/api/main.py` (`@app.get("/health")`) |
+| Implementation | `src/channel/api/main.py` (`@app.get("/health")`) |
 | OpenAPI | Hidden (`include_in_schema=False`) |
 | Response | `200 OK`, `application/json` |
 
@@ -75,7 +75,7 @@ but not yet forwarded to CloudWatch Logs.
 | Method | `POST` |
 | Auth | Unauthenticated (browsers don't send credentials with CSP POSTs) |
 | Path | `/api/csp-report` |
-| Implementation | `src/starter/api/csp.py` (`receive_csp_report`) |
+| Implementation | `src/channel/api/csp.py` (`receive_csp_report`) |
 | OpenAPI | Hidden (`include_in_schema=False`) |
 | Response | `204 No Content` (always — even on parse error) |
 
@@ -102,7 +102,7 @@ EMF metric emissions.
 
 **Log line.** The structured JSON formatter only forwards a fixed
 allowlist of `extra=` keys today (see `_JsonFormatter._EXTRA_FIELDS`
-in `src/starter/logging_config.py`), so the violation fields the
+in `src/channel/logging_config.py`), so the violation fields the
 handler attaches via `extra={"csp": ...}` are dropped and do **not**
 appear in CloudWatch Logs. What you see in CloudWatch is just the
 formatted message string, which embeds two of the most useful
