@@ -739,6 +739,48 @@ def test_post_message_omits_tools_when_all_flags_off(
     assert captured["build_agent_kwargs"]["tools"] == []
 
 
+def test_post_message_wires_native_and_capped_mcp_tools(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Registry assembly (#389): ``build_agent`` receives the native
+    tool registry followed by the per-server-capped MCP providers.
+
+    The MCP side is stubbed to two sentinel providers so this test pins
+    the ``[*native, *mcp]`` splice order without standing up real
+    ``MCPClient`` transports — the cap wrapper's truncation is exercised
+    directly in ``test_chats_api_mcp.py``.
+    """
+    from unittest.mock import AsyncMock
+
+    _stub_storage_for_one_turn(monkeypatch)
+    for flag, _ in _TOOL_FLAGS:
+        monkeypatch.delenv(flag, raising=False)
+    monkeypatch.setenv("STARTER_CLOCK_TOOL_ENABLED", "1")  # one native tool
+
+    mcp_a = object()
+    mcp_b = object()
+    monkeypatch.setattr(
+        "channel.api.chats._build_mcp_clients_for_chat",
+        AsyncMock(return_value=[mcp_a, mcp_b]),
+    )
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        "channel.api.chats.build_agent",
+        _fake_streaming_agent_factory(captured),
+    )
+
+    response = client.post(
+        "/api/chats/c1/messages",
+        json={"message": "hi", "model": "claude-sonnet-4-6"},
+    )
+    assert response.status_code == 200
+    tools = captured["build_agent_kwargs"]["tools"]
+    # Native tools registered first, MCP providers appended after.
+    assert [t.tool_name for t in tools[:1]] == ["current_time"]
+    assert tools[1:] == [mcp_a, mcp_b]
+
+
 def test_tool_registry_includes_code_exec_when_flag_on(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
