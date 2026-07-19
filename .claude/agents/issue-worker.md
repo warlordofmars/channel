@@ -315,28 +315,242 @@ Only proceed to step 7.5 once `code-reviewer` reports no `FAIL` items.
 
 Runs on **every** agent-created PR. The `agent-safe` label only gates whether the agent merges autonomously after the review — every PR gets a second opinion.
 
-1. After CI is green and `code-reviewer` is clean, request a Copilot review:
+1. After CI is green and `code-reviewer` is clean, request a Copilot review.
+
+   **Do not request it with `gh pr edit <PR-NUMBER> --add-reviewer "@copilot"`
+   (or a bare `@copilot`) — that silently no-ops**, dropping the bot login with
+   no error, so a poll started after it waits on a request that never
+   registered. Use **either** working method below; both actually register the
+   `copilot-pull-request-reviewer` bot.
+
+   **Method A — REST with the `[bot]`-suffixed login** (simplest; no node-id
+   lookup). The **`[bot]` suffix is required** — the un-suffixed login is what
+   the `--add-reviewer` path drops:
+
    ```bash
-   gh pr edit <PR-NUMBER> --add-reviewer "@copilot"
+   gh api --method POST \
+     repos/{owner}/{repo}/pulls/<PR-NUMBER>/requested_reviewers \
+     -f 'reviewers[]=copilot-pull-request-reviewer[bot]'
    ```
-2. Wait for the Copilot **`copilot-pull-request-reviewer` check-run** (posted by the `github-actions` app — **not** a check named `Agent`) to reach `completed`, then wait an **additional ~90s** before fetching review comments — the check-run closes before Copilot finishes writing line-level comments (observed: check-run completed at 12:41:52, comments posted at 12:43:03). Poll with:
+
+   **Method B — GraphQL `requestReviews` `botIds`** (explicit node id; the
+   method #413 specified). Discover the Copilot **reviewer** bot's node id,
+   then fire the mutation against the PR's node id. The reviewer bot's login is
+   `copilot-pull-request-reviewer` and its node id is a stable global value
+   (`BOT_kgDOCnlnWA` on github.com). **Do not discover it via `suggestedActors`**
+   — that returns `copilot-swe-agent` (the coding agent), *not* the reviewer,
+   and there is no `CAN_BE_REVIEWER` filter (the reviewer bot is simply not
+   offered by `suggestedActors`). Rediscover it instead by scanning recent PRs'
+   `reviewRequests` / `reviews` for the bot, falling back to the known stable
+   id:
+
    ```bash
-   gh api repos/{owner}/{repo}/pulls/<PR-NUMBER>/comments --jq '.[].body'
-   gh api repos/{owner}/{repo}/pulls/<PR-NUMBER>/reviews --jq '.[] | {state, body: .body[:120]}'
+   OWNER=$(gh repo view --json owner --jq .owner.login)
+   REPO=$(gh repo view --json name --jq .name)
+
+   PR_NODE=$(gh pr view <PR-NUMBER> --json id --jq .id)   # PR node id (PR_...)
+
+   # Copilot reviewer bot node id — login copilot-pull-request-reviewer.
+   # Scan recent PRs for the bot in a reviewRequest or a posted review; fall
+   # back to the stable global id if none is found yet (e.g. a fresh template).
+   BOT_ID=$(gh api graphql -f query='
+     query($owner:String!,$name:String!){
+       repository(owner:$owner,name:$name){
+         pullRequests(first:50, orderBy:{field:CREATED_AT, direction:DESC}){
+           nodes{
+             reviewRequests(first:10){ nodes{ requestedReviewer{ __typename ... on Bot { login id } } } }
+             reviews(first:10){ nodes{ author{ __typename login ... on Bot { id } } } }
+           }
+         }
+       }
+     }' -F owner="$OWNER" -F name="$REPO" \
+     --jq 'first(.data.repository.pullRequests.nodes[]
+           | (.reviewRequests.nodes[]?.requestedReviewer // empty),
+             (.reviews.nodes[]?.author // empty)
+           | select((.login // "") | startswith("copilot-pull-request-reviewer")) | .id)
+           // "BOT_kgDOCnlnWA"')
+
+   gh api graphql -f query='
+     mutation($prId:ID!,$botId:ID!){
+       requestReviews(input:{pullRequestId:$prId, botIds:[$botId], union:true}){
+         pullRequest{ id }
+       }
+     }' -F prId="$PR_NODE" -F botId="$BOT_ID"
+   ```
+
+   **Invariant — never poll for a review you have not confirmed was requested
+   (§7.1).** Before entering the poll, verify a pending Copilot reviewer now
+   shows on the PR; only proceed to step 2 if it does:
+
+   ```bash
+   OWNER=$(gh repo view --json owner --jq .owner.login)   # self-contained
+   REPO=$(gh repo view --json name --jq .name)
+   gh api graphql -f query='
+     query($owner:String!,$name:String!,$num:Int!){
+       repository(owner:$owner,name:$name){
+         pullRequest(number:$num){
+           reviewRequests(first:20){
+             nodes{ requestedReviewer{ __typename ... on Bot { login } ... on User { login } } }
+           }
+         }
+       }
+     }' -F owner="$OWNER" -F name="$REPO" -F num=<PR-NUMBER> \
+     --jq '[.data.repository.pullRequest.reviewRequests.nodes[]?.requestedReviewer.login]
+           | map(select(. != null)) | any(startswith("copilot-pull-request-reviewer"))'
+   ```
+
+   (The `reviewRequest` login is the **un-suffixed** `copilot-pull-request-reviewer`
+   — the `[bot]` suffix only appears on the *posted* review/comment author in
+   step 2, so `startswith` matches either form.) A `true` result means the
+   request registered — proceed to poll. `false` means it did **not** register
+   (bot not offered, or the request was rejected): retry the request **once**
+   (either method A or B); if it still doesn't register, treat Copilot review
+   as **advisory review unavailable**, record that in the PR description, and
+   skip to step 5. Do not poll for a request you never confirmed.
+2. Once the request is registered (step 1's invariant passed), wait for the Copilot **`copilot-pull-request-reviewer` check-run** (posted by the `github-actions` app — **not** a check named `Agent`) to reach `completed`, then wait an **additional ~90s** before fetching review comments — the check-run closes before Copilot finishes writing line-level comments (observed: check-run completed at 12:41:52, comments posted at 12:43:03). Poll with:
+   ```bash
+   # (1) Gate on the check-run reaching `completed` — poll this until it prints
+   # `completed/...`, THEN wait ~90s before the fetch below (HEAD_SHA = PR head):
+   HEAD_SHA=$(gh pr view <PR-NUMBER> --json headRefOid --jq .headRefOid)
+   gh api repos/{owner}/{repo}/commits/"$HEAD_SHA"/check-runs \
+     --jq '[.check_runs[] | select(.name=="copilot-pull-request-reviewer")
+            | .status + "/" + (.conclusion // "pending")] | (.[0] // "missing")'
+   # prints e.g. `completed/success`, `in_progress/pending`, or `missing`
+   # (no such check-run yet — keep polling within the bounded budget)
+
+   # (2) Fetch the review + comments. Author login differs by endpoint: the
+   # top-level REVIEW author is `copilot-pull-request-reviewer[bot]`, but INLINE
+   # review-comment authors show as `Copilot` — and the reviewRequest login in
+   # step 1 is the un-suffixed `copilot-pull-request-reviewer`. Match all three
+   # with a case-insensitive substring on "copilot" so the poll never
+   # under-reports.
+   gh api repos/{owner}/{repo}/pulls/<PR-NUMBER>/reviews \
+     --jq '.[] | select(.user.login | test("copilot"; "i")) | {state, body: .body[:120]}'
+   gh api repos/{owner}/{repo}/pulls/<PR-NUMBER>/comments \
+     --jq '.[] | select(.user.login | test("copilot"; "i")) | .body'
    ```
    Do not rely on `get_reviews` alone — subsequent Copilot iterations can post line comments without creating a new top-level review object.
+
+   **Bound the wait (§7.1).** Cap this at ~6–8 checks (≈90s apart), each tied to a concrete transition (the check-run reaching `completed`, then a comment/review appearing) — never an open-ended idle timer. When the budget is exhausted, report and move on; do not silently extend it.
+
+   **Docs-only / trivial PRs — expect no review even when correctly requested.** Copilot **skips** docs-only diffs: the request registers (step 1's invariant passes) yet Copilot posts no review at all — this, *not* a failed request, is why the docs-only PR #411 timed out its poll this session. A bounded no-response here is **"advisory review unavailable," not a hard stop**: record it in the PR description and proceed to step 5. Only a *posted* finding gates the loop.
 3. Triage each unresolved thread. **Every thread gets a reply before it's resolved.**
-   - **Correctness / security / clarity finding** — fix on the same branch, run `uv run inv pre-push`, push, reply `Fixed in <SHA> — <one-line summary>`, resolve the thread, re-request Copilot review.
+   - **Correctness / security / clarity finding** — fix on the same branch, run `uv run inv pre-push`, push, reply `Fixed in <SHA> — <one-line summary>`, resolve the thread, then re-request Copilot review by re-running step 1's request (method A or B) **and its registration check** (not `--add-reviewer`, which no-ops — see step 1).
    - **Pure style nit** (Tailwind class order, const-vs-let, naming preference, import sort) — reply declining with a citation to project conventions, resolve the thread.
    - **Ambiguous or architecturally significant** — emit `HUMAN_INPUT_REQUIRED: Copilot flagged X on #NNN — unclear call` and stop. Leave the thread open.
 
-   **Note — where each iteration's CI run actually comes from.** Re-requesting a Copilot review (`gh pr edit <PR-NUMBER> --add-reviewer "@copilot"`) starts only Copilot's own `copilot-pull-request-reviewer` check-run — it does **not** start a project CI run, because `ci.yml` triggers on `pull_request` (`opened`/`synchronize`/`reopened`) and `push`, and no workflow in this repo listens for `review_requested`. The fresh full CI run you see on most iterations comes from the fix `git push` in the step-3 correctness/clarity path (a `synchronize` event), not from the re-request. Practical rule: on any iteration where you push a fix, expect a new CI run and wait for it to go green (same §7 loop) before the next Copilot pass is meaningful; on a pure-decline iteration (all findings are style nits, resolved with no commit) **no** new project CI run fires — don't wait for one.
+   **Note — where each iteration's CI run actually comes from.** Re-requesting a Copilot review (re-running step 1's request, method A or B) starts only Copilot's own `copilot-pull-request-reviewer` check-run — it does **not** start a project CI run, because `ci.yml` triggers on `pull_request` (`opened`/`synchronize`/`reopened`) and `push`, and no workflow in this repo listens for `review_requested`. The fresh full CI run you see on most iterations comes from the fix `git push` in the step-3 correctness/clarity path (a `synchronize` event), not from the re-request. Practical rule: on any iteration where you push a fix, expect a new CI run and wait for it to go green (same §7 loop) before the next Copilot pass is meaningful; on a pure-decline iteration (all findings are style nits, resolved with no commit) **no** new project CI run fires — don't wait for one.
 4. **Hard cap: 5 iterations, early-exit on convergence.** Stop when 5 round-trips are done OR two consecutive iterations produce no new actionable findings. If unresolved findings remain, emit `HUMAN_INPUT_REQUIRED: Copilot loop ended with open findings on #NNN`.
 5. **Agent-safe PRs**: arm auto-merge:
    ```bash
    gh pr merge <PR-NUMBER> --auto --squash --delete-branch
    ```
    **Non-agent-safe PRs**: emit `HUMAN_INPUT_REQUIRED: PR #NNN ready for human review + merge` and stop.
+
+### 7.7. Auto-merge stuck-detector (agent-safe PRs)
+
+Only reached by **agent-safe** PRs that armed auto-merge in §7.5 step 5 —
+non-agent-safe PRs already stopped for human merge. GitHub sometimes leaves a
+PR at `mergeStateStatus: BLOCKED` **even when every merge gate is satisfied**
+(all required checks green, branch up-to-date, no required review, no unresolved
+threads): a known GitHub-side mergeability-recompute staleness / auto-update
+race — external, not fully in our control (observed on #411, which needed a
+manual admin-merge, and the #383 stuck-auto-update variant). Armed auto-merge
+then never fires and the PR sits indefinitely. This step **detects that shape,
+applies safe nudges, then escalates** — it never admin-merges autonomously.
+
+**Bounded wait for the merge to land (§7.1).** After arming, poll the PR's
+merge state on a bounded budget — ~4–6 checks, ≈60–90s apart (a few minutes
+total), each tied to the concrete `state == MERGED` transition:
+
+```bash
+gh pr view <PR-NUMBER> --json state,mergeStateStatus,mergeable \
+  --jq '{state, mergeStateStatus, mergeable}'
+```
+
+The instant `state == MERGED`, auto-merge fired — proceed to §8. Do **not**
+idle-loop past the budget (§7.1); if nothing has changed, ending the turn is
+fine — a completion notification re-invokes the worker if the PR later merges
+on its own.
+
+**Only if the budget is exhausted and the PR is still `OPEN`**, confirm the
+"all-gates-green but stuck" shape before nudging — the detector must fire
+**only** here, never to paper over a genuinely failing gate:
+
+```bash
+# merge state + required-check rollup + review decision, in one call.
+# `notgreen` counts any check that is not COMPLETED-and-green, so a still-
+# pending required check (conclusion null) also counts — the nudge can never
+# fire while a required check is merely in progress.
+gh pr view <PR-NUMBER> --json state,mergeStateStatus,reviewDecision,statusCheckRollup \
+  --jq '{state, mergeStateStatus, reviewDecision,
+         notgreen: ([.statusCheckRollup[]? | select(
+           (.status? != null and .status != "COMPLETED")                 # CheckRun still running
+           or (.conclusion? != null and .conclusion != "SUCCESS"
+               and .conclusion != "NEUTRAL" and .conclusion != "SKIPPED") # CheckRun not green
+           or (.state? != null and .state != "SUCCESS")                   # legacy StatusContext not green
+         )] | length)}'
+
+# unresolved review threads (want 0). `totalCount` guards the single page:
+# if there are >100 threads the count is incomplete, so conservatively treat
+# truncation as "unresolved" (a non-zero, blocking result) rather than 0.
+OWNER=$(gh repo view --json owner --jq .owner.login)
+REPO=$(gh repo view --json name --jq .name)
+gh api graphql -f query='
+  query($owner:String!,$name:String!,$num:Int!){
+    repository(owner:$owner,name:$name){
+      pullRequest(number:$num){ reviewThreads(first:100){ totalCount nodes{ isResolved } } }
+    }
+  }' -F owner="$OWNER" -F name="$REPO" -F num=<PR-NUMBER> \
+  --jq '.data.repository.pullRequest.reviewThreads
+        | if .totalCount > (.nodes | length)
+          then "truncated (>100 threads) — treat as unresolved; do not nudge"
+          else ([.nodes[]? | select(.isResolved == false)] | length) end'
+```
+
+Nudge **only if all of these hold**: `state == OPEN`, `mergeStateStatus` is
+`BLOCKED` **or** `BEHIND` (never `DIRTY`/`UNKNOWN` — those are real problems,
+handled below), `notgreen == 0` (every check is COMPLETED and green — a
+still-pending check counts, so the nudge can't fire early), `reviewDecision` is
+empty (no required review — *not* `REVIEW_REQUIRED`), and unresolved threads
+`== 0`. Apply the nudges **in order**, re-checking `state` / `mergeStateStatus`
+after each and stopping the instant it merges:
+
+1. **Toggle auto-merge off then on** — forces GitHub to recompute mergeability
+   (the primary fix for the `BLOCKED`-but-up-to-date shape from #411):
+   ```bash
+   gh pr merge <PR-NUMBER> --disable-auto
+   gh pr merge <PR-NUMBER> --auto --squash --delete-branch
+   ```
+2. **Update the branch if it has fallen behind** base (when
+   `mergeStateStatus == BEHIND`):
+   ```bash
+   gh pr update-branch <PR-NUMBER>
+   ```
+   `update-branch` merges base into the PR head **server-side** — no local
+   force-push, so W1–W7 are not engaged. If instead the PR needs a *rebase*
+   (the #383 stuck-auto-update variant, where GitHub's auto-update created an
+   up-to-date merge commit that never triggered CI), rebase locally and push
+   with the **explicit-refspec `--force-with-lease`** form from §6 — re-running
+   the full W1–W7 pre-push checks first. Never a bare force-push (W2/W3/W6).
+
+**After any nudge that starts a new CI run** — an `update-branch` merge commit,
+or a re-arm GitHub re-checks — `statusCheckRollup` goes pending again. Return to
+the §7 CI-green wait loop and let it settle **before** re-evaluating the gate or
+escalating; escalating while required checks are merely pending is premature.
+
+**Escalate — do NOT admin-merge.** If the safe nudges don't clear it within the
+bounded budget, **stop and escalate for a human/coordinator to admin-merge**.
+The autonomous worker does **not** carry — and must not improvise — an
+admin-merge power (decided policy). Emit the sentinel and end the turn:
+
+```
+HUMAN_INPUT_REQUIRED: PR #NNN auto-merge stuck at BLOCKED — all gates green (required checks green, branch up-to-date / mergeStateStatus not BEHIND, no required review, no unresolved threads) but the armed auto-merge has not fired after safe nudges (toggle auto-merge, update-branch); needs a human/coordinator admin-merge.
+```
+
+If `mergeStateStatus` is instead `DIRTY` (conflicts) or a required check is
+actually failing, this is **not** the stuck shape — fall back to the normal §7
+fix loop (or §7.5 for review findings); do not nudge.
 
 ### 8. Monitor development branch CI/CD post-merge
 
@@ -598,15 +812,16 @@ HUMAN_INPUT_REQUIRED: <brief reason>
 
 Halt **only** in these situations:
 
-- The PR is not auto-merging after CI passes and the reason is unclear
+- The PR is not auto-merging after CI passes and the reason is unclear (for the *diagnosed* all-gates-green-but-`BLOCKED` case, run the §7.7 stuck-detector's safe nudges first, then escalate per that section)
 - The `development` pipeline failure is in infrastructure (CDK / Lambda / DynamoDB) and the root cause is not apparent from logs
-- A change requires modifying `infra/stacks/starter_stack.py` in a way that could affect production resources
+- A change requires modifying `infra/stacks/channel_stack.py` in a way that could affect production resources
 - The same CI check has failed 3 times without a clear fix
 - A release milestone drains to zero open non-epic issues
 - **Any of the W1–W7 push-discipline checks fails** (see `## Push discipline`). W5 fires on `push.default = matching`; W7 fires on protected-shadow-branch divergence after the W4 fast-forward attempt. These halts surface a sentinel and stop; they do not retry. Other W-rule violations (W1/W2/W3/W6) indicate a malformed push command and should be reformulated by the agent before retrying — but if the malformed shape persists across two attempts, halt with `HUMAN_INPUT_REQUIRED: push command repeatedly violates W1–W7 (see ## Push discipline)`.
 - The §7.3 code-reviewer loop exhausts 3 fix iterations with `FAIL` items remaining (sentinel: `HUMAN_INPUT_REQUIRED: code-reviewer has unresolved blockers on #NNN after 3 fix attempts`)
 - The §7.5 Copilot review loop exhausts 5 iterations with unresolved findings (sentinel: `HUMAN_INPUT_REQUIRED: Copilot loop ended with open findings on #NNN`) or surfaces an ambiguous architecturally-significant finding (sentinel: `HUMAN_INPUT_REQUIRED: Copilot flagged X on #NNN — unclear call`)
 - The PR is non-`agent-safe` and reaches the §7.5 ready-for-merge state (sentinel: `HUMAN_INPUT_REQUIRED: PR #NNN ready for human review + merge`)
+- The §7.7 auto-merge stuck-detector confirms all merge gates are green but the armed auto-merge has not fired after the safe nudges (toggle auto-merge, update-branch). The worker does **not** admin-merge autonomously — escalate for a human/coordinator (sentinel: `HUMAN_INPUT_REQUIRED: PR #NNN auto-merge stuck at BLOCKED — all gates green ... needs a human/coordinator admin-merge`)
 
 In all other cases, make a judgment call and proceed.
 
