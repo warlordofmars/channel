@@ -22,6 +22,7 @@ htmlcov/
 coverage-unit/
 coverage-js/
 coverage-combined/
+.vite/
 
 # CDK
 infra/cdk.out/

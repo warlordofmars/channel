@@ -1,0 +1,6 @@
+# Desktop-specific cache/artifact dirs not covered by the root .gitignore.
+# Build outputs (dist-main/, dist-renderer/, release/) and node_modules/
+# are already ignored repo-wide from the root file.
+
+# Vitest v8 coverage output (desktop_test --coverage)
+coverage/
