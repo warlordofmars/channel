@@ -444,6 +444,61 @@ export async function putChatMCPSettings(chatId, settings) {
   if (!response.ok) throw new Error(`putChatMCPSettings ${response.status}`);
 }
 
+// ---- Featured MCP catalog (#405, backend #277) ----------------------------
+
+/**
+ * List Channel's curated first-party MCP servers. The SPA renders a
+ * one-click "Enable" affordance from this catalog; each entry carries the
+ * canonical url, description, docs_url, auth_type, tool_prefix, and default
+ * global-enablement. Read-only, no secrets.
+ */
+export async function getFeaturedServers() {
+  const response = await fetch(`${BASE}/api/mcp/featured`, {
+    headers: authHeader(),
+  });
+  if (!response.ok) throw new Error(`getFeaturedServers ${response.status}`);
+  return response.json();
+}
+
+/**
+ * Enable a featured (curated) MCP server via the one-click path (#405/#277).
+ *
+ * Registration is server-pinned: passing `featured_id` makes the backend
+ * resolve the canonical url, credential type, tool prefix, and default
+ * global-enablement from the catalog — the client is NOT the source of
+ * truth for any of those. We deliberately do not send `tool_prefix`,
+ * `auth_type`, or `globally_enabled`. `name` and `url` are echoed from the
+ * fetched catalog entry only because the register endpoint marks them
+ * required; they are non-authoritative (the server overwrites `url` with
+ * the catalog value for a featured registration — see #277).
+ *
+ * SECURITY: a `static_token` (PAT) registration always supplies a `token`,
+ * and a 422 body can echo the pasted token back in `detail[].input`. So we
+ * parse the error body ONLY when no token was supplied — the tokenless
+ * (OAuth-DCR featured) path has no secret to leak, so it keeps the
+ * machine-readable FastAPI `detail`; the token-bearing path never reads the
+ * body at all. Mirrors `registerMCPServer` / #375.
+ */
+export async function enableFeaturedServer({ featured_id, name, url, token = null }) {
+  const response = await fetch(`${BASE}/api/mcp/servers`, {
+    method: "POST",
+    headers: { ...authHeader(), "Content-Type": "application/json" },
+    body: JSON.stringify({ featured_id, name, url, token }),
+  });
+  if (!response.ok) {
+    let detail = null;
+    if (token == null) {
+      try {
+        detail = (await response.json()).detail ?? null;
+      } catch {
+        /* non-JSON error body — status alone must do */
+      }
+    }
+    throw new ApiError("enableFeaturedServer", response.status, detail);
+  }
+  return response.json();
+}
+
 // ---- Admin metrics (#239, epic #233) --------------------------------------
 //
 // Data source for the admin Dashboard (`/app/admin/dashboard`). Both wrap the
