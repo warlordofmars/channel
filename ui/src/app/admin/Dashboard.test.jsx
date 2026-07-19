@@ -48,7 +48,7 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
-// All 19 named counters, defaulting to 0 (the #236 contract guarantees every
+// All named counters, defaulting to 0 (the #236 contract guarantees every
 // name is always present), with per-test overrides.
 function metricsBlock(overrides = {}) {
   const names = [
@@ -56,6 +56,11 @@ function metricsBlock(overrides = {}) {
     "MemoryWriteFailures",
     "RecallSuccesses",
     "RecallFailures",
+    // Tool-driven memory (#400) — separate from the hook counters above.
+    "MemoryToolWriteSuccesses",
+    "MemoryToolWriteFailures",
+    "MemoryToolRecallSuccesses",
+    "MemoryToolRecallFailures",
     "AutoTitleSuccesses",
     "AutoTitleFailures",
     "ChatDeleteMemoryWipeSuccesses",
@@ -81,12 +86,16 @@ function summaryFixture() {
   return {
     today: {
       active_users: 12,
-      // recall 90/10 → 90% exercises the rate branch...
+      // recall 90/10 → 90% exercises the rate branch; tool save 15 + tool
+      // recall 8/2 → 80% exercise the separate #400 tiles.
       metrics: metricsBlock({
         MemoryWriteSuccesses: 340,
         RecallSuccesses: 90,
         RecallFailures: 10,
         AutoTitleSuccesses: 22,
+        MemoryToolWriteSuccesses: 15,
+        MemoryToolRecallSuccesses: 8,
+        MemoryToolRecallFailures: 2,
       }),
     },
     "7d": {
@@ -96,16 +105,24 @@ function summaryFixture() {
         RecallSuccesses: 600,
         RecallFailures: 0,
         AutoTitleSuccesses: 130,
+        MemoryToolWriteSuccesses: 90,
+        MemoryToolRecallSuccesses: 30,
+        MemoryToolRecallFailures: 0,
       }),
     },
     "30d": {
       active_users: 120,
-      // ...and recall 0/0 → "—" exercises the zero-denominator branch.
+      // ...and hook recall 0/0 → "—" exercises the zero-denominator branch.
+      // Tool recall is non-zero here so the card has a single em dash (the
+      // hook tile), keeping the getByText("—") assertion unambiguous.
       metrics: metricsBlock({
         MemoryWriteSuccesses: 9000,
         RecallSuccesses: 0,
         RecallFailures: 0,
         AutoTitleSuccesses: 500,
+        MemoryToolWriteSuccesses: 200,
+        MemoryToolRecallSuccesses: 40,
+        MemoryToolRecallFailures: 10,
       }),
     },
   };
@@ -146,20 +163,25 @@ describe("Dashboard", () => {
     // active_users per window.
     const today = within(screen.getByTestId("rollup-today"));
     expect(today.getByText("12")).toBeTruthy();
-    expect(today.getByText("340")).toBeTruthy(); // MemoryWriteSuccesses
-    expect(today.getByText("90%")).toBeTruthy(); // 90 / (90 + 10)
+    expect(today.getByText("340")).toBeTruthy(); // MemoryWriteSuccesses (hook)
+    expect(today.getByText("90%")).toBeTruthy(); // hook recall: 90 / (90 + 10)
     expect(today.getByText("22")).toBeTruthy(); // AutoTitleSuccesses
+    // #400 tool tiles are separate from the hook tiles above.
+    expect(today.getByText("15")).toBeTruthy(); // MemoryToolWriteSuccesses
+    expect(today.getByText("80%")).toBeTruthy(); // tool recall: 8 / (8 + 2)
 
     // Zero-denominator recall renders an em dash rather than "0%".
     const thirty = within(screen.getByTestId("rollup-30d"));
     expect(thirty.getByText("120")).toBeTruthy();
     expect(thirty.getByText("—")).toBeTruthy();
 
-    // The stat-tile labels are present.
+    // The stat-tile labels are present, including the isolated tool tiles.
     expect(today.getByText("Active users")).toBeTruthy();
     expect(today.getByText("Memory writes")).toBeTruthy();
     expect(today.getByText("Recall success")).toBeTruthy();
     expect(today.getByText("Auto-titles")).toBeTruthy();
+    expect(today.getByText("Tool saves")).toBeTruthy();
+    expect(today.getByText("Tool recall")).toBeTruthy();
   });
 
   it("shows the loading state while the summary fetch is in flight", async () => {

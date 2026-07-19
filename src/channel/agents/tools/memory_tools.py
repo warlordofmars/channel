@@ -48,7 +48,10 @@ from strands import tool
 
 from channel.agents.memory import _sanitize_actor_id
 from channel.agents.recall import _iso_date
-from channel.metrics import record_memory_write_outcome, record_recall_outcome
+from channel.metrics import (
+    record_memory_tool_recall_outcome,
+    record_memory_tool_write_outcome,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -245,9 +248,9 @@ def build_memory_tools(
                 extra={"error_type": type(exc).__name__, "error_message": str(exc)},
                 exc_info=True,
             )
-            await record_memory_write_outcome(success=False)
+            await record_memory_tool_write_outcome(success=False)
             return "Could not save to memory right now."
-        await record_memory_write_outcome(success=True)
+        await record_memory_tool_write_outcome(success=True)
         return "Saved to memory."
 
     @tool
@@ -276,9 +279,9 @@ def build_memory_tools(
                 extra={"error_type": type(exc).__name__, "error_message": str(exc)},
                 exc_info=True,
             )
-            await record_recall_outcome(success=False)
+            await record_memory_tool_recall_outcome(success=False)
             return "Could not search memory right now."
-        await record_recall_outcome(success=True)
+        await record_memory_tool_recall_outcome(success=True)
         ranked = _rank_candidates(candidates, query)
         if not ranked:
             return "No matching memories found."

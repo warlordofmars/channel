@@ -72,6 +72,40 @@ async def record_recall_outcome(success: bool) -> None:
     await emit_metric(metric)
 
 
+async def record_memory_tool_write_outcome(success: bool) -> None:
+    """Emit a CloudWatch counter for one ``remember`` tool write (#400).
+
+    Deliberately SEPARATE from :func:`record_memory_write_outcome` (which
+    tracks the always-on ``AgentCoreMemoryHook``). The admin dashboard reads
+    ``MemoryWriteSuccesses`` / ``MemoryWriteFailures`` as a hook-health
+    signal; folding agent-driven ``remember`` writes into that pair would
+    conflate hook and tool activity and could mask a hook regression as tool
+    usage grows. Splitting the counters — rather than adding a
+    ``source=hook|tool`` dimension — keeps hook health isolated without
+    breaking the low-cardinality signature (a ``source`` dimension is bounded
+    at two values, but a separate counter is simpler and matches the
+    established one-metric-per-outcome pattern in this module). Same
+    cardinality-risk rationale as :func:`record_memory_write_outcome` — no
+    per-actor / per-session dimensions.
+    """
+    metric = "MemoryToolWriteSuccesses" if success else "MemoryToolWriteFailures"
+    await emit_metric(metric)
+
+
+async def record_memory_tool_recall_outcome(success: bool) -> None:
+    """Emit a CloudWatch counter for one ``recall`` tool search (#400).
+
+    Deliberately SEPARATE from :func:`record_recall_outcome` (the always-on
+    ``AgentCoreRecallHook``) for the same isolation reason as
+    :func:`record_memory_tool_write_outcome`: the dashboard's recall-success
+    rate is a hook-health signal, so agent-driven ``recall`` searches get
+    their own counters. Same cardinality-risk rationale — no per-actor /
+    per-session dimensions.
+    """
+    metric = "MemoryToolRecallSuccesses" if success else "MemoryToolRecallFailures"
+    await emit_metric(metric)
+
+
 async def record_auto_title_outcome(success: bool) -> None:
     """Emit a CloudWatch counter for one auto-title attempt.
 

@@ -28,11 +28,19 @@ import { getAdminMetricsSummary, getAdminMetricsTimeseries } from "../../api.js"
  *
  * Contract note: the issue body's second chart was "active_users over 30
  * days", but `active_users` is a summary-only aggregate — the #236
- * timeseries endpoint 422s on any metric outside the 19 named counters — so
+ * timeseries endpoint 422s on any metric outside the named counters — so
  * the second chart tracks `ToolCallSuccesses` (a feature-engagement proxy)
  * instead. The "recall_cache_hit_rate" card is likewise mapped onto the real
  * contract as a derived recall success rate
  * (RecallSuccesses / (RecallSuccesses + RecallFailures)).
+ *
+ * Hook vs tool memory (#400): the "Memory writes" tile and the derived
+ * "Recall success" rate read the always-on `AgentCoreMemoryHook` /
+ * `AgentCoreRecallHook` counters (`MemoryWriteSuccesses` /
+ * `RecallSuccesses`+`RecallFailures`) — a hook-health signal. The
+ * agent-callable `remember` / `recall` tools (#273) emit their OWN
+ * `MemoryTool*` counters, surfaced by the separate "Tool saves" tile and
+ * "Tool recall" rate so tool usage never masks a hook regression.
  */
 
 // Summary rollup windows — keys match the summary endpoint's top-level shape.
@@ -217,9 +225,12 @@ export function fmtTooltipLabel(iso) {
 }
 
 /**
- * The four stat tiles for one rollup window. `active_users` is a top-level
- * section field; the rest read named counters from `section.metrics` (all 19
- * are always present per the #236 contract, so no missing-key guards).
+ * The six stat tiles for one rollup window. `active_users` is a top-level
+ * section field; the rest read named counters from `section.metrics` (all
+ * allowlisted names are always present per the #236 contract, so no
+ * missing-key guards). The first four are hook-health signals; the last two
+ * (#400) isolate the agent-driven `remember` / `recall` tools so their usage
+ * never dilutes the hook counters above.
  */
 function tilesFor(section) {
   const m = section.metrics;
@@ -228,6 +239,8 @@ function tilesFor(section) {
     { key: "memory", label: "Memory writes", icon: "database", value: formatCount(m.MemoryWriteSuccesses) },
     { key: "recall", label: "Recall success", icon: "refresh", value: formatRate(m.RecallSuccesses, m.RecallFailures) },
     { key: "titles", label: "Auto-titles", icon: "sparkle", value: formatCount(m.AutoTitleSuccesses) },
+    { key: "toolSave", label: "Tool saves", icon: "pin", value: formatCount(m.MemoryToolWriteSuccesses) },
+    { key: "toolRecall", label: "Tool recall", icon: "search", value: formatRate(m.MemoryToolRecallSuccesses, m.MemoryToolRecallFailures) },
   ];
 }
 

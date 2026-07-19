@@ -23,11 +23,17 @@ from channel.agents.tools.memory_tools import (
 @pytest.fixture
 def fake_metrics(monkeypatch):
     """Patch the EMF counters so tests can assert on the success flag
-    without hitting the real (stdout) metrics logger."""
+    without hitting the real (stdout) metrics logger.
+
+    The tools emit the tool-specific ``MemoryTool*`` counters (#400), kept
+    separate from the hook counters so the admin dashboard's hook-health
+    signal stays isolated — so these patch the ``record_memory_tool_*``
+    symbols, not the hook ``record_memory_write_outcome`` /
+    ``record_recall_outcome``."""
     write = AsyncMock()
     recall = AsyncMock()
-    monkeypatch.setattr(mt, "record_memory_write_outcome", write)
-    monkeypatch.setattr(mt, "record_recall_outcome", recall)
+    monkeypatch.setattr(mt, "record_memory_tool_write_outcome", write)
+    monkeypatch.setattr(mt, "record_memory_tool_recall_outcome", recall)
     return {"write": write, "recall": recall}
 
 
