@@ -413,8 +413,10 @@ Runs on **every** agent-created PR. The `agent-safe` label only gates whether th
    # `completed/...`, THEN wait ~90s before the fetch below (HEAD_SHA = PR head):
    HEAD_SHA=$(gh pr view <PR-NUMBER> --json headRefOid --jq .headRefOid)
    gh api repos/{owner}/{repo}/commits/"$HEAD_SHA"/check-runs \
-     --jq '.check_runs[] | select(.name=="copilot-pull-request-reviewer")
-           | .status + "/" + (.conclusion // "pending")'
+     --jq '[.check_runs[] | select(.name=="copilot-pull-request-reviewer")
+            | .status + "/" + (.conclusion // "pending")] | (.[0] // "missing")'
+   # prints e.g. `completed/success`, `in_progress/pending`, or `missing`
+   # (no such check-run yet — keep polling within the bounded budget)
 
    # (2) Fetch the review + comments. Author login differs by endpoint: the
    # top-level REVIEW author is `copilot-pull-request-reviewer[bot]`, but INLINE
@@ -489,16 +491,21 @@ gh pr view <PR-NUMBER> --json state,mergeStateStatus,reviewDecision,statusCheckR
            or (.state? != null and .state != "SUCCESS")                   # legacy StatusContext not green
          )] | length)}'
 
-# unresolved review threads (want 0)
+# unresolved review threads (want 0). `totalCount` guards the single page:
+# if there are >100 threads the count is incomplete, so conservatively treat
+# truncation as "unresolved" (a non-zero, blocking result) rather than 0.
 OWNER=$(gh repo view --json owner --jq .owner.login)
 REPO=$(gh repo view --json name --jq .name)
 gh api graphql -f query='
   query($owner:String!,$name:String!,$num:Int!){
     repository(owner:$owner,name:$name){
-      pullRequest(number:$num){ reviewThreads(first:100){ nodes{ isResolved } } }
+      pullRequest(number:$num){ reviewThreads(first:100){ totalCount nodes{ isResolved } } }
     }
   }' -F owner="$OWNER" -F name="$REPO" -F num=<PR-NUMBER> \
-  --jq '[.data.repository.pullRequest.reviewThreads.nodes[]? | select(.isResolved==false)] | length'
+  --jq '.data.repository.pullRequest.reviewThreads
+        | if .totalCount > (.nodes | length)
+          then "truncated (>100 threads) — treat as unresolved; do not nudge"
+          else ([.nodes[]? | select(.isResolved == false)] | length) end'
 ```
 
 Nudge **only if all of these hold**: `state == OPEN`, `mergeStateStatus` is
