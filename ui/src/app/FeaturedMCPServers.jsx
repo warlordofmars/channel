@@ -10,10 +10,13 @@ import Icon from "../components/Icon.jsx";
  * #277) and renders a one-click Enable affordance per entry. For a
  * `static_token` server (GitHub) the Enable button reveals an inline PAT
  * field with a "Create a token" link to the entry's `docs_url`; on submit
- * we POST `{ featured_id, token }` so the backend pins the canonical url,
- * tool prefix, credential type, and default global-enablement server-side.
- * A non-`static_token` entry enables directly (the backend returns an
- * `auth_start_url` to open, matching the OAuth register path).
+ * we POST `{ featured_id, name, url, token }` (`token` is `null` for a
+ * non-static entry) so the backend pins the canonical url, tool prefix,
+ * credential type, and default global-enablement server-side from
+ * `featured_id` — `name`/`url` are echoed only to satisfy the register
+ * endpoint's required fields and are non-authoritative. A non-`static_token`
+ * entry enables directly (the backend returns an `auth_start_url` to open,
+ * matching the OAuth register path).
  *
  * Dedupe: a featured entry whose canonical url already appears in the
  * caller's registered-server list shows "Enabled" instead of an Enable
@@ -22,8 +25,8 @@ import Icon from "../components/Icon.jsx";
  * per-chat.
  *
  * Secret handling reuses the #375 discipline: the pasted PAT is never
- * logged (only `String(e)` on failure) and `enableFeaturedServer` never
- * parses the error body.
+ * logged (only `String(e)` on failure), and `enableFeaturedServer` never
+ * reads the error body on the token-bearing path.
  */
 export default function FeaturedMCPServers({ registeredUrls = [], onEnabled }) {
   const [catalog, setCatalog] = useState(null);
