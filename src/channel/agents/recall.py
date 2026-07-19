@@ -277,6 +277,27 @@ class AgentCoreRecallHook:
             cache_entry.age += 1
             return cache_entry.records
 
+        aggregated = await self._fetch_records(chat_id=chat_id)
+
+        # ``age=1`` counts the cold-fetch turn as the 1st served turn —
+        # next 4 turns are cache hits (ages 2..5), 6th turn triggers refresh.
+        _recall_cache[key] = CacheEntry(records=aggregated, age=1)
+        return aggregated
+
+    async def _fetch_records(self, *, chat_id: str) -> list[dict[str, Any]]:
+        """Fetch fresh recall records via ``ListSessions`` + per-session
+        ``ListEvents`` — the uncached read that ``_get_or_fetch_records``
+        wraps with the 5-turn cache.
+
+        Pure read: performs NO caching and mutates no module-level state,
+        so it is safe to call outside the live-turn path (the
+        ``/api/_debug/recall/inspect`` inspection endpoint, #227) without
+        polluting ``_recall_cache`` or perturbing the age counters that a
+        real turn relies on.
+
+        Returns one record per prior session with shape
+        ``{sessionId, createdAt, payload}`` — see ``_get_or_fetch_records``.
+        """
         # Step 1: list this actor's sessions, exclude the current chat.
         sessions_resp = await asyncio.to_thread(
             self._client.list_sessions,
@@ -313,8 +334,31 @@ class AgentCoreRecallHook:
                         "payload": combined_payload,
                     }
                 )
-
-        # ``age=1`` counts the cold-fetch turn as the 1st served turn —
-        # next 4 turns are cache hits (ages 2..5), 6th turn triggers refresh.
-        _recall_cache[key] = CacheEntry(records=aggregated, age=1)
         return aggregated
+
+    async def preview_addendum(self, *, chat_id: str) -> tuple[str, list[dict[str, Any]]]:
+        """Return ``(addendum_text, records)`` the hook WOULD inject for
+        ``chat_id`` — computed WITHOUT firing a real turn and WITHOUT
+        touching the 5-turn ``_recall_cache``.
+
+        Diagnostic-only surface for ``/api/_debug/recall/inspect`` (#227).
+        Reuses the exact fetch + formatting path the live hook runs
+        (``_fetch_records`` + ``_format_recall_addendum``) so the preview
+        matches what really gets injected. Two deliberate differences from
+        the live path, both to make the endpoint a faithful *right now*
+        probe rather than a replay of hook state:
+
+        - **Always a fresh fetch** — the block reflects the current
+          AgentCore Memory state. On a warm Lambda a live turn that hits
+          the cache could inject a block up to ``_RECALL_CACHE_REFRESH_TURNS``
+          turns stale; the preview shows the un-cached truth.
+        - **Ignores the kill-switch** — the block is computed even when
+          ``STARTER_RECALL_ENABLED=0`` so it stays inspectable during an
+          A/B comparison (the endpoint reports the flag separately).
+
+        Each record's ``sessionId`` is the source chat id (``sessionId ==
+        chat_id`` by design — CLAUDE.md §AgentCore Memory), giving the
+        caller per-fragment provenance.
+        """
+        records = await self._fetch_records(chat_id=chat_id)
+        return _format_recall_addendum(records), records
