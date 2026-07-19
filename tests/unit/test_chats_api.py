@@ -4499,10 +4499,13 @@ def test_post_message_emits_keepalive_during_mid_stream_tool_gap(
     assert response.status_code == 200
     body = response.text
     # A keepalive reached the wire AFTER the first delta — the exact gap
-    # #391 left uncovered. Under the old behavior no keepalive followed
-    # the first delta, so this ordering assertion would fail.
-    assert ": keep-alive" in body
-    assert body.index('"type": "delta"') < body.index(": keep-alive")
+    # #391 left uncovered (old behavior: no keepalive followed the first
+    # delta). Assert one exists *somewhere after* the first delta rather
+    # than that the FIRST keepalive follows it: with a tiny interval a
+    # scheduler delay can legitimately emit a keepalive before the first
+    # delta too, which is harmless and not what this test guards.
+    delta_pos = body.index('"type": "delta"')
+    assert ": keep-alive" in body[delta_pos:]
     # Inert to the reducer: no keepalive event type in the parsed stream,
     # and the real frames all landed.
     types = [e["type"] for e in _sse_events(body)]
