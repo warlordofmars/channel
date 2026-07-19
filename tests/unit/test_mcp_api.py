@@ -1745,10 +1745,11 @@ def test_register_featured_github_enforces_static_token_and_default_off(
         "/api/mcp/servers",
         json={
             "name": "GitHub",
-            # Bogus client-supplied url + auth_type — both must be ignored
-            # in favour of the catalog's canonical values.
+            # Bogus client-supplied url + auth_type + tool_prefix — all must
+            # be ignored in favour of the catalog's canonical values.
             "url": "https://client-supplied-ignored.example.com/mcp",
             "auth_type": "oauth_dcr",
+            "tool_prefix": "evil",
             "featured_id": "github",
             "token": _FAKE_BEARER,
         },
@@ -1760,6 +1761,8 @@ def test_register_featured_github_enforces_static_token_and_default_off(
     assert created["auth_type"] == MCPServerAuthType.STATIC_TOKEN
     assert created["auth_status"] == MCPServerAuthStatus.ACTIVE
     assert created["client_id"] is None
+    # tool_prefix pinned to the catalog value — the "evil" client override
+    # is ignored for a featured registration.
     assert created["tool_prefix"] == "github"
     # Read-write hands default OFF (#277 item 3).
     assert created["globally_enabled"] is False

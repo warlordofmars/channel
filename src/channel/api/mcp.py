@@ -349,7 +349,11 @@ async def register_server(
             )
     url = featured.url if featured else body.url
     auth_type = featured.auth_type if featured else body.auth_type
-    tool_prefix = body.tool_prefix or (featured.tool_prefix if featured else None)
+    # A featured registration pins the catalog's tool prefix — a
+    # client-supplied prefix is ignored so the one-click integration has a
+    # stable, collision-free prefix (e.g. github_*). Custom (non-featured)
+    # registrations keep honouring the caller's prefix.
+    tool_prefix = featured.tool_prefix if featured else body.tool_prefix
     globally_enabled = featured.default_globally_enabled if featured else True
 
     validate_mcp_server_url(url)
