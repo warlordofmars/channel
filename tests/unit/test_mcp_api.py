@@ -1677,3 +1677,142 @@ def test_callback_honors_expires_in_zero(
     assert resp.status_code == 302
     # If we had used ``or 3600`` this would land an hour in the future.
     assert persisted["expires_at"] - now_before <= 2
+
+
+# ---------- featured catalog (#277) ----------
+
+
+def test_list_featured_returns_github_entry(client: TestClient) -> None:
+    resp = client.get("/api/mcp/featured")
+    assert resp.status_code == 200
+    body = resp.json()
+    ids = [s["featured_id"] for s in body["servers"]]
+    assert "github" in ids
+    gh = next(s for s in body["servers"] if s["featured_id"] == "github")
+    assert gh["auth_type"] == "static_token"
+    assert gh["default_globally_enabled"] is False
+    assert gh["url"] == "https://api.githubcopilot.com/mcp/"
+    assert gh["tool_prefix"] == "github"
+    assert "add_issue_comment" in gh["write_surface_tools"]
+    # Catalog carries no secrets.
+    assert "token" not in gh
+    # Same no-store discipline as the servers list.
+    assert resp.headers["cache-control"] == "no-store"
+
+
+def test_list_featured_requires_auth() -> None:
+    raw = TestClient(app)
+    resp = raw.get("/api/mcp/featured")
+    assert resp.status_code in (401, 403)
+
+
+def test_register_featured_github_enforces_static_token_and_default_off(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    public_dns: None,
+) -> None:
+    """A one-click featured GitHub registration pins the canonical URL,
+    the static-token credential type, and default-off enablement
+    server-side — the client-supplied url/auth_type are ignored."""
+    from channel import storage
+    from channel.mcp import crypto
+    from channel.models import MCPServer, MCPServerAuthStatus, MCPServerAuthType
+
+    created: dict[str, Any] = {}
+
+    def fake_create(**kwargs: Any) -> MCPServer:
+        created.update(kwargs)
+        return MCPServer(
+            server_id="srv-gh",
+            user_id="user-1",
+            name=kwargs["name"],
+            url=kwargs["url"],
+            client_id=kwargs["client_id"],
+            tool_prefix=kwargs["tool_prefix"],
+            auth_type=kwargs["auth_type"],
+            auth_status=kwargs["auth_status"],
+            globally_enabled=kwargs["globally_enabled"],
+            created_at="x",
+            updated_at="x",
+        )
+
+    monkeypatch.setattr(storage, "create_mcp_server", fake_create)
+    persisted: dict[str, Any] = {}
+    monkeypatch.setattr(storage, "put_mcp_token", lambda **kw: persisted.update(kw))
+    monkeypatch.setattr(crypto, "encrypt_blob", lambda s: ("ENC::" + s).encode())
+
+    resp = client.post(
+        "/api/mcp/servers",
+        json={
+            "name": "GitHub",
+            # Bogus client-supplied url + auth_type + tool_prefix — all must
+            # be ignored in favour of the catalog's canonical values.
+            "url": "https://client-supplied-ignored.example.com/mcp",
+            "auth_type": "oauth_dcr",
+            "tool_prefix": "evil",
+            "featured_id": "github",
+            "token": _FAKE_BEARER,
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["auth_start_url"] is None
+    # Canonical catalog values won, not the client-supplied ones.
+    assert created["url"] == "https://api.githubcopilot.com/mcp/"
+    assert created["auth_type"] == MCPServerAuthType.STATIC_TOKEN
+    assert created["auth_status"] == MCPServerAuthStatus.ACTIVE
+    assert created["client_id"] is None
+    # tool_prefix pinned to the catalog value — the "evil" client override
+    # is ignored for a featured registration.
+    assert created["tool_prefix"] == "github"
+    # Read-write hands default OFF (#277 item 3).
+    assert created["globally_enabled"] is False
+    # Token persisted encrypted.
+    assert persisted["access_token_ciphertext"] == ("ENC::" + _FAKE_BEARER).encode()
+
+
+def test_register_unknown_featured_id_returns_400(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from channel import storage
+
+    def must_not_create(**_kw: Any) -> Any:  # pragma: no cover - never reached
+        raise AssertionError("create_mcp_server must not run for an unknown featured id")
+
+    monkeypatch.setattr(storage, "create_mcp_server", must_not_create)
+    resp = client.post(
+        "/api/mcp/servers",
+        json={
+            "name": "Nope",
+            "url": "https://example.com/mcp",
+            "featured_id": "does-not-exist",
+            "token": _FAKE_BEARER,
+        },
+    )
+    assert resp.status_code == 400
+    assert resp.json()["detail"]["code"] == "unknown_featured_server"
+
+
+def test_register_featured_github_without_token_returns_400(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    public_dns: None,
+) -> None:
+    """The catalog pins GitHub to static_token, so a one-click enable with
+    no pasted PAT hits the 'requires a token' guard."""
+    from channel import storage
+
+    def must_not_create(**_kw: Any) -> Any:  # pragma: no cover - never reached
+        raise AssertionError("create_mcp_server must not run without a token")
+
+    monkeypatch.setattr(storage, "create_mcp_server", must_not_create)
+    resp = client.post(
+        "/api/mcp/servers",
+        json={
+            "name": "GitHub",
+            "url": "https://api.githubcopilot.com/mcp/",
+            "featured_id": "github",
+        },
+    )
+    assert resp.status_code == 400
+    assert "token" in resp.json()["detail"]

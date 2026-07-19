@@ -3,6 +3,7 @@
 
 Routes:
   * ``GET    /api/mcp/servers`` — list the user's registered servers
+  * ``GET    /api/mcp/featured`` — list curated first-party servers (#277)
   * ``POST   /api/mcp/servers`` — register new + run DCR + return auth_start_url
   * ``PATCH  /api/mcp/servers/{id}`` — rename / toggle globally_enabled
   * ``DELETE /api/mcp/servers/{id}`` — best-effort revoke + delete rows
@@ -40,6 +41,7 @@ from channel.auth import state_store
 from channel.logging_config import fingerprint_id
 from channel.mcp import auth as mcp_auth
 from channel.mcp import crypto
+from channel.mcp.featured import FeaturedMCPServer, get_featured_server, list_featured_servers
 from channel.mcp.url_guard import validate_mcp_server_url
 from channel.models import (
     ChatMCPMode,
@@ -155,6 +157,56 @@ def _to_out(s: MCPServer) -> _ServerOut:
     )
 
 
+# ---------- featured catalog ----------
+
+
+class _FeaturedOut(BaseModel):
+    featured_id: str
+    name: str
+    url: str
+    description: str
+    docs_url: str
+    auth_type: MCPServerAuthType
+    tool_prefix: str
+    default_globally_enabled: bool
+    write_surface_tools: list[str]
+
+
+class _FeaturedListResponse(BaseModel):
+    servers: list[_FeaturedOut]
+
+
+def _featured_to_out(s: FeaturedMCPServer) -> _FeaturedOut:
+    return _FeaturedOut(
+        featured_id=s.featured_id,
+        name=s.name,
+        url=s.url,
+        description=s.description,
+        docs_url=s.docs_url,
+        auth_type=s.auth_type,
+        tool_prefix=s.tool_prefix,
+        default_globally_enabled=s.default_globally_enabled,
+        write_surface_tools=list(s.write_surface_tools),
+    )
+
+
+@router.get("/api/mcp/featured", response_model=_FeaturedListResponse)
+def list_featured(
+    response: Response,
+    _claims: dict[str, Any] = Depends(require_mgmt_user),
+) -> _FeaturedListResponse:
+    """List Channel's curated first-party MCP servers (#277).
+
+    Read-only, no secrets — the catalog is static server config. The SPA
+    renders a one-click "Enable" affordance from this; registration then
+    POSTs ``/api/mcp/servers`` with the entry's ``featured_id`` so the
+    canonical URL, credential type, and default enablement are applied
+    server-side rather than trusted from the client.
+    """
+    response.headers["Cache-Control"] = "no-store"
+    return _FeaturedListResponse(servers=[_featured_to_out(s) for s in list_featured_servers()])
+
+
 # Hard upper bound on a pasted static token. A PAT / bearer token is a
 # small opaque string; 4 KB is far beyond any real token and keeps a
 # hostile client from stuffing the encrypt path / DDB item with a
@@ -176,6 +228,12 @@ class _RegisterRequest(BaseModel):
     # an empty string at the boundary; the coherence check in
     # register_server rejects the None/wrong-auth_type combinations.
     token: str | None = Field(default=None, min_length=1, max_length=_STATIC_TOKEN_MAX_LEN)
+    # One-click featured registration (#277). When set, the server resolves
+    # the catalog entry and pins the URL, credential type, tool prefix, and
+    # default enablement from it — the client-supplied url/auth_type are
+    # ignored so a one-click enable can't typo the host or accidentally
+    # make a read-write surface globally live. Unknown ids are rejected.
+    featured_id: str | None = Field(default=None, max_length=64)
 
 
 class _RegisterResponse(BaseModel):
@@ -199,12 +257,16 @@ def _register_static_token(
     url: str,
     tool_prefix: str | None,
     token: str,
+    globally_enabled: bool = True,
 ) -> _RegisterResponse:
     """Register a static-token (PAT) MCP server.
 
     No discovery / DCR / auth-code dance: the caller supplies the bearer
     token directly, we encrypt + persist it via the existing MCPToken
     path, mark the server ACTIVE, and return no ``auth_start_url``.
+
+    ``globally_enabled`` is ``False`` for a featured read-write surface
+    (GitHub, #277) so the server is off until explicitly enabled per chat.
 
     The token itself is never logged or echoed — only the fingerprinted
     user/server ids appear in the success log line, matching the
@@ -219,6 +281,7 @@ def _register_static_token(
         tool_prefix=tool_prefix_norm,
         auth_type=MCPServerAuthType.STATIC_TOKEN,
         auth_status=MCPServerAuthStatus.ACTIVE,
+        globally_enabled=globally_enabled,
     )
     expires_at = int(time.time()) + _STATIC_TOKEN_EXPIRY_SENTINEL_SECONDS
     # Make registration effectively atomic: the server row is already
@@ -268,11 +331,36 @@ async def register_server(
     body: _RegisterRequest,
     claims: dict[str, Any] = Depends(require_mgmt_user),
 ) -> _RegisterResponse:
-    validate_mcp_server_url(body.url)
-    # Branch on the credential type. Reject the incoherent combinations
-    # at the boundary — never silently drop a pasted secret, never run a
-    # tokenless static-token registration.
-    if body.auth_type == MCPServerAuthType.STATIC_TOKEN:
+    # Resolve a featured (one-click) registration first. A featured entry
+    # pins the canonical URL, credential type, tool prefix, and default
+    # enablement server-side — the client-supplied url/auth_type are
+    # ignored so a one-click enable can't typo the host or accidentally
+    # make a read-write surface globally live. See #277.
+    featured = None
+    if body.featured_id is not None:
+        featured = get_featured_server(body.featured_id)
+        if featured is None:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "unknown_featured_server",
+                    "message": "Unknown featured server id",
+                },
+            )
+    url = featured.url if featured else body.url
+    auth_type = featured.auth_type if featured else body.auth_type
+    # A featured registration pins the catalog's tool prefix — a
+    # client-supplied prefix is ignored so the one-click integration has a
+    # stable, collision-free prefix (e.g. github_*). Custom (non-featured)
+    # registrations keep honouring the caller's prefix.
+    tool_prefix = featured.tool_prefix if featured else body.tool_prefix
+    globally_enabled = featured.default_globally_enabled if featured else True
+
+    validate_mcp_server_url(url)
+    # Branch on the (effective) credential type. Reject the incoherent
+    # combinations at the boundary — never silently drop a pasted secret,
+    # never run a tokenless static-token registration.
+    if auth_type == MCPServerAuthType.STATIC_TOKEN:
         # Strip server-side and reject a blank/whitespace-only token — the
         # Field(min_length=1) only rejects the empty string, so "   " would
         # otherwise persist an unusable credential (easy for a non-UI
@@ -286,9 +374,10 @@ async def register_server(
         return _register_static_token(
             user_id=claims["sub"],
             name=body.name,
-            url=body.url,
-            tool_prefix=body.tool_prefix,
+            url=url,
+            tool_prefix=tool_prefix,
             token=token,
+            globally_enabled=globally_enabled,
         )
     if body.token is not None:
         raise HTTPException(
@@ -298,8 +387,8 @@ async def register_server(
 
     redirect_uri = _redirect_uri()
     try:
-        prm = await mcp_auth.discover_resource_metadata(body.url)
-        as_url = str(prm.authorization_servers[0]) if prm.authorization_servers else body.url
+        prm = await mcp_auth.discover_resource_metadata(url)
+        as_url = str(prm.authorization_servers[0]) if prm.authorization_servers else url
         as_meta = await mcp_auth.discover_auth_server_metadata(as_url)
         if not as_meta.registration_endpoint:
             # Distinguishable, machine-readable reason so the SPA can
@@ -348,13 +437,14 @@ async def register_server(
             detail="MCP server's auth server did not issue a client_id",
         )
 
-    tool_prefix = _normalize_tool_prefix(body.tool_prefix, body.url)
+    tool_prefix_norm = _normalize_tool_prefix(tool_prefix, url)
     server = storage.create_mcp_server(
         user_id=claims["sub"],
         name=body.name,
-        url=body.url,
+        url=url,
         client_id=client_info.client_id,
-        tool_prefix=tool_prefix,
+        tool_prefix=tool_prefix_norm,
+        globally_enabled=globally_enabled,
     )
     auth_start_url = _begin_auth_flow(
         user_id=claims["sub"],
