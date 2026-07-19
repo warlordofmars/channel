@@ -406,3 +406,25 @@ def test_record_mcp_tools_capped_signature_locks_out_dimensions():
 
     sig = inspect.signature(record_mcp_tools_capped)
     assert list(sig.parameters.keys()) == []
+
+
+@pytest.mark.asyncio
+async def test_record_mcp_tool_result_truncated_emits_counter():
+    from channel.metrics import record_mcp_tool_result_truncated
+
+    with patch("channel.metrics.emit_metric", new=AsyncMock()) as mock_emit:
+        await record_mcp_tool_result_truncated()
+
+    mock_emit.assert_awaited_once_with("MCPToolResultTruncated")
+
+
+def test_record_mcp_tool_result_truncated_signature_locks_out_dimensions():
+    """Counter-only (#390): the signature accepts NO arguments so a
+    future caller cannot slip a per-tool dimension through — cardinality
+    scales with the registered tool set. Which tool was truncated (and the
+    exact byte counts) lives in the ``mcp.tool_result_truncated`` log
+    line."""
+    from channel.metrics import record_mcp_tool_result_truncated
+
+    sig = inspect.signature(record_mcp_tool_result_truncated)
+    assert list(sig.parameters.keys()) == []

@@ -15,6 +15,9 @@ from channel.agents.tool_hooks import (
     ModelVisibilityAddendumHook,
     ToolCallGuardHook,
     ToolCallTelemetryHook,
+    ToolResultSizeBoundHook,
+    _truncate_utf8,
+    _truncation_marker,
     clear_cancel_signal,
     is_cancel_requested,
     set_cancel_signal,
@@ -842,6 +845,439 @@ def test_telemetry_hook_register_hooks_subscribes_to_after_tool_call():
     from strands.hooks.events import AfterToolCallEvent
 
     hook = ToolCallTelemetryHook()
+    registry = MagicMock()
+    hook.register_hooks(registry)
+    registry.add_callback.assert_called_once_with(AfterToolCallEvent, hook.on_after_tool_call)
+
+
+# ---------------------------------------------------------------------------
+# _truncate_utf8 / _truncation_marker — byte-safe truncation primitives (#390)
+# ---------------------------------------------------------------------------
+
+
+def test_truncate_utf8_under_budget_is_byte_for_byte_untouched():
+    """A string within the budget is returned unchanged with 0 bytes
+    removed — the caller's "leave the block alone" signal."""
+    text = "hello world"
+    kept, removed = _truncate_utf8(text, 1000)
+    assert kept == text
+    assert removed == 0
+
+
+def test_truncate_utf8_exactly_at_budget_is_untouched():
+    """A string whose UTF-8 size exactly equals the budget is NOT
+    truncated — the boundary is inclusive (``<= max_bytes``)."""
+    text = "x" * 50
+    kept, removed = _truncate_utf8(text, 50)
+    assert kept == text
+    assert removed == 0
+
+
+def test_truncate_utf8_over_budget_clips_ascii_and_counts_removed():
+    """ASCII (1 byte/char) over budget: kept is clipped to the budget and
+    ``removed`` reconciles ``original == kept + removed``."""
+    text = "x" * 1000
+    kept, removed = _truncate_utf8(text, 100)
+    assert len(kept.encode("utf-8")) == 100
+    assert removed == 900
+    assert len(kept.encode("utf-8")) + removed == len(text.encode("utf-8"))
+
+
+def test_truncate_utf8_never_splits_a_multibyte_char():
+    """The Euro sign is 3 UTF-8 bytes. A budget that lands mid-character
+    must back off to the previous char boundary — the kept text decodes
+    cleanly with no U+FFFD replacement char, and ``removed`` counts the
+    whole dropped tail including the backed-off partial byte."""
+    text = "€" * 200  # 600 bytes
+    # 301 lands one byte into the 101st Euro sign (100*3 = 300, +1).
+    kept, removed = _truncate_utf8(text, 301)
+    assert kept == "€" * 100
+    assert "�" not in kept  # no replacement char — the char was not split
+    assert len(kept.encode("utf-8")) == 300  # backed off below the 301 budget
+    assert removed == 300
+    assert len(kept.encode("utf-8")) + removed == len(text.encode("utf-8"))
+
+
+def test_truncation_marker_format():
+    """The marker is exactly ``\\n[truncated N bytes]`` — the contract the
+    model relies on to detect a clipped span."""
+    assert _truncation_marker(42) == "\n[truncated 42 bytes]"
+
+
+# ---------------------------------------------------------------------------
+# ToolResultSizeBoundHook — AfterToolCallEvent (#390)
+#
+# Bounds oversized tool_result text/json content BEFORE it re-enters the
+# Converse loop as input tokens. The counter is dispatched fire-and-forget
+# via asyncio.create_task (same pattern as ToolCallTelemetryHook), so
+# truncation-triggering tests are async and drain the pending tasks.
+# ---------------------------------------------------------------------------
+
+
+def _make_after_event(result, tool_use=None):
+    event = MagicMock()
+    event.result = result
+    event.tool_use = tool_use if tool_use is not None else {"toolUseId": "tu-1"}
+    return event
+
+
+@pytest.mark.asyncio
+async def test_size_bound_truncates_over_budget_text_block_with_marker(monkeypatch):
+    """An over-budget text block is clipped to the budget and carries the
+    exact ``[truncated N bytes]`` marker with the correct byte count."""
+    counter_calls = []
+
+    async def fake_counter():
+        counter_calls.append(True)
+
+    monkeypatch.setattr(
+        "channel.agents.tool_hooks.record_mcp_tool_result_truncated",
+        fake_counter,
+    )
+
+    hook = ToolResultSizeBoundHook(max_bytes=100)
+    block = {"text": "x" * 1000}
+    result = {"content": [block], "status": "success", "toolUseId": "tu-1"}
+
+    hook.on_after_tool_call(_make_after_event(result))
+    await _drain_pending_tasks()
+
+    # Content clipped to the budget; marker appended on top.
+    assert block["text"] == "x" * 100 + "\n[truncated 900 bytes]"
+    # The retained content (before the marker) is exactly the budget.
+    content, marker = block["text"].rsplit("\n[truncated", 1)
+    assert len(content.encode("utf-8")) == 100
+    assert marker == " 900 bytes]"
+    # Counter fired exactly once for the one truncated block.
+    assert counter_calls == [True]
+
+
+@pytest.mark.asyncio
+async def test_size_bound_leaves_under_budget_text_block_byte_for_byte(monkeypatch):
+    """An under-budget text block passes through unchanged and emits no
+    counter."""
+    counter_calls = []
+
+    async def fake_counter():
+        counter_calls.append(True)
+
+    monkeypatch.setattr(
+        "channel.agents.tool_hooks.record_mcp_tool_result_truncated",
+        fake_counter,
+    )
+
+    hook = ToolResultSizeBoundHook(max_bytes=1000)
+    block = {"text": "small response"}
+    result = {"content": [block], "status": "success"}
+
+    hook.on_after_tool_call(_make_after_event(result))
+    await _drain_pending_tasks()
+
+    assert block["text"] == "small response"
+    assert counter_calls == []
+
+
+@pytest.mark.asyncio
+async def test_size_bound_never_splits_multibyte_char_in_block(monkeypatch):
+    """End-to-end multibyte safety on a real block: the clipped text
+    decodes cleanly (no replacement char) and stays within the budget."""
+
+    async def fake_counter():
+        return None
+
+    monkeypatch.setattr(
+        "channel.agents.tool_hooks.record_mcp_tool_result_truncated",
+        fake_counter,
+    )
+
+    hook = ToolResultSizeBoundHook(max_bytes=301)
+    block = {"text": "€" * 200}
+    result = {"content": [block], "status": "success"}
+
+    hook.on_after_tool_call(_make_after_event(result))
+    await _drain_pending_tasks()
+
+    content, _marker = block["text"].rsplit("\n[truncated", 1)
+    assert content == "€" * 100
+    assert "�" not in content
+    assert len(content.encode("utf-8")) <= 301
+
+
+@pytest.mark.asyncio
+async def test_size_bound_truncates_each_oversized_block_in_multi_block_result(monkeypatch):
+    """A result with several content blocks: each oversized block is
+    truncated independently, under-budget blocks are left untouched, and
+    the counter fires once per truncated block."""
+    counter_calls = []
+
+    async def fake_counter():
+        counter_calls.append(True)
+
+    monkeypatch.setattr(
+        "channel.agents.tool_hooks.record_mcp_tool_result_truncated",
+        fake_counter,
+    )
+
+    hook = ToolResultSizeBoundHook(max_bytes=10)
+    big_a = {"text": "a" * 50}
+    small = {"text": "ok"}
+    big_b = {"text": "b" * 40}
+    result = {"content": [big_a, small, big_b], "status": "success"}
+
+    hook.on_after_tool_call(_make_after_event(result))
+    await _drain_pending_tasks()
+
+    assert big_a["text"] == "a" * 10 + "\n[truncated 40 bytes]"
+    assert small["text"] == "ok"  # under budget — untouched
+    assert big_b["text"] == "b" * 10 + "\n[truncated 30 bytes]"
+    # Two truncated blocks → two counter increments.
+    assert counter_calls == [True, True]
+
+
+@pytest.mark.asyncio
+async def test_size_bound_truncates_oversized_json_block_to_text(monkeypatch):
+    """An oversized ``json`` block is serialized, truncated, and REPLACED
+    by a ``text`` block carrying the marker — a partial JSON string is no
+    longer valid structured data, so text is the honest degradation."""
+
+    async def fake_counter():
+        return None
+
+    monkeypatch.setattr(
+        "channel.agents.tool_hooks.record_mcp_tool_result_truncated",
+        fake_counter,
+    )
+
+    hook = ToolResultSizeBoundHook(max_bytes=20)
+    payload = {"items": ["value" for _ in range(50)]}
+    block = {"json": payload}
+    result = {"content": [block], "status": "success"}
+
+    hook.on_after_tool_call(_make_after_event(result))
+    await _drain_pending_tasks()
+
+    # The json key is gone; the block is now a text block with the marker.
+    assert "json" not in block
+    assert "text" in block
+    content, _marker = block["text"].rsplit("\n[truncated", 1)
+    assert len(content.encode("utf-8")) <= 20
+    assert block["text"].endswith(" bytes]")
+
+
+@pytest.mark.asyncio
+async def test_size_bound_leaves_under_budget_json_block_untouched(monkeypatch):
+    """A ``json`` block whose serialization fits the budget is left as a
+    json block — no conversion, no counter."""
+    counter_calls = []
+
+    async def fake_counter():
+        counter_calls.append(True)
+
+    monkeypatch.setattr(
+        "channel.agents.tool_hooks.record_mcp_tool_result_truncated",
+        fake_counter,
+    )
+
+    hook = ToolResultSizeBoundHook(max_bytes=1000)
+    block = {"json": {"ok": True}}
+    result = {"content": [block], "status": "success"}
+
+    hook.on_after_tool_call(_make_after_event(result))
+    await _drain_pending_tasks()
+
+    assert block == {"json": {"ok": True}}
+    assert counter_calls == []
+
+
+@pytest.mark.asyncio
+async def test_size_bound_emits_structured_log_on_truncation(monkeypatch):
+    """Each truncated block logs ``mcp.tool_result_truncated`` with the
+    tool_use_id + original/kept byte counts."""
+
+    async def fake_counter():
+        return None
+
+    monkeypatch.setattr(
+        "channel.agents.tool_hooks.record_mcp_tool_result_truncated",
+        fake_counter,
+    )
+    mock_logger = MagicMock()
+    monkeypatch.setattr("channel.agents.tool_hooks.logger", mock_logger)
+
+    hook = ToolResultSizeBoundHook(max_bytes=100)
+    result = {"content": [{"text": "x" * 1000}], "status": "success"}
+
+    hook.on_after_tool_call(_make_after_event(result, tool_use={"toolUseId": "tu-42"}))
+    await _drain_pending_tasks()
+
+    mock_logger.info.assert_called_once()
+    args = mock_logger.info.call_args[0]
+    assert args[0] == "mcp.tool_result_truncated tool_use_id=%s original_bytes=%d kept_bytes=%d"
+    assert args[1] == "tu-42"
+    assert args[2] == 1000  # original bytes
+    assert args[3] == 100  # kept bytes (content only, marker excluded)
+
+
+@pytest.mark.asyncio
+async def test_size_bound_falls_back_to_result_tool_use_id(monkeypatch):
+    """When the event's ``tool_use`` carries no ``toolUseId``, the log
+    falls back to the result's ``toolUseId``."""
+
+    async def fake_counter():
+        return None
+
+    monkeypatch.setattr(
+        "channel.agents.tool_hooks.record_mcp_tool_result_truncated",
+        fake_counter,
+    )
+    mock_logger = MagicMock()
+    monkeypatch.setattr("channel.agents.tool_hooks.logger", mock_logger)
+
+    hook = ToolResultSizeBoundHook(max_bytes=10)
+    result = {
+        "content": [{"text": "y" * 100}],
+        "status": "success",
+        "toolUseId": "res-tu",
+    }
+
+    hook.on_after_tool_call(_make_after_event(result, tool_use={}))
+    await _drain_pending_tasks()
+
+    assert mock_logger.info.call_args[0][1] == "res-tu"
+
+
+@pytest.mark.asyncio
+async def test_size_bound_tool_use_id_defaults_to_unknown(monkeypatch):
+    """When neither the event nor the result carries a toolUseId, the log
+    falls back to ``unknown`` rather than crashing."""
+
+    async def fake_counter():
+        return None
+
+    monkeypatch.setattr(
+        "channel.agents.tool_hooks.record_mcp_tool_result_truncated",
+        fake_counter,
+    )
+    mock_logger = MagicMock()
+    monkeypatch.setattr("channel.agents.tool_hooks.logger", mock_logger)
+
+    hook = ToolResultSizeBoundHook(max_bytes=10)
+    result = {"content": [{"text": "z" * 100}], "status": "success"}
+    # Build the event directly: event.tool_use is None (not the helper's
+    # default) AND the result carries no toolUseId → the "unknown" branch.
+    event = MagicMock()
+    event.result = result
+    event.tool_use = None
+
+    hook.on_after_tool_call(event)
+    await _drain_pending_tasks()
+
+    assert mock_logger.info.call_args[0][1] == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_size_bound_swallows_counter_dispatch_errors(monkeypatch):
+    """If the counter coroutine raises (transient EMF flush failure), the
+    wrapper swallows + logs at WARNING rather than surfacing an unhandled
+    "Task exception was never retrieved" — bounding the result must never
+    break the turn. Truncation of the block still happened."""
+
+    async def raising_counter():
+        raise RuntimeError("EMF flush failed")
+
+    monkeypatch.setattr(
+        "channel.agents.tool_hooks.record_mcp_tool_result_truncated",
+        raising_counter,
+    )
+    mock_logger = MagicMock()
+    monkeypatch.setattr("channel.agents.tool_hooks.logger", mock_logger)
+
+    hook = ToolResultSizeBoundHook(max_bytes=10)
+    block = {"text": "w" * 100}
+    result = {"content": [block], "status": "success"}
+
+    hook.on_after_tool_call(_make_after_event(result))
+    # Drain via gather — if _emit_truncated_counter_safe re-raised, gather
+    # would propagate and fail the test.
+    await asyncio.gather(*hook._pending_tasks)
+
+    # Truncation still happened despite the EMF failure.
+    assert block["text"] == "w" * 10 + "\n[truncated 90 bytes]"
+    mock_logger.warning.assert_called_once()
+    assert "mcp.tool_result_truncated_emf_dispatch_failed" in mock_logger.warning.call_args[0][0]
+    assert mock_logger.warning.call_args[1].get("exc_info") is True
+
+
+def test_size_bound_non_dict_result_is_noop():
+    """When ``event.result`` is not a dict (e.g. an Exception on tool
+    failure), the hook short-circuits without raising. No event loop is
+    needed because no task is created."""
+    hook = ToolResultSizeBoundHook(max_bytes=10)
+    event = MagicMock()
+    event.result = RuntimeError("tool blew up")
+    hook.on_after_tool_call(event)  # must not raise
+
+
+def test_size_bound_non_list_content_is_noop():
+    """A malformed result whose ``content`` is not a list is skipped
+    defensively."""
+    hook = ToolResultSizeBoundHook(max_bytes=10)
+    event = MagicMock()
+    event.result = {"content": "not-a-list", "status": "success"}
+    event.tool_use = {"toolUseId": "tu"}
+    hook.on_after_tool_call(event)  # must not raise
+
+
+def test_size_bound_missing_content_key_is_noop():
+    """A result dict with no ``content`` key is skipped."""
+    hook = ToolResultSizeBoundHook(max_bytes=10)
+    event = MagicMock()
+    event.result = {"status": "success"}
+    event.tool_use = {"toolUseId": "tu"}
+    hook.on_after_tool_call(event)  # must not raise
+
+
+def test_size_bound_non_dict_block_is_skipped():
+    """A content list carrying a non-dict entry (contract violation) is
+    skipped rather than crashing the walk."""
+    hook = ToolResultSizeBoundHook(max_bytes=10)
+    event = MagicMock()
+    event.result = {"content": ["not-a-dict", None], "status": "success"}
+    event.tool_use = {"toolUseId": "tu"}
+    hook.on_after_tool_call(event)  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_size_bound_ignores_non_text_non_json_blocks(monkeypatch):
+    """Image/document blocks are out of scope — they pass through
+    untouched and emit no counter."""
+    counter_calls = []
+
+    async def fake_counter():
+        counter_calls.append(True)
+
+    monkeypatch.setattr(
+        "channel.agents.tool_hooks.record_mcp_tool_result_truncated",
+        fake_counter,
+    )
+
+    hook = ToolResultSizeBoundHook(max_bytes=1)
+    block = {"image": {"format": "png", "source": {"bytes": b"...."}}}
+    result = {"content": [block], "status": "success"}
+
+    hook.on_after_tool_call(_make_after_event(result))
+    await _drain_pending_tasks()
+
+    assert block == {"image": {"format": "png", "source": {"bytes": b"...."}}}
+    assert counter_calls == []
+
+
+def test_size_bound_register_hooks_subscribes_to_after_tool_call():
+    """``register_hooks`` wires the callback onto ``AfterToolCallEvent``
+    via the registry — matches the HookProvider pattern."""
+    from strands.hooks.events import AfterToolCallEvent
+
+    hook = ToolResultSizeBoundHook(max_bytes=10)
     registry = MagicMock()
     hook.register_hooks(registry)
     registry.add_callback.assert_called_once_with(AfterToolCallEvent, hook.on_after_tool_call)

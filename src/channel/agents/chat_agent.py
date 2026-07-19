@@ -32,6 +32,7 @@ from channel.agents.tool_hooks import (
     ModelVisibilityAddendumHook,
     ToolCallGuardHook,
     ToolCallTelemetryHook,
+    ToolResultSizeBoundHook,
 )
 from channel.agents.tools.memory_tools import build_memory_tools
 
@@ -207,6 +208,34 @@ def _bedrock_max_attempts() -> int:
     return parsed if parsed >= 1 else _DEFAULT_BEDROCK_MAX_ATTEMPTS
 
 
+# #390: byte budget for bounding a tool_result's text/JSON content before
+# it re-enters the Converse loop as input tokens. 24 KB ≈ 6K input tokens
+# per fat block — generous enough that ordinary API responses pass through
+# untouched, tight enough that a runaway GitHub-MCP page (file dumps,
+# search results) can't inflate every subsequent turn in the chain.
+_DEFAULT_MCP_TOOL_RESULT_MAX_BYTES = 24_000
+
+
+def _tool_result_max_bytes() -> int:
+    """Resolve the UTF-8 byte budget for :class:`ToolResultSizeBoundHook`.
+
+    Defaults to ``_DEFAULT_MCP_TOOL_RESULT_MAX_BYTES``.
+    ``STARTER_MCP_TOOL_RESULT_MAX_BYTES`` overrides it so the budget can
+    be dialled without a redeploy. Non-integer or non-positive values
+    fall back to the default rather than error on a bad env string (a
+    zero/negative budget would clip every result to empty) — mirrors
+    :func:`_bedrock_max_attempts`.
+    """
+    raw = os.environ.get("STARTER_MCP_TOOL_RESULT_MAX_BYTES")
+    if raw is None:
+        return _DEFAULT_MCP_TOOL_RESULT_MAX_BYTES
+    try:
+        parsed = int(raw)
+    except ValueError:
+        return _DEFAULT_MCP_TOOL_RESULT_MAX_BYTES
+    return parsed if parsed >= 1 else _DEFAULT_MCP_TOOL_RESULT_MAX_BYTES
+
+
 def _bedrock_client_config() -> BotocoreConfig:
     """Build the botocore ``Config`` for the chat ``BedrockModel`` (#391).
 
@@ -310,6 +339,10 @@ def build_agent(
     # Telemetry hook records ``[meta] used <tool>`` synthetic ASSISTANT
     # messages via memory_hook's CreateEvent path (epic #128 decision 6).
     telemetry_hook = ToolCallTelemetryHook(memory_writer=memory_hook.write_meta_event)
+    # #390: bound oversized tool_result text/JSON before it re-enters the
+    # Converse loop as input tokens. Independent of the persist-time strip
+    # in memory.py — both still apply.
+    size_bound_hook = ToolResultSizeBoundHook(max_bytes=_tool_result_max_bytes())
     # #131 quick win: Strands 1.40+ ships built-in proactive context
     # compression via ``SummarizingConversationManager``. When the
     # running token count crosses ``compression_threshold`` (default
@@ -330,12 +363,27 @@ def build_agent(
         conversation_manager=conversation_manager,
         # Order matters: addendum first (mutates the system prompt
         # before recall reads it), then recall (Before) + memory write
-        # (After), then the tool-use guard + telemetry hooks.
+        # (After), then the tool-use guard (Before) + the two
+        # AfterToolCallEvent hooks (size-bound + telemetry).
+        #
+        # size_bound_hook is registered BEFORE telemetry_hook here, but
+        # AfterToolCallEvent uses REVERSE callback ordering (Strands:
+        # ``should_reverse_callbacks``), so telemetry_hook (registered
+        # last) fires FIRST and observes the untruncated result, then
+        # size_bound_hook fires LAST and performs the final mutation of
+        # ``event.result`` before Strands appends it to the conversation
+        # history / re-enters the Converse loop. Telemetry's
+        # success/failure determination reads only status / exception /
+        # cancel_message — all truncation-invariant — so the ordering is
+        # immaterial to telemetry correctness; it is chosen so the
+        # size bound is the last touch before the result returns to the
+        # model.
         hooks=[
             addendum_hook,
             recall_hook,
             memory_hook,
             guard_hook,
+            size_bound_hook,
             telemetry_hook,
         ],
         # Strands types ``messages`` as ``list[Message]`` (its TypedDict);

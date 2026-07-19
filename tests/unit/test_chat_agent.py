@@ -9,9 +9,11 @@ import pytest
 
 from channel.agents.chat_agent import (
     _BEDROCK_READ_TIMEOUT,
+    _DEFAULT_MCP_TOOL_RESULT_MAX_BYTES,
     DEFAULT_MAX_TOKENS,
     DEFAULT_SYSTEM_PROMPT,
     _bedrock_max_attempts,
+    _tool_result_max_bytes,
     build_agent,
     max_tokens_for_effort,
     resolve_model_id,
@@ -120,6 +122,34 @@ def test_bedrock_max_attempts_falls_back_on_non_positive(monkeypatch):
     # would disable the call entirely, so fall back to the default.
     monkeypatch.setenv("STARTER_BEDROCK_MAX_ATTEMPTS", "0")
     assert _bedrock_max_attempts() == 2
+
+
+# ----------------------------------------------------------------
+# #390: tool_result byte-budget resolver
+# ----------------------------------------------------------------
+
+
+def test_tool_result_max_bytes_defaults(monkeypatch):
+    monkeypatch.delenv("STARTER_MCP_TOOL_RESULT_MAX_BYTES", raising=False)
+    assert _tool_result_max_bytes() == _DEFAULT_MCP_TOOL_RESULT_MAX_BYTES
+
+
+def test_tool_result_max_bytes_respects_valid_override(monkeypatch):
+    monkeypatch.setenv("STARTER_MCP_TOOL_RESULT_MAX_BYTES", "8192")
+    assert _tool_result_max_bytes() == 8192
+
+
+def test_tool_result_max_bytes_falls_back_on_non_numeric(monkeypatch):
+    # A bad env string must not crash agent construction.
+    monkeypatch.setenv("STARTER_MCP_TOOL_RESULT_MAX_BYTES", "big")
+    assert _tool_result_max_bytes() == _DEFAULT_MCP_TOOL_RESULT_MAX_BYTES
+
+
+def test_tool_result_max_bytes_falls_back_on_non_positive(monkeypatch):
+    # A zero/negative budget would clip every result to empty — fall back
+    # to the default rather than honour a footgun value.
+    monkeypatch.setenv("STARTER_MCP_TOOL_RESULT_MAX_BYTES", "0")
+    assert _tool_result_max_bytes() == _DEFAULT_MCP_TOOL_RESULT_MAX_BYTES
 
 
 def test_build_agent_passes_low_retry_config_to_bedrock(monkeypatch):
@@ -510,12 +540,19 @@ def test_build_agent_attaches_chassis_hooks_in_documented_order(monkeypatch):
     """Hook order matters: addendum mutates the system prompt BEFORE the
     recall hook reads it; the write + tool hooks come after.
 
-    Documented order: ``[addendum, recall, memory, guard, telemetry]``.
+    Documented order:
+    ``[addendum, recall, memory, guard, size_bound, telemetry]``.
+
+    size_bound is registered BEFORE telemetry so that — under
+    AfterToolCallEvent's reverse callback ordering — telemetry fires
+    first (sees the untruncated result) and the size bound is the final
+    mutation before the result re-enters the Converse loop (#390).
     """
     from channel.agents.tool_hooks import (
         ModelVisibilityAddendumHook,
         ToolCallGuardHook,
         ToolCallTelemetryHook,
+        ToolResultSizeBoundHook,
     )
 
     captured: dict[str, object] = {}
@@ -547,11 +584,42 @@ def test_build_agent_attaches_chassis_hooks_in_documented_order(monkeypatch):
     assert hooks[1] is fake_recall
     assert hooks[2] is fake_memory
     assert isinstance(hooks[3], ToolCallGuardHook)
-    assert isinstance(hooks[4], ToolCallTelemetryHook)
+    assert isinstance(hooks[4], ToolResultSizeBoundHook)
+    assert isinstance(hooks[5], ToolCallTelemetryHook)
     # The telemetry hook must be wired to the memory hook's
     # write_meta_event so synthetic ``[meta] used <tool>`` events
     # actually land in AgentCore.
-    assert hooks[4]._memory_writer is fake_memory.write_meta_event
+    assert hooks[5]._memory_writer is fake_memory.write_meta_event
+
+
+def test_build_agent_registers_size_bound_hook_with_configured_budget(monkeypatch):
+    """#390: the ToolResultSizeBoundHook must be constructed with the
+    byte budget resolved from ``STARTER_MCP_TOOL_RESULT_MAX_BYTES`` (or
+    the default). It is the fifth hook in the documented order and its
+    ``_max_bytes`` must reflect the env override."""
+    from channel.agents.tool_hooks import ToolResultSizeBoundHook
+
+    captured: dict[str, object] = {}
+
+    class FakeAgent:
+        def __init__(self, **kwargs):
+            captured["agent_kwargs"] = kwargs
+
+    monkeypatch.setattr("channel.agents.chat_agent.BedrockModel", lambda **_: object())
+    monkeypatch.setattr("channel.agents.chat_agent.Agent", FakeAgent)
+    monkeypatch.setattr("channel.agents.chat_agent.AgentCoreRecallHook", lambda **_: object())
+    monkeypatch.setattr(
+        "channel.agents.chat_agent.AgentCoreMemoryHook",
+        lambda **_: MagicMock(write_meta_event=MagicMock()),
+    )
+    monkeypatch.setattr("channel.agents.chat_agent.get_or_create_memory", lambda env: "m")
+    monkeypatch.setenv("STARTER_MCP_TOOL_RESULT_MAX_BYTES", "4096")
+
+    build_agent(model_id="claude-sonnet-4-6", user_id="u", chat_id="c")
+
+    hooks = captured["agent_kwargs"]["hooks"]
+    size_bound = next(h for h in hooks if isinstance(h, ToolResultSizeBoundHook))
+    assert size_bound._max_bytes == 4096
 
 
 def test_build_agent_passes_tools_kwarg_to_strands_agent(monkeypatch):

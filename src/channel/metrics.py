@@ -205,3 +205,24 @@ async def record_mcp_tools_capped() -> None:
     every other counter in this module).
     """
     await emit_metric("MCPToolsCapped")
+
+
+async def record_mcp_tool_result_truncated() -> None:
+    """Emit a CloudWatch counter for one oversized tool_result content
+    block truncated before it returned to Bedrock in-loop (#390).
+
+    Counter-only — deliberately accepts NO arguments, mirroring the
+    signature-lock discipline of :func:`record_memory_write_outcome`. The
+    alarming signal is *how often* a tool result exceeds the in-turn byte
+    budget (a fat MCP response — GitHub API JSON, search results, file
+    contents — inflates the input-token count of every subsequent turn in
+    the tool-calling chain); *which* tool it was, and the exact byte
+    counts, live in the structured ``mcp.tool_result_truncated`` log line,
+    queryable via CloudWatch Logs Insights without a per-tool metric
+    dimension (cardinality scales with the registered tool set — the same
+    blowup guard as every other counter in this module).
+
+    Complements :func:`record_mcp_tools_capped`: that counter bounds
+    *tool-schema* input; this one bounds *tool-result* input.
+    """
+    await emit_metric("MCPToolResultTruncated")
