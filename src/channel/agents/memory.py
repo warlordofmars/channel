@@ -202,6 +202,20 @@ class AgentCoreMemoryHook:
             # consumers of this private helper to import Strands types.
             messages = cast(list[dict[str, Any]], list(event.agent.messages)[-2:])
             payload = _payload_from_messages(messages)
+            if not payload:
+                # An all-empty turn (every entry had empty/whitespace-only
+                # text) leaves nothing to persist. Skip ``create_event``
+                # entirely — a no-op turn is neither a write success nor a
+                # write failure, so do NOT bump
+                # ``MemoryWriteSuccesses`` / ``MemoryWriteFailures``.
+                # Debug-log so an investigation can still see it without
+                # warning-level noise. See #392.
+                logger.debug(
+                    "memory.skip_empty_event actor_id=%s session_id=%s",
+                    self._actor_id,
+                    self._session_id,
+                )
+                return
             await asyncio.to_thread(
                 self._client.create_event,
                 memoryId=self._memory_id,
@@ -253,6 +267,20 @@ class AgentCoreMemoryHook:
         bump ``MemoryWriteFailures``) — META writes are best-effort
         side-channel telemetry, not the primary memory write path.
         """
+        # Guard the empty-body case: a ``[meta]``-prefixed event whose
+        # body ``text`` is empty/whitespace-only carries no META fact and
+        # would only add noise, so skip it before scheduling any write.
+        # (The ``[meta] `` prefix means the wire payload wouldn't itself
+        # be zero-length, but an empty body is still a no-op worth
+        # dropping.) Mirrors the primary-path guard in
+        # ``_on_after_invocation_async``. See #392.
+        if not text.strip():
+            logger.debug(
+                "memory.skip_empty_meta_event actor_id=%s session_id=%s",
+                self._actor_id,
+                self._session_id,
+            )
+            return
         task = asyncio.create_task(self._write_meta_event_async(text))
         self._pending_writes.add(task)
         task.add_done_callback(self._pending_writes.discard)
@@ -318,5 +346,14 @@ def _payload_from_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any
         if role is None:
             raise ValueError(f"unsupported role: {msg['role']!r}")
         text = "".join(block["text"] for block in msg.get("content", []) if "text" in block)
+        # Skip zero-length / whitespace-only entries. AgentCore's
+        # ``create_event`` validator rejects an empty ``content.text``
+        # (``ParamValidationError: Invalid length for parameter
+        # payload[0]...text, value: 0``), so a turn whose text content is
+        # empty has nothing eligible to persist — dropping it here lets
+        # the caller skip ``create_event`` for an all-empty turn instead
+        # of manufacturing a doomed write. See #392.
+        if not text.strip():
+            continue
         out.append({"conversational": {"role": role, "content": {"text": text}}})
     return out

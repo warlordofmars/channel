@@ -99,6 +99,53 @@ def test_payload_from_messages_raises_on_unknown_role():
 
 
 @pytest.mark.parametrize(
+    "content",
+    [
+        pytest.param([{"text": ""}], id="empty-string"),
+        pytest.param([{"text": "   \n\t"}], id="whitespace-only"),
+        pytest.param([], id="no-content"),
+        pytest.param([{"toolUse": {"name": "calc"}}], id="text-less-blocks-only"),
+    ],
+)
+def test_payload_from_messages_skips_empty_text_entry(content: list[dict[str, Any]]):
+    """#392: an entry whose text is empty / whitespace-only / absent is
+    dropped rather than serialized as ``content.text == ""`` (which
+    AgentCore's create_event validator rejects with a ParamValidationError)."""
+    payload = _payload_from_messages([{"role": "user", "content": content}])
+
+    assert payload == []
+
+
+def test_payload_from_messages_mixed_drops_only_empty_entry():
+    """#392: a mixed turn (one empty entry, one non-empty) drops only the
+    empty entry and keeps the non-empty one intact."""
+    messages = [
+        {"role": "user", "content": [{"text": "   "}]},
+        {"role": "assistant", "content": [{"text": "the answer is 4"}]},
+    ]
+
+    payload = _payload_from_messages(messages)
+
+    assert payload == [
+        {"conversational": {"role": "ASSISTANT", "content": {"text": "the answer is 4"}}},
+    ]
+
+
+def test_payload_from_messages_preserves_internal_whitespace():
+    """#392 guard is a whitespace-only *emptiness* check — text that merely
+    contains whitespace (leading/internal) is written verbatim, unchanged."""
+    messages = [
+        {"role": "assistant", "content": [{"text": "  padded reply  "}]},
+    ]
+
+    payload = _payload_from_messages(messages)
+
+    assert payload == [
+        {"conversational": {"role": "ASSISTANT", "content": {"text": "  padded reply  "}}},
+    ]
+
+
+@pytest.mark.parametrize(
     ("raw", "expected"),
     [
         # Email-form JWT subs (the auth-bypass + Google OAuth shape).
@@ -351,6 +398,73 @@ async def test_hook_swallows_exceptions_and_emits_failure_metric():
     mock_record.assert_awaited_once_with(success=False)
 
 
+@pytest.mark.asyncio
+async def test_hook_skips_create_event_when_turn_is_all_empty():
+    """#392: an all-empty turn (every entry has empty/whitespace-only text)
+    must NOT call create_event and must NOT bump the success/failure
+    counter — a no-op turn is neither a write success nor a failure."""
+    fake_client = MagicMock()
+
+    hook = AgentCoreMemoryHook(
+        memory_id="m-1",
+        actor_id="user-abc",
+        session_id="chat-xyz",
+        client=fake_client,
+    )
+
+    event = _fake_event_with_messages(
+        [
+            {"role": "user", "content": [{"text": "   "}]},
+            {"role": "assistant", "content": [{"text": ""}]},
+        ]
+    )
+
+    with patch(
+        "channel.agents.memory.record_memory_write_outcome",
+        new=AsyncMock(),
+    ) as mock_record:
+        await hook._on_after_invocation_async(event)
+
+    fake_client.create_event.assert_not_called()
+    mock_record.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_hook_writes_only_non_empty_entry_on_mixed_turn():
+    """#392: a mixed turn (one empty entry, one non-empty) still writes —
+    create_event fires once with only the non-empty entry in the payload,
+    and the write is counted as a success."""
+    fake_client = MagicMock()
+    fake_client.create_event.return_value = {"event": {"eventId": "evt-1"}}
+
+    hook = AgentCoreMemoryHook(
+        memory_id="m-1",
+        actor_id="user-abc",
+        session_id="chat-xyz",
+        client=fake_client,
+    )
+
+    event = _fake_event_with_messages(
+        [
+            {"role": "user", "content": [{"text": "  "}]},
+            {"role": "assistant", "content": [{"text": "hello"}]},
+        ]
+    )
+
+    with patch(
+        "channel.agents.memory.record_memory_write_outcome",
+        new=AsyncMock(),
+    ) as mock_record:
+        await hook._on_after_invocation_async(event)
+
+    fake_client.create_event.assert_called_once()
+    payload = fake_client.create_event.call_args.kwargs["payload"]
+    assert payload == [
+        {"conversational": {"role": "ASSISTANT", "content": {"text": "hello"}}},
+    ]
+    mock_record.assert_awaited_once_with(success=True)
+
+
 def test_hook_after_invocation_fires_and_forgets():
     """The sync callback must fire-and-forget via asyncio.create_task,
     not block the agent loop. The task must also be held in
@@ -495,6 +609,40 @@ async def test_write_meta_event_swallows_client_exceptions():
     # the async helper, not propagated here.
     while hook._pending_writes:
         await _asyncio.sleep(0)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param("", id="empty-string"),
+        pytest.param("   \n\t", id="whitespace-only"),
+    ],
+)
+def test_write_meta_event_skips_empty_body(text: str):
+    """#392: a meta event whose body is empty/whitespace-only carries no
+    META fact — the guard short-circuits before scheduling any write, so
+    create_event is never called and no pending task leaks."""
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def create_event(self, **_: Any) -> dict[str, Any]:
+            self.calls += 1
+            return {}
+
+    client = FakeClient()
+    hook = AgentCoreMemoryHook(
+        memory_id="m",
+        actor_id="a",
+        session_id="s",
+        client=client,
+    )
+
+    hook.write_meta_event(text)
+
+    assert client.calls == 0
+    assert hook._pending_writes == set()
 
 
 def test_payload_from_messages_never_leaks_asset_content():
