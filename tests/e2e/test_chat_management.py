@@ -4,7 +4,7 @@
 Drives the UI through:
 1. Create a chat (send one message)
 2. Hover the row → assert menu button is visible
-3. Click menu → assert 5 items render (3 disabled, 2 enabled)
+3. Click menu → assert 6 items render (3 disabled, 3 enabled)
 4. Click Rename → modal opens with pre-filled input → submit → assert
    sidebar updated AND ``GET /api/chats/{id}`` returns the new title
 5. Click Delete → confirm modal → assert row gone AND
@@ -65,9 +65,12 @@ async def test_rename_and_delete_chat_from_sidebar() -> None:
             await menu_btn.wait_for(state="visible")
             await menu_btn.click()
 
-            # 5 items render.
+            # 6 items render: Pin, Rename, Archive, Change project,
+            # Remove from project, Delete (Pin / Change project /
+            # Remove from project are disabled placeholders; Rename /
+            # Archive / Delete are enabled). Archive was added in #164.
             menu_items = page.locator('[role="menuitem"]')
-            assert await menu_items.count() == 5
+            assert await menu_items.count() == 6
 
             # Rename flow.
             await page.locator('[role="menuitem"]', has_text="Rename").click()
