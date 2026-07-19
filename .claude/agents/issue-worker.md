@@ -438,12 +438,18 @@ on its own.
 **only** here, never to paper over a genuinely failing gate:
 
 ```bash
-# merge state + required-check rollup + review decision, in one call
+# merge state + required-check rollup + review decision, in one call.
+# `notgreen` counts any check that is not COMPLETED-and-green, so a still-
+# pending required check (conclusion null) also counts — the nudge can never
+# fire while a required check is merely in progress.
 gh pr view <PR-NUMBER> --json state,mergeStateStatus,reviewDecision,statusCheckRollup \
   --jq '{state, mergeStateStatus, reviewDecision,
-         failing: ([.statusCheckRollup[]? | select(
-           .conclusion!=null and .conclusion!="SUCCESS"
-           and .conclusion!="NEUTRAL" and .conclusion!="SKIPPED")] | length)}'
+         notgreen: ([.statusCheckRollup[]? | select(
+           (.status? != null and .status != "COMPLETED")                 # CheckRun still running
+           or (.conclusion? != null and .conclusion != "SUCCESS"
+               and .conclusion != "NEUTRAL" and .conclusion != "SKIPPED") # CheckRun not green
+           or (.state? != null and .state != "SUCCESS")                   # legacy StatusContext not green
+         )] | length)}'
 
 # unresolved review threads (want 0)
 OWNER=$(gh repo view --json owner --jq .owner.login)
@@ -459,7 +465,8 @@ gh api graphql -f query='
 
 Nudge **only if all of these hold**: `state == OPEN`, `mergeStateStatus` is
 `BLOCKED` **or** `BEHIND` (never `DIRTY`/`UNKNOWN` — those are real problems,
-handled below), `failing == 0` (all required checks green), `reviewDecision` is
+handled below), `notgreen == 0` (every check is COMPLETED and green — a
+still-pending check counts, so the nudge can't fire early), `reviewDecision` is
 empty (no required review — *not* `REVIEW_REQUIRED`), and unresolved threads
 `== 0`. Apply the nudges **in order**, re-checking `state` / `mergeStateStatus`
 after each and stopping the instant it merges:
