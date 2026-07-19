@@ -1002,9 +1002,14 @@ async def _events_with_keepalive(
 
     Yields ``("keepalive", None)`` for every ``interval`` seconds that
     elapse without the wire warming up, and ``("event", <event>)`` for
-    each Strands event. ``is_warm`` is a zero-arg predicate the caller
-    flips ``True`` once it has written a real frame to the client;
-    keepalives stop from then on (deltas keep the connection warm on
+    each Strands event. ``is_warm`` is a zero-arg predicate owned by the
+    caller; this helper only reads it and never defines what "warm"
+    means. The current caller (``_stream_bedrock_reply``) flips it
+    ``True`` on the first **delta** specifically — deliberately NOT on
+    tool / usage / stop frames, which write nothing to the client wire —
+    so keepalives keep flowing through any pre-delta gap (e.g. a turn
+    that only calls tools before its first token). Once the predicate
+    returns ``True``, keepalives stop (deltas keep the connection warm on
     their own) and events flow via the cheap direct-await path.
 
     The pending pull is held across successive timed waits and is NEVER
