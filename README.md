@@ -100,7 +100,7 @@ To run the whole stack locally (DynamoDB Local + API + Vite dev server):
 
 ```bash
 uv sync --all-extras       # Python deps (requires uv)
-cd ui && npm install       # JS deps
+(cd ui && npm install)     # JS deps (subshell keeps you at the repo root)
 uv run inv dev             # DynamoDB Local, API, and the Vite dev server
 ```
 
@@ -117,8 +117,9 @@ Then open the local URL `inv dev` prints. For the desktop app, `uv run inv deskt
 
 ```bash
 git clone https://github.com/warlordofmars/channel
+cd channel
 uv sync --all-extras       # Python deps (requires uv)
-cd ui && npm install       # JS deps
+(cd ui && npm install)     # JS deps (subshell keeps you at the repo root)
 uv run inv pre-push        # lint + type check + unit tests + frontend tests
 ```
 
