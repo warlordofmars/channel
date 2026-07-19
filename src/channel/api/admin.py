@@ -88,6 +88,13 @@ _METRIC_ALLOWLIST = (
     "MemoryWriteFailures",
     "RecallSuccesses",
     "RecallFailures",
+    # Tool-driven memory (#400): agent-callable remember/recall counters,
+    # kept separate from the hook counters above so the dashboard's
+    # hook-health signal stays isolated from tool usage.
+    "MemoryToolWriteSuccesses",
+    "MemoryToolWriteFailures",
+    "MemoryToolRecallSuccesses",
+    "MemoryToolRecallFailures",
     "AutoTitleSuccesses",
     "AutoTitleFailures",
     "ChatDeleteMemoryWipeSuccesses",
