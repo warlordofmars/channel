@@ -367,6 +367,19 @@ describe("Sidebar", () => {
     expect(() => fireEvent.click(screen.getByTitle("Toggle sidebar"))).not.toThrow();
   });
 
+  it("applies .mobile-open class to .sb when the mobileOpen prop is true (#425)", () => {
+    const { container } = render(
+      <MemoryRouter><Sidebar mobileOpen chats={[]} /></MemoryRouter>
+    );
+    expect(container.querySelector(".sb.mobile-open")).toBeTruthy();
+  });
+
+  it("omits .mobile-open class when mobileOpen is false/absent (default)", () => {
+    const { container } = render(<MemoryRouter><Sidebar chats={[]} /></MemoryRouter>);
+    expect(container.querySelector(".sb.mobile-open")).toBeNull();
+    expect(container.querySelector(".sb")).toBeTruthy();
+  });
+
   it("clicking a recent navigates to /app/c/<that-chat_id>", () => {
     let lastPath = null;
     function PathCatcher() {

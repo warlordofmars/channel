@@ -49,12 +49,18 @@ const GROUP_ORDER = ["Today", "Yesterday", "Previous 7 days", "Older"];
  * archived rows opt in via `?include_archived=1`.
  * `onNewChat` fires when the user clicks the "New chat" primary action —
  * Shell wires this to `createChat()` + `navigate(/app/c/{id})`.
+ *
+ * `mobileOpen` (#425) adds the `mobile-open` class so the ≤640px media
+ * query in app.css slides the off-canvas drawer into view. It has no
+ * effect on desktop, where the sidebar is a static rail and the mobile
+ * drawer CSS is inert.
  */
 export default function Sidebar({
   collapsed = false,
   onToggle = () => {},
   chats = [],
   onNewChat = () => {},
+  mobileOpen = false,
 }) {
   const navigate = useNavigate();
   const { archiveChat } = useChats();
@@ -150,7 +156,13 @@ export default function Sidebar({
   }
 
   return (
-    <div className={"sb" + (collapsed ? " collapsed" : "")}>
+    <div
+      className={
+        "sb" +
+        (collapsed ? " collapsed" : "") +
+        (mobileOpen ? " mobile-open" : "")
+      }
+    >
       <div className="sb-top">
         <div className="sb-actions">
           <button type="button" className="icon-btn" title="Toggle sidebar" onClick={onToggle}><Icon name="sidebar" size={18} /></button>
