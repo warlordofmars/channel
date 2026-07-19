@@ -33,6 +33,9 @@ export default function FeaturedMCPServers({ registeredUrls = [], onEnabled }) {
   const [token, setToken] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  // featured_id the current `error` belongs to, so it renders on the right
+  // card — the OAuth path has no open sub-form to host it.
+  const [errorId, setErrorId] = useState(null);
 
   useEffect(function fetchFeaturedOnMount() {
     let cancelled = false;
@@ -56,6 +59,7 @@ export default function FeaturedMCPServers({ registeredUrls = [], onEnabled }) {
   // else (a future OAuth-DCR featured entry) enables directly.
   function startEnable(entry) {
     setError("");
+    setErrorId(null);
     setToken("");
     if (entry.auth_type === "static_token") {
       setActiveId(entry.featured_id);
@@ -69,12 +73,14 @@ export default function FeaturedMCPServers({ registeredUrls = [], onEnabled }) {
     setActiveId(null);
     setToken("");
     setError("");
+    setErrorId(null);
   }
 
   async function submitEnable(entry) {
     if (busy) return;
     setBusy(true);
     setError("");
+    setErrorId(null);
     const isStatic = entry.auth_type === "static_token";
     try {
       const out = await enableFeaturedServer({
@@ -96,7 +102,14 @@ export default function FeaturedMCPServers({ registeredUrls = [], onEnabled }) {
       // Log only String(e) — never the error object, whose body could
       // otherwise surface the pasted PAT in the console (#375).
       console.error("enableFeaturedServer failed", String(e));
-      setError(`Couldn't enable ${entry.name}. Check the token and try again.`);
+      // Only the static_token path involves a pasted token, so only it
+      // should point the user at the token — an OAuth entry has none.
+      setError(
+        isStatic
+          ? `Couldn't enable ${entry.name}. Check the token and try again.`
+          : `Couldn't enable ${entry.name}. Please try again.`,
+      );
+      setErrorId(entry.featured_id);
     } finally {
       setBusy(false);
     }
@@ -159,6 +172,11 @@ export default function FeaturedMCPServers({ registeredUrls = [], onEnabled }) {
                   Write tools stay off until you enable this server per-chat.
                 </p>
               )}
+              {errorId === entry.featured_id && error && (
+                <div className="mcp-err mcp-featured-err" role="alert">
+                  {error}
+                </div>
+              )}
               {open && (
                 <div className="mcp-featured-enable">
                   <label className="mcp-field">
@@ -182,11 +200,6 @@ export default function FeaturedMCPServers({ registeredUrls = [], onEnabled }) {
                     Create a token
                     <Icon name="arrow-right" size={13} aria-hidden="true" />
                   </a>
-                  {error && (
-                    <div className="mcp-err" role="alert">
-                      {error}
-                    </div>
-                  )}
                   <div className="mcp-actions">
                     <button
                       type="button"

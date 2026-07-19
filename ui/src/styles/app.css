@@ -1353,6 +1353,7 @@ html.is-electron-mac .sb-top {
   padding: 8px 10px;
   margin: 8px 0 0;
 }
+.mcp-featured-err { margin-top: 8px; }
 .mcp-featured-enable {
   display: flex;
   flex-direction: column;

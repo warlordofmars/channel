@@ -219,6 +219,19 @@ describe("FeaturedMCPServers", () => {
     expect(screen.queryByLabelText(/access token/i)).not.toBeInTheDocument();
   });
 
+  it("uses a token-free error message when a non-static (OAuth) enable fails", async () => {
+    api.getFeaturedServers.mockResolvedValueOnce({ servers: [DCR] });
+    api.enableFeaturedServer.mockRejectedValueOnce(new Error("nope"));
+    renderFeatured();
+    fireEvent.click(await screen.findByRole("button", { name: /^enable$/i }));
+    const err = await screen.findByText(/couldn't enable acme/i);
+    expect(err).toBeInTheDocument();
+    // OAuth entries involve no pasted token, so the message must NOT
+    // tell the user to check a token.
+    expect(err.textContent).toMatch(/please try again/i);
+    expect(err.textContent).not.toMatch(/check the token/i);
+  });
+
   it("surfaces an error and never logs the token when enable fails", async () => {
     api.enableFeaturedServer.mockRejectedValueOnce(new Error("nope"));
     renderFeatured();
