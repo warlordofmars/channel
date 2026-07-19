@@ -133,12 +133,14 @@ channel/
 
 Google OAuth is the identity provider for management UI login
 (`/auth/login`). On successful Google sign-in, the API mints a
-management JWT (`typ=mgmt`, `role=admin|user`, 8h TTL) signed with
+management JWT (`typ=mgmt`, `role=admin|user`, 30-day TTL, revocable
+via the `DENY#{jti}` denylist — #240 / #298) signed with
 HS256 using a secret resolved from SSM
 (`/channel/{env}/jwt-secret`). All `/api/*` endpoints
 require a valid Bearer mgmt JWT. JWT validation enforces `iss`,
-`typ=mgmt`, and `exp`. The token is stored client-side in
-`localStorage` under the `starter_mgmt_token` key.
+`typ=mgmt`, and `exp`, then rejects any `jti` on the denylist. The
+token is stored client-side in `localStorage` under the
+`starter_mgmt_token` key.
 
 ## DynamoDB single table design
 
