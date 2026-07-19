@@ -10,6 +10,7 @@ import {
 import Icon from "../../components/Icon.jsx";
 import { useChannelPrefs } from "../../hooks/useChannelPrefs.js";
 import AddMCPServerModal from "../AddMCPServerModal.jsx";
+import FeaturedMCPServers from "../FeaturedMCPServers.jsx";
 import { EFFORTS, cachedModels, loadModels, mergeWithDisplayMeta } from "../data.js";
 
 // Five accent hues. Co-located here because nothing else in the app reads
@@ -402,6 +403,10 @@ export default function Customize() {
               ))}
             </ul>
           )}
+          <FeaturedMCPServers
+            registeredUrls={mcpServers.map((s) => s.url)}
+            onEnabled={refreshMCP}
+          />
           <div className="set-row">
             <div />
             <div className="ctl">

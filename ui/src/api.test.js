@@ -5,6 +5,7 @@ import {
   createChat,
   deleteChat,
   deleteMCPServer,
+  enableFeaturedServer,
   finalizeAttachment,
   getAdminMetricsSummary,
   getAdminMetricsTimeseries,
@@ -14,6 +15,7 @@ import {
   getAssetContent,
   getChat,
   getChatMCPSettings,
+  getFeaturedServers,
   getPrefs,
   listAssets,
   listChatAssets,
@@ -878,6 +880,136 @@ describe("MCP API client", () => {
     await expect(
       putChatMCPSettings("chat-1", { mode: "inherit", explicit_server_ids: [] }),
     ).rejects.toThrow(/putChatMCPSettings 422/);
+  });
+
+  it("getFeaturedServers GETs the catalog with auth", async () => {
+    global.fetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ servers: [{ featured_id: "github" }] }),
+    });
+    const data = await getFeaturedServers();
+    expect(global.fetch).toHaveBeenCalledWith(
+      expect.stringContaining("/api/mcp/featured"),
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: "Bearer test-token" }),
+      }),
+    );
+    expect(data.servers[0].featured_id).toBe("github");
+  });
+
+  it("getFeaturedServers throws on non-ok response", async () => {
+    global.fetch.mockResolvedValueOnce({ ok: false, status: 500 });
+    await expect(getFeaturedServers()).rejects.toThrow(/getFeaturedServers 500/);
+  });
+
+  it("enableFeaturedServer POSTs featured_id/name/url/token only (no prefix/enablement)", async () => {
+    global.fetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ server_id: "srv-feat", auth_start_url: null }),
+    });
+    const fakeBearer = "dummy-" + "bearer-value";
+    const out = await enableFeaturedServer({
+      featured_id: "github",
+      name: "GitHub",
+      url: "https://api.githubcopilot.com/mcp/",
+      token: fakeBearer,
+    });
+    expect(out.server_id).toBe("srv-feat");
+    const [, opts] = global.fetch.mock.calls[0];
+    expect(opts.method).toBe("POST");
+    const body = JSON.parse(opts.body);
+    // Exactly the four keys the server needs — never tool_prefix /
+    // auth_type / globally_enabled (server pins those from the catalog).
+    expect(Object.keys(body).sort()).toEqual(["featured_id", "name", "token", "url"]);
+    expect(body.featured_id).toBe("github");
+    expect(body.token).toBe(fakeBearer);
+  });
+
+  it("enableFeaturedServer defaults token to null when omitted", async () => {
+    global.fetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ server_id: "srv-dcr", auth_start_url: "https://a" }),
+    });
+    const out = await enableFeaturedServer({
+      featured_id: "acme",
+      name: "Acme",
+      url: "https://acme.example.com/mcp",
+    });
+    expect(out.auth_start_url).toBe("https://a");
+    const body = JSON.parse(global.fetch.mock.calls[0][1].body);
+    expect(body.token).toBeNull();
+  });
+
+  it("enableFeaturedServer throws ApiError WITHOUT reading the body when a token was supplied (no PAT echo)", async () => {
+    // A static_token 422 can echo the pasted token in detail[].input; the
+    // wrapper must never read the body when a token was supplied.
+    const jsonSpy = vi.fn(() => Promise.resolve({ detail: "should-not-be-read" }));
+    global.fetch.mockResolvedValueOnce({ ok: false, status: 422, json: jsonSpy });
+    let caught;
+    try {
+      await enableFeaturedServer({
+        featured_id: "github",
+        name: "GitHub",
+        url: "https://api.githubcopilot.com/mcp/",
+        token: "dummy-" + "secret",
+      });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(ApiError);
+    expect(caught.status).toBe(422);
+    expect(caught.detail).toBeNull();
+    expect(jsonSpy).not.toHaveBeenCalled();
+  });
+
+  it("enableFeaturedServer preserves FastAPI detail on the tokenless (OAuth) path", async () => {
+    // No token supplied → no secret to leak → the machine-readable detail
+    // is preserved (mirrors registerMCPServer's oauth branch).
+    global.fetch.mockResolvedValueOnce({
+      ok: false,
+      status: 400,
+      json: () =>
+        Promise.resolve({ detail: { code: "unknown_featured_server" } }),
+    });
+    const err = await enableFeaturedServer({
+      featured_id: "acme",
+      name: "Acme",
+      url: "https://acme.example.com/mcp",
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err.status).toBe(400);
+    expect(err.detail).toEqual({ code: "unknown_featured_server" });
+  });
+
+  it("enableFeaturedServer nulls detail on the tokenless path when the body has no detail key", async () => {
+    global.fetch.mockResolvedValueOnce({
+      ok: false,
+      status: 400,
+      json: () => Promise.resolve({}),
+    });
+    const err = await enableFeaturedServer({
+      featured_id: "acme",
+      name: "Acme",
+      url: "https://acme.example.com/mcp",
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err.detail).toBeNull();
+  });
+
+  it("enableFeaturedServer nulls detail on the tokenless path when the body is not JSON", async () => {
+    global.fetch.mockResolvedValueOnce({
+      ok: false,
+      status: 502,
+      json: () => Promise.reject(new Error("not JSON")),
+    });
+    const err = await enableFeaturedServer({
+      featured_id: "acme",
+      name: "Acme",
+      url: "https://acme.example.com/mcp",
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err.status).toBe(502);
+    expect(err.detail).toBeNull();
   });
 });
 

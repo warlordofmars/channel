@@ -14,6 +14,10 @@ vi.mock("../../api.js", () => ({
   registerMCPServer: vi.fn(() =>
     Promise.resolve({ server_id: "srv-1", auth_start_url: "https://x" }),
   ),
+  getFeaturedServers: vi.fn(() => Promise.resolve({ servers: [] })),
+  enableFeaturedServer: vi.fn(() =>
+    Promise.resolve({ server_id: "srv-feat", auth_start_url: null }),
+  ),
 }));
 
 import * as api from "../../api.js";
@@ -468,6 +472,69 @@ describe("Customize", () => {
         screen.queryByRole("heading", { name: /add mcp server/i }),
       ).not.toBeInTheDocument(),
     );
+  });
+
+  it("renders the Featured integrations section from getFeaturedServers", async () => {
+    api.getFeaturedServers.mockResolvedValueOnce({
+      servers: [
+        {
+          featured_id: "github",
+          name: "GitHub",
+          url: "https://api.githubcopilot.com/mcp/",
+          description: "GitHub's official MCP server.",
+          docs_url: "https://github.com/settings/personal-access-tokens",
+          auth_type: "static_token",
+          tool_prefix: "github",
+          default_globally_enabled: false,
+        },
+      ],
+    });
+    renderCustomize();
+    expect(
+      await screen.findByRole("heading", { name: /featured integrations/i }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^enable$/i })).toBeInTheDocument();
+  });
+
+  it("dedupes a featured entry already registered (shows Enabled, not Enable)", async () => {
+    api.listMCPServers.mockResolvedValue({
+      servers: [
+        {
+          server_id: "srv-gh",
+          name: "GitHub",
+          url: "https://api.githubcopilot.com/mcp/",
+          tool_prefix: "github",
+          auth_type: "static_token",
+          auth_status: "active",
+          globally_enabled: false,
+          created_at: "x",
+          updated_at: "x",
+        },
+      ],
+    });
+    api.getFeaturedServers.mockResolvedValueOnce({
+      servers: [
+        {
+          featured_id: "github",
+          name: "GitHub",
+          url: "https://api.githubcopilot.com/mcp/",
+          description: "GitHub's official MCP server.",
+          docs_url: "https://github.com/settings/personal-access-tokens",
+          auth_type: "static_token",
+          tool_prefix: "github",
+          default_globally_enabled: false,
+        },
+      ],
+    });
+    renderCustomize();
+    // The featured GitHub card renders its "Enabled" pill…
+    const featured = (await screen.findByRole("heading", {
+      name: /featured integrations/i,
+    })).closest(".mcp-featured");
+    expect(within(featured).getByText(/enabled/i)).toBeInTheDocument();
+    expect(
+      within(featured).queryByRole("button", { name: /^enable$/i }),
+    ).not.toBeInTheDocument();
   });
 
   it("renders accessible status text + aria-label on the auth-status dot", async () => {
