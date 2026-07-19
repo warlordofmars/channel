@@ -367,7 +367,7 @@ Runs on **every** agent-created PR. The `agent-safe` label only gates whether th
      --jq 'first(.data.repository.pullRequests.nodes[]
            | (.reviewRequests.nodes[]?.requestedReviewer // empty),
              (.reviews.nodes[]?.author // empty)
-           | select(.login=="copilot-pull-request-reviewer") | .id)
+           | select((.login // "") | startswith("copilot-pull-request-reviewer")) | .id)
            // "BOT_kgDOCnlnWA"')
 
    gh api graphql -f query='
@@ -383,6 +383,8 @@ Runs on **every** agent-created PR. The `agent-safe` label only gates whether th
    shows on the PR; only proceed to step 2 if it does:
 
    ```bash
+   OWNER=$(gh repo view --json owner --jq .owner.login)   # self-contained
+   REPO=$(gh repo view --json name --jq .name)
    gh api graphql -f query='
      query($owner:String!,$name:String!,$num:Int!){
        repository(owner:$owner,name:$name){
@@ -407,14 +409,15 @@ Runs on **every** agent-created PR. The `agent-safe` label only gates whether th
    skip to step 5. Do not poll for a request you never confirmed.
 2. Once the request is registered (step 1's invariant passed), wait for the Copilot **`copilot-pull-request-reviewer` check-run** (posted by the `github-actions` app — **not** a check named `Agent`) to reach `completed`, then wait an **additional ~90s** before fetching review comments — the check-run closes before Copilot finishes writing line-level comments (observed: check-run completed at 12:41:52, comments posted at 12:43:03). Poll with:
    ```bash
-   # The posted review/comment author login carries the [bot] suffix —
-   # copilot-pull-request-reviewer[bot] — even though the reviewRequest login
-   # in step 1 does not. Filter on the suffixed login or you will under-report
-   # and miss the review entirely.
+   # Author login differs by endpoint: the top-level REVIEW author is
+   # `copilot-pull-request-reviewer[bot]`, but INLINE review-comment authors
+   # show as `Copilot` — and the reviewRequest login in step 1 is the
+   # un-suffixed `copilot-pull-request-reviewer`. Match all three with a
+   # case-insensitive substring on "copilot" so the poll never under-reports.
    gh api repos/{owner}/{repo}/pulls/<PR-NUMBER>/reviews \
-     --jq '.[] | select(.user.login=="copilot-pull-request-reviewer[bot]") | {state, body: .body[:120]}'
+     --jq '.[] | select(.user.login | test("copilot"; "i")) | {state, body: .body[:120]}'
    gh api repos/{owner}/{repo}/pulls/<PR-NUMBER>/comments \
-     --jq '.[] | select(.user.login=="copilot-pull-request-reviewer[bot]") | .body'
+     --jq '.[] | select(.user.login | test("copilot"; "i")) | .body'
    ```
    Do not rely on `get_reviews` alone — subsequent Copilot iterations can post line comments without creating a new top-level review object.
 
@@ -516,13 +519,18 @@ after each and stopping the instant it merges:
    with the **explicit-refspec `--force-with-lease`** form from §6 — re-running
    the full W1–W7 pre-push checks first. Never a bare force-push (W2/W3/W6).
 
+**After any nudge that starts a new CI run** — an `update-branch` merge commit,
+or a re-arm GitHub re-checks — `statusCheckRollup` goes pending again. Return to
+the §7 CI-green wait loop and let it settle **before** re-evaluating the gate or
+escalating; escalating while required checks are merely pending is premature.
+
 **Escalate — do NOT admin-merge.** If the safe nudges don't clear it within the
 bounded budget, **stop and escalate for a human/coordinator to admin-merge**.
 The autonomous worker does **not** carry — and must not improvise — an
 admin-merge power (decided policy). Emit the sentinel and end the turn:
 
 ```
-HUMAN_INPUT_REQUIRED: PR #NNN auto-merge stuck at BLOCKED — all gates green (checks green, behind_by=0, no required review, no unresolved threads) but the armed auto-merge has not fired after safe nudges (toggle auto-merge, update-branch); needs a human/coordinator admin-merge.
+HUMAN_INPUT_REQUIRED: PR #NNN auto-merge stuck at BLOCKED — all gates green (required checks green, branch up-to-date / mergeStateStatus not BEHIND, no required review, no unresolved threads) but the armed auto-merge has not fired after safe nudges (toggle auto-merge, update-branch); needs a human/coordinator admin-merge.
 ```
 
 If `mergeStateStatus` is instead `DIRTY` (conflicts) or a required check is
@@ -791,7 +799,7 @@ Halt **only** in these situations:
 
 - The PR is not auto-merging after CI passes and the reason is unclear (for the *diagnosed* all-gates-green-but-`BLOCKED` case, run the §7.7 stuck-detector's safe nudges first, then escalate per that section)
 - The `development` pipeline failure is in infrastructure (CDK / Lambda / DynamoDB) and the root cause is not apparent from logs
-- A change requires modifying `infra/stacks/starter_stack.py` in a way that could affect production resources
+- A change requires modifying `infra/stacks/channel_stack.py` in a way that could affect production resources
 - The same CI check has failed 3 times without a clear fix
 - A release milestone drains to zero open non-epic issues
 - **Any of the W1–W7 push-discipline checks fails** (see `## Push discipline`). W5 fires on `push.default = matching`; W7 fires on protected-shadow-branch divergence after the W4 fast-forward attempt. These halts surface a sentinel and stop; they do not retry. Other W-rule violations (W1/W2/W3/W6) indicate a malformed push command and should be reformulated by the agent before retrying — but if the malformed shape persists across two attempts, halt with `HUMAN_INPUT_REQUIRED: push command repeatedly violates W1–W7 (see ## Push discipline)`.
