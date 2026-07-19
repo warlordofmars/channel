@@ -1410,6 +1410,7 @@ def create_mcp_server(
     client_id: str | None = None,
     auth_type: MCPServerAuthType = MCPServerAuthType.OAUTH_DCR,
     auth_status: MCPServerAuthStatus = MCPServerAuthStatus.NEVER_AUTHED,
+    globally_enabled: bool = True,
 ) -> MCPServer:
     """Persist a freshly-registered MCP server row.
 
@@ -1420,6 +1421,11 @@ def create_mcp_server(
     static-token (PAT) server the caller passes
     ``auth_type=STATIC_TOKEN``, ``client_id=None``, and
     ``auth_status=ACTIVE`` (there is no auth-code step to complete).
+
+    ``globally_enabled`` defaults to ``True`` (the historical registry
+    behaviour). A featured-server registration of a read-write surface
+    (GitHub, #277) passes ``False`` so write hands need an explicit
+    per-chat enable.
 
     Enforces the data-model invariant at the storage boundary: an
     ``oauth_dcr`` server must carry a DCR-issued ``client_id``. Persisting
@@ -1438,7 +1444,7 @@ def create_mcp_server(
         tool_prefix=tool_prefix,
         auth_type=auth_type,
         auth_status=auth_status,
-        globally_enabled=True,
+        globally_enabled=globally_enabled,
         created_at=now,
         updated_at=now,
     )
