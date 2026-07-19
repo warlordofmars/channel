@@ -603,19 +603,6 @@ export default function Conversation() {
             const onRetry = retryEnabled ? () => regenerate({}) : undefined;
             return t.role === "user" ? (
               <div className="turn user" key={t.msg_id}>
-                {t.atts && t.atts.length > 0 && (
-                  <div
-                    className="attaches"
-                    style={{ justifyContent: "flex-end", marginBottom: 0 }}
-                  >
-                    {t.atts.map((a, j) => (
-                      <div className="chip" key={j}>
-                        <span className="tile"><Icon name={a.ic} size={15} /></span>
-                        <span>{a.name}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
                 <div className="bubble">{t.text}</div>
                 {standaloneAssets(t.assets, t.text).map(renderStandalone)}
               </div>

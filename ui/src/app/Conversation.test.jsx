@@ -222,29 +222,6 @@ describe("Conversation", () => {
     expect(screen.getByText("bold reply")).toBeTruthy();
   });
 
-  it("renders attachment chips on a user turn that has atts", () => {
-    mockStream({
-      turns: [
-        {
-          msg_id: "u1",
-          role: "user",
-          text: "look at this",
-          atts: [{ kind: "file", name: "spec.pdf", ic: "doc" }],
-        },
-      ],
-    });
-    renderAt("/app/c/c1");
-    expect(screen.getByText("spec.pdf")).toBeTruthy();
-  });
-
-  it("does NOT render attachments chip wrapper when atts is empty", () => {
-    mockStream({
-      turns: [{ msg_id: "u1", role: "user", text: "no atts", atts: [] }],
-    });
-    renderAt("/app/c/c1");
-    expect(document.body.querySelector(".attaches")).toBeNull();
-  });
-
   it("shows the streaming cursor and hides message-actions while streaming", () => {
     mockStream({
       turns: [
