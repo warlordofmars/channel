@@ -317,8 +317,11 @@ def sse_delta(text: str) -> bytes:
 def sse_keepalive() -> bytes:
     """Emit an inert SSE keepalive comment frame (#391, #417).
 
-    Written on a timer whenever the stream idles — no real frame for the
-    keepalive interval, at ANY point in the turn. That covers Bedrock's
+    Written on a timer whenever the stream idles — no upstream Strands
+    event for the keepalive interval, at ANY point in the turn (the idle
+    timer is measured on upstream-event arrival, not client-byte
+    emission; see ``_events_with_keepalive`` for why the two coincide for
+    the connection-dropping gaps). That covers Bedrock's
     silent pre-first-token window (#391 — botocore's throttle backoff or
     a genuinely slow first token, before the first delta or the
     ``sse_error`` / ``bedrock_throttled`` frame from #212) AND a

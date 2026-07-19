@@ -964,8 +964,15 @@ def _collect_code_exec_images(
 # ----------------------------------------------------------------
 
 # Interval (seconds) between inert SSE keepalive comment frames written
-# whenever the stream idles — i.e. no real frame has reached the client
-# for ``interval`` seconds, at ANY point in the turn. Bedrock can go
+# whenever the stream idles — i.e. no upstream Strands event has arrived
+# for ``interval`` seconds, at ANY point in the turn. (Idle is measured on
+# upstream-event arrival, not client-byte emission; the two coincide for
+# the gaps that actually drop the connection — during a slow first token
+# or a tool-execution pause the agent emits no upstream events at all, so
+# no bytes reach the client and the keepalive fires. The handful of
+# upstream events that yield no client frame — usage/stop, deduped
+# tool_started — arrive either at end-of-turn or in sub-interval bursts,
+# so resetting the timer on them is harmless.) Bedrock can go
 # silent for a long window before the first delta (throttle backoff —
 # now collapsed to single-digit seconds by the lowered max_attempts in
 # build_agent, #391 — or a genuinely slow first token) AND mid-stream,
@@ -1013,11 +1020,17 @@ async def _events_with_keepalive(
     idle by #417).
 
     Yields ``("keepalive", None)`` for every ``interval`` seconds that
-    elapse without the next real event arriving — at ANY point in the
-    turn — and ``("event", <event>)`` for each Strands event. The idle
-    timer resets on every real event: each completed pull starts a fresh
-    timed wait, so a long gap anywhere in the stream emits keepalives
-    throughout it.
+    elapse without the next **upstream Strands event** arriving — at ANY
+    point in the turn — and ``("event", <event>)`` for each Strands
+    event. The idle timer measures upstream-event arrival (not
+    client-byte emission) and resets on every event: each completed pull
+    starts a fresh timed wait, so a long gap anywhere in the stream emits
+    keepalives throughout it. The gaps that actually drop the connection
+    (slow first token, tool-execution pause) are upstream-event silences,
+    so measuring on event arrival covers them; the few events that yield
+    no client frame (usage/stop, deduped tool_started) arrive at
+    end-of-turn or in sub-interval bursts, so resetting on them is
+    harmless.
 
     #391 originally *stopped* keepalives once the wire warmed (the first
     delta), on the assumption that deltas thereafter kept the connection
