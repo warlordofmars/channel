@@ -53,7 +53,7 @@ handler.
 
 The CloudFront WebACL still applies a **global per-IP rate limit of
 1000 requests / 5 minutes** (the `GlobalRateLimit` rule in
-`infra/stacks/starter_stack.py`), so a single IP that floods
+`infra/stacks/channel_stack.py`), so a single IP that floods
 `/health` will be blocked at the edge before it reaches the Lambda
 even though no endpoint-specific limit is defined.
 

@@ -13,7 +13,7 @@ prod   → /channel/<name>
 others → /channel/<env_name>/<name>
 ```
 
-The CDK stack in `infra/stacks/starter_stack.py` provisions most
+The CDK stack in `infra/stacks/channel_stack.py` provisions most
 secret parameters with a `CHANGE_ME_ON_FIRST_DEPLOY` placeholder and
 applies `RemovalPolicy.RETAIN` so a stack delete never destroys the
 live secret material. The `AllowedEmails` parameter is the exception:
@@ -47,7 +47,7 @@ geo-restrictions, and CSP headers.
 | Header name | `X-Origin-Verify` |
 | Consumer (Lambda) | `src/channel/auth/tokens.py` (`_origin_verify_secret()`) |
 | Consumer (middleware) | `src/channel/api/main.py` (`_verify_origin_secret`) |
-| Injector (CloudFront) | `infra/stacks/starter_stack.py` (`origin_verify_header`, all environments) |
+| Injector (CloudFront) | `infra/stacks/channel_stack.py` (`origin_verify_header`, all environments) |
 
 ### Current behaviour
 
