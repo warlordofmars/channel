@@ -1,7 +1,7 @@
 # Copyright (c) 2026 John Carter. All rights reserved.
 """Tool-use hooks for the Channel chat agent (epic #128 / #181).
 
-Three hook handlers — see the design doc at
+Four hook handlers — see the design doc at
 ``docs/superpowers/specs/2026-06-06-tool-use-chassis-design.md`` for the
 phenomenology preamble and the rationale behind each.
 
@@ -20,6 +20,16 @@ phenomenology preamble and the rationale behind each.
   per-chain counter, fires the ``[meta] used <tool> ...`` synthetic
   ASSISTANT message via ``AgentCoreMemoryHook``'s ``CreateEvent`` path,
   and emits ``ToolCallSuccesses`` / ``ToolCallFailures`` EMF counters.
+
+* ``ToolResultSizeBoundHook`` — ``AfterToolCallEvent`` (#390). Bounds
+  each oversized ``text`` / ``json`` content block on the tool result to
+  a UTF-8 byte budget BEFORE it re-enters the Converse loop as input
+  tokens, appending a ``[truncated N bytes]`` marker so the model can
+  reason about the clipped span. Complements the persist-time strip in
+  ``memory.py`` (which drops tool payloads from AgentCore Memory
+  entirely): the two are independent — the persist-time strip governs
+  what lands in Memory, this bound governs what returns to the model
+  in-turn.
 
 The cancel-signal registry is a module-level dict keyed by ``chat_id``,
 mapping to a ``time.monotonic()`` timestamp. ``chats.py``'s SSE
@@ -47,6 +57,7 @@ Three clearing mechanisms keep the registry bounded (defense in depth):
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from collections.abc import Callable
@@ -59,7 +70,10 @@ from strands.hooks.events import (
     BeforeToolCallEvent,
 )
 
-from channel.metrics import record_tool_call_outcome
+from channel.metrics import (
+    record_mcp_tool_result_truncated,
+    record_tool_call_outcome,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -364,5 +378,171 @@ class ToolCallTelemetryHook:
             logger.warning(
                 "tool_call.emf_dispatch_failed success=%s",
                 success,
+                exc_info=True,
+            )
+
+
+# ---------------------------------------------------------------------------
+# ToolResultSizeBoundHook — AfterToolCallEvent (#390)
+#
+# Bounds oversized tool_result content BEFORE it returns to Bedrock
+# in-loop. After a tool fires, Strands appends the (post-hook)
+# ``AfterToolCallEvent.result`` to the conversation history as a
+# ``toolResult`` block, which becomes INPUT tokens on every subsequent
+# Converse call in the tool-calling chain. A single fat MCP response
+# (GitHub API JSON, search results, file contents) therefore inflates
+# the input-token count of the whole chain. This hook clips each
+# oversized ``text`` / stringified-``json`` block to a UTF-8 byte budget
+# and appends a ``\n[truncated N bytes]`` marker so the model can reason
+# about the clipped span (and, if needed, re-fetch a narrower slice)
+# rather than silently losing the tail.
+#
+# Independent of the persist-time strip (``memory.py``'s
+# ``_payload_from_messages`` drops tool payloads from AgentCore Memory
+# entirely, per ADR-0009). Both still apply: the strip governs what
+# lands in Memory; this bound governs what returns to the model in-turn.
+# ---------------------------------------------------------------------------
+
+# Appended after the retained content when a block is clipped. ``N`` is
+# the number of UTF-8 bytes removed from the ORIGINAL block content (the
+# marker's own bytes sit on top of the budget — the marker is bounded
+# metadata, not part of the clipped payload).
+_TRUNCATION_MARKER_TEMPLATE = "\n[truncated {removed} bytes]"
+
+
+def _truncation_marker(removed_bytes: int) -> str:
+    return _TRUNCATION_MARKER_TEMPLATE.format(removed=removed_bytes)
+
+
+def _truncate_utf8(text: str, max_bytes: int) -> tuple[str, int]:
+    """Clip ``text`` to at most ``max_bytes`` UTF-8 bytes on a character
+    boundary. Returns ``(kept_text, removed_bytes)``.
+
+    Under budget (``<= max_bytes``) the text is returned byte-for-byte
+    with ``removed_bytes == 0`` — callers use that as the "leave the
+    block untouched" signal. Over budget, the byte string is sliced at
+    ``max_bytes`` and decoded with ``errors="ignore"``: because the
+    source is valid UTF-8, a mid-character slice can only leave a partial
+    multibyte sequence at the TAIL, so ``ignore`` drops exactly that
+    dangling char and never splits a multibyte character. ``removed`` is
+    computed from the ACTUAL retained byte length (which may be a few
+    bytes under ``max_bytes`` after backing off the boundary), so the
+    marker's count always reconciles ``original == kept + removed``.
+    """
+    encoded = text.encode("utf-8")
+    original_len = len(encoded)
+    if original_len <= max_bytes:
+        return text, 0
+    kept_text = encoded[:max_bytes].decode("utf-8", errors="ignore")
+    removed = original_len - len(kept_text.encode("utf-8"))
+    return kept_text, removed
+
+
+class ToolResultSizeBoundHook:
+    """Strands ``HookProvider`` that bounds oversized tool_result content
+    blocks on ``AfterToolCallEvent`` before they re-enter the Converse
+    loop (#390).
+
+    Walks ``event.result["content"]`` and clips each block whose UTF-8
+    size exceeds ``max_bytes``:
+
+    * ``text`` block — the string is byte-safe truncated in place and the
+      ``[truncated N bytes]`` marker appended.
+    * ``json`` block — the value is serialized (``json.dumps``,
+      ``ensure_ascii=False`` so multibyte chars count as their real UTF-8
+      width), and if the serialization exceeds the budget the block is
+      REPLACED by a ``text`` block carrying the truncated serialization +
+      marker. A partially-truncated JSON string is no longer valid
+      structured data, so surfacing it as text (rather than a broken
+      ``json`` block) is the honest degradation — and the marker reads
+      naturally in the text register the model already consumes.
+
+    Non-text blocks (``image`` / ``document``) are out of scope — this is
+    about text/JSON API responses, not binary payloads (cf. the #390
+    scope note).
+
+    Each clipped block emits a structured ``mcp.tool_result_truncated``
+    log line (carrying ``tool_use_id`` + byte counts) and increments the
+    ``MCPToolResultTruncated`` EMF counter. Like ``ToolCallTelemetryHook``
+    the counter is dispatched fire-and-forget via ``asyncio.create_task``
+    with a strong-ref discard set (Sonar python:S7502) and a
+    swallow-and-log wrapper — bounding the result must never break the
+    turn on a transient EMF failure.
+
+    Conforms to the ``HookProvider`` protocol structurally — no explicit
+    base class, matching the pattern across this module + ``memory.py`` +
+    ``recall.py``.
+    """
+
+    def __init__(self, max_bytes: int) -> None:
+        self._max_bytes = max_bytes
+        # Strong refs to in-flight EMF emissions — without this, Python's
+        # GC can reclaim the task before the counter coroutine completes.
+        # Mirrors ToolCallTelemetryHook (Sonar python:S7502).
+        self._pending_tasks: set[asyncio.Task[None]] = set()
+
+    def register_hooks(self, registry: Any, **_: Any) -> None:
+        registry.add_callback(AfterToolCallEvent, self.on_after_tool_call)
+
+    def on_after_tool_call(self, event: AfterToolCallEvent) -> None:
+        result = getattr(event, "result", None)
+        if not isinstance(result, dict):
+            return  # e.g. an Exception result — nothing to bound
+        content = result.get("content")
+        if not isinstance(content, list):
+            return
+        tool_use = getattr(event, "tool_use", None)
+        tool_use_id = (
+            (tool_use.get("toolUseId") if isinstance(tool_use, dict) else None)
+            or result.get("toolUseId")
+            or "unknown"
+        )
+        for block in content:
+            self._bound_block(block, tool_use_id)
+
+    def _bound_block(self, block: Any, tool_use_id: str) -> None:
+        if not isinstance(block, dict):
+            return
+        text = block.get("text")
+        if isinstance(text, str):
+            kept, removed = _truncate_utf8(text, self._max_bytes)
+            if removed == 0:
+                return  # under budget — byte-for-byte untouched
+            original_bytes = len(text.encode("utf-8"))
+            block["text"] = kept + _truncation_marker(removed)
+            self._record_truncation(tool_use_id, original_bytes, len(kept.encode("utf-8")))
+            return
+        if "json" in block:
+            serialized = json.dumps(block["json"], ensure_ascii=False, default=str)
+            kept, removed = _truncate_utf8(serialized, self._max_bytes)
+            if removed == 0:
+                return  # under budget — leave the json block untouched
+            original_bytes = len(serialized.encode("utf-8"))
+            del block["json"]
+            block["text"] = kept + _truncation_marker(removed)
+            self._record_truncation(tool_use_id, original_bytes, len(kept.encode("utf-8")))
+
+    def _record_truncation(self, tool_use_id: str, original_bytes: int, kept_bytes: int) -> None:
+        logger.info(
+            "mcp.tool_result_truncated tool_use_id=%s original_bytes=%d kept_bytes=%d",
+            tool_use_id,
+            original_bytes,
+            kept_bytes,
+        )
+        task = asyncio.create_task(self._emit_truncated_counter_safe())
+        self._pending_tasks.add(task)
+        task.add_done_callback(self._pending_tasks.discard)
+
+    async def _emit_truncated_counter_safe(self) -> None:
+        """Wrap ``record_mcp_tool_result_truncated`` so the create_task'd
+        coroutine never raises. EMF emission can fail on transient network
+        / permissions issues; the counter is best-effort telemetry —
+        log + swallow rather than surface a "Task exception was never
+        retrieved" warning."""
+        try:
+            await record_mcp_tool_result_truncated()
+        except Exception:
+            logger.warning(
+                "mcp.tool_result_truncated_emf_dispatch_failed",
                 exc_info=True,
             )
