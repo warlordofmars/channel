@@ -4,8 +4,67 @@ import ReactMarkdown from "react-markdown";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 import Icon from "../components/Icon.jsx";
+import MermaidBlock from "./MermaidBlock.jsx";
 
 const REMARK_PLUGINS = [remarkGfm, remarkBreaks];
+
+// Language info-string that promotes a fenced code block to a rendered
+// diagram instead of the default `<pre><code>` display (#278).
+const MERMAID_LANG = "mermaid";
+const LANG_RE = /language-(\w+)/;
+
+// Strip the trailing newline(s) react-markdown appends to a fenced block's
+// text so mermaid receives the diagram source verbatim.
+function mermaidSource(children) {
+  return String(children).replace(/\n+$/, "");
+}
+
+// Does this `<pre>`'s child code element carry the `language-mermaid` class?
+// react-markdown builds the tree top-down, so when the `pre` override runs its
+// child is the (not-yet-rendered) `code` override element — its `.type` is the
+// code function, not `MermaidBlock` — so we detect via the child's className.
+function mermaidCodeChild(children) {
+  const only = React.Children.toArray(children)[0];
+  const match = LANG_RE.exec(only.props.className || "");
+  return match !== null && match[1] === MERMAID_LANG;
+}
+
+/**
+ * react-markdown `components` overrides that render a ```mermaid fence as an
+ * inline SVG diagram (#278). A mermaid fence is recognised by its
+ * `language-mermaid` class on the `<code>` element; when the turn is no longer
+ * streaming it renders via `<MermaidBlock>` (the closing fence has arrived and
+ * the source is complete). While `streaming` is true the same fence falls back
+ * to a plain code block — the diagram source is still arriving and would not
+ * parse. The paired `pre` override unwraps the `<pre>` around a mermaid block
+ * so the SVG container is a valid block-level element (a diagram nested inside
+ * `<pre>` is invalid HTML). Every other language and inline code renders
+ * exactly as react-markdown's defaults.
+ */
+function mermaidComponents(streaming) {
+  function code({ node, className, children, ...props }) {
+    const match = LANG_RE.exec(className || "");
+    if (match && match[1] === MERMAID_LANG && !streaming) {
+      return <MermaidBlock source={mermaidSource(children)} />;
+    }
+    return (
+      <code className={className} {...props}>
+        {children}
+      </code>
+    );
+  }
+  function pre({ children }) {
+    // Only unwrap once the fence is complete (`!streaming`) — the `code`
+    // override renders the diagram then, so dropping the `<pre>` leaves a
+    // valid block-level `<MermaidBlock>`. While streaming, keep the `<pre>`
+    // so the in-progress source shows as a normal code block.
+    if (!streaming && mermaidCodeChild(children)) {
+      return <>{children}</>;
+    }
+    return <pre>{children}</pre>;
+  }
+  return { code, pre };
+}
 
 // Opening fence: up to 3 leading spaces (CommonMark), 3+ backticks,
 // optional info string. Mirrors `_FENCE_OPEN_RE` in the backend producer
@@ -74,7 +133,12 @@ export function scanFences(text) {
 function markdownBlock(key, text, streaming) {
   return (
     <React.Fragment key={key}>
-      <ReactMarkdown remarkPlugins={REMARK_PLUGINS}>{text}</ReactMarkdown>
+      <ReactMarkdown
+        remarkPlugins={REMARK_PLUGINS}
+        components={mermaidComponents(streaming)}
+      >
+        {text}
+      </ReactMarkdown>
       {streaming && <span className="cursor" />}
     </React.Fragment>
   );
@@ -129,12 +193,16 @@ function renderWithFenceDecorations(text, streaming, codeAssets, onOpenAsset) {
   if (located.length === 0) {
     return markdownBlock("md", text, streaming);
   }
+  // The surrounding prose segments can themselves carry a ```mermaid fence
+  // (mermaid fences are never persisted as code assets, so they always fall
+  // in the prose, not the decorated slice), so they get the same overrides.
+  const components = mermaidComponents(streaming);
   const segments = [];
   let cut = 0;
   located.forEach((f, k) => {
     const pre = text.slice(cut, f.start);
     if (pre.trim() !== "") {
-      segments.push(<ReactMarkdown key={`md-${k}`} remarkPlugins={REMARK_PLUGINS}>{pre}</ReactMarkdown>);
+      segments.push(<ReactMarkdown key={`md-${k}`} remarkPlugins={REMARK_PLUGINS} components={components}>{pre}</ReactMarkdown>);
     }
     const asset = codeAssets.get(f.fenceIndex);
     segments.push(
@@ -149,7 +217,7 @@ function renderWithFenceDecorations(text, streaming, codeAssets, onOpenAsset) {
   });
   const tail = text.slice(cut);
   if (tail.trim() !== "") {
-    segments.push(<ReactMarkdown key="md-tail" remarkPlugins={REMARK_PLUGINS}>{tail}</ReactMarkdown>);
+    segments.push(<ReactMarkdown key="md-tail" remarkPlugins={REMARK_PLUGINS} components={components}>{tail}</ReactMarkdown>);
   }
   return (
     <>
