@@ -219,6 +219,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Meta
 
+- Public docs-site operations pages now cite the correct module paths:
+  the stale `src/starter/*` references in
+  `docs-site/operations/security.md` and
+  `docs-site/operations/endpoints.md` (a leftover from the
+  starter → channel rename) were corrected to `src/channel/*`, and the
+  stale `infra/stacks/starter_stack.py` references in the same two
+  files were corrected to `infra/stacks/channel_stack.py`, so readers
+  following the docs to inspect the source no longer land on 404s
+  (#262, part of #258).
 - Web search design doc: `docs/superpowers/specs/2026-06-07-182-web-search-design.md`.
 - `strands-agents-tools` pinned in `pyproject.toml` for the native Exa wrapper.
 - Memory invariant lifted into the `_payload_from_messages` docstring +
