@@ -420,10 +420,12 @@ update the redirect URI in the Google Cloud Console if it changed.
 
 ## Management JWT contract
 
-The management UI stores a short-lived signed JWT in browser
-`localStorage` and presents it as a `Bearer` token on every API
-call. The token is self-contained — no DynamoDB lookup at validation
-time — so a stolen token is valid until its `exp` passes.
+The management UI stores a signed JWT in browser `localStorage` and
+presents it as a `Bearer` token on every API call. The signature and
+claims are self-contained, but validation also performs a single
+`DENY#{jti}` denylist point-read (#240) so a revoked (logged-out)
+session is rejected before its `exp` — the compensating control for
+the 30-day TTL.
 
 | Field | Value |
 | --- | --- |
@@ -434,8 +436,10 @@ time — so a stolen token is valid until its `exp` passes.
 | `display_name` claim | from Google ID token (`name`) |
 | `role` claim | `"admin"` or `"user"` (set at login from `is_admin_email`) |
 | `typ` claim | `"mgmt"` (distinguishes from API access tokens) |
-| `iat` / `exp` claims | seconds since epoch; TTL = 8 hours |
-| TTL constant | `MGMT_JWT_TTL_SECONDS = 28800` in `src/channel/auth/tokens.py` |
+| `jti` claim | unique per-token id (`uuid4().hex`); the `DENY#{jti}` denylist key used for revocation |
+| `iat` / `exp` claims | seconds since epoch; TTL = 30 days |
+| TTL constant | `MGMT_JWT_TTL_SECONDS = 2_592_000` (30 days) in `src/channel/auth/tokens.py` |
+| Revocation | logout writes `DENY#{jti}` (DynamoDB `ttl` = the token's `exp`); `require_mgmt_user` rejects a denied `jti` with HTTP 401 (#240) |
 | Browser storage key | `localStorage["starter_mgmt_token"]` |
 | Issuer (server) | `src/channel/auth/tokens.py` (`issue_mgmt_jwt`) via `src/channel/auth/mgmt_auth.py` |
 | Validator (server) | `src/channel/auth/tokens.py` (`decode_mgmt_jwt`) via `src/channel/api/_auth.py` (`require_mgmt_user`, `require_admin`) |
@@ -455,18 +459,27 @@ time — so a stolen token is valid until its `exp` passes.
 Failures raise `JWTError`, which `require_mgmt_user` translates to
 HTTP 401. `require_admin` adds an HTTP 403 if `role != "admin"`.
 
+`require_mgmt_user` adds one check beyond `decode_mgmt_jwt`: the
+token's `jti` is looked up against the `DENY#{jti}` revocation
+denylist (#240) via a single point read, and a revoked (logged-out)
+session is rejected with HTTP 401. This is the safety valve the
+30-day TTL relies on — a stolen or logged-out token can be killed
+before its `exp` passes.
+
 The UI clears `localStorage["starter_mgmt_token"]` on any 401 from
 the API; see `ui/src/api.js`.
 
 ### Rotation procedure
 
-Management JWTs are session credentials, not long-lived secrets —
-"rotation" means either waiting out the 8-hour TTL or invalidating
-all outstanding tokens by rotating the signing secret (see the
-[JWT signing secret](#jwt-signing-secret) section). There is no
-revocation list for individual mgmt tokens; remove a user by
-removing their email from `ALLOWED_EMAILS` so they cannot log in
-again, and either rotate the signing secret or wait for `exp`.
+Management JWTs are session credentials, not long-lived secrets. An
+individual token is revoked by adding its `jti` to the `DENY#{jti}`
+denylist (#240) — this is what logout does, and it takes effect on
+the next request. To invalidate *all* outstanding tokens at once,
+rotate the signing secret (see the
+[JWT signing secret](#jwt-signing-secret) section). Remove a user by
+deleting their email from `ALLOWED_EMAILS` so they cannot log in
+again; existing sessions then end by per-token denylisting, by a
+signing-secret rotation, or by waiting out the 30-day TTL.
 
 ## Rotation quick reference
 
