@@ -348,6 +348,53 @@ prod never sets the flag (CDK assertion test in
   to raw-event reads. The strategy is no longer attached to new
   memories.
 
+### Memory tools — `remember` / `recall` (#273)
+
+Agent-driven persistent memory: two native Strands `@tool`s
+(`src/channel/agents/tools/memory_tools.py`) that let the model
+*choose* what to persist and when to search, complementing the
+always-on `AgentCoreRecallHook`. Both are thin wrappers over the
+already-wired AgentCore plumbing — **no parallel memory system, no new
+infra**.
+
+- **`remember(content, tags=None)`** → the same `CreateEvent` path as
+  `AgentCoreMemoryHook`, writing a note-shaped `ASSISTANT` event
+  tagged `[remember]` (parallels the `[meta]` convention). `tags` are
+  encoded inline as `[tags: a, b]` (AgentCore's conversational payload
+  has no native tag field), which also makes them keyword-searchable
+  by `recall`.
+- **`recall(query)`** → the same `ListSessions` + `ListEvents` reads as
+  `AgentCoreRecallHook`, flattened and keyword/recency-ranked, returned
+  as **tool-result text**. **Known v1 limitation:** the
+  `SemanticMemoryStrategy` was retired in Phase 8a, so this is
+  keyword/recency over the actor's own events, not vector search — the
+  model does the final relevance judgment. A semantic index is a v2
+  optimization.
+- **Bound per-request via `build_memory_tools(memory_id, actor_id,
+  session_id)`** — a factory closure, because the stateless
+  module-level `@tool` pattern (`clock` / `web_search`) can't carry
+  `memory_id` / `actor_id` / `session_id`. Appended to the tools list
+  **inside `build_agent`** (not `chats._build_tool_registry`) where
+  that context exists. Scoping reuses `actorId =
+  _sanitize_actor_id(jwt.sub)` — follows, does not pre-empt, the future
+  `{workspace_id}/{user_id}` scheme.
+- **Kill-switch** — `STARTER_MEMORY_TOOLS_ENABLED` (default `"1"`, same
+  memory-family convention as `STARTER_RECALL_ENABLED` /
+  `STARTER_AUTO_TITLE_ENABLED`). `"0"` removes both tools.
+- **Coexists with the recall hook** — Q2 keeps both; the hook's fate is
+  deferred to #274 (+ #227). The tool's output lands in the
+  *tool-result* register, the hook's in the *system prompt* — different
+  registers, so overlap is bounded.
+- **Trust posture (#273 / #299)** — own-data only (token-scoped, not
+  the cross-owner Hive pool) delivered in the **data register**, never
+  spliced into the system-prompt instruction register (that's the
+  recall hook's seam, which #299/#95 flag). This is what keeps #273 v1
+  off the confused-deputy surface #299 guards. `remember` reuses
+  `record_memory_write_outcome`; `recall` reuses `record_recall_outcome`
+  (no per-actor/per-session dimensions — the cardinality rule).
+- **Metrics** — the chassis telemetry hook records `[meta] used
+  remember` / `[meta] used recall` events per invocation as normal.
+
 ### Auto-titling (Phase 7d)
 
 - After the first assistant `done` event lands (and
