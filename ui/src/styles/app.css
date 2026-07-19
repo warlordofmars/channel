@@ -1292,6 +1292,84 @@ html.is-electron-mac .sb-top {
   margin-left: 4px;
 }
 
+/* MCP — Featured integrations (#405) */
+.mcp-featured { margin-top: 16px; }
+.mcp-featured-title {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-family: var(--font-mono);
+  color: var(--ink-faint);
+  font-weight: 600;
+  margin: 0 0 6px;
+}
+.mcp-featured-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  list-style: none;
+  padding: 0;
+  margin: 10px 0 0;
+}
+.mcp-featured-card {
+  background: var(--raised);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 12px 14px;
+}
+.mcp-featured-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+.mcp-featured-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.mcp-featured-enabled {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--accent-ink);
+}
+.mcp-featured-desc {
+  font-size: 0.85rem;
+  color: var(--ink-soft);
+  margin: 8px 0 0;
+  line-height: 1.45;
+}
+.mcp-featured-note {
+  font-size: 0.8rem;
+  color: var(--ink-faint);
+  background: var(--canvas);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 8px 10px;
+  margin: 8px 0 0;
+}
+.mcp-featured-enable {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+}
+.mcp-featured-tokenlink {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  align-self: flex-start;
+  font-size: 0.82rem;
+  color: var(--accent-ink);
+  text-decoration: none;
+}
+.mcp-featured-tokenlink:hover { text-decoration: underline; }
+
 /* MCP picker (#207) */
 .mcp-pill {
   display: inline-flex; align-items: center; gap: 6px;
