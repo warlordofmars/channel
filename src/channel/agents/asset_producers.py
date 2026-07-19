@@ -15,9 +15,12 @@ design review (2026-07-12). Three producers:
 3. **Fenced-code extraction** — the ONLY heuristic. After the stream
    settles, fenced code blocks >= :data:`FENCE_MIN_LINES` lines in the
    final assistant text (EXCLUDING ```` ```mermaid ```` fences — #278
-   renders those inline) become ``kind=code`` assets with
-   ``source.fence_index`` recorded. The message text persists
-   UNCHANGED — the SPA swaps fence -> card by ordinal.
+   renders those inline) become assets with ``source.fence_index``
+   recorded. CSV / TSV fences (and bare fences whose body sniffs as
+   delimited tabular data) classify as ``kind=data`` so #363's inline
+   table renderer picks them up; everything else stays ``kind=code``
+   (#383). The message text persists UNCHANGED — the SPA swaps fence ->
+   card by ordinal.
 
 Every persist is fail-soft with per-asset isolation: a failure logs
 (fingerprinted ids only — SonarCloud S5145), bumps
@@ -45,7 +48,7 @@ import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from channel import storage
@@ -220,6 +223,65 @@ def _qualifying_fences(fences: list[CodeFence]) -> list[CodeFence]:
     return [
         f for f in fences if f.line_count >= FENCE_MIN_LINES and f.lang not in _EXCLUDED_FENCE_LANGS
     ]
+
+
+# Fence info-string languages whose body is tabular data, not code (#383).
+# These classify as ``kind=data`` (mapped to their canonical MIME) so #363's
+# InlineData renderer shows an inline table instead of a code card. Mermaid
+# stays in ``_EXCLUDED_FENCE_LANGS`` (never extracted at all); every other
+# language is code.
+_DATA_FENCE_LANGS: dict[str, str] = {
+    "csv": "text/csv",
+    "tsv": "text/tab-separated-values",
+}
+
+
+def _sniff_tabular_mime(body: str) -> str | None:
+    """Best-effort content sniff for a BARE fence (no info string) that
+    looks like delimited tabular data (#383).
+
+    Deliberately conservative — reclassifying a code block as data on a
+    false positive is worse than leaving a genuine CSV as a code card. A
+    body qualifies only when, for a single delimiter (comma or tab):
+
+    * every non-blank line splits into the SAME number of fields, and
+    * that field count is >= 2 (at least one delimiter on every line), and
+    * the header (first) row has no empty cells.
+
+    A qualifying fence already carries >= :data:`FENCE_MIN_LINES` lines, and
+    a code block hitting an identical comma/tab count on every one of those
+    lines with a non-empty header row is vanishingly rare — so the check
+    stays well on the safe side. Returns the matching MIME (``text/csv`` for
+    comma, ``text/tab-separated-values`` for tab), else ``None``.
+    """
+    lines = [ln for ln in body.split("\n") if ln.strip()]
+    if len(lines) < 2:  # need a header plus at least one data row
+        return None
+    for delim, mime in ((",", "text/csv"), ("\t", "text/tab-separated-values")):
+        counts = [ln.count(delim) for ln in lines]
+        if counts[0] >= 1 and len(set(counts)) == 1:
+            header = [cell.strip() for cell in lines[0].split(delim)]
+            if all(header):
+                return mime
+    return None
+
+
+def _classify_fence(fence: CodeFence) -> tuple[Literal["code", "data"], str]:
+    """Map a qualifying fence to its ``(kind, mime)`` (#383).
+
+    ``csv`` / ``tsv`` info strings are tabular data; a BARE fence (no info
+    string) whose body sniffs as consistent delimited data is too. Every
+    other fence is code (``text/plain``). Mermaid never reaches here — it is
+    excluded from qualification upstream.
+    """
+    data_mime = _DATA_FENCE_LANGS.get(fence.lang)
+    if data_mime is not None:
+        return "data", data_mime
+    if not fence.lang:
+        sniffed = _sniff_tabular_mime(fence.body)
+        if sniffed is not None:
+            return "data", sniffed
+    return "code", "text/plain"
 
 
 async def _record_outcome_safe(success: bool) -> None:
@@ -478,15 +540,20 @@ async def persist_fence_assets(
     msg_id: str,
     text: str,
 ) -> list[Asset]:
-    """Extract qualifying fenced code blocks into ``kind=code`` assets.
+    """Extract qualifying fenced blocks into ``kind=code`` / ``kind=data``
+    assets.
 
     The post-stream heuristic (decision Q3): fences with >=
     :data:`FENCE_MIN_LINES` body lines, mermaid excluded,
     ``source.fence_index`` recorded for the deterministic fence -> card
-    swap. The assistant message text is NEVER mutated — this reads the
-    settled text and writes rows on the side. ``source.lang`` carries
-    the info-string language so the SPA's code renderer can highlight
-    without sniffing.
+    swap. Each fence is classified by :func:`_classify_fence` — ``csv`` /
+    ``tsv`` fences (and bare fences whose body sniffs as delimited tabular
+    data) become ``kind=data`` with a CSV/TSV MIME so #363's inline table
+    renderer picks them up; everything else stays ``kind=code`` /
+    ``text/plain`` (#383). The assistant message text is NEVER mutated —
+    this reads the settled text and writes rows on the side.
+    ``source.lang`` carries the info-string language so the SPA's code
+    renderer can highlight without sniffing.
 
     Inline ``content`` for bodies <= 100 KB UTF-8; larger bodies go to
     S3 (decision Q2). Short-circuits to ``[]`` when the
@@ -499,6 +566,7 @@ async def persist_fence_assets(
         return []
     persisted: list[Asset] = []
     for fence in _qualifying_fences(extract_code_fences(text)):
+        kind, mime = _classify_fence(fence)
         # Initialised OUTSIDE the try (and re-initialised per fence) so
         # the except path can safely read the coordinates: set only
         # when this fence's body actually landed in S3.
@@ -511,16 +579,16 @@ async def persist_fence_assets(
             if len(body_bytes) > ASSET_INLINE_CONTENT_MAX_BYTES:
                 content = None
                 s3_bucket, s3_key = storage.put_asset_bytes(
-                    chat_id=chat_id, asset_id=asset_id, data=body_bytes, mime="text/plain"
+                    chat_id=chat_id, asset_id=asset_id, data=body_bytes, mime=mime
                 )
             now = _now_iso()
             asset = Asset(
                 asset_id=asset_id,
                 chat_id=chat_id,
                 owner=owner,
-                kind="code",
+                kind=kind,
                 title=fence.title,
-                mime="text/plain",
+                mime=mime,
                 size_bytes=len(body_bytes),
                 origin="generated",
                 source={

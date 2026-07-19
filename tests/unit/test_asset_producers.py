@@ -829,6 +829,175 @@ async def test_fence_inline_failure_does_not_touch_s3(
     assert delete_object_capture == []
 
 
+# ----------------------------------------------------------------
+# CSV / TSV fence classification (#383)
+# ----------------------------------------------------------------
+
+
+def _tabular_body(delim: str, rows: int = 16) -> str:
+    """A header row + ``rows`` data rows, ``delim``-separated (>= 15 body
+    lines so the block qualifies for extraction)."""
+    header = delim.join(["name", "age", "city"])
+    data = "\n".join(delim.join([f"p{i}", str(20 + i), f"t{i}"]) for i in range(rows))
+    return f"{header}\n{data}"
+
+
+def _code_fence(*, index: int = 0, lang: str, body: str) -> ap.CodeFence:
+    return ap.CodeFence(
+        fence_index=index,
+        lang=lang,
+        title="t",
+        body=body,
+        line_count=body.count("\n") + 1,
+    )
+
+
+# --- _sniff_tabular_mime -----------------------------------------
+
+
+def test_sniff_comma_tabular_with_header_returns_csv_mime() -> None:
+    assert ap._sniff_tabular_mime(_tabular_body(",")) == "text/csv"
+
+
+def test_sniff_tab_tabular_with_header_returns_tsv_mime() -> None:
+    assert ap._sniff_tabular_mime(_tabular_body("\t")) == "text/tab-separated-values"
+
+
+def test_sniff_blank_lines_ignored_but_still_qualifies() -> None:
+    body = "a,b\n\n1,2\n\n3,4"  # blank lines dropped before the count check
+    assert ap._sniff_tabular_mime(body) == "text/csv"
+
+
+def test_sniff_single_line_is_not_tabular() -> None:
+    assert ap._sniff_tabular_mime("just one line, with a comma") is None
+
+
+def test_sniff_single_column_is_not_tabular() -> None:
+    # Consistent but zero delimiters per line — one column is not a table.
+    assert ap._sniff_tabular_mime("alpha\nbeta\ngamma") is None
+
+
+def test_sniff_inconsistent_column_count_is_not_tabular() -> None:
+    # First line 2 commas, rest 1 — ragged, so not classified as data.
+    assert ap._sniff_tabular_mime("a,b,c\n1,2\n3,4") is None
+
+
+def test_sniff_empty_header_cell_is_not_tabular() -> None:
+    # Comma counts are consistent (2 each) but the header has an empty
+    # leading cell, and no tab delimiter exists → falls through to None.
+    body = "\n".join([",a,b"] * 3)
+    assert ap._sniff_tabular_mime(body) is None
+
+
+# --- _classify_fence ---------------------------------------------
+
+
+def test_classify_csv_lang_is_data() -> None:
+    fence = _code_fence(lang="csv", body=_tabular_body(","))
+    assert ap._classify_fence(fence) == ("data", "text/csv")
+
+
+def test_classify_tsv_lang_is_data() -> None:
+    fence = _code_fence(lang="tsv", body=_tabular_body("\t"))
+    assert ap._classify_fence(fence) == ("data", "text/tab-separated-values")
+
+
+def test_classify_python_lang_stays_code() -> None:
+    fence = _code_fence(lang="python", body="print('x')\nfor i in range(3):\n    pass")
+    assert ap._classify_fence(fence) == ("code", "text/plain")
+
+
+def test_classify_bare_tabular_fence_is_data() -> None:
+    fence = _code_fence(lang="", body=_tabular_body(","))
+    assert ap._classify_fence(fence) == ("data", "text/csv")
+
+
+def test_classify_bare_nontabular_fence_stays_code() -> None:
+    # A bare fence whose body isn't delimited data must NOT be reclassified.
+    fence = _code_fence(lang="", body="the quick brown fox\njumped over\nthe lazy dog")
+    assert ap._classify_fence(fence) == ("code", "text/plain")
+
+
+# --- persist_fence_assets: data classification end-to-end --------
+
+
+@pytest.mark.asyncio
+async def test_persist_csv_lang_fence_is_kind_data(
+    put_asset_capture: list[Asset], metrics: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("STARTER_ASSET_EXTRACTION_ENABLED", raising=False)
+    text = f"Here is the data:\n\n```csv\n{_tabular_body(',')}\n```"
+    persisted = await ap.persist_fence_assets(chat_id="c-1", owner="u-1", msg_id="m-a", text=text)
+    assert len(persisted) == 1
+    asset = persisted[0]
+    assert asset.kind == "data"
+    assert asset.mime == "text/csv"
+    assert asset.origin == "generated"
+    assert asset.source == {"msg_id": "m-a", "fence_index": 0, "lang": "csv"}
+    assert asset.content is not None and asset.content.startswith("name,age,city")
+    metrics.assert_awaited_once_with(success=True)
+
+
+@pytest.mark.asyncio
+async def test_persist_tsv_lang_fence_is_kind_data(
+    put_asset_capture: list[Asset], metrics: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("STARTER_ASSET_EXTRACTION_ENABLED", raising=False)
+    text = f"```tsv\n{_tabular_body(chr(9))}\n```"
+    persisted = await ap.persist_fence_assets(chat_id="c-1", owner="u-1", msg_id="m-a", text=text)
+    assert len(persisted) == 1
+    assert persisted[0].kind == "data"
+    assert persisted[0].mime == "text/tab-separated-values"
+
+
+@pytest.mark.asyncio
+async def test_persist_bare_tabular_fence_is_kind_data(
+    put_asset_capture: list[Asset], metrics: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("STARTER_ASSET_EXTRACTION_ENABLED", raising=False)
+    text = f"```\n{_tabular_body(',')}\n```"
+    persisted = await ap.persist_fence_assets(chat_id="c-1", owner="u-1", msg_id="m-a", text=text)
+    assert len(persisted) == 1
+    assert persisted[0].kind == "data"
+    assert persisted[0].mime == "text/csv"
+    assert persisted[0].source["lang"] == ""
+
+
+@pytest.mark.asyncio
+async def test_persist_python_fence_stays_kind_code(
+    put_asset_capture: list[Asset], metrics: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("STARTER_ASSET_EXTRACTION_ENABLED", raising=False)
+    persisted = await ap.persist_fence_assets(
+        chat_id="c-1", owner="u-1", msg_id="m-a", text=_fence(20, lang="python")
+    )
+    assert len(persisted) == 1
+    assert persisted[0].kind == "code"
+    assert persisted[0].mime == "text/plain"
+
+
+@pytest.mark.asyncio
+async def test_persist_oversized_csv_uses_csv_mime_for_s3(
+    put_asset_capture: list[Asset],
+    put_bytes_capture: list[dict[str, Any]],
+    metrics: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An over-inline-cap CSV fence carries text/csv to the S3 put too, not
+    the code default — so the stored object's Content-Type matches."""
+    monkeypatch.delenv("STARTER_ASSET_EXTRACTION_ENABLED", raising=False)
+    cell = "v" * ((ASSET_INLINE_CONTENT_MAX_BYTES // 15) + 1)
+    header = "a,b"
+    rows = "\n".join(f"{cell},{i}" for i in range(15))
+    text = f"```csv\n{header}\n{rows}\n```"
+    persisted = await ap.persist_fence_assets(chat_id="c-1", owner="u-1", msg_id="m-a", text=text)
+    assert len(persisted) == 1
+    assert persisted[0].kind == "data"
+    assert persisted[0].content is None
+    assert persisted[0].mime == "text/csv"
+    assert put_bytes_capture[0]["mime"] == "text/csv"
+
+
 @pytest.mark.asyncio
 async def test_orphan_cleanup_failure_is_swallowed(
     monkeypatch: pytest.MonkeyPatch,
