@@ -124,6 +124,28 @@ def test_create_static_token_server_persists_type_and_null_client_id(
     assert fetched.auth_status == MCPServerAuthStatus.ACTIVE
 
 
+def test_create_mcp_server_honours_globally_enabled_false(
+    fake_table: _FakeTable,
+) -> None:
+    """A featured read-write surface (GitHub, #277) registers OFF — the
+    caller passes ``globally_enabled=False`` and the row persists it."""
+    server = storage.create_mcp_server(
+        user_id="user-1",
+        name="GitHub",
+        url="https://api.githubcopilot.com/mcp/",
+        client_id=None,
+        tool_prefix="github",
+        auth_type=MCPServerAuthType.STATIC_TOKEN,
+        auth_status=MCPServerAuthStatus.ACTIVE,
+        globally_enabled=False,
+    )
+    assert server.globally_enabled is False
+
+    fetched = storage.get_mcp_server(user_id="user-1", server_id=server.server_id)
+    assert fetched is not None
+    assert fetched.globally_enabled is False
+
+
 def test_create_mcp_server_oauth_dcr_requires_client_id(fake_table: _FakeTable) -> None:
     """Storage-boundary invariant: an oauth_dcr server must carry a
     client_id. Persisting one with client_id=None would later fail with
