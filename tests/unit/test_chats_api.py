@@ -4444,6 +4444,102 @@ def test_post_message_no_keepalive_when_interval_disabled(
     assert any(e["type"] == "delta" for e in _sse_events(response.text))
 
 
+def test_post_message_emits_keepalive_during_mid_stream_tool_gap(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#417: keepalives must keep flowing AFTER the first delta too. On a
+    multi-tool-call turn the agent can idle for a long stretch executing
+    tools once the first token has landed (each tool call yields no SSE
+    bytes); the #391 pre-first-token-only keepalive stopped there and the
+    connection idled out mid-reply. The idle-based keepalive emits comment
+    frames throughout the mid-stream gap. Frames stay inert (``:``-prefixed,
+    no message row)."""
+
+    _stub_storage_capturing_persistence(monkeypatch)
+    monkeypatch.setenv("STARTER_FOLLOWUPS_ENABLED", "0")
+    monkeypatch.setenv("STARTER_STREAM_KEEPALIVE_INTERVAL", "0.01")
+
+    import asyncio
+
+    async def fake_stream(self, prompt):
+        # First token lands immediately — under #391 this "warmed" the
+        # wire and stopped keepalives for the rest of the turn.
+        yield {"event": {"contentBlockDelta": {"delta": {"text": "working"}}}}
+        # Long idle gap #1 while the agent runs a tool (no SSE bytes).
+        await asyncio.sleep(0.05)
+        yield {
+            "type": "tool_result",
+            "tool_result": {
+                "toolUseId": "tu-1",
+                "status": "success",
+                "content": [{"text": "ok-1"}],
+            },
+        }
+        # Long idle gap #2 before the next sequential tool call.
+        await asyncio.sleep(0.05)
+        yield {
+            "type": "tool_result",
+            "tool_result": {
+                "toolUseId": "tu-2",
+                "status": "success",
+                "content": [{"text": "ok-2"}],
+            },
+        }
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+
+    class FakeAgent:
+        stream_async = fake_stream
+
+    monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
+
+    response = client.post(
+        "/api/chats/c1/messages",
+        json={"message": "hi", "model": "claude-sonnet-4-6"},
+    )
+    assert response.status_code == 200
+    body = response.text
+    # A keepalive reached the wire AFTER the first delta — the exact gap
+    # #391 left uncovered. Under the old behavior no keepalive followed
+    # the first delta, so this ordering assertion would fail.
+    assert ": keep-alive" in body
+    assert body.index('"type": "delta"') < body.index(": keep-alive")
+    # Inert to the reducer: no keepalive event type in the parsed stream,
+    # and the real frames all landed.
+    types = [e["type"] for e in _sse_events(body)]
+    assert "delta" in types
+    assert "tool_finished" in types
+    assert "done" in types
+    assert all(t != "keepalive" for t in types)
+
+
+async def test_events_with_keepalive_resets_idle_timer_each_event() -> None:
+    """#417: ``_events_with_keepalive`` resets its idle timer on every
+    real event, so a gap AFTER the first event emits keepalives just like
+    a pre-first-event gap. Exercised directly against a controlled async
+    source (no HTTP layer) for a deterministic assertion of the reset
+    semantics."""
+    import asyncio
+
+    from channel.api.chats import _events_with_keepalive
+
+    async def source():
+        yield "a"  # arrives immediately — no pre-first-event keepalive
+        await asyncio.sleep(0.05)  # mid-stream idle gap > interval
+        yield "b"  # arrives only after the gap
+
+    out: list[tuple[str, object]] = []
+    async for kind, event in _events_with_keepalive(source(), 0.01):
+        out.append((kind, event))
+
+    kinds = [k for k, _ in out]
+    events = [ev for k, ev in out if k == "event"]
+    assert events == ["a", "b"]
+    # At least one keepalive landed BETWEEN the two events — the idle
+    # timer covers post-first-event gaps, not just the pre-first case.
+    first_event_idx = kinds.index("event")
+    assert "keepalive" in kinds[first_event_idx + 1 :]
+
+
 def test_post_message_stream_heartbeat_logs_when_enabled(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,

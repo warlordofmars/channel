@@ -17,7 +17,7 @@ import logging
 import math
 import os
 import re
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
 import boto3
@@ -960,19 +960,23 @@ def _collect_code_exec_images(
 
 
 # ----------------------------------------------------------------
-# Pre-first-token SSE keepalive (#391)
+# Idle-based SSE keepalive (#391, extended to whole-stream idle by #417)
 # ----------------------------------------------------------------
 
 # Interval (seconds) between inert SSE keepalive comment frames written
-# while the wire is still cold — i.e. before the first real frame
-# reaches the client. Bedrock can go silent for a long window before the
-# first delta: throttle backoff (now collapsed to single-digit seconds
-# by the lowered max_attempts in build_agent, #391) or a genuinely slow
-# first token. During that window the stream yields zero bytes, so the
+# whenever the stream idles — i.e. no real frame has reached the client
+# for ``interval`` seconds, at ANY point in the turn. Bedrock can go
+# silent for a long window before the first delta (throttle backoff —
+# now collapsed to single-digit seconds by the lowered max_attempts in
+# build_agent, #391 — or a genuinely slow first token) AND mid-stream,
+# after the first delta, while the agent executes tools on a
+# multi-tool-call turn (#417 — each tool call yields no SSE bytes).
+# During any such window the stream yields zero bytes, so the
 # CloudFront → Function URL → AWS Lambda Web Adapter SSE hop idles out
-# and the client tears the connection down BEFORE the real delta or the
-# sse_error/bedrock_throttled frame (#212) can be delivered. 15s is
-# safely under the observed ~3-min idle ceiling with wide margin.
+# and the client tears the connection down BEFORE the next real delta,
+# tool frame, or sse_error/bedrock_throttled frame (#212) can be
+# delivered. 15s is safely under the observed ~3-min idle ceiling with
+# wide margin.
 _DEFAULT_STREAM_KEEPALIVE_INTERVAL = 15.0
 
 
@@ -1003,22 +1007,30 @@ def _stream_keepalive_interval() -> float:
 async def _events_with_keepalive(
     source: AsyncIterator[Any],
     interval: float,
-    is_warm: Callable[[], bool],
 ) -> AsyncIterator[tuple[str, Any]]:
     """Drive a Strands event async-iterator, interleaving keepalive ticks
-    while the wire is still cold (#391).
+    during any idle gap in the stream (#391, extended to whole-stream
+    idle by #417).
 
     Yields ``("keepalive", None)`` for every ``interval`` seconds that
-    elapse without the wire warming up, and ``("event", <event>)`` for
-    each Strands event. ``is_warm`` is a zero-arg predicate owned by the
-    caller; this helper only reads it and never defines what "warm"
-    means. The current caller (``_stream_bedrock_reply``) flips it
-    ``True`` on the first **delta** specifically — deliberately NOT on
-    tool / usage / stop frames, which write nothing to the client wire —
-    so keepalives keep flowing through any pre-delta gap (e.g. a turn
-    that only calls tools before its first token). Once the predicate
-    returns ``True``, keepalives stop (deltas keep the connection warm on
-    their own) and events flow via the cheap direct-await path.
+    elapse without the next real event arriving — at ANY point in the
+    turn — and ``("event", <event>)`` for each Strands event. The idle
+    timer resets on every real event: each completed pull starts a fresh
+    timed wait, so a long gap anywhere in the stream emits keepalives
+    throughout it.
+
+    #391 originally *stopped* keepalives once the wire warmed (the first
+    delta), on the assumption that deltas thereafter kept the connection
+    warm. But a multi-tool-call turn can idle for a long stretch AFTER
+    the first delta while the agent executes tools (each tool call
+    yields no SSE bytes), so the CloudFront → Function URL → AWS Lambda
+    Web Adapter hop idled out mid-reply (#417). Making the keepalive
+    idle-based across the whole stream subsumes the pre-first-token case
+    and closes that mid-stream gap. The only cost is that every event
+    now travels the timed-wait path (one ``__anext__`` Task per event)
+    rather than the cheap direct-await path — retained only for the
+    ``interval <= 0`` disabled case. That per-event Task allocation is
+    negligible against the network await already paid per Bedrock event.
 
     The pending pull is held across successive timed waits and is never
     cancelled *as a timeout mechanism*: cancelling an in-flight
@@ -1035,9 +1047,9 @@ async def _events_with_keepalive(
     """
     event_iter = source.__aiter__()
     while True:
-        if interval <= 0 or is_warm():
-            # Warm (or keepalive disabled): cheap direct await, no
-            # per-event Task allocation across a delta-heavy stream.
+        if interval <= 0:
+            # Keepalive disabled: cheap direct await, no per-event Task
+            # allocation across a delta-heavy stream.
             try:
                 event = await event_iter.__anext__()
             except StopAsyncIteration:
@@ -1046,10 +1058,14 @@ async def _events_with_keepalive(
             continue
         pull = asyncio.ensure_future(event_iter.__anext__())
         try:
-            while not is_warm():
+            while True:
                 done, _pending = await asyncio.wait({pull}, timeout=interval)
                 if pull in done:
                     break
+                # No event within ``interval`` — emit a keepalive and
+                # re-wait on the SAME pull. The idle timer only resets
+                # once a real event finally arrives and the outer loop
+                # creates a fresh pull.
                 yield ("keepalive", None)
             event = await pull
         except StopAsyncIteration:
@@ -1260,23 +1276,18 @@ async def _stream_bedrock_reply(
     # outside an active investigation.
     heartbeat = os.environ.get("STARTER_STREAM_HEARTBEAT_ENABLED", "0") == "1"
 
-    # #391 pre-first-token keepalive: track whether any real frame has
-    # reached the wire yet. Until the first delta lands, a keepalive
-    # comment frame is written every ``keepalive_interval`` seconds so
-    # the SSE connection survives Bedrock's silent pre-first-token window
-    # (throttle backoff or slow first token). ``wire_warm`` is closed
-    # over by ``_is_wire_warm`` and read by ``_events_with_keepalive``;
-    # once the first delta is written the wrapper drops to its cheap
-    # direct-await path (see that helper). Keying warmth on the first
-    # delta — not on stop/usage/skip events, which write nothing to the
-    # client — keeps keepalives flowing through any pre-delta gap
-    # (e.g. a turn that only calls tools before its first token), which
-    # is strictly more protective and always inert.
+    # #391 + #417 idle-based keepalive: a keepalive comment frame is
+    # written every ``keepalive_interval`` seconds that the stream idles
+    # — at ANY point in the turn, not just before the first delta.
+    # ``_events_with_keepalive`` resets the idle timer on every real
+    # event it pulls, so the SSE connection survives both Bedrock's
+    # silent pre-first-token window (#391 — throttle backoff or a slow
+    # first token) AND a mid-stream idle gap while the agent executes
+    # tools on a multi-tool-call turn (#417 — each tool call yields no
+    # SSE bytes). The keepalive is always inert (a ``:``-prefixed
+    # comment the SPA's sseParser drops). A non-positive interval
+    # disables it entirely (escape hatch, handled inside the helper).
     keepalive_interval = _stream_keepalive_interval()
-    wire_warm = False
-
-    def _is_wire_warm() -> bool:
-        return wire_warm
 
     # #212 failure capture: when the Strands loop raises (or terminates
     # empty), the frames to emit are staged here and yielded AFTER the
@@ -1305,15 +1316,13 @@ async def _stream_bedrock_reply(
     # at the top of this function on the NEXT turn for the same chat.
     try:
         async for wrapped_kind, event in _events_with_keepalive(
-            agent.stream_async(user_payload), keepalive_interval, _is_wire_warm
+            agent.stream_async(user_payload), keepalive_interval
         ):
             if wrapped_kind == "keepalive":
                 yield sse_keepalive()
                 continue
             kind, payload = translate_event(event)
             if kind == "delta":
-                # First delta warms the wire — keepalives stop from here.
-                wire_warm = True
                 accumulated.append(payload)
                 accumulated_chars += len(payload)
                 if heartbeat and len(accumulated) % 50 == 0:

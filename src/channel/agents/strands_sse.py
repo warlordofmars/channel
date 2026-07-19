@@ -315,14 +315,18 @@ def sse_delta(text: str) -> bytes:
 
 
 def sse_keepalive() -> bytes:
-    """Emit an inert SSE keepalive comment frame (#391).
+    """Emit an inert SSE keepalive comment frame (#391, #417).
 
-    Written on a timer *before* the first delta (or the
-    ``sse_error`` / ``bedrock_throttled`` frame from #212) while Bedrock
-    is silent — either botocore's throttle backoff or a genuinely slow
-    first token. During that window the stream loop yields zero bytes,
-    so the CloudFront → Function URL → AWS Lambda Web Adapter SSE hop
-    idles out and the client tears the connection down before the real
+    Written on a timer whenever the stream idles — no real frame for the
+    keepalive interval, at ANY point in the turn. That covers Bedrock's
+    silent pre-first-token window (#391 — botocore's throttle backoff or
+    a genuinely slow first token, before the first delta or the
+    ``sse_error`` / ``bedrock_throttled`` frame from #212) AND a
+    mid-stream idle gap after the first delta while the agent executes
+    tools on a multi-tool-call turn (#417 — each tool call yields no SSE
+    bytes). During any such window the stream loop yields zero bytes, so
+    the CloudFront → Function URL → AWS Lambda Web Adapter SSE hop idles
+    out and the client tears the connection down before the next real
     frame can be delivered. This lightweight frame keeps the connection
     warm.
 
