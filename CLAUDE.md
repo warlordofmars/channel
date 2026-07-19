@@ -891,11 +891,15 @@ demo data.
 
 The `?test_email=` bypass mints an **admin**-role JWT only when the email
 is listed in `ALLOWED_EMAILS` — a JSON array the login path reads via
-`is_admin_email()` (`src/channel/auth/google.py`). Unlisted emails get
-`role=user`; **malformed JSON denies all logins**. `inv dev` spreads the
-shell environment into the API process, so exporting before launch is the
-whole recipe (when the env var is unset the allowlist falls back to the
-`ALLOWED_EMAILS_PARAM` SSM param, default `/channel/allowed-emails`;
+`is_admin_email()` (`src/channel/auth/google.py`). Unlisted emails still
+log in via the bypass, just downgraded to `role=user`. **Malformed JSON
+fails closed to an empty allowlist**, so every `?test_email=` login drops
+to `role=user` (the bypass runs only the role check, never the allowlist
+*gate*); the real Google sign-in flow, which does run that gate, denies an
+unlisted or malformed-config login outright (HTTP 403). `inv dev` spreads
+the shell environment into the API process, so exporting before launch is
+the whole recipe (when the env var is unset the allowlist falls back to
+the `ALLOWED_EMAILS_PARAM` SSM param, default `/channel/allowed-emails`;
 either source is cached in-process for ~60s):
 
 ```bash
