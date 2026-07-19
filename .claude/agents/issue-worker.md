@@ -409,11 +409,19 @@ Runs on **every** agent-created PR. The `agent-safe` label only gates whether th
    skip to step 5. Do not poll for a request you never confirmed.
 2. Once the request is registered (step 1's invariant passed), wait for the Copilot **`copilot-pull-request-reviewer` check-run** (posted by the `github-actions` app — **not** a check named `Agent`) to reach `completed`, then wait an **additional ~90s** before fetching review comments — the check-run closes before Copilot finishes writing line-level comments (observed: check-run completed at 12:41:52, comments posted at 12:43:03). Poll with:
    ```bash
-   # Author login differs by endpoint: the top-level REVIEW author is
-   # `copilot-pull-request-reviewer[bot]`, but INLINE review-comment authors
-   # show as `Copilot` — and the reviewRequest login in step 1 is the
-   # un-suffixed `copilot-pull-request-reviewer`. Match all three with a
-   # case-insensitive substring on "copilot" so the poll never under-reports.
+   # (1) Gate on the check-run reaching `completed` — poll this until it prints
+   # `completed/...`, THEN wait ~90s before the fetch below (HEAD_SHA = PR head):
+   HEAD_SHA=$(gh pr view <PR-NUMBER> --json headRefOid --jq .headRefOid)
+   gh api repos/{owner}/{repo}/commits/"$HEAD_SHA"/check-runs \
+     --jq '.check_runs[] | select(.name=="copilot-pull-request-reviewer")
+           | .status + "/" + (.conclusion // "pending")'
+
+   # (2) Fetch the review + comments. Author login differs by endpoint: the
+   # top-level REVIEW author is `copilot-pull-request-reviewer[bot]`, but INLINE
+   # review-comment authors show as `Copilot` — and the reviewRequest login in
+   # step 1 is the un-suffixed `copilot-pull-request-reviewer`. Match all three
+   # with a case-insensitive substring on "copilot" so the poll never
+   # under-reports.
    gh api repos/{owner}/{repo}/pulls/<PR-NUMBER>/reviews \
      --jq '.[] | select(.user.login | test("copilot"; "i")) | {state, body: .body[:120]}'
    gh api repos/{owner}/{repo}/pulls/<PR-NUMBER>/comments \
