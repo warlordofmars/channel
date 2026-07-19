@@ -424,13 +424,17 @@ stale recall. The prompt names its tools generically ("your GitHub
 tools"); it deliberately does **not** enumerate `github_*` tool names,
 since the toolset evolves and is capped per-server (#389).
 
-- **Live-read only, never persisted.** GitHub read results are tool
-  payloads — they stay in the tool-result register and are **never**
-  persisted to AgentCore Memory (per the "tool payloads never persist to
-  AgentCore Memory" product decision) or to the Hive pool. A cached
-  backlog snapshot would be both stale-within-minutes and a
-  confused-deputy hazard (#299); the live-read/no-persist posture
-  sidesteps both, so #387 does not create or inherit the #299 boundary.
+- **Live-read only, no persisted snapshot.** The *raw* GitHub read
+  results are tool payloads — they stay in the tool-result register and
+  are **never** persisted to AgentCore Memory (per the "tool payloads
+  never persist to AgentCore Memory" product decision) or to the Hive
+  pool; #387 adds no snapshot cache. (A model-authored *conclusion*
+  written via the #273 `remember` tool is the separate,
+  product-decision-permitted path — "conclusions and tool-use META
+  facts may [persist]" — not the raw state dump.) A cached backlog
+  snapshot would be both stale-within-minutes and a confused-deputy
+  hazard (#299); the live-read/no-persist posture sidesteps both, so
+  #387 does not create or inherit the #299 boundary.
 - **Scope: the `warlordofmars/channel` repo only. Read + narrate, never
   dispatch.** Channel observes and explains its dev system; it never
   triggers the orchestrator or dispatches agents (that step is out of
