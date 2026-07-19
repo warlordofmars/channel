@@ -193,7 +193,9 @@ describe("Shell", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: /open menu/i }));
     expect(container.querySelector(".sb.mobile-open")).toBeTruthy();
-    fireEvent.click(container.querySelector(".mobile-nav-backdrop"));
+    // The backdrop is a real <button aria-label="Close menu"> so keyboard
+    // + assistive-tech users get a focusable dismiss path (Copilot #427).
+    fireEvent.click(screen.getByRole("button", { name: /close menu/i }));
     expect(container.querySelector(".sb.mobile-open")).toBeNull();
     expect(container.querySelector(".mobile-nav-backdrop")).toBeNull();
   });

@@ -82,9 +82,10 @@ export default function Shell({ children }) {
             mobileOpen={mobileNavOpen}
           />
           {mobileNavOpen && (
-            <div
+            <button
+              type="button"
               className="mobile-nav-backdrop"
-              aria-hidden="true"
+              aria-label="Close menu"
               onClick={closeMobileNav}
             />
           )}
