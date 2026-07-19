@@ -145,6 +145,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `POST /api/chats/{id}/regenerate` — drop the last assistant turn and
   re-stream from the same user message. New "Regenerate" button on the
   last assistant turn.
+- `scripts/reset_dev_table.py` — drop+recreate the local DDB table with
+  the current schema (incl. `ChatByIdIndex` GSI). DDB Local is in-memory
+  and `inv dev --seed` doesn't create the table yet; this is the
+  stopgap. Run with `uv run python scripts/reset_dev_table.py`.
 
 ### Changed
 
@@ -243,10 +247,3 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (resolved `Strands MCPClient vs fastmcp.Client` — `transport_callable`
   is the seam; Channel owns OAuth + DCR + refresh, Strands gets a
   pre-authenticated transport thunk).
-
-### Added
-
-- `scripts/reset_dev_table.py` — drop+recreate the local DDB table with
-  the current schema (incl. `ChatByIdIndex` GSI). DDB Local is in-memory
-  and `inv dev --seed` doesn't create the table yet; this is the
-  stopgap. Run with `uv run python scripts/reset_dev_table.py`.
