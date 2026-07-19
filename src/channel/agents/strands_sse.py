@@ -314,6 +314,27 @@ def sse_delta(text: str) -> bytes:
     return _sse({"type": "delta", "text": text})
 
 
+def sse_keepalive() -> bytes:
+    """Emit an inert SSE keepalive comment frame (#391).
+
+    Written on a timer *before* the first delta (or the
+    ``sse_error`` / ``bedrock_throttled`` frame from #212) while Bedrock
+    is silent — either botocore's throttle backoff or a genuinely slow
+    first token. During that window the stream loop yields zero bytes,
+    so the CloudFront → Function URL → AWS Lambda Web Adapter SSE hop
+    idles out and the client tears the connection down before the real
+    frame can be delivered. This lightweight frame keeps the connection
+    warm.
+
+    It is an SSE *comment* line (leading ``:``), NOT a ``data:`` frame:
+    the SPA's ``sseParser`` (``ui/src/lib/sseParser.js``) drops
+    ``:``-prefixed lines, so the keepalive never produces a message row
+    or a reducer state change. Because there is no JSON payload it is
+    deliberately not routed through :func:`_sse`.
+    """
+    return b": keep-alive\n\n"
+
+
 def sse_title_suggested(*, chat_id: str, title: str) -> bytes:
     """Emit a ``title_suggested`` SSE event.
 

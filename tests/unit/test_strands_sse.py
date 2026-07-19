@@ -79,6 +79,20 @@ def test_sse_delta_emits_bytes_with_data_prefix():
     assert payload == {"type": "delta", "text": "Hello"}
 
 
+def test_sse_keepalive_is_inert_comment_frame():
+    """The #391 keepalive is an SSE *comment* frame — leading ``:``, no
+    ``data:`` payload — so the SPA's sseParser drops it (no message row,
+    no reducer state change)."""
+    from channel.agents.strands_sse import sse_keepalive
+
+    raw = sse_keepalive()
+    assert raw == b": keep-alive\n\n"
+    # Comment line, not a data frame, and a complete SSE event (\n\n).
+    assert raw.startswith(b":")
+    assert b"data:" not in raw
+    assert raw.endswith(b"\n\n")
+
+
 def test_sse_done_includes_usage_and_metadata():
     raw = sse_done(
         msg_id="m-1",

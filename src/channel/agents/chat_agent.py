@@ -19,6 +19,7 @@ import os
 import re
 from typing import Any, cast
 
+from botocore.config import Config as BotocoreConfig
 from strands import Agent
 from strands.agent.conversation_manager import SummarizingConversationManager
 from strands.models import BedrockModel
@@ -167,6 +168,59 @@ def resolve_model_id(short_id: str) -> str:
         raise ValueError(f"unknown model: {short_id!r}") from exc
 
 
+# #391: cap botocore's transparent retry/backoff on the Bedrock client.
+# By default botocore retries a ``ThrottlingException`` with exponential
+# backoff (~4-5 attempts, ~175s of wall time) BEFORE the exception ever
+# reaches the stream loop. During that window ``_stream_bedrock_reply``
+# yields zero SSE bytes and the SSE connection idles out, so the
+# retryable ``bedrock_throttled`` frame (#212) never reaches the client
+# — the throttle surfaces as an opaque "connection closed". A low
+# ``max_attempts`` collapses that silent backoff so the throttle reaches
+# the stream loop (and thus the error frame) in single-digit seconds.
+_DEFAULT_BEDROCK_MAX_ATTEMPTS = 2
+
+# Mirrors Strands' ``DEFAULT_READ_TIMEOUT`` (120s). When we supply our
+# own ``boto_client_config``, Strands' BedrockModel merges it with only a
+# ``user_agent_extra`` override and DROPS its own default
+# ``read_timeout`` — so botocore's 60s default would silently apply and
+# could spuriously time out a slow-first-token turn. Pin it explicitly to
+# preserve the pre-#391 read-timeout behaviour.
+_BEDROCK_READ_TIMEOUT = 120
+
+
+def _bedrock_max_attempts() -> int:
+    """Resolve the botocore ``max_attempts`` cap for the Bedrock client.
+
+    Defaults to ``_DEFAULT_BEDROCK_MAX_ATTEMPTS`` (2 — one retry).
+    ``STARTER_BEDROCK_MAX_ATTEMPTS`` overrides it so the cap can be
+    dialled back without a redeploy if legitimate transient throttles
+    start failing too eagerly. Non-integer or non-positive values fall
+    back to the default rather than error on a bad env string.
+    """
+    raw = os.environ.get("STARTER_BEDROCK_MAX_ATTEMPTS")
+    if raw is None:
+        return _DEFAULT_BEDROCK_MAX_ATTEMPTS
+    try:
+        parsed = int(raw)
+    except ValueError:
+        return _DEFAULT_BEDROCK_MAX_ATTEMPTS
+    return parsed if parsed >= 1 else _DEFAULT_BEDROCK_MAX_ATTEMPTS
+
+
+def _bedrock_client_config() -> BotocoreConfig:
+    """Build the botocore ``Config`` for the chat ``BedrockModel`` (#391).
+
+    Caps the transparent retry/backoff at a low ``max_attempts`` (see
+    :func:`_bedrock_max_attempts`) in ``standard`` mode and pins
+    ``read_timeout`` to preserve Strands' prior default (see
+    ``_BEDROCK_READ_TIMEOUT``).
+    """
+    return BotocoreConfig(
+        retries={"max_attempts": _bedrock_max_attempts(), "mode": "standard"},
+        read_timeout=_BEDROCK_READ_TIMEOUT,
+    )
+
+
 def build_agent(
     *,
     model_id: str,
@@ -224,6 +278,11 @@ def build_agent(
         # rough estimates and either trims too early (wasting context)
         # or too late (the long-chat degradation we hit on 2026-06-07).
         use_native_token_count=True,
+        # #391: cap botocore's throttle backoff so a ThrottlingException
+        # reaches the stream loop (and the retryable bedrock_throttled
+        # frame) in single-digit seconds instead of ~175s of silent
+        # backoff that idles out the SSE connection first.
+        boto_client_config=_bedrock_client_config(),
     )
     memory_id = get_or_create_memory(os.environ["STARTER_ENV"])
     # #273: agent-driven persistent memory. Register the ``remember`` /
