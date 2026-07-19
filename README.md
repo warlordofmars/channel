@@ -15,93 +15,129 @@
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 [![mypy](https://img.shields.io/badge/type--checked-mypy-blue)](https://mypy-lang.org/)
 
-A production-ready starter template for building AWS-native AI agent backend services.
+**The workspace for thinking with AI.**
 
-## What's included
+Channel is an AI agent chat product — a web app and a native desktop app for
+macOS, Windows, and Linux, backed by an AWS-native serverless stack. Chats
+stream token-by-token from Amazon Bedrock, carry context across conversations
+with Bedrock AgentCore Memory, and reach for tools mid-answer: web search,
+sandboxed code execution, and any MCP server you register. Free to start.
 
-- **FastAPI** management REST API with Google OAuth login
-- **AWS Lambda** + Function URL hosting
-- **DynamoDB** single-table storage
-- **CloudFront** + S3 CDN for the management UI
-- **React** management SPA (Vite + shadcn/ui)
-- **AWS CDK** (Python) infrastructure as code
-- **OAuth 2.1** authorization server with PKCE
-- **GitHub Actions** CI/CD with OIDC (no long-lived AWS keys)
-- **100% test coverage** enforced (pytest + vitest)
+<!--
+  Product screenshot — asset capture is a follow-up (see #247 "Out of scope").
+  Add docs/assets/screenshot.png, then replace this comment with:
+  <p align="center">
+    <img src="docs/assets/screenshot.png" alt="Channel — AI agent chat on web and desktop" width="820" />
+  </p>
+-->
+
+**[channel.warlordofmars.net](https://channel.warlordofmars.net)** —
+the product ·
+**[Download](https://channel.warlordofmars.net/download)** ·
+**[Docs](https://channel.warlordofmars.net/docs/getting-started/quick-start)** ·
+**[Latest release](https://github.com/warlordofmars/channel/releases/latest)**
+
+## What Channel does
+
+- **Streaming chat** — token-by-token Bedrock responses over SSE, with
+  auto-titling of new chats, follow-up suggestions, and attachments + vision.
+- **Memory** — every turn is persisted to Bedrock AgentCore Memory, and a
+  recall hook injects relevant context from prior chats into new conversations.
+- **Tool use** — a tool-calling chassis with Exa web search, sandboxed Lambda
+  code execution, and a registry of MCP servers (GitHub featured first-party),
+  so agents can act, not just answer.
+- **Web and desktop from one source** — the React SPA ships as both the web
+  app and the Electron desktop app (signed, notarized, and auto-updating).
+
+## What's inside
+
+Channel is one repository with four shipping surfaces:
+
+- **Backend** (`src/channel/`) — FastAPI management API on AWS Lambda (Function
+  URLs), DynamoDB single-table storage, and Google OAuth login that mints
+  management JWTs.
+- **Web SPA** (`ui/`) — React 18 + Vite, a custom OKLCH design-token system (no
+  Tailwind), serving both the marketing site and the chat app from one source.
+- **Desktop app** (`desktop/`) — an Electron wrapper around the SPA with
+  external-browser + loopback OAuth and auto-update.
+- **Docs site** (`docs-site/`) — VitePress, served at `/docs/`.
+
+Everything is provisioned with AWS CDK (Python) under `infra/`, deployed by
+GitHub Actions via OIDC (no long-lived AWS keys), and held to 100% test
+coverage (pytest + vitest).
 
 ## Architecture
 
+```text
+Browser · Desktop app · API client
+                 │
+                 ▼
+┌───────────────────────────────────────────────┐
+│                   CloudFront                    │
+│                                                 │
+│  /api · /auth · /oauth  → API Lambda (FastAPI)  │
+│  /                      → S3 (SPA + marketing)  │
+│  /docs/                 → S3 (VitePress docs)    │
+└───────────────────────────────────────────────┘
+                 │
+      ┌──────────┴───────────┐
+      ▼                      ▼
+┌───────────┐     ┌───────────────────────┐
+│ DynamoDB  │     │ Bedrock + AgentCore   │
+│ (single   │     │ Memory (chat + recall)│
+│  table)   │     └───────────────────────┘
+└───────────┘
 ```
-Browser / API client
-      │
-      ▼
-┌──────────────────────────────────────────────┐
-│                  CloudFront                   │
-│                                               │
-│  /api/* /oauth/*  → API Lambda (FastAPI)      │
-│  /                → S3 (React SPA)            │
-│  /docs/           → S3 (VitePress docs)       │
-└──────────────────────────────────────────────┘
-              │
-              ▼
-       ┌─────────────┐
-       │  DynamoDB   │
-       └─────────────┘
-```
 
-| Layer | Technology |
-|---|---|
-| Auth server | OAuth 2.1 + PKCE (self-contained, built into API Lambda) |
-| Management API | FastAPI (Python) |
-| Management UI | React 18 + Vite |
-| Storage | DynamoDB (single-table design) |
-| Hosting | AWS Lambda Function URLs + CloudFront + S3 |
-| IaC | AWS CDK (Python) |
-| CI/CD | GitHub Actions + OIDC |
+## Quick start
 
-## Getting started
+Full setup — AWS prerequisites, Google OAuth, and the first deploy — lives in
+the docs so it stays in one place:
 
-See [docs-site/getting-started/quick-start.md](docs-site/getting-started/quick-start.md) or run:
+**→ [Quick start](https://channel.warlordofmars.net/docs/getting-started/quick-start)**
+
+To run the whole stack locally (DynamoDB Local + API + Vite dev server):
 
 ```bash
-# Install dependencies
-uv sync
-
-# Bootstrap CDK (first time only)
-cd infra && cdk bootstrap -c account=YOUR_ACCOUNT_ID -c env=dev
-
-# Deploy to dev
-uv run inv deploy --env dev
+uv sync --all-extras       # Python deps (requires uv)
+cd ui && npm install       # JS deps
+uv run inv dev             # DynamoDB Local, API, and the Vite dev server
 ```
 
-## Local development
+`inv dev` blocks; in a second terminal, provision the (ephemeral) local table
+schema once it's up:
 
 ```bash
-# Start all services (DynamoDB Local, API, Vite dev server)
-uv run inv dev
-
-# Provision the local DynamoDB table (re-run after every `inv dev`
-# restart — DynamoDB Local is in-memory/ephemeral)
 uv run python scripts/reset_dev_table.py
-
-# Open http://localhost:5173?test_email=you@example.com
 ```
 
-## Development
-
-This repo uses a dual-branch model: `development` is the GitHub default branch (where feature/fix PRs land via squash merge) and `main` is release-only (where `release/vX.Y.Z` PRs land via merge commit, then are auto back-merged to `development` by CI). Both branches are protected behind the seven required CI status checks defined in [`.github/workflows/ci.yml`](.github/workflows/ci.yml) (`Lint & Type Check`, `Unit Tests`, `Integration Tests (DynamoDB Local)`, `Frontend Tests & Build`, `Coverage Report`, `Infra Synth`, `Security Audit`) with `strict=true` so the head SHA must be up-to-date with the base branch at merge time. The repository has `allow_auto_merge=true` enabled, so `gh pr merge --auto --squash --delete-branch` queues the PR for merge as soon as required checks pass. The expected branch-protection snapshot is checked in at [`infra/branch-protection.expected.json`](infra/branch-protection.expected.json); fresh forks should apply Phase 1.5 of the onboarding agent (`.claude/agents/onboarding.md`) to install the same protections before opening any PR.
+Then open the local URL `inv dev` prints. For the desktop app, `uv run inv desktop-dev`.
 
 ## Contributing
 
 ```bash
-git clone <your-fork>
-uv sync --all-extras    # install Python deps (requires uv)
-cd ui && npm install    # install JS deps
-uv run inv pre-push     # lint + type check + unit tests + frontend tests
+git clone https://github.com/warlordofmars/channel
+uv sync --all-extras       # Python deps (requires uv)
+cd ui && npm install       # JS deps
+uv run inv pre-push        # lint + type check + unit tests + frontend tests
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the full dev workflow.
+Channel uses a dual-branch model: `development` is the default branch (feature
+and fix PRs land there via squash merge) and `main` is release-only
+(`release/vX.Y.Z` PRs land via merge commit, after which CI back-merges to
+`development`). Both branches are protected behind the required CI status checks
+in [`.github/workflows/ci.yml`](.github/workflows/ci.yml). See
+[CONTRIBUTING.md](CONTRIBUTING.md) for the full workflow.
 
 ## Security
 
-To report a vulnerability, use GitHub's private vulnerability reporting rather than opening a public issue. See [SECURITY.md](SECURITY.md) for the full disclosure policy.
+To report a vulnerability, use GitHub's private vulnerability reporting rather
+than opening a public issue. See [SECURITY.md](SECURITY.md) for the full
+disclosure policy.
+
+## History
+
+Channel began as an AWS-native agent-backend starter template and has since
+grown into a full product. That lineage survives only in the shape of the CDK
+stack and the CI wiring; the chat experience, memory, tool use, desktop app,
+and docs site are all Channel.
