@@ -4372,8 +4372,11 @@ def test_post_message_emits_keepalive_before_throttle_error(
 
     async def fake_stream(self, prompt):
         await asyncio.sleep(0.1)
+        # `if False: yield` (before the raise) makes this an async
+        # generator without leaving unreachable code after the raise.
+        if False:  # pragma: no cover - only makes fake_stream an async gen
+            yield None
         raise ThrottlingException("slow down")
-        yield  # pragma: no cover - unreachable; makes this an async gen
 
     class FakeAgent:
         stream_async = fake_stream

@@ -1014,18 +1014,18 @@ async def _events_with_keepalive(
     between waits until it completes (or raises — a throttle propagates
     out here to the caller's stream-exception handler).
     """
-    aiter = source.__aiter__()
+    event_iter = source.__aiter__()
     while True:
         if interval <= 0 or is_warm():
             # Warm (or keepalive disabled): cheap direct await, no
             # per-event Task allocation across a delta-heavy stream.
             try:
-                event = await aiter.__anext__()
+                event = await event_iter.__anext__()
             except StopAsyncIteration:
                 return
             yield ("event", event)
             continue
-        pull = asyncio.ensure_future(aiter.__anext__())
+        pull = asyncio.ensure_future(event_iter.__anext__())
         try:
             while not is_warm():
                 done, _pending = await asyncio.wait({pull}, timeout=interval)
