@@ -16,7 +16,7 @@ import json
 import logging
 import os
 import re
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from typing import Any
 
 import boto3
@@ -51,6 +51,7 @@ from channel.agents.strands_sse import (
     sse_done,
     sse_error,
     sse_follow_ups_suggested,
+    sse_keepalive,
     sse_title_suggested,
     sse_tool_error,
     sse_tool_finished,
@@ -957,6 +958,92 @@ def _collect_code_exec_images(
         sink.append((payload["tool_use_id"], images))
 
 
+# ----------------------------------------------------------------
+# Pre-first-token SSE keepalive (#391)
+# ----------------------------------------------------------------
+
+# Interval (seconds) between inert SSE keepalive comment frames written
+# while the wire is still cold — i.e. before the first real frame
+# reaches the client. Bedrock can go silent for a long window before the
+# first delta: throttle backoff (now collapsed to single-digit seconds
+# by the lowered max_attempts in build_agent, #391) or a genuinely slow
+# first token. During that window the stream yields zero bytes, so the
+# CloudFront → Function URL → AWS Lambda Web Adapter SSE hop idles out
+# and the client tears the connection down BEFORE the real delta or the
+# sse_error/bedrock_throttled frame (#212) can be delivered. 15s is
+# safely under the observed ~3-min idle ceiling with wide margin.
+_DEFAULT_STREAM_KEEPALIVE_INTERVAL = 15.0
+
+
+def _stream_keepalive_interval() -> float:
+    """Resolve the keepalive interval in seconds (#391).
+
+    ``STARTER_STREAM_KEEPALIVE_INTERVAL`` overrides the default; a
+    non-positive value disables the keepalive entirely. A non-numeric
+    value falls back to the default rather than error on a bad env
+    string.
+    """
+    raw = os.environ.get("STARTER_STREAM_KEEPALIVE_INTERVAL")
+    if raw is None:
+        return _DEFAULT_STREAM_KEEPALIVE_INTERVAL
+    try:
+        return float(raw)
+    except ValueError:
+        return _DEFAULT_STREAM_KEEPALIVE_INTERVAL
+
+
+async def _events_with_keepalive(
+    source: AsyncIterator[Any],
+    interval: float,
+    is_warm: Callable[[], bool],
+) -> AsyncIterator[tuple[str, Any]]:
+    """Drive a Strands event async-iterator, interleaving keepalive ticks
+    while the wire is still cold (#391).
+
+    Yields ``("keepalive", None)`` for every ``interval`` seconds that
+    elapse without the wire warming up, and ``("event", <event>)`` for
+    each Strands event. ``is_warm`` is a zero-arg predicate the caller
+    flips ``True`` once it has written a real frame to the client;
+    keepalives stop from then on (deltas keep the connection warm on
+    their own) and events flow via the cheap direct-await path.
+
+    The pending pull is held across successive timed waits and is NEVER
+    cancelled: cancelling an in-flight ``__anext__`` on an async
+    generator corrupts it. ``asyncio.wait`` leaves the task running on
+    timeout, so we simply re-wait on the same task and emit a keepalive
+    between waits until it completes (or raises — a throttle propagates
+    out here to the caller's stream-exception handler).
+    """
+    aiter = source.__aiter__()
+    while True:
+        if interval <= 0 or is_warm():
+            # Warm (or keepalive disabled): cheap direct await, no
+            # per-event Task allocation across a delta-heavy stream.
+            try:
+                event = await aiter.__anext__()
+            except StopAsyncIteration:
+                return
+            yield ("event", event)
+            continue
+        pull = asyncio.ensure_future(aiter.__anext__())
+        try:
+            while not is_warm():
+                done, _pending = await asyncio.wait({pull}, timeout=interval)
+                if pull in done:
+                    break
+                yield ("keepalive", None)
+            event = await pull
+        except StopAsyncIteration:
+            return
+        finally:
+            # Release the pull if the caller tore us down mid-keepalive
+            # (client disconnect throws GeneratorExit at the yield above
+            # while the pull is still pending). ``cancel`` is a harmless
+            # no-op once the task has completed, so this is unconditional.
+            pull.cancel()
+        yield ("event", event)
+
+
 async def _stream_bedrock_reply(
     *,
     chat: Chat,
@@ -1154,6 +1241,24 @@ async def _stream_bedrock_reply(
     # outside an active investigation.
     heartbeat = os.environ.get("STARTER_STREAM_HEARTBEAT_ENABLED", "0") == "1"
 
+    # #391 pre-first-token keepalive: track whether any real frame has
+    # reached the wire yet. Until the first delta lands, a keepalive
+    # comment frame is written every ``keepalive_interval`` seconds so
+    # the SSE connection survives Bedrock's silent pre-first-token window
+    # (throttle backoff or slow first token). ``wire_warm`` is closed
+    # over by ``_is_wire_warm`` and read by ``_events_with_keepalive``;
+    # once the first delta is written the wrapper drops to its cheap
+    # direct-await path (see that helper). Keying warmth on the first
+    # delta — not on stop/usage/skip events, which write nothing to the
+    # client — keeps keepalives flowing through any pre-delta gap
+    # (e.g. a turn that only calls tools before its first token), which
+    # is strictly more protective and always inert.
+    keepalive_interval = _stream_keepalive_interval()
+    wire_warm = False
+
+    def _is_wire_warm() -> bool:
+        return wire_warm
+
     # #212 failure capture: when the Strands loop raises (or terminates
     # empty), the frames to emit are staged here and yielded AFTER the
     # ``finally`` block has released the agent — yielding from inside an
@@ -1180,9 +1285,16 @@ async def _stream_bedrock_reply(
     # call during the cancellation window, or (b) the entry-time clear
     # at the top of this function on the NEXT turn for the same chat.
     try:
-        async for event in agent.stream_async(user_payload):
+        async for wrapped_kind, event in _events_with_keepalive(
+            agent.stream_async(user_payload), keepalive_interval, _is_wire_warm
+        ):
+            if wrapped_kind == "keepalive":
+                yield sse_keepalive()
+                continue
             kind, payload = translate_event(event)
             if kind == "delta":
+                # First delta warms the wire — keepalives stop from here.
+                wire_warm = True
                 accumulated.append(payload)
                 accumulated_chars += len(payload)
                 if heartbeat and len(accumulated) % 50 == 0:
