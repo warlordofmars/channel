@@ -4282,6 +4282,168 @@ def test_post_message_empty_stream_with_non_end_turn_stop_is_not_flagged(
     assert [m.role for m in persisted] == [MessageRole.USER, MessageRole.ASSISTANT]
 
 
+# ----------------------------------------------------------------
+# #391: pre-first-token SSE keepalive
+# ----------------------------------------------------------------
+
+
+def test_stream_keepalive_interval_defaults_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from channel.api.chats import (
+        _DEFAULT_STREAM_KEEPALIVE_INTERVAL,
+        _stream_keepalive_interval,
+    )
+
+    monkeypatch.delenv("STARTER_STREAM_KEEPALIVE_INTERVAL", raising=False)
+    assert _stream_keepalive_interval() == _DEFAULT_STREAM_KEEPALIVE_INTERVAL
+
+
+def test_stream_keepalive_interval_falls_back_on_non_numeric(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from channel.api.chats import (
+        _DEFAULT_STREAM_KEEPALIVE_INTERVAL,
+        _stream_keepalive_interval,
+    )
+
+    # A bad env string must not crash the stream.
+    monkeypatch.setenv("STARTER_STREAM_KEEPALIVE_INTERVAL", "soon")
+    assert _stream_keepalive_interval() == _DEFAULT_STREAM_KEEPALIVE_INTERVAL
+
+
+@pytest.mark.parametrize("bad", ["nan", "inf", "-inf"])
+def test_stream_keepalive_interval_rejects_non_finite(
+    monkeypatch: pytest.MonkeyPatch, bad: str
+) -> None:
+    # float() accepts "nan"/"inf", but a nan timeout makes asyncio.wait
+    # behave unpredictably and inf would silently pin the interval open —
+    # both fall back to the default.
+    from channel.api.chats import (
+        _DEFAULT_STREAM_KEEPALIVE_INTERVAL,
+        _stream_keepalive_interval,
+    )
+
+    monkeypatch.setenv("STARTER_STREAM_KEEPALIVE_INTERVAL", bad)
+    assert _stream_keepalive_interval() == _DEFAULT_STREAM_KEEPALIVE_INTERVAL
+
+
+def test_post_message_emits_keepalive_before_first_delta(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#391: a slow first token must not go dark — a keepalive comment
+    frame reaches the wire BEFORE the first delta so the SSE connection
+    survives Bedrock's pre-first-token silence. The keepalive is inert
+    to the reducer (a ``:``-prefixed comment, no ``data:`` payload)."""
+
+    _stub_storage_capturing_persistence(monkeypatch)
+    monkeypatch.setenv("STARTER_FOLLOWUPS_ENABLED", "0")
+    monkeypatch.setenv("STARTER_STREAM_KEEPALIVE_INTERVAL", "0.01")
+
+    import asyncio
+
+    async def fake_stream(self, prompt):
+        # Silent longer than the keepalive interval before the first token.
+        await asyncio.sleep(0.1)
+        yield {"event": {"contentBlockDelta": {"delta": {"text": "hi"}}}}
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+
+    class FakeAgent:
+        stream_async = fake_stream
+
+    monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
+
+    response = client.post(
+        "/api/chats/c1/messages",
+        json={"message": "hi", "model": "claude-sonnet-4-6"},
+    )
+    assert response.status_code == 200
+    body = response.text
+    # >= 1 keepalive comment frame, emitted before the first real delta.
+    assert ": keep-alive" in body
+    assert body.index(": keep-alive") < body.index('"type": "delta"')
+    # Inert to the reducer: the parsed data: event stream carries the
+    # real frames only — no spurious keepalive event.
+    types = [e["type"] for e in _sse_events(body)]
+    assert "delta" in types
+    assert all(t != "keepalive" for t in types)
+
+
+def test_post_message_emits_keepalive_before_throttle_error(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#391 + #212: when Bedrock throttles before any token, the
+    keepalive keeps the connection alive so the retryable
+    ``bedrock_throttled`` frame actually reaches the client instead of a
+    silent connection close."""
+
+    _stub_storage_capturing_persistence(monkeypatch)
+    monkeypatch.setenv("STARTER_FOLLOWUPS_ENABLED", "0")
+    monkeypatch.setenv("STARTER_STREAM_KEEPALIVE_INTERVAL", "0.01")
+
+    import asyncio
+
+    class ThrottlingException(Exception):
+        pass
+
+    async def fake_stream(self, prompt):
+        await asyncio.sleep(0.1)
+        # `if False: yield` (before the raise) makes this an async
+        # generator without leaving unreachable code after the raise.
+        if False:  # pragma: no cover - only makes fake_stream an async gen
+            yield None
+        raise ThrottlingException("slow down")
+
+    class FakeAgent:
+        stream_async = fake_stream
+
+    monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
+
+    response = client.post(
+        "/api/chats/c1/messages",
+        json={"message": "hi", "model": "claude-sonnet-4-6"},
+    )
+    assert response.status_code == 200
+    body = response.text
+    error = next(e for e in _sse_events(body) if e["type"] == "error")
+    assert error["code"] == "bedrock_throttled"
+    assert error["retryable"] is True
+    # A keepalive reached the wire before the error frame.
+    assert ": keep-alive" in body
+    assert body.index(": keep-alive") < body.index('"type": "error"')
+
+
+def test_post_message_no_keepalive_when_interval_disabled(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-positive ``STARTER_STREAM_KEEPALIVE_INTERVAL`` disables the
+    keepalive entirely (escape hatch); the stream still completes."""
+
+    _stub_storage_capturing_persistence(monkeypatch)
+    monkeypatch.setenv("STARTER_FOLLOWUPS_ENABLED", "0")
+    monkeypatch.setenv("STARTER_STREAM_KEEPALIVE_INTERVAL", "0")
+
+    import asyncio
+
+    async def fake_stream(self, prompt):
+        await asyncio.sleep(0.02)
+        yield {"event": {"contentBlockDelta": {"delta": {"text": "hi"}}}}
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+
+    class FakeAgent:
+        stream_async = fake_stream
+
+    monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
+
+    response = client.post(
+        "/api/chats/c1/messages",
+        json={"message": "hi", "model": "claude-sonnet-4-6"},
+    )
+    assert response.status_code == 200
+    assert ": keep-alive" not in response.text
+    assert any(e["type"] == "delta" for e in _sse_events(response.text))
+
+
 def test_post_message_stream_heartbeat_logs_when_enabled(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,

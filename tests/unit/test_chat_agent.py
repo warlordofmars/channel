@@ -8,8 +8,10 @@ from unittest.mock import MagicMock
 import pytest
 
 from channel.agents.chat_agent import (
+    _BEDROCK_READ_TIMEOUT,
     DEFAULT_MAX_TOKENS,
     DEFAULT_SYSTEM_PROMPT,
+    _bedrock_max_attempts,
     build_agent,
     max_tokens_for_effort,
     resolve_model_id,
@@ -90,6 +92,57 @@ def _patch_strands(monkeypatch, captured):
         lambda **kw: MagicMock(write_meta_event=MagicMock()),
     )
     monkeypatch.setattr("channel.agents.chat_agent.AgentCoreRecallHook", lambda **kw: object())
+
+
+# ----------------------------------------------------------------
+# #391: botocore retry cap on the Bedrock client
+# ----------------------------------------------------------------
+
+
+def test_bedrock_max_attempts_defaults_to_two(monkeypatch):
+    monkeypatch.delenv("STARTER_BEDROCK_MAX_ATTEMPTS", raising=False)
+    assert _bedrock_max_attempts() == 2
+
+
+def test_bedrock_max_attempts_respects_valid_override(monkeypatch):
+    monkeypatch.setenv("STARTER_BEDROCK_MAX_ATTEMPTS", "5")
+    assert _bedrock_max_attempts() == 5
+
+
+def test_bedrock_max_attempts_falls_back_on_non_numeric(monkeypatch):
+    # A bad env string must not crash agent construction.
+    monkeypatch.setenv("STARTER_BEDROCK_MAX_ATTEMPTS", "lots")
+    assert _bedrock_max_attempts() == 2
+
+
+def test_bedrock_max_attempts_falls_back_on_non_positive(monkeypatch):
+    # max_attempts must be >= 1 (at least one attempt); 0 / negative
+    # would disable the call entirely, so fall back to the default.
+    monkeypatch.setenv("STARTER_BEDROCK_MAX_ATTEMPTS", "0")
+    assert _bedrock_max_attempts() == 2
+
+
+def test_build_agent_passes_low_retry_config_to_bedrock(monkeypatch):
+    """#391: the BedrockModel is built with a botocore Config that caps
+    retries at ``max_attempts=2`` (standard mode) so a throttle reaches
+    the stream loop fast, and pins read_timeout to Strands' prior
+    default so we don't regress to botocore's 60s."""
+    monkeypatch.delenv("STARTER_BEDROCK_MAX_ATTEMPTS", raising=False)
+    captured: dict[str, object] = {}
+    _patch_strands(monkeypatch, captured)
+    build_agent(model_id="claude-sonnet-4-6", user_id="u-1", chat_id="c-1")
+    cfg = captured["bedrock_kwargs"]["boto_client_config"]
+    assert cfg.retries == {"max_attempts": 2, "mode": "standard"}
+    assert cfg.read_timeout == _BEDROCK_READ_TIMEOUT
+
+
+def test_build_agent_retry_config_honours_env_override(monkeypatch):
+    monkeypatch.setenv("STARTER_BEDROCK_MAX_ATTEMPTS", "4")
+    captured: dict[str, object] = {}
+    _patch_strands(monkeypatch, captured)
+    build_agent(model_id="claude-sonnet-4-6", user_id="u-1", chat_id="c-1")
+    cfg = captured["bedrock_kwargs"]["boto_client_config"]
+    assert cfg.retries["max_attempts"] == 4
 
 
 def test_build_agent_with_effort_low_sets_max_tokens_1024(monkeypatch):
