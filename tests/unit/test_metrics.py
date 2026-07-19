@@ -385,3 +385,24 @@ def test_record_asset_persist_outcome_signature_locks_out_dimensions():
     param = sig.parameters["success"]
     assert param.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
     assert param.annotation == "bool"
+
+
+@pytest.mark.asyncio
+async def test_record_mcp_tools_capped_emits_counter():
+    from channel.metrics import record_mcp_tools_capped
+
+    with patch("channel.metrics.emit_metric", new=AsyncMock()) as mock_emit:
+        await record_mcp_tools_capped()
+
+    mock_emit.assert_awaited_once_with("MCPToolsCapped")
+
+
+def test_record_mcp_tools_capped_signature_locks_out_dimensions():
+    """Counter-only (#389): the signature accepts NO arguments so a
+    future caller cannot slip a per-server dimension through — cardinality
+    scales with the registered-server set. Which server was capped (and
+    which tools were dropped) lives in the ``mcp.tools_capped`` log line."""
+    from channel.metrics import record_mcp_tools_capped
+
+    sig = inspect.signature(record_mcp_tools_capped)
+    assert list(sig.parameters.keys()) == []

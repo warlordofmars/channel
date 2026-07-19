@@ -188,3 +188,20 @@ async def record_tool_call_outcome(success: bool) -> None:
     """
     metric = "ToolCallSuccesses" if success else "ToolCallFailures"
     await emit_metric(metric)
+
+
+async def record_mcp_tools_capped() -> None:
+    """Emit a CloudWatch counter for one MCP server whose advertised tool
+    set exceeded the per-server budget and was truncated (#389).
+
+    Counter-only — deliberately accepts NO arguments, mirroring the
+    signature-lock discipline of :func:`record_memory_write_outcome`. The
+    alarming signal is *how often* a real server exceeds the budget (a
+    heavy server ships ~15-20K tokens of tool-schema overhead per turn);
+    *which* server it was, and *which* tools were dropped, live in the
+    structured ``mcp.tools_capped`` log line, queryable via CloudWatch
+    Logs Insights without a per-server metric dimension (cardinality
+    scales with the registered-server set — the same blowup guard as
+    every other counter in this module).
+    """
+    await emit_metric("MCPToolsCapped")
