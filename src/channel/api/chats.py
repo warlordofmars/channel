@@ -1020,12 +1020,18 @@ async def _events_with_keepalive(
     returns ``True``, keepalives stop (deltas keep the connection warm on
     their own) and events flow via the cheap direct-await path.
 
-    The pending pull is held across successive timed waits and is NEVER
-    cancelled: cancelling an in-flight ``__anext__`` on an async
-    generator corrupts it. ``asyncio.wait`` leaves the task running on
-    timeout, so we simply re-wait on the same task and emit a keepalive
-    between waits until it completes (or raises — a throttle propagates
-    out here to the caller's stream-exception handler).
+    The pending pull is held across successive timed waits and is never
+    cancelled *as a timeout mechanism*: cancelling an in-flight
+    ``__anext__`` on an async generator corrupts it, so ``asyncio.wait``
+    (which leaves the task running on timeout) is used to re-wait on the
+    same task and emit a keepalive between waits until it completes (or
+    raises — a throttle propagates out here to the caller's
+    stream-exception handler). The only ``pull.cancel()`` is in the
+    ``finally`` below, and it fires only on teardown — a client
+    disconnect throws ``GeneratorExit`` at the keepalive ``yield`` while
+    the pull is still pending, and this generator is then abandoned
+    wholesale, so releasing the orphaned pull can't corrupt anything we
+    still use. (It is a no-op once the pull has already completed.)
     """
     event_iter = source.__aiter__()
     while True:
