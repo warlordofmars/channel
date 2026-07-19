@@ -141,6 +141,44 @@ def test_metrics_routes_reject_non_admin_with_403(path: str, qs: dict[str, str])
 # ----------------------------------------------------------------
 
 
+def test_memory_tool_counters_are_allowlisted() -> None:
+    """#400: the tool-driven memory counters must be readable from the
+    dashboard, and must be distinct names from the hook counters so the two
+    signals stay isolated."""
+    tool_counters = {
+        "MemoryToolWriteSuccesses",
+        "MemoryToolWriteFailures",
+        "MemoryToolRecallSuccesses",
+        "MemoryToolRecallFailures",
+    }
+    assert tool_counters.issubset(set(_METRIC_ALLOWLIST))
+    # The hook counters remain, distinct, so hook health is not folded in.
+    assert {"MemoryWriteSuccesses", "RecallSuccesses"}.issubset(set(_METRIC_ALLOWLIST))
+    assert tool_counters.isdisjoint({"MemoryWriteSuccesses", "MemoryWriteFailures"})
+
+
+def test_timeseries_accepts_memory_tool_metric(cloudwatch_stub: Any, frozen_now: datetime) -> None:
+    """#400: a tool-driven counter is a valid timeseries metric (not a 422)."""
+    cloudwatch_stub.add_response(
+        "get_metric_data",
+        {"MetricDataResults": []},
+        {
+            "MetricDataQueries": _expected_queries(("MemoryToolWriteSuccesses",), 300),
+            "StartTime": ANY,
+            "EndTime": ANY,
+            "ScanBy": "TimestampAscending",
+        },
+    )
+    resp = client.get(
+        _TIMESERIES_PATH,
+        params={"metric": "MemoryToolWriteSuccesses", "window": "24h"},
+        headers=_admin_headers(),
+    )
+    assert resp.status_code == 200
+    assert resp.json()["metric"] == "MemoryToolWriteSuccesses"
+    cloudwatch_stub.assert_no_pending_responses()
+
+
 def test_timeseries_rejects_unknown_metric_with_422() -> None:
     resp = client.get(
         _TIMESERIES_PATH,

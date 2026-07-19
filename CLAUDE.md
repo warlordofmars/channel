@@ -391,11 +391,21 @@ infra**.
   the cross-owner Hive pool) delivered in the **data register**, never
   spliced into the system-prompt instruction register (that's the
   recall hook's seam, which #299/#95 flag). This is what keeps #273 v1
-  off the confused-deputy surface #299 guards. `remember` reuses
-  `record_memory_write_outcome`; `recall` reuses `record_recall_outcome`
-  (no per-actor/per-session dimensions — the cardinality rule).
-- **Metrics** — the chassis telemetry hook records `[meta] used
-  remember` / `[meta] used recall` events per invocation as normal.
+  off the confused-deputy surface #299 guards.
+- **Metrics (#400)** — `remember` emits `record_memory_tool_write_outcome`
+  (`MemoryToolWriteSuccesses` / `MemoryToolWriteFailures`); `recall` emits
+  `record_memory_tool_recall_outcome` (`MemoryToolRecallSuccesses` /
+  `MemoryToolRecallFailures`). These are **deliberately separate** from the
+  hook counters (`MemoryWriteSuccesses` / `RecallSuccesses`) so the admin
+  dashboard's hook-health signal stays isolated from agent-driven tool
+  usage — separate counters rather than a `source=hook|tool` dimension,
+  preserving the no-per-actor/per-session cardinality rule. Both are on the
+  admin metrics allowlist (`src/channel/api/admin.py`) and surfaced by the
+  dashboard's "Tool saves" / "Tool recall" tiles
+  (`ui/src/app/admin/Dashboard.jsx`). v1 (#273) reused the hook counters;
+  #400 split them. The chassis telemetry hook additionally records
+  `[meta] used remember` / `[meta] used recall` events per invocation as
+  normal.
 
 ### Auto-titling (Phase 7d)
 

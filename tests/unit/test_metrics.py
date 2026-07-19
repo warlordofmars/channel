@@ -80,6 +80,102 @@ def test_record_recall_outcome_signature_locks_out_dimensions():
     assert sig.parameters["success"].annotation == "bool"
 
 
+# ----------------------------------------------------------------
+# Memory TOOL counters (#400) — agent-driven remember/recall, kept
+# distinct from the hook counters above so hook health stays isolated.
+# ----------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_record_memory_tool_write_outcome_success_emits_success_counter():
+    from channel.metrics import record_memory_tool_write_outcome
+
+    with patch("channel.metrics.emit_metric", new=AsyncMock()) as mock_emit:
+        await record_memory_tool_write_outcome(success=True)
+    mock_emit.assert_awaited_once_with("MemoryToolWriteSuccesses")
+
+
+@pytest.mark.asyncio
+async def test_record_memory_tool_write_outcome_failure_emits_failure_counter():
+    from channel.metrics import record_memory_tool_write_outcome
+
+    with patch("channel.metrics.emit_metric", new=AsyncMock()) as mock_emit:
+        await record_memory_tool_write_outcome(success=False)
+    mock_emit.assert_awaited_once_with("MemoryToolWriteFailures")
+
+
+def test_record_memory_tool_write_outcome_is_distinct_from_hook_counter():
+    """#400: the tool emitter must NOT reuse the hook metric names, or the
+    dashboard would re-conflate hook and tool writes."""
+    from channel.metrics import record_memory_tool_write_outcome
+
+    with patch("channel.metrics.emit_metric", new=AsyncMock()) as mock_emit:
+        import asyncio
+
+        asyncio.run(record_memory_tool_write_outcome(success=True))
+        asyncio.run(record_memory_tool_write_outcome(success=False))
+    emitted = {call.args[0] for call in mock_emit.await_args_list}
+    assert emitted == {"MemoryToolWriteSuccesses", "MemoryToolWriteFailures"}
+    assert "MemoryWriteSuccesses" not in emitted
+    assert "MemoryWriteFailures" not in emitted
+
+
+def test_record_memory_tool_write_outcome_signature_locks_out_dimensions():
+    """Same cardinality guard as the hook memory-write counter — no kwargs
+    path for a future caller to slip a per-actor / per-session dimension."""
+    from channel.metrics import record_memory_tool_write_outcome
+
+    sig = inspect.signature(record_memory_tool_write_outcome)
+    assert list(sig.parameters.keys()) == ["success"]
+    param = sig.parameters["success"]
+    assert param.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+    assert param.annotation == "bool"
+
+
+@pytest.mark.asyncio
+async def test_record_memory_tool_recall_outcome_success_emits_success_counter():
+    from channel.metrics import record_memory_tool_recall_outcome
+
+    with patch("channel.metrics.emit_metric", new=AsyncMock()) as mock_emit:
+        await record_memory_tool_recall_outcome(success=True)
+    mock_emit.assert_awaited_once_with("MemoryToolRecallSuccesses")
+
+
+@pytest.mark.asyncio
+async def test_record_memory_tool_recall_outcome_failure_emits_failure_counter():
+    from channel.metrics import record_memory_tool_recall_outcome
+
+    with patch("channel.metrics.emit_metric", new=AsyncMock()) as mock_emit:
+        await record_memory_tool_recall_outcome(success=False)
+    mock_emit.assert_awaited_once_with("MemoryToolRecallFailures")
+
+
+def test_record_memory_tool_recall_outcome_is_distinct_from_hook_counter():
+    """#400: tool recall must NOT reuse the hook recall metric names."""
+    from channel.metrics import record_memory_tool_recall_outcome
+
+    with patch("channel.metrics.emit_metric", new=AsyncMock()) as mock_emit:
+        import asyncio
+
+        asyncio.run(record_memory_tool_recall_outcome(success=True))
+        asyncio.run(record_memory_tool_recall_outcome(success=False))
+    emitted = {call.args[0] for call in mock_emit.await_args_list}
+    assert emitted == {"MemoryToolRecallSuccesses", "MemoryToolRecallFailures"}
+    assert "RecallSuccesses" not in emitted
+    assert "RecallFailures" not in emitted
+
+
+def test_record_memory_tool_recall_outcome_signature_locks_out_dimensions():
+    """Same cardinality guard as the hook recall counter."""
+    from channel.metrics import record_memory_tool_recall_outcome
+
+    sig = inspect.signature(record_memory_tool_recall_outcome)
+    assert list(sig.parameters.keys()) == ["success"]
+    param = sig.parameters["success"]
+    assert param.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+    assert param.annotation == "bool"
+
+
 @pytest.mark.asyncio
 async def test_record_auto_title_outcome_success_emits_success_counter():
     from channel.metrics import record_auto_title_outcome
