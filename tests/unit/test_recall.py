@@ -595,3 +595,73 @@ def test_append_to_system_prompt_sets_addendum_when_agent_has_no_system_prompt()
     fake_agent.system_prompt = ""
     _append_to_system_prompt(fake_event, "addendum text")
     assert fake_agent.system_prompt == "addendum text"
+
+
+# ---------------------------------------------------------------------------
+# preview_addendum — the /api/_debug/recall/inspect reuse surface (#227)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_preview_addendum_returns_block_and_records_without_caching():
+    """``preview_addendum`` reuses the live fetch + format path but does a
+    fresh (uncached) read and leaves ``_recall_cache`` untouched, so the
+    inspection endpoint can't perturb a warm hook's age counters."""
+    fake_client = MagicMock()
+    fake_client.list_sessions.return_value = {
+        "sessionSummaries": [
+            {"sessionId": "current", "createdAt": "2026-06-07T20:00:00Z"},
+            {"sessionId": "prior-1", "createdAt": "2026-06-01T10:00:00Z"},
+        ],
+    }
+    fake_client.list_events.return_value = {
+        "events": [
+            {
+                "sessionId": "prior-1",
+                "payload": [
+                    {"conversational": {"role": "USER", "content": {"text": "i love sage green"}}},
+                    {"conversational": {"role": "ASSISTANT", "content": {"text": "sage is great"}}},
+                ],
+            },
+        ],
+    }
+    hook = AgentCoreRecallHook(memory_id="m-1", actor_id="u-abc", client=fake_client)
+
+    block, records = await hook.preview_addendum(chat_id="current")
+
+    assert "## What we've talked about before" in block
+    assert "- You: i love sage green" in block
+    assert records == [
+        {
+            "sessionId": "prior-1",
+            "createdAt": "2026-06-01",
+            "payload": [
+                {"conversational": {"role": "USER", "content": {"text": "i love sage green"}}},
+                {"conversational": {"role": "ASSISTANT", "content": {"text": "sage is great"}}},
+            ],
+        },
+    ]
+    # Current chat is excluded from the ListEvents fan-out.
+    fake_client.list_events.assert_called_once_with(
+        memoryId="m-1", actorId="u-abc", sessionId="prior-1", maxResults=_RECALL_EVENTS_PER_SESSION
+    )
+    # No cache pollution — inspection is a pure read.
+    assert recall_module._recall_cache == {}
+
+
+@pytest.mark.asyncio
+async def test_preview_addendum_empty_when_no_prior_sessions():
+    """Only the current chat exists → empty block, empty records, no
+    per-session ListEvents fan-out."""
+    fake_client = MagicMock()
+    fake_client.list_sessions.return_value = {
+        "sessionSummaries": [{"sessionId": "current", "createdAt": "2026-06-07T20:00:00Z"}],
+    }
+    hook = AgentCoreRecallHook(memory_id="m-1", actor_id="u-abc", client=fake_client)
+
+    block, records = await hook.preview_addendum(chat_id="current")
+
+    assert block == ""
+    assert records == []
+    fake_client.list_events.assert_not_called()
+    assert recall_module._recall_cache == {}
