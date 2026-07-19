@@ -317,17 +317,32 @@ Runs on **every** agent-created PR. The `agent-safe` label only gates whether th
 
 1. After CI is green and `code-reviewer` is clean, request a Copilot review.
 
-   **Request it via the GraphQL `requestReviews` mutation's `botIds` field —
-   this is the only method that actually registers the request.** Both
-   `gh pr edit <PR-NUMBER> --add-reviewer "@copilot"` **and** the REST
-   `POST /repos/{o}/{r}/pulls/{n}/requested_reviewers` path silently **no-op**
-   for the `copilot-pull-request-reviewer` bot (they drop bot logins with no
-   error), so a poll started after either waits forever for a review that was
-   never requested — observed on #410 / PR #411, two full poll windows
-   (~26 polls / ~12 min) burned on a request that never landed.
+   **Do not request it with `gh pr edit <PR-NUMBER> --add-reviewer "@copilot"`
+   (or a bare `@copilot`) — that silently no-ops**, dropping the bot login with
+   no error, so a poll started after it waits on a request that never
+   registered. Use **either** working method below; both actually register the
+   `copilot-pull-request-reviewer` bot.
 
-   Discover the Copilot bot's node id (stable per repo; e.g. `BOT_kgDOCnlnWA`)
-   via `suggestedActors`, then fire the mutation against the PR's node id:
+   **Method A — REST with the `[bot]`-suffixed login** (simplest; no node-id
+   lookup). The **`[bot]` suffix is required** — the un-suffixed login is what
+   the `--add-reviewer` path drops:
+
+   ```bash
+   gh api --method POST \
+     repos/{owner}/{repo}/pulls/<PR-NUMBER>/requested_reviewers \
+     -f 'reviewers[]=copilot-pull-request-reviewer[bot]'
+   ```
+
+   **Method B — GraphQL `requestReviews` `botIds`** (explicit node id; the
+   method #413 specified). Discover the Copilot **reviewer** bot's node id,
+   then fire the mutation against the PR's node id. The reviewer bot's login is
+   `copilot-pull-request-reviewer` and its node id is a stable global value
+   (`BOT_kgDOCnlnWA` on github.com). **Do not discover it via `suggestedActors`**
+   — that returns `copilot-swe-agent` (the coding agent), *not* the reviewer,
+   and there is no `CAN_BE_REVIEWER` filter (the reviewer bot is simply not
+   offered by `suggestedActors`). Rediscover it instead by scanning recent PRs'
+   `reviewRequests` / `reviews` for the bot, falling back to the known stable
+   id:
 
    ```bash
    OWNER=$(gh repo view --json owner --jq .owner.login)
@@ -335,28 +350,32 @@ Runs on **every** agent-created PR. The `agent-safe` label only gates whether th
 
    PR_NODE=$(gh pr view <PR-NUMBER> --json id --jq .id)   # PR node id (PR_...)
 
-   # Copilot bot node id (login: copilot-pull-request-reviewer)
+   # Copilot reviewer bot node id — login copilot-pull-request-reviewer.
+   # Scan recent PRs for the bot in a reviewRequest or a posted review; fall
+   # back to the stable global id if none is found yet (e.g. a fresh template).
    BOT_ID=$(gh api graphql -f query='
      query($owner:String!,$name:String!){
        repository(owner:$owner,name:$name){
-         suggestedActors(capabilities:[CAN_BE_ASSIGNED], first:100){
-           nodes{ login __typename ... on Bot { id } }
+         pullRequests(first:50, orderBy:{field:CREATED_AT, direction:DESC}){
+           nodes{
+             reviewRequests(first:10){ nodes{ requestedReviewer{ __typename ... on Bot { login id } } } }
+             reviews(first:10){ nodes{ author{ __typename login ... on Bot { id } } } }
+           }
          }
        }
      }' -F owner="$OWNER" -F name="$REPO" \
-     --jq '.data.repository.suggestedActors.nodes[]
-           | select(.login=="copilot-pull-request-reviewer") | .id')
+     --jq 'first(.data.repository.pullRequests.nodes[]
+           | (.reviewRequests.nodes[]?.requestedReviewer // empty),
+             (.reviews.nodes[]?.author // empty)
+           | select(.login=="copilot-pull-request-reviewer") | .id)
+           // "BOT_kgDOCnlnWA"')
 
-   if [ -z "$BOT_ID" ]; then
-     echo "Copilot not offered as a reviewer on this repo — advisory review unavailable; skip to step 5"
-   else
-     gh api graphql -f query='
-       mutation($prId:ID!,$botId:ID!){
-         requestReviews(input:{pullRequestId:$prId, botIds:[$botId], union:true}){
-           pullRequest{ id }
-         }
-       }' -F prId="$PR_NODE" -F botId="$BOT_ID"
-   fi
+   gh api graphql -f query='
+     mutation($prId:ID!,$botId:ID!){
+       requestReviews(input:{pullRequestId:$prId, botIds:[$botId], union:true}){
+         pullRequest{ id }
+       }
+     }' -F prId="$PR_NODE" -F botId="$BOT_ID"
    ```
 
    **Invariant — never poll for a review you have not confirmed was requested
@@ -375,31 +394,39 @@ Runs on **every** agent-created PR. The `agent-safe` label only gates whether th
        }
      }' -F owner="$OWNER" -F name="$REPO" -F num=<PR-NUMBER> \
      --jq '[.data.repository.pullRequest.reviewRequests.nodes[]?.requestedReviewer.login]
-           | index("copilot-pull-request-reviewer")'
+           | map(select(. != null)) | any(startswith("copilot-pull-request-reviewer"))'
    ```
 
-   A non-null result means the request registered — proceed to poll. A `null`
-   result means it did **not** register (bot not offered, or the mutation was
-   rejected): retry the mutation **once**; if it still doesn't register, treat
-   Copilot review as **advisory review unavailable**, record that in the PR
-   description, and skip to step 5. Do not poll for a request you never
-   confirmed.
+   (The `reviewRequest` login is the **un-suffixed** `copilot-pull-request-reviewer`
+   — the `[bot]` suffix only appears on the *posted* review/comment author in
+   step 2, so `startswith` matches either form.) A `true` result means the
+   request registered — proceed to poll. `false` means it did **not** register
+   (bot not offered, or the request was rejected): retry the request **once**
+   (either method A or B); if it still doesn't register, treat Copilot review
+   as **advisory review unavailable**, record that in the PR description, and
+   skip to step 5. Do not poll for a request you never confirmed.
 2. Once the request is registered (step 1's invariant passed), wait for the Copilot **`copilot-pull-request-reviewer` check-run** (posted by the `github-actions` app — **not** a check named `Agent`) to reach `completed`, then wait an **additional ~90s** before fetching review comments — the check-run closes before Copilot finishes writing line-level comments (observed: check-run completed at 12:41:52, comments posted at 12:43:03). Poll with:
    ```bash
-   gh api repos/{owner}/{repo}/pulls/<PR-NUMBER>/comments --jq '.[].body'
-   gh api repos/{owner}/{repo}/pulls/<PR-NUMBER>/reviews --jq '.[] | {state, body: .body[:120]}'
+   # The posted review/comment author login carries the [bot] suffix —
+   # copilot-pull-request-reviewer[bot] — even though the reviewRequest login
+   # in step 1 does not. Filter on the suffixed login or you will under-report
+   # and miss the review entirely.
+   gh api repos/{owner}/{repo}/pulls/<PR-NUMBER>/reviews \
+     --jq '.[] | select(.user.login=="copilot-pull-request-reviewer[bot]") | {state, body: .body[:120]}'
+   gh api repos/{owner}/{repo}/pulls/<PR-NUMBER>/comments \
+     --jq '.[] | select(.user.login=="copilot-pull-request-reviewer[bot]") | .body'
    ```
    Do not rely on `get_reviews` alone — subsequent Copilot iterations can post line comments without creating a new top-level review object.
 
    **Bound the wait (§7.1).** Cap this at ~6–8 checks (≈90s apart), each tied to a concrete transition (the check-run reaching `completed`, then a comment/review appearing) — never an open-ended idle timer. When the budget is exhausted, report and move on; do not silently extend it.
 
-   **Docs-only / trivial PRs — expect no response.** Copilot commonly posts **nothing** on docs-only or otherwise trivial diffs. A bounded no-response there is **"advisory review unavailable," not a hard stop**: record it in the PR description and proceed to step 5. Only a *posted* finding gates the loop.
+   **Docs-only / trivial PRs — expect no review even when correctly requested.** Copilot **skips** docs-only diffs: the request registers (step 1's invariant passes) yet Copilot posts no review at all — this, *not* a failed request, is why the docs-only PR #411 timed out its poll this session. A bounded no-response here is **"advisory review unavailable," not a hard stop**: record it in the PR description and proceed to step 5. Only a *posted* finding gates the loop.
 3. Triage each unresolved thread. **Every thread gets a reply before it's resolved.**
-   - **Correctness / security / clarity finding** — fix on the same branch, run `uv run inv pre-push`, push, reply `Fixed in <SHA> — <one-line summary>`, resolve the thread, then re-request Copilot review by re-running step 1's `requestReviews` mutation **and its registration check** (not `--add-reviewer`, which no-ops — see step 1).
+   - **Correctness / security / clarity finding** — fix on the same branch, run `uv run inv pre-push`, push, reply `Fixed in <SHA> — <one-line summary>`, resolve the thread, then re-request Copilot review by re-running step 1's request (method A or B) **and its registration check** (not `--add-reviewer`, which no-ops — see step 1).
    - **Pure style nit** (Tailwind class order, const-vs-let, naming preference, import sort) — reply declining with a citation to project conventions, resolve the thread.
    - **Ambiguous or architecturally significant** — emit `HUMAN_INPUT_REQUIRED: Copilot flagged X on #NNN — unclear call` and stop. Leave the thread open.
 
-   **Note — where each iteration's CI run actually comes from.** Re-requesting a Copilot review (re-running step 1's `requestReviews` mutation) starts only Copilot's own `copilot-pull-request-reviewer` check-run — it does **not** start a project CI run, because `ci.yml` triggers on `pull_request` (`opened`/`synchronize`/`reopened`) and `push`, and no workflow in this repo listens for `review_requested`. The fresh full CI run you see on most iterations comes from the fix `git push` in the step-3 correctness/clarity path (a `synchronize` event), not from the re-request. Practical rule: on any iteration where you push a fix, expect a new CI run and wait for it to go green (same §7 loop) before the next Copilot pass is meaningful; on a pure-decline iteration (all findings are style nits, resolved with no commit) **no** new project CI run fires — don't wait for one.
+   **Note — where each iteration's CI run actually comes from.** Re-requesting a Copilot review (re-running step 1's request, method A or B) starts only Copilot's own `copilot-pull-request-reviewer` check-run — it does **not** start a project CI run, because `ci.yml` triggers on `pull_request` (`opened`/`synchronize`/`reopened`) and `push`, and no workflow in this repo listens for `review_requested`. The fresh full CI run you see on most iterations comes from the fix `git push` in the step-3 correctness/clarity path (a `synchronize` event), not from the re-request. Practical rule: on any iteration where you push a fix, expect a new CI run and wait for it to go green (same §7 loop) before the next Copilot pass is meaningful; on a pure-decline iteration (all findings are style nits, resolved with no commit) **no** new project CI run fires — don't wait for one.
 4. **Hard cap: 5 iterations, early-exit on convergence.** Stop when 5 round-trips are done OR two consecutive iterations produce no new actionable findings. If unresolved findings remain, emit `HUMAN_INPUT_REQUIRED: Copilot loop ended with open findings on #NNN`.
 5. **Agent-safe PRs**: arm auto-merge:
    ```bash
