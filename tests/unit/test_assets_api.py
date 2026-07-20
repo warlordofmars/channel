@@ -22,7 +22,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-os.environ.setdefault("STARTER_JWT_SECRET", "test-secret-for-unit-tests")
+os.environ.setdefault("CHANNEL_JWT_SECRET", "test-secret-for-unit-tests")
 
 from channel import storage  # noqa: E402
 from channel.api import assets as assets_api  # noqa: E402

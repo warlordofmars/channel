@@ -39,15 +39,15 @@ PLACEHOLDER_VALUE = "CHANGE_ME_ON_FIRST_DEPLOY"
 # parameters. Names match the ones wired by :mod:`infra.stacks.starter_stack`
 # under ``common_env`` — do not hardcode parameter paths here.
 HARD_FAIL_PARAM_ENV_VARS: tuple[str, ...] = (
-    "STARTER_JWT_SECRET_PARAM",
+    "CHANNEL_JWT_SECRET_PARAM",
     "GOOGLE_CLIENT_ID_PARAM",
     "GOOGLE_CLIENT_SECRET_PARAM",
-    "STARTER_ORIGIN_VERIFY_PARAM",
+    "CHANNEL_ORIGIN_VERIFY_PARAM",
 )
 
 # Env var that holds the SSM parameter name for the operational
 # AlarmEmail parameter (soft-warn only).
-SOFT_WARN_PARAM_ENV_VAR = "STARTER_ALARM_EMAIL_PARAM"
+SOFT_WARN_PARAM_ENV_VAR = "CHANNEL_ALARM_EMAIL_PARAM"
 
 
 class StartupConfigError(RuntimeError):

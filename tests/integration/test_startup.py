@@ -53,7 +53,7 @@ def lambda_env(monkeypatch):
     monkeypatch.setenv(SOFT_WARN_PARAM_ENV_VAR, "/test/alarm-email")
     # JWT secret env var has highest priority in tokens.py — set it so the
     # downstream import path doesn't try to reach SSM during the test.
-    monkeypatch.setenv("STARTER_JWT_SECRET", "integration-test-secret")
+    monkeypatch.setenv("CHANNEL_JWT_SECRET", "integration-test-secret")
     yield
     _force_reimport_main()
 

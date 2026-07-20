@@ -163,7 +163,7 @@ async def test_web_fetch_rejects_invalid_urls(monkeypatch, bad_url):
         lambda: fake_exa,
     )
     monkeypatch.delenv("EXA_API_KEY", raising=False)
-    monkeypatch.delenv("STARTER_EXA_API_KEY_PARAM", raising=False)
+    monkeypatch.delenv("CHANNEL_EXA_API_KEY_PARAM", raising=False)
 
     from channel.agents.tools.web_fetch import web_fetch
 
@@ -220,7 +220,7 @@ async def test_web_fetch_returns_missing_key_when_resolve_fails(monkeypatch):
         lambda: fake_exa,
     )
     monkeypatch.delenv("EXA_API_KEY", raising=False)
-    monkeypatch.delenv("STARTER_EXA_API_KEY_PARAM", raising=False)
+    monkeypatch.delenv("CHANNEL_EXA_API_KEY_PARAM", raising=False)
 
     from channel.agents.tools.web_fetch import web_fetch
 
@@ -355,7 +355,7 @@ async def test_invalid_url_error_round_trips_through_translate_event(monkeypatch
     ``content[].text`` — so the SPA renders ``invalid_url`` rather than a
     generic ``tool_failed``."""
     monkeypatch.delenv("EXA_API_KEY", raising=False)
-    monkeypatch.delenv("STARTER_EXA_API_KEY_PARAM", raising=False)
+    monkeypatch.delenv("CHANNEL_EXA_API_KEY_PARAM", raising=False)
 
     from channel.agents.strands_sse import translate_event
     from channel.agents.tools.web_fetch import web_fetch

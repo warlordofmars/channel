@@ -9,7 +9,7 @@ nudges the model toward that format); no SSE protocol changes.
 The Exa API key resolves on the first ``web_search()`` invocation (NOT
 at module import time): the wrapper checks ``EXA_API_KEY`` (local dev)
 first, then falls back to the SSM parameter named by
-``STARTER_EXA_API_KEY_PARAM``. The resolved value is cached for the
+``CHANNEL_EXA_API_KEY_PARAM``. The resolved value is cached for the
 lifetime of the Lambda warm pool (``@functools.lru_cache(maxsize=1)``).
 The Exa SDK itself (``strands_tools.exa``) is also lazy-loaded on first
 invocation to keep the cold-start dependency tree small. Mirrors the
@@ -77,7 +77,7 @@ def _get_exa_search() -> Callable[..., Awaitable[dict[str, Any]]]:
 
     The Exa SDK pulls in aiohttp, Rich, Console, Panel, etc. — a
     substantial transitive dependency tree. With
-    ``STARTER_WEB_SEARCH_ENABLED=1`` in all envs (the env var is a
+    ``CHANNEL_WEB_SEARCH_ENABLED=1`` in all envs (the env var is a
     kill switch, not a feature flag), this module always loads at
     cold start. Deferring the Exa import until the model actually
     calls ``web_search`` keeps those deps off the cold-start path
@@ -90,12 +90,12 @@ def _get_exa_search() -> Callable[..., Awaitable[dict[str, Any]]]:
 @functools.lru_cache(maxsize=1)
 def _resolve_exa_api_key() -> str:
     """Return the Exa API key, preferring ``EXA_API_KEY`` env var (local
-    dev), then SSM at the path in ``STARTER_EXA_API_KEY_PARAM``."""
+    dev), then SSM at the path in ``CHANNEL_EXA_API_KEY_PARAM``."""
     if key := os.environ.get("EXA_API_KEY"):
         return key
     import boto3  # pragma: no cover
 
-    param_name = os.environ["STARTER_EXA_API_KEY_PARAM"]  # pragma: no cover
+    param_name = os.environ["CHANNEL_EXA_API_KEY_PARAM"]  # pragma: no cover
     ssm = boto3.client("ssm")  # pragma: no cover
     resp = ssm.get_parameter(Name=param_name, WithDecryption=True)  # pragma: no cover
     return resp["Parameter"]["Value"]  # pragma: no cover
@@ -140,7 +140,7 @@ async def web_search(
     #
     # Make the key available to strands_tools.exa, which reads it from
     # the environment at call time. ``_resolve_exa_api_key`` can raise
-    # for multiple reasons (``KeyError`` when ``STARTER_EXA_API_KEY_PARAM``
+    # for multiple reasons (``KeyError`` when ``CHANNEL_EXA_API_KEY_PARAM``
     # is unset in local dev, ``botocore`` ``ClientError`` for SSM
     # failures, network errors during boto3 client init, etc.). The
     # bare ``Exception`` catch is intentional: the contract requires a

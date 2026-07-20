@@ -2,7 +2,7 @@
 """``current_time`` — chassis smoke-test tool (epic #128 / #181).
 
 Returns the current UTC time as an ISO-8601 string. The chassis
-registers this tool when ``STARTER_CLOCK_TOOL_ENABLED=1``; default off
+registers this tool when ``CHANNEL_CLOCK_TOOL_ENABLED=1``; default off
 in prod per strategy spec policy P2 ("smoke-test, not a product
 feature"). It exists only so the chassis has a real Strands tool to
 exercise every hook + every SSE event + every SPA renderer end-to-end.

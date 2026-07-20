@@ -2,7 +2,7 @@
 """Unit tests for the dev-only /api/_debug/* router.
 
 The router is conditionally mounted at module-import time based on
-``STARTER_ENABLE_DEBUG_ENDPOINTS``. Tests that need to flip the mount
+``CHANNEL_ENABLE_DEBUG_ENDPOINTS``. Tests that need to flip the mount
 state call ``importlib.reload(channel.api.main)`` to re-evaluate the
 mount check, then clean up by reloading again with the env var back
 to its original state.
@@ -28,15 +28,15 @@ def _stub_user() -> dict[str, Any]:
 @pytest.fixture
 def mounted_app(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     """App with the debug router mounted (env flag set)."""
-    monkeypatch.setenv("STARTER_ENABLE_DEBUG_ENDPOINTS", "1")
-    monkeypatch.setenv("STARTER_ENV", "test")
+    monkeypatch.setenv("CHANNEL_ENABLE_DEBUG_ENDPOINTS", "1")
+    monkeypatch.setenv("CHANNEL_ENV", "test")
     importlib.reload(main_module)
     main_module.app.dependency_overrides[require_mgmt_user] = _stub_user
 
     yield TestClient(main_module.app)
 
     main_module.app.dependency_overrides.clear()
-    monkeypatch.delenv("STARTER_ENABLE_DEBUG_ENDPOINTS", raising=False)
+    monkeypatch.delenv("CHANNEL_ENABLE_DEBUG_ENDPOINTS", raising=False)
     importlib.reload(main_module)
 
 
@@ -116,7 +116,7 @@ def test_delete_memory_event_calls_agentcore_delete(mounted_app: TestClient):
 
 
 def test_debug_router_not_mounted_when_env_flag_unset(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.delenv("STARTER_ENABLE_DEBUG_ENDPOINTS", raising=False)
+    monkeypatch.delenv("CHANNEL_ENABLE_DEBUG_ENDPOINTS", raising=False)
     importlib.reload(main_module)
     main_module.app.dependency_overrides[require_mgmt_user] = _stub_user
 
@@ -133,8 +133,8 @@ def test_debug_router_not_mounted_when_env_flag_unset(monkeypatch: pytest.Monkey
 
 def test_debug_endpoint_requires_mgmt_jwt(monkeypatch: pytest.MonkeyPatch):
     """No dependency override → 403/401 from HTTPBearer enforcement."""
-    monkeypatch.setenv("STARTER_ENABLE_DEBUG_ENDPOINTS", "1")
-    monkeypatch.setenv("STARTER_ENV", "test")
+    monkeypatch.setenv("CHANNEL_ENABLE_DEBUG_ENDPOINTS", "1")
+    monkeypatch.setenv("CHANNEL_ENV", "test")
     importlib.reload(main_module)
 
     try:
@@ -143,7 +143,7 @@ def test_debug_endpoint_requires_mgmt_jwt(monkeypatch: pytest.MonkeyPatch):
         # FastAPI's HTTPBearer returns 403 when no Authorization header is sent.
         assert resp.status_code in (401, 403)
     finally:
-        monkeypatch.delenv("STARTER_ENABLE_DEBUG_ENDPOINTS", raising=False)
+        monkeypatch.delenv("CHANNEL_ENABLE_DEBUG_ENDPOINTS", raising=False)
         importlib.reload(main_module)
 
 
@@ -241,10 +241,10 @@ def test_inspect_recall_empty_when_no_prior_sessions(mounted_app: TestClient):
 def test_inspect_recall_reports_kill_switch_but_still_builds_block(
     mounted_app: TestClient, monkeypatch: pytest.MonkeyPatch
 ):
-    """With ``STARTER_RECALL_ENABLED=0`` a live turn injects nothing, but
+    """With ``CHANNEL_RECALL_ENABLED=0`` a live turn injects nothing, but
     the inspector still computes the block (so it stays usable during an
     A/B run) and reports the flag so the investigator knows the live state."""
-    monkeypatch.setenv("STARTER_RECALL_ENABLED", "0")
+    monkeypatch.setenv("CHANNEL_RECALL_ENABLED", "0")
     fake_client = _recall_fake_client()
 
     with (
@@ -263,7 +263,7 @@ def test_inspect_recall_reports_kill_switch_but_still_builds_block(
 
 
 def test_inspect_recall_not_mounted_when_env_flag_unset(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.delenv("STARTER_ENABLE_DEBUG_ENDPOINTS", raising=False)
+    monkeypatch.delenv("CHANNEL_ENABLE_DEBUG_ENDPOINTS", raising=False)
     importlib.reload(main_module)
     main_module.app.dependency_overrides[require_mgmt_user] = _stub_user
 
@@ -277,8 +277,8 @@ def test_inspect_recall_not_mounted_when_env_flag_unset(monkeypatch: pytest.Monk
 
 def test_inspect_recall_requires_mgmt_jwt(monkeypatch: pytest.MonkeyPatch):
     """No dependency override → 403/401 from HTTPBearer enforcement."""
-    monkeypatch.setenv("STARTER_ENABLE_DEBUG_ENDPOINTS", "1")
-    monkeypatch.setenv("STARTER_ENV", "test")
+    monkeypatch.setenv("CHANNEL_ENABLE_DEBUG_ENDPOINTS", "1")
+    monkeypatch.setenv("CHANNEL_ENV", "test")
     importlib.reload(main_module)
 
     try:
@@ -286,7 +286,7 @@ def test_inspect_recall_requires_mgmt_jwt(monkeypatch: pytest.MonkeyPatch):
         resp = client.get("/api/_debug/recall/inspect", params={"chat_id": "c"})
         assert resp.status_code in (401, 403)
     finally:
-        monkeypatch.delenv("STARTER_ENABLE_DEBUG_ENDPOINTS", raising=False)
+        monkeypatch.delenv("CHANNEL_ENABLE_DEBUG_ENDPOINTS", raising=False)
         importlib.reload(main_module)
 
 

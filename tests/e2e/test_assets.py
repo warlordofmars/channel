@@ -43,9 +43,9 @@ profile + inline text assets need no S3); tests 4-5 skip locally and
 exercise on the deployed env via ``inv e2e``.
 
 Required env vars (mirrors the other suites here):
-- ``STARTER_UI_URL`` — Vite / SPA base URL (Playwright tests)
-- ``STARTER_API_URL`` — FastAPI base URL
-- ``STARTER_BYPASS_GOOGLE_AUTH=1`` on the API side
+- ``CHANNEL_UI_URL`` — Vite / SPA base URL (Playwright tests)
+- ``CHANNEL_API_URL`` — FastAPI base URL
+- ``CHANNEL_BYPASS_GOOGLE_AUTH=1`` on the API side
 """
 
 from __future__ import annotations
@@ -105,14 +105,14 @@ _CASCADE_POLL_SECONDS = 25.0
 
 
 def _api_url() -> str:
-    return os.environ.get("STARTER_API_URL", "http://localhost:8001")
+    return os.environ.get("CHANNEL_API_URL", "http://localhost:8001")
 
 
 def _skip_if_no_ui() -> tuple[str, str]:
     """Return (ui_url, api_url); skip when the SPA URL isn't configured."""
-    ui_url = os.environ.get("STARTER_UI_URL")
+    ui_url = os.environ.get("CHANNEL_UI_URL")
     if not ui_url:
-        pytest.skip("STARTER_UI_URL not set — run via `inv e2e` or `inv e2e-local`")
+        pytest.skip("CHANNEL_UI_URL not set — run via `inv e2e` or `inv e2e-local`")
     return ui_url, _api_url()
 
 
@@ -509,10 +509,10 @@ async def test_upload_projection_creates_asset() -> None:
 
 
 @pytest.mark.skipif(
-    os.environ.get("STARTER_CODE_EXEC_ENABLED") != "1"
-    or not os.environ.get("STARTER_CODE_EXEC_LAMBDA_ARN"),
+    os.environ.get("CHANNEL_CODE_EXEC_ENABLED") != "1"
+    or not os.environ.get("CHANNEL_CODE_EXEC_LAMBDA_ARN"),
     reason=(
-        "requires STARTER_CODE_EXEC_ENABLED=1 AND STARTER_CODE_EXEC_LAMBDA_ARN "
+        "requires CHANNEL_CODE_EXEC_ENABLED=1 AND CHANNEL_CODE_EXEC_LAMBDA_ARN "
         "set (deployed-env sandbox config)"
     ),
 )
