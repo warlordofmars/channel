@@ -169,4 +169,47 @@ describe("Shell", () => {
     await waitFor(() => expect(lastPath).toBe("/app"));
     expect(mockCreateChat).not.toHaveBeenCalled();
   });
+
+  it("mobile drawer starts closed (no mobile-open class, no backdrop) (#425)", () => {
+    const { container } = render(
+      <MemoryRouter><Shell><div /></Shell></MemoryRouter>
+    );
+    expect(container.querySelector(".sb.mobile-open")).toBeNull();
+    expect(container.querySelector(".mobile-nav-backdrop")).toBeNull();
+  });
+
+  it("tapping the hamburger opens the off-canvas drawer + backdrop (#425)", () => {
+    const { container } = render(
+      <MemoryRouter><Shell><div /></Shell></MemoryRouter>
+    );
+    fireEvent.click(screen.getByRole("button", { name: /open menu/i }));
+    expect(container.querySelector(".sb.mobile-open")).toBeTruthy();
+    expect(container.querySelector(".mobile-nav-backdrop")).toBeTruthy();
+  });
+
+  it("tapping the backdrop closes the mobile drawer (#425)", () => {
+    const { container } = render(
+      <MemoryRouter><Shell><div /></Shell></MemoryRouter>
+    );
+    fireEvent.click(screen.getByRole("button", { name: /open menu/i }));
+    expect(container.querySelector(".sb.mobile-open")).toBeTruthy();
+    // The backdrop is a real <button aria-label="Close menu"> so keyboard
+    // + assistive-tech users get a focusable dismiss path (Copilot #427).
+    fireEvent.click(screen.getByRole("button", { name: /close menu/i }));
+    expect(container.querySelector(".sb.mobile-open")).toBeNull();
+    expect(container.querySelector(".mobile-nav-backdrop")).toBeNull();
+  });
+
+  it("navigating via a sidebar nav item closes an open mobile drawer (#425)", () => {
+    // Route change is the primary close path: tapping New chat / Projects
+    // / a recent navigates, which slides the drawer shut so the user lands
+    // on the destination with the drawer closed.
+    const { container } = render(
+      <MemoryRouter><Shell><div /></Shell></MemoryRouter>
+    );
+    fireEvent.click(screen.getByRole("button", { name: /open menu/i }));
+    expect(container.querySelector(".sb.mobile-open")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /^projects/i }));
+    expect(container.querySelector(".sb.mobile-open")).toBeNull();
+  });
 });
