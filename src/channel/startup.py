@@ -36,7 +36,7 @@ logger = get_logger(__name__)
 PLACEHOLDER_VALUE = "CHANGE_ME_ON_FIRST_DEPLOY"
 
 # Env vars that hold the SSM parameter name for the four security-critical
-# parameters. Names match the ones wired by :mod:`infra.stacks.starter_stack`
+# parameters. Names match the ones wired by :mod:`infra.stacks.channel_stack`
 # under ``common_env`` — do not hardcode parameter paths here.
 HARD_FAIL_PARAM_ENV_VARS: tuple[str, ...] = (
     "CHANNEL_JWT_SECRET_PARAM",
