@@ -333,7 +333,7 @@ def test_combined_coverage(ctx):
         "AWS_SECRET_ACCESS_KEY": "local",
         "AWS_DEFAULT_REGION": "us-east-1",
         "CHANNEL_JWT_SECRET": "test-secret",
-        "CHANNEL_TABLE_NAME": "starter-integration",
+        "CHANNEL_TABLE_NAME": "channel-integration",
     }
     ctx.run(
         "uv run pytest tests/unit tests/integration "

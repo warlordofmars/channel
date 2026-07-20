@@ -186,7 +186,7 @@ jobs:
           AWS_SECRET_ACCESS_KEY: local
           AWS_DEFAULT_REGION: us-east-1
           CHANNEL_JWT_SECRET: test-secret
-          CHANNEL_TABLE_NAME: starter-integration
+          CHANNEL_TABLE_NAME: channel-integration
         run: uv run pytest tests/unit tests/integration -v --cov=src/channel --cov-report=xml:coverage-combined.xml --cov-fail-under=100
 
       - name: Write coverage summary
