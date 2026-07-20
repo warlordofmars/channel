@@ -21,7 +21,7 @@ from channel.agents.chat_agent import (
 
 
 @pytest.fixture(autouse=True)
-def _set_starter_env(monkeypatch):
+def _set_channel_env(monkeypatch):
     """build_agent needs CHANNEL_ENV to derive the AgentCore Memory name."""
     monkeypatch.setenv("CHANNEL_ENV", "test")
 
@@ -406,7 +406,7 @@ def test_build_titler_agent_uses_haiku_with_no_hooks(monkeypatch):
     assert captured["agent_kwargs"].get("hooks", []) == []
 
 
-def test_build_titler_agent_respects_starter_titler_model_override(monkeypatch):
+def test_build_titler_agent_respects_channel_titler_model_override(monkeypatch):
     from channel.agents.chat_agent import build_titler_agent
 
     monkeypatch.setenv("CHANNEL_TITLER_MODEL", "claude-sonnet-4-6")
@@ -449,7 +449,7 @@ def test_build_followups_agent_uses_haiku_with_no_hooks(monkeypatch):
     assert "follow-up" in captured["agent_kwargs"]["system_prompt"].lower()
 
 
-def test_build_followups_agent_respects_starter_followups_model_override(monkeypatch):
+def test_build_followups_agent_respects_channel_followups_model_override(monkeypatch):
     from channel.agents.chat_agent import build_followups_agent
 
     monkeypatch.setenv("CHANNEL_FOLLOWUPS_MODEL", "claude-sonnet-4-6")
