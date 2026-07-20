@@ -200,16 +200,21 @@ describe("Shell", () => {
     expect(container.querySelector(".mobile-nav-backdrop")).toBeNull();
   });
 
-  it("navigating via a sidebar nav item closes an open mobile drawer (#425)", () => {
+  it("navigating via a sidebar nav item closes an open mobile drawer (#425)", async () => {
     // Route change is the primary close path: tapping New chat / Projects
     // / a recent navigates, which slides the drawer shut so the user lands
-    // on the destination with the drawer closed.
+    // on the destination with the drawer closed. The close is driven by a
+    // `useLocation().pathname` effect, so assert via `waitFor` to let the
+    // navigation → effect flush settle (rather than assuming a single
+    // synchronous tick).
     const { container } = render(
       <MemoryRouter><Shell><div /></Shell></MemoryRouter>
     );
     fireEvent.click(screen.getByRole("button", { name: /open menu/i }));
     expect(container.querySelector(".sb.mobile-open")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: /^projects/i }));
-    expect(container.querySelector(".sb.mobile-open")).toBeNull();
+    await waitFor(() =>
+      expect(container.querySelector(".sb.mobile-open")).toBeNull()
+    );
   });
 });
