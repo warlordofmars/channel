@@ -45,6 +45,7 @@ channel/
 │           ├── mcp.py         # MCP-server registry REST (list/register/rename/delete/reauth) + per-chat override + /auth/mcp/callback
 │           ├── models.py      # GET /api/models — server allowlist
 │           ├── prefs.py       # User preferences API — GET/PUT /api/me/prefs (single PREFS row)
+│           ├── sessions.py    # Sessions API — GET/DELETE /api/me/sessions[/{device_id}] over refresh rows
 │           └── csp.py         # CSP violation reporting endpoint
 ├── ui/
 │   ├── index.html             # Vite entry HTML
@@ -287,9 +288,15 @@ expiry even though the refresh token it needs is now issued (#292).
   so a row minted inside the index-propagation window can survive a
   cascade — the reuse path sweeps twice to narrow this, which does not
   close it. Closing it needs a strongly-consistent per-device family
-  marker checked on consume; that belongs with the session row #293
-  introduces. Damage is bounded by the family's unchanged
-  `absolute_expires_at` — #290, epic #241)
+  marker checked on consume. **#293 did not add one** — the sessions
+  API it introduced (`GET`/`DELETE /api/me/sessions`, backed by
+  `list_live_refresh_tokens` / `revoke_device_refresh_tokens`) is a
+  read-and-revoke surface over this same index and *inherits* the
+  window: a just-created session can be missing from the list, and
+  revoking it can 404 until the index catches up. A family marker is a
+  change to the mint/consume path, not to that read surface, and is
+  still unbuilt. Damage is bounded by the family's unchanged
+  `absolute_expires_at` — #290, #293, epic #241)
 - Chat-index items: `PK=USER#{user_id}`, `SK=CHAT#{created_at}#{chat_id}`
   (one row per chat; sortable so the Recents query is a single
   `Query(ScanIndexForward=False)`; also projects onto `ChatByIdIndex`)
