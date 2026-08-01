@@ -135,12 +135,31 @@ def _rejection(*, via_cookie: bool) -> JSONResponse:
 
 
 def _issued(row: RefreshToken, rotated: str, *, via_cookie: bool) -> JSONResponse:
-    """200 carrying a fresh access JWT and the rotated refresh token."""
+    """200 carrying a fresh access JWT and the rotated refresh token.
 
-    # Claims are rebuilt through the same helper the login flow uses so a
-    # refreshed session can never drift from a freshly logged-in one. The
-    # refresh row stores only ``user_id``, which equals the user's email
-    # in the current mgmt-JWT shape (see ``mgmt_auth.make_mgmt_user``).
+    .. warning::
+       **``display_name`` degrades here, and #292 is where that gets
+       fixed.** Claims are rebuilt through the same helper the login
+       flow uses, so a refreshed session cannot drift from a freshly
+       logged-in one — except in the one field the refresh row cannot
+       supply. ``RefreshToken`` (#290) stores only ``user_id``, which
+       equals the user's email in the current mgmt-JWT shape, so the
+       best this can do for ``display_name`` is the email's local-part.
+       Google's real name ("John Carter" → "john") is lost, and
+       ``Sidebar.jsx`` / ``ChatHome.jsx`` treat that as the *legacy
+       token* fallback rather than a normal state.
+
+       This is unreachable today: nothing in ``src/`` mints a first
+       refresh token — ``mint_refresh_token``'s only production caller
+       is ``consume_refresh_token`` rotating an existing family — so no
+       client can reach this branch until #292 wires minting into the
+       Google callback. #292 is also the only place with the name to
+       persist (it is a claim on the Google ID token, present nowhere
+       else), so the fix belongs there: carry ``display_name`` onto the
+       refresh row and forward through rotation the way
+       ``absolute_expires_at`` already is, then read it here.
+    """
+
     user = make_mgmt_user(row.user_id, row.user_id.split("@")[0])
     payload: dict[str, Any] = {
         "access_token": issue_mgmt_jwt(user),
