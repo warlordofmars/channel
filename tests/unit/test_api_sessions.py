@@ -11,16 +11,25 @@ argument would let a broken route pass.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable, Iterator
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from jose import jwt
 
-from channel.api._auth import require_mgmt_user
-from channel.api.main import app
-from channel.models import (
+# Set before importing the app, exactly as the other token-using suites do.
+# ``_jwt_secret`` is ``lru_cache``d, so a per-test ``monkeypatch.setenv``
+# would populate that cache with a value that outlives its own teardown.
+os.environ.setdefault("CHANNEL_JWT_SECRET", "test-secret-for-unit-tests")
+os.environ.setdefault("GOOGLE_CLIENT_ID", "test-google-client-id")
+
+from channel.api._auth import require_mgmt_user  # noqa: E402
+from channel.api.main import app  # noqa: E402
+from channel.auth.tokens import issue_mgmt_jwt  # noqa: E402
+from channel.models import (  # noqa: E402
     REFRESH_ABSOLUTE_LIFETIME_SECONDS,
     REFRESH_IDLE_TIMEOUT_SECONDS,
     RefreshToken,
@@ -437,7 +446,45 @@ def test_revoke_all_sessions_writes_an_audit_event(
         {
             "event_type": "auth.session_revoke_all",
             "actor_id": "u-1",
-            "details": {"role": "user", "revoked_rows": 2, "access_token_denied": True},
+            "details": {
+                "role": "user",
+                "revoked_rows": 2,
+                "access_token_denied": True,
+                # Pairs the row with the DENY#{jti} row it caused, the
+                # same correlation handle /auth/logout records.
+                "jti": "jti-abc",
+            },
+        }
+    ]
+
+
+def test_a_failed_denylist_write_still_leaves_an_audit_row(
+    store: _Store, as_user: Callable[..., TestClient], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Refresh families are already gone by the time the deny runs, so the
+    half-applied state is exactly the one the audit trail must show —
+    honestly, as access_token_denied: false."""
+
+    def _boom(jti: str, exp: int) -> None:
+        raise RuntimeError("denylist table unavailable")
+
+    monkeypatch.setattr("channel.api.sessions.storage.deny_jti", _boom)
+    store.seed(_token("u-1", "laptop"))
+    client = as_user("u-1", jti="jti-abc")
+
+    with pytest.raises(RuntimeError):
+        client.delete("/api/me/sessions", headers=_AUTH)
+
+    assert store.audit_events == [
+        {
+            "event_type": "auth.session_revoke_all",
+            "actor_id": "u-1",
+            "details": {
+                "role": "user",
+                "revoked_rows": 1,
+                "access_token_denied": False,
+                "jti": "jti-abc",
+            },
         }
     ]
 
@@ -479,25 +526,25 @@ def test_a_404_revoke_writes_no_audit_event(
 # auth; mock the AWS boundary" rule.
 
 
-def test_cross_user_revoke_is_404_with_a_real_signed_token(
-    store: _Store, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("CHANNEL_JWT_SECRET", "test-secret-for-unit-tests")
-    from channel.auth.tokens import issue_mgmt_jwt
+def _real_bearer(email: str) -> dict[str, str]:
+    """A real signed mgmt JWT for ``email``, as the login flow would mint."""
 
-    store.seed(_token("victim@example.com", "victim-laptop"))
-    attacker = issue_mgmt_jwt(
+    token = issue_mgmt_jwt(
         {
-            "user_id": "attacker@example.com",
-            "email": "attacker@example.com",
-            "display_name": "attacker",
+            "user_id": email,
+            "email": email,
+            "display_name": email.split("@")[0],
             "role": "user",
         }
     )
+    return {"Authorization": f"Bearer {token}"}
+
+
+def test_cross_user_revoke_is_404_with_a_real_signed_token(store: _Store) -> None:
+    store.seed(_token("victim@example.com", "victim-laptop"))
 
     r = TestClient(app).delete(
-        "/api/me/sessions/victim-laptop",
-        headers={"Authorization": f"Bearer {attacker}"},
+        "/api/me/sessions/victim-laptop", headers=_real_bearer("attacker@example.com")
     )
 
     assert r.status_code == 404
@@ -505,29 +552,31 @@ def test_cross_user_revoke_is_404_with_a_real_signed_token(
     assert [row.device_id for row in store.rows["victim@example.com"]] == ["victim-laptop"]
 
 
-def test_a_real_token_only_lists_its_own_subjects_sessions(
-    store: _Store, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("CHANNEL_JWT_SECRET", "test-secret-for-unit-tests")
-    from channel.auth.tokens import issue_mgmt_jwt
-
+def test_a_real_token_only_lists_its_own_subjects_sessions(store: _Store) -> None:
     store.seed(
         _token("victim@example.com", "victim-laptop"),
         _token("attacker@example.com", "attacker-phone"),
     )
-    attacker = issue_mgmt_jwt(
-        {
-            "user_id": "attacker@example.com",
-            "email": "attacker@example.com",
-            "display_name": "attacker",
-            "role": "user",
-        }
-    )
 
     body = (
-        TestClient(app)
-        .get("/api/me/sessions", headers={"Authorization": f"Bearer {attacker}"})
-        .json()
+        TestClient(app).get("/api/me/sessions", headers=_real_bearer("attacker@example.com")).json()
     )
 
     assert [s["device_id"] for s in body["sessions"]] == ["attacker-phone"]
+
+
+def test_a_real_token_denylists_its_own_jti_on_sign_out_everywhere(store: _Store) -> None:
+    """End-to-end through the real validator: the jti that gets denylisted
+    is the one the issuer actually baked into the caller's token."""
+    store.seed(_token("user@example.com", "laptop"))
+    headers = _real_bearer("user@example.com")
+
+    r = TestClient(app).delete("/api/me/sessions", headers=headers)
+
+    assert r.status_code == 204
+    assert len(store.denied_jtis) == 1
+    denied_jti, denied_exp = store.denied_jtis[0]
+    claims = jwt.get_unverified_claims(headers["Authorization"].removeprefix("Bearer "))
+    assert denied_jti == claims["jti"]
+    assert denied_exp == claims["exp"]
+    assert store.audit_events[0]["details"]["jti"] == claims["jti"]

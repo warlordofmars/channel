@@ -245,10 +245,27 @@ def revoke_all_my_sessions(
     revoked = storage.revoke_all_user_refresh_tokens(claims["sub"])
     # Tokens minted before #240 carry no ``jti`` and cannot be denylisted;
     # they simply expire. Mirrors the same guard in ``/auth/logout``.
-    denied = bool(jti := claims.get("jti"))
-    if jti:
-        storage.deny_jti(jti, claims["exp"])
-    _audit_revocation(
-        "auth.session_revoke_all", claims, revoked_rows=revoked, access_token_denied=denied
-    )
+    jti = claims.get("jti")
+    denied = False
+    try:
+        if jti:
+            storage.deny_jti(jti, claims["exp"])
+            denied = True
+    finally:
+        # ``finally``, so a denylist failure still leaves an audit row for
+        # the revocation that already landed — recorded honestly as
+        # ``access_token_denied: false``. Without it the one state the
+        # audit trail most needs to show (refresh families gone, access
+        # token still live) would be the one state it never recorded. The
+        # exception still propagates; only the row is salvaged.
+        details: dict[str, Any] = {
+            "revoked_rows": revoked,
+            "access_token_denied": denied,
+        }
+        if jti:
+            # Same correlation handle ``/auth/logout`` records, and what
+            # lets an operator pair this row with the DENY#{jti} row it
+            # caused (or, when denied is False, the one it failed to).
+            details["jti"] = jti
+        _audit_revocation("auth.session_revoke_all", claims, **details)
     return Response(status_code=204)
