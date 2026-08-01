@@ -1464,7 +1464,7 @@ html.is-electron-mac .sb-top {
   /* Anchor the greeting near the top (not vertically centred) so the
      composer + quick actions sit in the thumb zone, and let the
      greeting wrap instead of overflowing a long first name. */
-  .home { padding: 16px 12px 12px; justify-content: flex-start; padding-top: 8vh; }
+  .home { padding: 8vh 12px 12px; justify-content: flex-start; }
   .greet { gap: 12px; margin-bottom: 22px; }
   .greet h1 { font-size: 28px; white-space: normal; }
 
