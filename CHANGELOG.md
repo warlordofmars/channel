@@ -223,6 +223,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Meta
 
+- Brought the automated review instructions back in line with the UI
+  conventions they are supposed to enforce (#449). PR #447 removed
+  `lucide-react`, but `.claude/agents/code-reviewer.md` still issued a
+  `FAIL` against any icon not sourced from that deleted package and
+  carried a whole "shadcn/ui primitives" check telling authors to add
+  primitives to a `ui/src/components/ui/` directory that has never
+  existed — since `code-reviewer` runs as a merge gate on every PR,
+  the next UI change would have been blocked on impossible
+  instructions. Check 5 now states the real rule (icons come from the
+  hand-rolled `ui/src/components/Icon.jsx` stroke set; emoji-as-UI
+  stays a `FAIL`; a new icon-package import is also a `FAIL`), and
+  check 6 is rewritten from "use shadcn" to the actual convention —
+  hand-rolled primitives, no component library, raw HTML with semantic
+  class names is correct — while still flagging a re-rolled modal over
+  `Modal.jsx` and any new Tailwind/component-library dependency. The
+  same correction lands in `.github/copilot-instructions.md`, the
+  vestigial `ui/components.json` (shadcn CLI config pointing at a
+  Tailwind config and `src/index.css` that don't exist) is deleted, and
+  the `react-component` skill drops its now-false "the dependency still
+  lingers in `ui/package.json`" parenthetical.
 - Swept `CLAUDE.md` for the stale `STARTER_*` environment-variable
   prefix left behind by the #259 hard-cut rename: all 17 occurrences
   across 13 distinct variables (the debug-endpoint gate, audit

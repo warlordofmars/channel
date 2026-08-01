@@ -110,7 +110,7 @@ gh pr diff <PR> -- '*.css' '*.jsx' '*.js' | grep -E '^\+' | grep -vE '^\+\s*//' 
 
 Hardcoded hex, rgb, or hsl colour values in UI files → `FAIL`. All colours must use `var(--token-name)`.
 
-Exception: `docs-site/.vitepress/theme/style.css` and `ui/src/index.css` may define CSS variable tokens — verify the flagged lines are variable *definitions* (for example `:root { --colour: #... }`, `[data-theme="dark"] { --colour: #... }`, or `@theme { --color-foo: #... }`) not *usages*. New chart palette tokens (`--chart-<name>: #...`) added to `ui/src/index.css`'s root blocks, and Tailwind theme tokens added in its `@theme` block, fall under this exception; consuming them in `*.jsx` / `*.js` must still go through `var(--chart-<name>)` or the appropriate CSS variable reference.
+Exception: `ui/src/styles/channel.css` and `docs-site/.vitepress/theme/style.css` may define CSS variable tokens — verify the flagged lines are variable *definitions* (for example `:root { --colour: #... }` or `[data-theme="dark"] { --colour: #... }`) not *usages*. New chart palette tokens (`--chart-<name>: #...`) added to `ui/src/styles/channel.css`'s theme blocks fall under this exception; consuming them in `*.jsx` / `*.js` must still go through `var(--chart-<name>)` or the appropriate CSS variable reference.
 
 ---
 
@@ -120,19 +120,31 @@ Exception: `docs-site/.vitepress/theme/style.css` and `ui/src/index.css` may def
 gh pr diff <PR> -- '*.jsx' '*.js' | grep -E '^\+' | grep -P '[\x{1F300}-\x{1FFFF}]|[\x{2600}-\x{26FF}]' 2>/dev/null || true
 ```
 
-Emoji used as visible UI elements in JSX/JS → `FAIL`. All icons must use `lucide-react`. If a needed icon isn't in `lucide-react`, that's a design conversation — flag as `WARN` with a suggested search.
+Emoji used as visible UI elements in JSX/JS → `FAIL`.
+
+All icons come from `ui/src/components/Icon.jsx` — the project's hand-rolled 24×24 `currentColor` stroke set, used as `<Icon name="search" size={18} />`. If a needed glyph isn't in the set, the fix is to add a `case` to `Icon.jsx`, not to reach for an icon package. Channel ships **no** icon dependency (`lucide-react` was removed in #445 / PR #447), so a new icon-library import is also a `FAIL`:
+
+```bash
+gh pr diff <PR> -- 'ui/src/*' | grep -E "^\+.*from ['\"](lucide-react|react-icons|@heroicons|@tabler/icons)"
+```
+
+An icon whose colour is passed as a hardcoded prop rather than inherited from the surrounding element's token-driven `color` → `WARN` (see check 4).
 
 ---
 
-### 6. shadcn/ui primitives
+### 6. Hand-rolled primitives — no component library
 
-Raw HTML form elements in JSX outside `ui/src/components/ui/`:
+Channel's UI uses no Tailwind and no component library. Reusable primitives are plain `.jsx` files directly under `ui/src/components/` (`Icon.jsx`, `Modal.jsx`, `ErrorBoundary.jsx`, `ChannelMark.jsx`, `AuthGate.jsx`), styled with the CSS-variable tokens from check 4. There is **no** `ui/src/components/ui/` layer — a raw `<button>` / `<input>` / `<select>` / `<textarea>` carrying a semantic `className` is the correct shape and is **not** a finding.
 
 ```bash
-gh pr diff <PR> -- '*.jsx' | grep -E '^\+.*<(button|input|select|textarea)\b' | grep -v 'components/ui/'
+gh pr diff <PR> -- 'ui/package.json' | grep -E '^\+.*"(tailwindcss|@radix-ui/|@mui/|@chakra-ui/|class-variance-authority|tailwind-merge|shadcn)'
 ```
 
-Raw HTML form elements that should be shadcn primitives → `WARN`. Add the primitive to `ui/src/components/ui/` first, then use it.
+- A new component-library or Tailwind dependency added to `ui/package.json` → `FAIL`. That's a design conversation, not a PR-time decision (CLAUDE.md §"UI conventions").
+- A new dialog or destructive-confirm that hand-rolls its own backdrop + Esc handling instead of using `ui/src/components/Modal.jsx` → `WARN`.
+- A new popover that doesn't follow the established `<div className="backdrop" />` + `<div className="pop" />` pattern (ModelPicker / AttachMenu / AccountPopover in `ui/src/app/`) → `WARN`.
+
+Full conventions: `.claude/skills/react-component/SKILL.md` §1.
 
 ---
 
