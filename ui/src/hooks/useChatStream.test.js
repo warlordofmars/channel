@@ -1492,6 +1492,43 @@ describe("useChatStream", () => {
       expect(assignSpy).not.toHaveBeenCalled();
     });
 
+    // #428: a send into a chat owned by a different sign-in (or one that
+    // was deleted) 404s by design — `_load_owned_chat` answers 404 rather
+    // than 403 so chat existence isn't leaked. The chip must name that
+    // plainly and stay non-retryable; the retryable `connection_lost`
+    // copy is exactly the misdiagnosis this branch exists to prevent.
+    it("maps 404 to the non-retryable chat-unavailable chip", async () => {
+      const { view, outcome } = await sendRefused(404, "Chat not found");
+      expect(outcome).toEqual({ accepted: false });
+      expect(view.result.current.status).toBe("idle");
+      expect(view.result.current.error).toBeNull();
+      const turn = view.result.current.turns.at(-1);
+      expect(turn.role).toBe("assistant");
+      expect(turn.streaming).toBe(false);
+      expect(turn.sendRejected).toBe(true);
+      expect(turn.streamError).toEqual({
+        code: "chat_unavailable",
+        message:
+          "This chat isn't available on your account. It may have been " +
+          "deleted or belongs to a different sign-in.",
+        retryable: false,
+      });
+    });
+
+    it("404 does NOT clear the mgmt token or redirect to login", async () => {
+      // Contrast with 401: the session is fine, only this chat is out of
+      // reach — signing the user out would be wrong and destructive.
+      const assignSpy = vi.fn();
+      vi.stubGlobal("location", { ...globalThis.location, assign: assignSpy });
+      localStorage.setItem(TOKEN_KEY, "tok-abc");
+      const { view } = await sendRefused(404, "Chat not found");
+      expect(view.result.current.turns.at(-1).streamError).toMatchObject({
+        code: "chat_unavailable",
+      });
+      expect(localStorage.getItem(TOKEN_KEY)).toBe("tok-abc");
+      expect(assignSpy).not.toHaveBeenCalled();
+    });
+
     it("maps a 500 to the generic chip", async () => {
       const { view } = await sendRefused(500, "Internal Server Error");
       expect(view.result.current.turns.at(-1).streamError).toMatchObject({

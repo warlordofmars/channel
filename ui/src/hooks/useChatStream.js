@@ -127,6 +127,24 @@ function sendRefusalError(status, detail) {
       retryable: false,
     };
   }
+  // #428: the chat isn't readable under the signed-in identity — it was
+  // deleted, or it belongs to a different sign-in. `_load_owned_chat`
+  // deliberately answers 404 (not 403) on an ownership mismatch so chat
+  // existence isn't leaked, which makes 404 the single signal for both
+  // cases. Name it plainly: the generic "Couldn't send. Please try
+  // again." copy invites a retry that can never succeed under the wrong
+  // identity, and a stale bundle rendered this as the *retryable*
+  // `connection_lost` chip — which cost an hour chasing a phantom
+  // streaming bug on 2026-07-19.
+  if (status === 404) {
+    return {
+      code: "chat_unavailable",
+      message:
+        "This chat isn't available on your account. It may have been " +
+        "deleted or belongs to a different sign-in.",
+      retryable: false,
+    };
+  }
   return {
     code: "send_failed",
     message: "Couldn't send. Please try again.",
