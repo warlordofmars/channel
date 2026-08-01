@@ -37,7 +37,7 @@ channel/
 │       └── api/
 │           ├── main.py        # FastAPI app + routes
 │           ├── _auth.py       # Shared mgmt-JWT dependency for /api/* routes
-│           ├── _debug.py      # /api/_debug/* — dev-only, gated by STARTER_ENABLE_DEBUG_ENDPOINTS
+│           ├── _debug.py      # /api/_debug/* — dev-only, gated by CHANNEL_ENABLE_DEBUG_ENDPOINTS
 │           ├── admin.py       # Admin REST — user list/detail (#235) + CloudWatch metrics (#236); every route require_admin-gated
 │           ├── assets.py      # Asset REST surface — per-chat list/get/content/delete + browse
 │           ├── attachments.py # Attachments API (#175) — presigned S3 upload + finalize
@@ -147,7 +147,7 @@ token is stored client-side in `localStorage` under the
 - Activity log items: `PK=LOG#{date}#{hour}`, `SK={timestamp}#{event_id}`
   (hour-sharded to avoid hot partitions)
 - Audit log items: `PK=AUDIT#{date}#{hour}`, `SK={timestamp}#{event_id}`
-  (immutable compliance trail, TTL via `STARTER_AUDIT_RETENTION_DAYS`,
+  (immutable compliance trail, TTL via `CHANNEL_AUDIT_RETENTION_DAYS`,
   default 365 days)
 - User items: `PK=USER#{user_id}`, `SK=META`
 - Mgmt state items: `PK=MGMT_STATE#{state}`, `SK=META`
@@ -264,7 +264,7 @@ Everything that creates ASSET rows lives in
   confirmation). The post-stream slot reads that sink and persists each
   image via `persist_generated_image_assets` (`kind=image`,
   `origin=generated`, `source.tool_use_id`). Kill-switch:
-  `STARTER_IMAGE_GEN_ENABLED` gates tool registration in
+  `CHANNEL_IMAGE_GEN_ENABLED` gates tool registration in
   `chats._build_tool_registry` (default-on in every deployed env; set
   `"0"` to remove the tool). Content moderation is Bedrock's built-in
   Stability RAI filter — a blocked generation returns a non-null first
@@ -274,7 +274,7 @@ Everything that creates ASSET rows lives in
   the SPA sees `error_type="content_filtered"`. No cost gating (billing
   deferred);
   the only observability is the `ImageGenInvocations` /
-  `ImageGenFailures` EMF counters. `STARTER_IMAGE_GEN_MODEL` overrides
+  `ImageGenFailures` EMF counters. `CHANNEL_IMAGE_GEN_MODEL` overrides
   the model id (Ultra / SD3.5 Large share the identical request
   contract). **Cross-region (the app's only one):** `generate_image`
   invokes Bedrock in **us-west-2** because the Stability text-to-image
@@ -282,7 +282,7 @@ Everything that creates ASSET rows lives in
   cross-region inference profile). Only this image call leaves
   us-east-1 — the returned PNG persists to the us-east-1 assets bucket
   via the unchanged pipeline, so data at rest stays in us-east-1.
-  `STARTER_IMAGE_GEN_REGION` (default `us-west-2`) makes it
+  `CHANNEL_IMAGE_GEN_REGION` (default `us-west-2`) makes it
   configurable; `channel_stack.py` pins the three Stability
   foundation-model ARNs to us-west-2 to authorize the call.
 - **Fenced-code extraction** (the ONLY heuristic) — post-stream, in
@@ -291,7 +291,7 @@ Everything that creates ASSET rows lives in
   `kind=code` assets with `source.fence_index` (0-based ordinal over
   ALL fences in the message) and `source.lang`. Message text persists
   UNCHANGED — the SPA swaps fence → card by ordinal. Kill-switch:
-  `STARTER_ASSET_EXTRACTION_ENABLED` (default `"1"`; gates the
+  `CHANNEL_ASSET_EXTRACTION_ENABLED` (default `"1"`; gates the
   heuristic only).
 
 SSE vocabulary (`strands_sse.py`): `asset_created` / `asset_updated`
@@ -328,7 +328,7 @@ auto-titling of fresh chats via a Haiku one-shot Agent (Phase 7d).
   hyphens). Discovered or created lazily on Lambda cold-start; the
   module-level cache means subsequent requests in the same instance
   pay zero overhead.
-- **`STARTER_AGENTCORE_MEMORY_NAME`** overrides the default name —
+- **`CHANNEL_AGENTCORE_MEMORY_NAME`** overrides the default name —
   useful for pointing a personal dev environment at a pre-existing
   Memory resource.
 - **`actorId = sanitize(jwt.sub)`** — one actor per Channel user.
@@ -357,7 +357,7 @@ auto-titling of fresh chats via a Haiku one-shot Agent (Phase 7d).
 Dev-only `GET /api/_debug/memory/events?chat_id=...&limit=...` and
 `DELETE /api/_debug/memory/events?chat_id=...&event_id=...`
 (`src/channel/api/_debug.py`) surface writes for Playwright e2e
-verification. Mounted only when `STARTER_ENABLE_DEBUG_ENDPOINTS=1`;
+verification. Mounted only when `CHANNEL_ENABLE_DEBUG_ENDPOINTS=1`;
 prod never sets the flag (CDK assertion test in
 `tests/unit/test_channel_stack.py` guards this).
 
@@ -378,7 +378,7 @@ prod never sets the flag (CDK assertion test in
   `sessionId` from the ListSessions result to avoid double-feeding.
 - **5-turn cache** — keyed by `(actor_id, chat_id)`, module-level.
   Cold-start invalidates.
-- **Kill-switch** — `STARTER_RECALL_ENABLED=0` short-circuits.
+- **Kill-switch** — `CHANNEL_RECALL_ENABLED=0` short-circuits.
 - **History**: Phase 7d implemented this via `RetrieveMemoryRecords`
   + `SemanticMemoryStrategy`. The strategy's async ingestion lag
   (hours in real use) made recall empty for too long, so 8a pivoted
@@ -415,9 +415,9 @@ infra**.
   that context exists. Scoping reuses `actorId =
   _sanitize_actor_id(jwt.sub)` — follows, does not pre-empt, the future
   `{workspace_id}/{user_id}` scheme.
-- **Kill-switch** — `STARTER_MEMORY_TOOLS_ENABLED` (default `"1"`, same
-  memory-family convention as `STARTER_RECALL_ENABLED` /
-  `STARTER_AUTO_TITLE_ENABLED`). `"0"` removes both tools.
+- **Kill-switch** — `CHANNEL_MEMORY_TOOLS_ENABLED` (default `"1"`, same
+  memory-family convention as `CHANNEL_RECALL_ENABLED` /
+  `CHANNEL_AUTO_TITLE_ENABLED`). `"0"` removes both tools.
 - **Coexists with the recall hook** — Q2 keeps both; the hook's fate is
   deferred to #274 (+ #227). The tool's output lands in the
   *tool-result* register, the hook's in the *system prompt* — different
@@ -452,9 +452,9 @@ infra**.
   `sse_title_suggested(chat_id, title)` SSE frame before stream close.
   The SPA's `useChatStream` forwards via `onTitleSuggested` to
   `ChatsContext.renameChatLocal`.
-- **Kill-switch** — `STARTER_AUTO_TITLE_ENABLED=0` skips the titler
+- **Kill-switch** — `CHANNEL_AUTO_TITLE_ENABLED=0` skips the titler
   block. Default `"1"`.
-- **Model override** — `STARTER_TITLER_MODEL` (default `claude-haiku-4-5`).
+- **Model override** — `CHANNEL_TITLER_MODEL` (default `claude-haiku-4-5`).
 
 ## Development self-awareness (#387)
 
@@ -561,7 +561,7 @@ app uses external-browser + loopback instead:
    renderer via IPC, closes the loopback server, and serves the browser
    a "you can close this window" HTML page.
 
-In `inv desktop-dev`, the dev FastAPI runs with `STARTER_BYPASS_GOOGLE_AUTH=1`,
+In `inv desktop-dev`, the dev FastAPI runs with `CHANNEL_BYPASS_GOOGLE_AUTH=1`,
 but the desktop renderer does not send the `?test_email=` shortcut, so the
 dev flow currently still goes through Google. A follow-up will wire a
 desktop-specific bypass path that mints a synthetic JWT and short-circuits
@@ -917,7 +917,7 @@ uv run inv dev
 
 - `CORS_ORIGINS` — `localhost:5173` through `localhost:5179` (handles port
   collisions if 5173 is already taken by another project)
-- `STARTER_BYPASS_GOOGLE_AUTH=1` — enables the `?test_email=` auth shortcut
+- `CHANNEL_BYPASS_GOOGLE_AUTH=1` — enables the `?test_email=` auth shortcut
   (only activates when that query param is present; normal browser flows
   are unaffected)
 
@@ -974,7 +974,7 @@ uv run inv e2e-local --n 5
 ```
 
 `inv e2e-local` probes ports 5173–5179 for the Channel Vite dev server (via
-`/auth/login?test_email=probe`) and passes the detected URL as `STARTER_UI_URL`.
+`/auth/login?test_email=probe`) and passes the detected URL as `CHANNEL_UI_URL`.
 
 Key local e2e gotchas:
 
