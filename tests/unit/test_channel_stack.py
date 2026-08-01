@@ -1109,3 +1109,135 @@ def test_lambda_asset_exclude_shields_fingerprint_from_junk_churn(tmp_path):
         before = fp()
         bundling_input.write_text(bundling_input.read_text() + "# changed\n")
         assert fp() != before, f"{bundling_input.name} must still move the fingerprint"
+
+
+# ----------------------------------------------------------------
+# Observability v2 (#111) — alarms must reference metrics we emit
+# ----------------------------------------------------------------
+
+
+def _alarms(template: assertions.Template) -> dict[str, dict]:
+    """Every ``AWS::CloudWatch::Alarm`` keyed by its ``AlarmName``."""
+    return {
+        res["Properties"]["AlarmName"]: res["Properties"]
+        for res in template.find_resources("AWS::CloudWatch::Alarm").values()
+    }
+
+
+def _channel_metric_names(alarm: dict) -> set[str]:
+    """``Channel``-namespace metric names an alarm depends on.
+
+    Covers both shapes: a plain ``MetricName`` alarm and a metric-math
+    alarm, whose component metrics hang off ``Metrics[].MetricStat``.
+    """
+    names: set[str] = set()
+    if alarm.get("Namespace") == "Channel":
+        names.add(alarm["MetricName"])
+    for entry in alarm.get("Metrics", []):
+        stat = entry.get("MetricStat")
+        if stat and stat["Metric"].get("Namespace") == "Channel":
+            names.add(stat["Metric"]["MetricName"])
+    return names
+
+
+def test_every_channel_namespace_alarm_references_an_emitted_metric(dev_template):
+    """The regression this issue exists to prevent.
+
+    Three alarms used to watch metric names no code path ever emitted
+    (``ToolErrors`` / ``StorageLatencyMs`` / ``TokenValidationFailures``);
+    with ``treat_missing_data=NOT_BREACHING`` they sat permanently green,
+    advertising coverage that did not exist. Pin every Channel-namespace
+    alarm to a name ``channel.metrics`` actually publishes so a renamed or
+    dropped counter fails here instead of silently going dark in prod.
+    """
+    import ast
+
+    def _live_string_literals(path: Path) -> set[str]:
+        """Every string constant in ``path`` EXCEPT docstrings.
+
+        Excluding docstrings is the load-bearing part. Metric names reach
+        ``emit_metric`` three different ways — a literal argument, a ternary
+        bound to a local, an ``_emit_batch`` tuple — so matching call shapes
+        misses some. Matching every literal catches all three, but would also
+        accept a name that only ever appeared in a usage example: an earlier
+        draft of this test passed while `StorageLatencyMs` was documented and
+        unemitted, which is exactly the dead-metric shape being guarded here.
+        """
+        tree = ast.parse(path.read_text())
+        docstrings: set[int] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Module | ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+                first = node.body[0] if node.body else None
+                if (
+                    isinstance(first, ast.Expr)
+                    and isinstance(first.value, ast.Constant)
+                    and isinstance(first.value.value, str)
+                ):
+                    docstrings.add(id(first.value))
+        return {
+            node.value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and id(node) not in docstrings
+        }
+
+    src_root = Path(__file__).resolve().parents[2] / "src" / "channel"
+    emitted = _live_string_literals(src_root / "metrics.py") | _live_string_literals(
+        src_root / "api" / "csp.py"
+    )
+    # Self-check — without this the subset assertion below could pass
+    # vacuously if the extractor ever over-collected.
+    assert not ({"ToolErrors", "StorageLatencyMs", "TokenValidationFailures"} & emitted)
+
+    referenced: set[str] = set()
+    for alarm in _alarms(dev_template).values():
+        referenced |= _channel_metric_names(alarm)
+
+    assert referenced, "expected at least one Channel-namespace alarm"
+    assert referenced <= emitted, f"alarms watch unemitted metrics: {referenced - emitted}"
+
+
+def test_request_and_bedrock_sli_alarms_exist(dev_template):
+    """#111's alarmable SLIs, including the burn-rate pair whose fast
+    window satisfies the issue's "fires within 1h of a sustained 5xx
+    spike" definition of done."""
+    names = set(_alarms(dev_template))
+    assert {
+        "Channel-dev-ApiRequestErrorRate",
+        "Channel-dev-ApiRequestLatencyHigh",
+        "Channel-dev-ApiRequestFastBurn",
+        "Channel-dev-ApiRequestSlowBurn",
+        "Channel-dev-BedrockErrorRate",
+        "Channel-dev-BedrockThrottles",
+    } <= names
+
+
+def test_request_burn_rate_alarms_use_the_documented_windows(dev_template):
+    """Fast burn = 1h at 5x budget, slow burn = 6h at 2x budget."""
+    alarms = _alarms(dev_template)
+    fast = alarms["Channel-dev-ApiRequestFastBurn"]
+    slow = alarms["Channel-dev-ApiRequestSlowBurn"]
+    assert fast["Threshold"] == 5.0
+    assert slow["Threshold"] == 2.0
+    assert all(e["MetricStat"]["Period"] == 3600 for e in fast["Metrics"] if "MetricStat" in e)
+    assert all(e["MetricStat"]["Period"] == 21600 for e in slow["Metrics"] if "MetricStat" in e)
+
+
+def test_channel_alarms_select_only_the_aggregate_dimension_set(dev_template):
+    """Alarms must NOT select the per-``Route`` breakdown series (#111).
+
+    CloudWatch matches a metric on an exact dimension set, so an alarm
+    carrying a ``Route`` dimension would watch one route instead of the
+    service. The aggregate ``{Environment}`` set is the alarmable one.
+    """
+    for name, alarm in _alarms(dev_template).items():
+        dimension_sets = []
+        if alarm.get("Namespace") == "Channel":
+            dimension_sets.append(alarm.get("Dimensions", []))
+        for entry in alarm.get("Metrics", []):
+            stat = entry.get("MetricStat")
+            if stat and stat["Metric"].get("Namespace") == "Channel":
+                dimension_sets.append(stat["Metric"].get("Dimensions", []))
+        for dims in dimension_sets:
+            assert [d["Name"] for d in dims] == ["Environment"], name

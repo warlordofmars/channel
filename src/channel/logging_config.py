@@ -115,6 +115,18 @@ def set_request_context(request_id: str, client_id: str = "") -> None:
     _client_id_var.set(client_id)
 
 
+def set_client_id(client_id: str) -> None:
+    """Set only the ``client_id`` context variable, leaving ``request_id``.
+
+    The request boundary knows the correlation id but not yet who is
+    calling — the caller's identity only becomes available once the auth
+    dependency has validated the JWT, deeper in the stack. This is the
+    setter for that later point; :func:`set_request_context` would clobber
+    the already-established ``request_id``.
+    """
+    _client_id_var.set(client_id)
+
+
 def fingerprint_id(value: str) -> str:
     """Deterministic non-reversible 16-char hex fingerprint for an
     identifier (user_id, server_id, etc.).

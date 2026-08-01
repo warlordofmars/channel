@@ -1661,45 +1661,158 @@ function handler(event) {
         _notify(cf_5xx_alarm)
 
         # Custom EMF metric alarms
+        #
+        # #111 — three alarms in this block used to reference metric names
+        # that nothing in ``src/channel`` ever emitted (``ToolErrors``,
+        # ``StorageLatencyMs``, ``TokenValidationFailures``). With
+        # ``treat_missing_data=NOT_BREACHING`` they sat permanently green,
+        # advertising coverage that did not exist. ``ToolErrors`` is
+        # re-pointed at the counter that IS emitted; the other two are
+        # removed rather than left as decoration. Reviving an auth-failure
+        # counter needs a sync-safe emit path in ``api/_auth.py`` (the
+        # dependency is not a coroutine) — tracked as a follow-up, not
+        # papered over here.
+        def _channel_metric(
+            metric_name: str,
+            *,
+            statistic: str = "Sum",
+            period_minutes: int = 5,
+        ) -> cw.Metric:
+            """A ``Channel``-namespace EMF metric on this env's aggregate
+            dimension set.
+
+            ``{"Environment": env_name}`` is exactly the base dimension set
+            ``channel.metrics.emit_metric`` writes, and CloudWatch matches a
+            metric only on an exact dimension set — so the per-``Route``
+            breakdown series (#111) is deliberately NOT selected here.
+            Alarms fire on the service-wide aggregate; per-route drill-down
+            is a dashboard/Insights activity, not an alarm.
+            """
+            return cw.Metric(
+                namespace="Channel",
+                metric_name=metric_name,
+                dimensions_map={"Environment": env_name},
+                period=cdk.Duration.minutes(period_minutes),
+                statistic=statistic,
+            )
+
         tool_errors_alarm = cw.Alarm(
             self,
             "ToolErrorsAlarm",
             alarm_name=f"Channel-{env_name}-ToolErrors",
-            metric=cw.Metric(
-                namespace="Channel",
-                metric_name="ToolErrors",
-                dimensions_map={"Environment": env_name},
+            metric=_channel_metric("ToolCallFailures"),
+            threshold=10,
+            evaluation_periods=2,
+            datapoints_to_alarm=2,
+            comparison_operator=cw.ComparisonOperator.GREATER_THAN_THRESHOLD,
+            treat_missing_data=cw.TreatMissingData.NOT_BREACHING,
+            alarm_description=f"Channel tool call failures > 10 in 5 min ({env_name})",
+        )
+        _notify(tool_errors_alarm)
+
+        # ----------------------------------------------------------------
+        # Request-level SLIs (#111) — emitted by the api.main middleware
+        # ----------------------------------------------------------------
+        # Lambda's own ``Errors`` metric (the ApiErrorRateAlarm above) only
+        # counts invocations that raised out of the handler. A FastAPI route
+        # returning HTTP 500 is a *successful* Lambda invocation, so the
+        # whole application-error surface was previously unalarmed. These
+        # alarms close that gap.
+        def _request_error_rate(window_minutes: int) -> cw.MathExpression:
+            """5xx responses as a percentage of all responses.
+
+            ``MAX([errors, requests])`` is the same zero-denominator guard
+            the Lambda error-rate helper uses: ``Request5xxCount`` is only
+            emitted when a 5xx actually happens, so the two series can be
+            sparse independently and a naive division would produce
+            ``Infinity`` in the window where errors arrive first.
+            """
+            errors = _channel_metric("Request5xxCount", period_minutes=window_minutes)
+            requests = _channel_metric("RequestCount", period_minutes=window_minutes)
+            return cw.MathExpression(
+                expression="100 * errors / MAX([errors, requests])",
+                using_metrics={"errors": errors, "requests": requests},
+                label="API 5xx rate %",
+                period=cdk.Duration.minutes(window_minutes),
+            )
+
+        api_request_error_alarm = cw.Alarm(
+            self,
+            "ApiRequestErrorRateAlarm",
+            alarm_name=f"Channel-{env_name}-ApiRequestErrorRate",
+            metric=_request_error_rate(5),
+            threshold=5,
+            evaluation_periods=2,
+            datapoints_to_alarm=2,
+            comparison_operator=cw.ComparisonOperator.GREATER_THAN_THRESHOLD,
+            treat_missing_data=cw.TreatMissingData.NOT_BREACHING,
+            alarm_description=f"Channel API 5xx response rate > 5% ({env_name})",
+        )
+        _notify(api_request_error_alarm)
+
+        # p99 time-to-response-start. The middleware measures the
+        # ``call_next`` window, which for an SSE turn closes when the
+        # headers go out — a streaming chat contributes its first-byte
+        # latency, not its multi-minute stream duration. That is what makes
+        # a single service-wide p99 threshold meaningful here.
+        api_request_latency_alarm = cw.Alarm(
+            self,
+            "ApiRequestLatencyAlarm",
+            alarm_name=f"Channel-{env_name}-ApiRequestLatencyHigh",
+            metric=_channel_metric("RequestLatencyMs", statistic="p99"),
+            threshold=3000,
+            evaluation_periods=2,
+            datapoints_to_alarm=2,
+            comparison_operator=cw.ComparisonOperator.GREATER_THAN_THRESHOLD,
+            treat_missing_data=cw.TreatMissingData.NOT_BREACHING,
+            alarm_description=f"Channel API request latency p99 > 3000ms ({env_name})",
+        )
+        _notify(api_request_latency_alarm)
+
+        # ----------------------------------------------------------------
+        # Bedrock SLIs (#111) — emitted per streamed chat turn
+        # ----------------------------------------------------------------
+        # ``BedrockLatencyMs`` gets exactly one datapoint per turn, so its
+        # SampleCount IS the turn count — used as the error-rate denominator
+        # rather than paying for a separate ``BedrockTurns`` counter.
+        bedrock_turns = _channel_metric("BedrockLatencyMs", statistic="SampleCount")
+        bedrock_errors = _channel_metric("BedrockErrors")
+        bedrock_error_rate_alarm = cw.Alarm(
+            self,
+            "BedrockErrorRateAlarm",
+            alarm_name=f"Channel-{env_name}-BedrockErrorRate",
+            metric=cw.MathExpression(
+                expression="100 * errors / MAX([errors, turns])",
+                using_metrics={"errors": bedrock_errors, "turns": bedrock_turns},
+                label="Bedrock turn error rate %",
                 period=cdk.Duration.minutes(5),
-                statistic="Sum",
             ),
             threshold=10,
             evaluation_periods=2,
             datapoints_to_alarm=2,
             comparison_operator=cw.ComparisonOperator.GREATER_THAN_THRESHOLD,
             treat_missing_data=cw.TreatMissingData.NOT_BREACHING,
-            alarm_description=f"Channel tool errors > 10 in 5 min ({env_name})",
+            alarm_description=f"Channel Bedrock turn error rate > 10% ({env_name})",
         )
-        _notify(tool_errors_alarm)
+        _notify(bedrock_error_rate_alarm)
 
-        storage_latency_alarm = cw.Alarm(
+        # Throttling is a quota wall, not a bug: the response is to switch
+        # model or raise the account quota, so it gets its own alarm rather
+        # than hiding inside the error rate. Two consecutive breaching
+        # periods, so a single retried burst stays quiet.
+        bedrock_throttle_alarm = cw.Alarm(
             self,
-            "StorageLatencyAlarm",
-            alarm_name=f"Channel-{env_name}-StorageLatencyHigh",
-            metric=cw.Metric(
-                namespace="Channel",
-                metric_name="StorageLatencyMs",
-                dimensions_map={"Environment": env_name},
-                period=cdk.Duration.minutes(5),
-                statistic="p99",
-            ),
-            threshold=2000,
+            "BedrockThrottleAlarm",
+            alarm_name=f"Channel-{env_name}-BedrockThrottles",
+            metric=_channel_metric("BedrockThrottles"),
+            threshold=0,
             evaluation_periods=2,
             datapoints_to_alarm=2,
             comparison_operator=cw.ComparisonOperator.GREATER_THAN_THRESHOLD,
             treat_missing_data=cw.TreatMissingData.NOT_BREACHING,
-            alarm_description=f"Channel storage latency p99 > 2000ms ({env_name})",
+            alarm_description=f"Channel Bedrock throttling sustained > 5 min ({env_name})",
         )
-        _notify(storage_latency_alarm)
+        _notify(bedrock_throttle_alarm)
 
         # Lambda throttles — any throttled invocation is a capacity issue to
         # investigate immediately; no tolerance.
@@ -1741,30 +1854,6 @@ function handler(event) {
             alarm_description=f"Channel DynamoDB user errors > 10 in 5 min ({env_name})",
         )
         _notify(ddb_user_errors_alarm)
-
-        # Business metric: Bearer-token rejections from the existing
-        # `TokenValidationFailures` EMF metric. Spike usually means a
-        # credential leak or a misconfigured client — investigate before it
-        # triggers rate-limiter churn.
-        auth_failures_alarm = cw.Alarm(
-            self,
-            "AuthFailuresAlarm",
-            alarm_name=f"Channel-{env_name}-AuthFailures",
-            metric=cw.Metric(
-                namespace="Channel",
-                metric_name="TokenValidationFailures",
-                dimensions_map={"Environment": env_name},
-                period=cdk.Duration.minutes(5),
-                statistic="Sum",
-            ),
-            threshold=10,
-            evaluation_periods=2,
-            datapoints_to_alarm=2,
-            comparison_operator=cw.ComparisonOperator.GREATER_THAN_THRESHOLD,
-            treat_missing_data=cw.TreatMissingData.NOT_BREACHING,
-            alarm_description=f"Channel auth failures > 10 in 5 min ({env_name})",
-        )
-        _notify(auth_failures_alarm)
 
         # SLO burn rate alarms
         # Fast burn (>5×): error rate exceeds 5 × error_budget over 1 hour
@@ -1810,6 +1899,40 @@ function handler(event) {
 
         _burn_rate_alarm("ApiFastBurnAlarm", api_fn, "API", _API_ERROR_BUDGET_PCT, 5, 60)
         _burn_rate_alarm("ApiSlowBurnAlarm", api_fn, "API", _API_ERROR_BUDGET_PCT, 2, 360)
+
+        # Request-level burn rate (#111). Same 1h / 6h multi-window shape as
+        # the Lambda-metric pair above, but measured on the SLI users
+        # actually experience: HTTP 5xx responses. The issue's definition of
+        # done — "an error-rate burn alarm fires within 1h of a sustained
+        # 5xx spike" — is this fast-burn alarm; the Lambda-metric one above
+        # cannot see a handled 500 at all.
+        def _request_burn_rate_alarm(
+            construct_id: str,
+            burn_multiplier: float,
+            window_minutes: int,
+        ) -> cw.Alarm:
+            threshold = burn_multiplier * _API_ERROR_BUDGET_PCT
+            burn_type = "fast" if burn_multiplier >= 5 else "slow"
+            alarm = cw.Alarm(
+                self,
+                construct_id,
+                alarm_name=f"Channel-{env_name}-{construct_id.removesuffix('Alarm')}",
+                metric=_request_error_rate(window_minutes),
+                threshold=threshold,
+                evaluation_periods=1,
+                datapoints_to_alarm=1,
+                comparison_operator=cw.ComparisonOperator.GREATER_THAN_THRESHOLD,
+                treat_missing_data=cw.TreatMissingData.NOT_BREACHING,
+                alarm_description=(
+                    f"Channel API request SLO {burn_type}-burn: 5xx rate > {threshold}% "
+                    f"over {window_minutes}m "
+                    f"(budget={_API_ERROR_BUDGET_PCT}% x {burn_multiplier}x) ({env_name})"
+                ),
+            )
+            return _notify(alarm)
+
+        _request_burn_rate_alarm("ApiRequestFastBurnAlarm", 5, 60)
+        _request_burn_rate_alarm("ApiRequestSlowBurnAlarm", 2, 360)
 
         # Dashboard
         dashboard = cw.Dashboard(
@@ -1986,44 +2109,70 @@ function handler(event) {
                     width=6,
                 ),
             ),
+            # Request SLIs row (#111). Replaces the three widgets that
+            # graphed `ToolInvocations` / `ToolErrors` /
+            # `TokenValidationFailures` — metric names nothing ever emitted,
+            # so those panels were permanently blank.
+            cw.Row(
+                cw.TextWidget(markdown="## Requests (application)", width=24, height=1),
+            ),
             cw.Row(
                 cw.GraphWidget(
-                    title="Tool Invocations",
-                    left=[
-                        cw.Metric(
-                            namespace="Channel",
-                            metric_name="ToolInvocations",
-                            dimensions_map={"Environment": env_name},
-                            period=cdk.Duration.minutes(5),
-                            statistic="Sum",
-                        )
+                    title="Requests & Errors",
+                    left=[_channel_metric("RequestCount")],
+                    right=[
+                        _channel_metric("Request4xxCount"),
+                        _channel_metric("Request5xxCount"),
                     ],
                     width=8,
                 ),
                 cw.GraphWidget(
-                    title="Tool Errors",
+                    title="Request Latency to First Byte (ms)",
                     left=[
-                        cw.Metric(
-                            namespace="Channel",
-                            metric_name="ToolErrors",
-                            dimensions_map={"Environment": env_name},
-                            period=cdk.Duration.minutes(5),
-                            statistic="Sum",
-                        )
+                        _channel_metric("RequestLatencyMs", statistic="p50"),
+                        _channel_metric("RequestLatencyMs", statistic="p95"),
+                        _channel_metric("RequestLatencyMs", statistic="p99"),
                     ],
                     width=8,
                 ),
                 cw.GraphWidget(
-                    title="Token Validation Failures",
+                    title="Tool Call Failures",
                     left=[
-                        cw.Metric(
-                            namespace="Channel",
-                            metric_name="TokenValidationFailures",
-                            dimensions_map={"Environment": env_name},
-                            period=cdk.Duration.minutes(5),
-                            statistic="Sum",
-                        )
+                        _channel_metric("ToolCallSuccesses"),
+                        _channel_metric("ToolCallFailures"),
                     ],
+                    width=8,
+                ),
+            ),
+            # Bedrock row (#111)
+            cw.Row(
+                cw.TextWidget(markdown="## Bedrock", width=24, height=1),
+            ),
+            cw.Row(
+                cw.GraphWidget(
+                    title="Bedrock Turn Latency (ms)",
+                    left=[
+                        _channel_metric("BedrockLatencyMs", statistic="p50"),
+                        _channel_metric("BedrockLatencyMs", statistic="p95"),
+                        _channel_metric("BedrockLatencyMs", statistic="p99"),
+                    ],
+                    width=8,
+                ),
+                cw.GraphWidget(
+                    title="Bedrock Tokens",
+                    left=[
+                        _channel_metric("BedrockTokensIn"),
+                        _channel_metric("BedrockTokensOut"),
+                    ],
+                    width=8,
+                ),
+                cw.GraphWidget(
+                    title="Bedrock Errors & Throttles",
+                    left=[
+                        _channel_metric("BedrockErrors"),
+                        _channel_metric("BedrockThrottles"),
+                    ],
+                    right=[bedrock_turns],
                     width=8,
                 ),
             ),
@@ -2034,6 +2183,20 @@ function handler(event) {
             cw.Row(
                 cw.AlarmWidget(alarm=api_error_alarm, title="API Error Rate", width=6),
                 cw.AlarmWidget(alarm=ddb_throttle_alarm, title="DDB Throttles", width=6),
+                cw.AlarmWidget(
+                    alarm=api_request_error_alarm, title="API 5xx Rate", width=6
+                ),
+                cw.AlarmWidget(
+                    alarm=api_request_latency_alarm, title="API Latency p99", width=6
+                ),
+            ),
+            cw.Row(
+                cw.AlarmWidget(
+                    alarm=bedrock_error_rate_alarm, title="Bedrock Error Rate", width=6
+                ),
+                cw.AlarmWidget(
+                    alarm=bedrock_throttle_alarm, title="Bedrock Throttles", width=6
+                ),
             ),
         )
 

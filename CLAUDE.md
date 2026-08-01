@@ -547,6 +547,69 @@ since the toolset evolves and is capped per-server (#389).
   of #393 (falling back to the `.claude/agents/` files) and gets richer
   when #393 lands.
 
+## Observability (#111)
+
+Every EMF counter lives in `src/channel/metrics.py` under namespace
+`Channel`. **Go through a named `record_*` helper, never a raw
+`emit_metric` call** — the helpers are where the no-dimensions rule is
+enforced, pinned by `_signature_locks_out_dimensions` tests.
+
+### Request SLIs
+
+`api/main.py`'s `_log_requests` middleware both logs and meters every
+request (one middleware, one clock — a second one would time the request
+twice for no new signal). It emits `RequestCount`, `RequestLatencyMs`,
+and `Request4xxCount` / `Request5xxCount` via `record_request_outcome`.
+
+- **`duration_ms` is time to response *start*, not last byte.** Starlette's
+  `BaseHTTPMiddleware` returns from `call_next` once `http.response.start`
+  arrives, so an SSE chat turn contributes its time-to-first-byte, not its
+  multi-minute stream duration. That is what makes one service-wide p99
+  latency alarm meaningful on a service whose slowest route streams by
+  design.
+- **`Route` is the only dimension the module permits**, and only because
+  it is a build-time-bounded enum: the middleware resolves the matched
+  FastAPI route's *template* (`/api/chats/{chat_id}`) from
+  `request.scope["route"]`, never `request.url.path`, and collapses
+  unmatched requests into the single `other` bucket. Every metric is ALSO
+  emitted under the aggregate `{Environment}` dimension set — that is the
+  one CDK alarms and `/api/admin/metrics/*` read, since CloudWatch matches
+  a metric only on an exact dimension set.
+- **`CHANNEL_REQUEST_ROUTE_DIMENSION_ENABLED`** (default `"1"`) kills the
+  per-`Route` breakdown without touching the aggregate. Flip it to `"0"`
+  if the custom-metric bill outgrows the drill-down — CloudWatch Logs
+  Insights answers the same question from the structured request log lines
+  for free (the `Channel/{env}/api-latency` saved query).
+- **`client_id`** is set by `require_mgmt_user`, which publishes the
+  caller's `fingerprint_id(jwt.sub)` digest (never the raw sub — it is an
+  email) two ways: the ContextVar for log lines emitted *inside* the
+  request, and `request.state` for the middleware's completion line.
+  `BaseHTTPMiddleware` runs the app in its own task, so a ContextVar set
+  inside the request does not propagate back out — hence both.
+
+### Bedrock SLIs
+
+`_stream_bedrock_reply` emits one `record_bedrock_turn` per turn:
+`BedrockLatencyMs`, `BedrockTokensIn`, `BedrockTokensOut`, plus
+`BedrockErrors` and `BedrockThrottles` on failure. Exactly one
+`BedrockLatencyMs` datapoint per turn, so its **`SampleCount` statistic is
+the turn count** — the CDK error-rate alarm uses it as the denominator
+rather than paying for a separate counter. `error_code` is a branch
+selector, not a dimension, so the `_STREAM_ERROR_MAP` code set can grow
+without multiplying metrics; the per-code breakdown stays in the
+`chat_stream_failed` log line. A client disconnect re-raises before this
+point and is deliberately not counted as a Bedrock error.
+
+### Alarms must reference metrics we emit
+
+`tests/unit/test_channel_stack.py::test_every_channel_namespace_alarm_references_an_emitted_metric`
+asserts every `Channel`-namespace alarm watches a name `metrics.py` (or
+`csp.py`) actually publishes. Three alarms previously watched names
+nothing ever emitted (`ToolErrors`, `StorageLatencyMs`,
+`TokenValidationFailures`); with `treat_missing_data=NOT_BREACHING` they
+sat permanently green, advertising coverage that did not exist. Adding an
+alarm for a metric you have not wired up now fails at `inv pre-push`.
+
 ## Management UI
 
 - React SPA (Vite), runs on port 5173 in dev

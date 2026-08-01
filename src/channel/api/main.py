@@ -34,6 +34,7 @@ from channel.logging_config import (
     new_request_id,
     set_request_context,
 )
+from channel.metrics import REQUEST_ROUTE_FALLBACK, record_request_outcome
 from channel.startup import (
     validate_secrets_or_die,
     warn_unrotated_observability_params,
@@ -81,9 +82,38 @@ app.add_middleware(
 )
 
 
+def _route_template(request: Request) -> str:
+    """The matched route's **template** (``/api/chats/{chat_id}``), or
+    :data:`REQUEST_ROUTE_FALLBACK` when nothing matched.
+
+    ``FastAPI.APIRoute.matches`` stashes the matched route on the ASGI
+    scope, and ``BaseHTTPMiddleware`` shares that same scope dict with the
+    downstream app — so the key is populated by the time ``call_next``
+    returns. Reading the template (rather than ``request.url.path``) is
+    what keeps the ``Route`` metric dimension bounded by the mounted route
+    set: a concrete path would mint one dimension value per chat id.
+    Unmatched requests (404s, CORS preflights the CORSMiddleware
+    short-circuits below this layer, vulnerability scans) collapse into
+    the single fallback bucket.
+    """
+    path = getattr(request.scope.get("route"), "path", None)
+    return path if isinstance(path, str) else REQUEST_ROUTE_FALLBACK
+
+
 @app.middleware("http")
 async def _log_requests(request: Request, call_next):
-    """Log every request with method, path, status code, and duration."""
+    """Log AND meter every request: method, path, status code, duration.
+
+    One middleware rather than two (#111 lists the structured-log and EMF
+    emissions as separate sub-tasks) because both need the same clock and
+    the same post-``call_next`` state — a second middleware would time the
+    request twice and add an ASGI layer per request for no new signal.
+
+    ``duration_ms`` is time to **response start**, not to last byte: an SSE
+    turn's ``call_next`` returns as soon as the headers are ready, so a
+    multi-minute stream logs its time-to-first-byte. See
+    ``record_request_outcome`` for why that is the right latency SLI here.
+    """
     request_id = (
         request.headers.get("x-amzn-requestid")
         or request.headers.get("x-request-id")
@@ -94,6 +124,12 @@ async def _log_requests(request: Request, call_next):
     t0 = time.monotonic()
     response = await call_next(request)
     duration_ms = int((time.monotonic() - t0) * 1000)
+
+    # ``require_mgmt_user`` stashes the caller's fingerprint on request
+    # state; re-seed the context here because BaseHTTPMiddleware runs the
+    # downstream app in its own task, so a ContextVar set inside the
+    # request does NOT propagate back out to this frame.
+    set_request_context(request_id, getattr(request.state, "client_id", ""))
 
     level = "warning" if response.status_code >= 400 else "info"
     getattr(logger, level)(
@@ -108,6 +144,19 @@ async def _log_requests(request: Request, call_next):
             "duration_ms": duration_ms,
         },
     )
+
+    # Metering must never break a request: a CloudWatch/EMF hiccup degrades
+    # observability, it does not fail the call. Same fail-soft posture as
+    # every other metric emission in the codebase.
+    try:
+        await record_request_outcome(
+            route=_route_template(request),
+            status_code=response.status_code,
+            duration_ms=duration_ms,
+        )
+    except Exception:
+        logger.warning("request metric emission failed", exc_info=True)
+
     return response
 
 

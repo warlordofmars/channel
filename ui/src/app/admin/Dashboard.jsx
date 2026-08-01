@@ -41,6 +41,12 @@ import { getAdminMetricsSummary, getAdminMetricsTimeseries } from "../../api.js"
  * agent-callable `remember` / `recall` tools (#273) emit their OWN
  * `MemoryTool*` counters, surfaced by the separate "Tool saves" tile and
  * "Tool recall" rate so tool usage never masks a hook regression.
+ *
+ * Request SLIs (#111): the "Requests" and "5xx responses" tiles read the
+ * per-request EMF counters the API middleware emits, so the card reflects
+ * real traffic rather than only agent-internal activity. They read the
+ * aggregate `{Environment}` series — the same one the summary endpoint pins —
+ * not the per-`Route` breakdown, so the numbers are service-wide totals.
  */
 
 // Summary rollup windows — keys match the summary endpoint's top-level shape.
@@ -225,12 +231,14 @@ export function fmtTooltipLabel(iso) {
 }
 
 /**
- * The six stat tiles for one rollup window. `active_users` is a top-level
+ * The eight stat tiles for one rollup window. `active_users` is a top-level
  * section field; the rest read named counters from `section.metrics` (all
  * allowlisted names are always present per the #236 contract, so no
- * missing-key guards). The first four are hook-health signals; the last two
+ * missing-key guards). The first four are hook-health signals; the next two
  * (#400) isolate the agent-driven `remember` / `recall` tools so their usage
- * never dilutes the hook counters above.
+ * never dilutes the hook counters above; the last two (#111) are the
+ * request-level SLIs, so the card answers "is the service healthy" and not
+ * only "are the memory hooks firing".
  */
 function tilesFor(section) {
   const m = section.metrics;
@@ -241,6 +249,8 @@ function tilesFor(section) {
     { key: "titles", label: "Auto-titles", icon: "sparkle", value: formatCount(m.AutoTitleSuccesses) },
     { key: "toolSave", label: "Tool saves", icon: "pin", value: formatCount(m.MemoryToolWriteSuccesses) },
     { key: "toolRecall", label: "Tool recall", icon: "search", value: formatRate(m.MemoryToolRecallSuccesses, m.MemoryToolRecallFailures) },
+    { key: "requests", label: "Requests", icon: "globe", value: formatCount(m.RequestCount) },
+    { key: "requestErrors", label: "5xx responses", icon: "shield", value: formatCount(m.Request5xxCount) },
   ];
 }
 

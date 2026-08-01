@@ -109,6 +109,24 @@ _METRIC_ALLOWLIST = (
     "AssetLazyExpiryReapFailures",
     "ToolCallSuccesses",
     "ToolCallFailures",
+    # Request + Bedrock SLIs (#111). Only the Sum-meaningful counters are
+    # listed: this endpoint hardcodes ``Stat: "Sum"``, so adding the
+    # ``RequestLatencyMs`` / ``BedrockLatencyMs`` distributions here would
+    # hand the dashboard the sum of every latency sample — a number with no
+    # meaning. Latency percentiles live on the CloudWatch dashboard, which
+    # can name a statistic.
+    #
+    # ``RequestCount`` and friends are also published under a second
+    # ``{Environment, Route}`` dimension set; ``_metric_data_queries`` pins
+    # the ``{Environment}`` set exactly, so readback sees the aggregate and
+    # the per-route breakdown never double-counts here.
+    "RequestCount",
+    "Request4xxCount",
+    "Request5xxCount",
+    "BedrockTokensIn",
+    "BedrockTokensOut",
+    "BedrockErrors",
+    "BedrockThrottles",
     "CSPViolations",
 )
 
