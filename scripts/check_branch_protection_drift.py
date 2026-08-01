@@ -318,8 +318,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--repo",
-        default="agentcore-starter",
-        help="GitHub repo name (default: agentcore-starter).",
+        default="channel",
+        help="GitHub repo name (default: channel).",
     )
     parser.add_argument(
         "--live-file",

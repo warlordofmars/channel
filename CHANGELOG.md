@@ -223,6 +223,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Meta
 
+- Swept `CLAUDE.md` for the stale `STARTER_*` environment-variable
+  prefix left behind by the #259 hard-cut rename: all 17 occurrences
+  across 13 distinct variables (the debug-endpoint gate, audit
+  retention, the image-generation trio, asset extraction, the
+  AgentCore Memory name override, the recall / memory-tools /
+  auto-title kill-switch family, the titler model override, the
+  Google-auth bypass, and the e2e UI URL) now read `CHANNEL_*`, each
+  name verified against the live readers in `src/`, `infra/`, and
+  `tasks.py` rather than mechanically re-prefixed. This is the
+  env-var half of #264 only — the `starter_mgmt_token` localStorage
+  key is deliberately left untouched because it is still the key the
+  SPA actually writes; that rename rides with #295, and a second
+  documentation pass follows it. The same pass also corrects the
+  Electron OAuth section, whose closing paragraph still promised a
+  desktop-specific dev bypass as future work — it has since shipped, so
+  the text now documents the real behaviour: `inv desktop-dev` sets both
+  `CHANNEL_BYPASS_GOOGLE_AUTH` and `CHANNEL_DESKTOP_DEV_EMAIL`, and
+  `/auth/login` mints a synthetic JWT straight back to the loopback
+  callback when both are present, while deployed dev (which sets only the
+  former) still goes through Google (#264, part of #258).
 - Renamed every production environment variable from the legacy
   `STARTER_*` prefix (a leftover from the `agentcore-starter` fork) to
   `CHANNEL_*` across the CDK Lambda env block
@@ -233,7 +253,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reads a new name or vice versa). Pure mechanical rename, zero
   behaviour change; the SSM parameter *paths* held as `*_PARAM` values
   are untouched (#259, part of #258). Documentation of the new names in
-  the READMEs and `CLAUDE.md` follows in #5 and #6.
+  the READMEs and `CLAUDE.md` follows in #263 and #264.
 - Public docs-site operations pages now cite the correct module paths:
   the stale `src/starter/*` references in
   `docs-site/operations/security.md` and
@@ -243,6 +263,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   files were corrected to `infra/stacks/channel_stack.py`, so readers
   following the docs to inspect the source no longer land on 404s
   (#262, part of #258).
+- In-repo docs and module docstrings swept of residual `starter`
+  naming. `CONTRIBUTING.md` was actively wrong — its local-dev snippet
+  told contributors to export `STARTER_BYPASS_GOOGLE_AUTH=1`, a
+  variable #259 removed, so the `?test_email=` bypass silently failed
+  for anyone following the guide; it now sets
+  `CHANNEL_BYPASS_GOOGLE_AUTH=1` and runs `channel.api.main:app`.
+  `infra/README.md` now documents the live `CHANNEL_TABLE_NAME` /
+  `CHANNEL_ISSUER` / `CHANNEL_JWT_SECRET_PARAM` names and the real
+  `stacks/channel_stack.py` / `cp -r src/channel` bundling step;
+  `src/channel/README.md`'s module index was renamed off `src/starter/`
+  and refreshed to match the package as it stands; and the
+  `starter.auth.*` docstring cross-references plus the
+  "Starter management API" OpenAPI description were corrected.
+  Each replacement was verified against live code rather than
+  mechanically re-prefixed, since the variable set drifted during
+  #259 (#263, part of #258). Deliberately left alone: the
+  `starter_mgmt_token` localStorage key (still the real key — that
+  rename is open as #295), the `Starter*` CDK construct logical IDs in
+  `infra/stacks/channel_stack.py` (renaming them would force a
+  replace of the DynamoDB table, CloudFront policy, and dashboard),
+  and frozen historical records under `docs/adr/`, `docs/retros/`,
+  `docs/superpowers/`, and past CHANGELOG sections.
 - Web search design doc: `docs/superpowers/specs/2026-06-07-182-web-search-design.md`.
 - `strands-agents-tools` pinned in `pyproject.toml` for the native Exa wrapper.
 - Memory invariant lifted into the `_payload_from_messages` docstring +

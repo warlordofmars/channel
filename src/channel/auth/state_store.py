@@ -4,7 +4,7 @@ DynamoDB-backed store for OAuth state parameters used by the management
 UI login flow.
 
 Replaces the in-process ``_pending_states`` dict that previously lived in
-:mod:`starter.auth.mgmt_auth`. The dict pattern works under a single
+:mod:`channel.auth.mgmt_auth`. The dict pattern works under a single
 warm Lambda but breaks under concurrent execution: the callback may hit
 a different warm container than the one that issued the state, the
 state is missing, the auth flow fails with "invalid state", and the user
