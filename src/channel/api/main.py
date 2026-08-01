@@ -3,7 +3,9 @@
 Channel management FastAPI application.
 
 Runs on port 8001 in development.
-Add your API routes here — see api/_auth.py for auth dependencies.
+App construction, middleware, and ``/health`` only — domain routes live
+in dedicated ``api/<area>.py`` router modules and are wired in here via
+``app.include_router``. See ``api/_auth.py`` for the auth dependencies.
 """
 
 from __future__ import annotations
@@ -62,7 +64,7 @@ APP_VERSION = _app_version()
 app = FastAPI(
     title="Channel API",
     version=APP_VERSION,
-    description="Starter management API — replace with your application routes.",
+    description="Channel management API — chats, auth, MCP registry, assets, and admin.",
     docs_url=None,
     redoc_url=None,
 )

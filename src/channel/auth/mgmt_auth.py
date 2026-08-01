@@ -4,7 +4,7 @@ Management UI authentication — Google OAuth login flow for human users.
 
 Issues short-lived management JWTs (typ=mgmt) stored in the browser's
 localStorage.  Pending OAuth state is persisted in DynamoDB (see
-:mod:`starter.auth.state_store`) so concurrent Lambda containers can
+:mod:`channel.auth.state_store`) so concurrent Lambda containers can
 share state — the previous in-process dict broke under concurrent
 execution because the callback could hit a different warm container
 than the one that issued the state.
