@@ -263,6 +263,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   files were corrected to `infra/stacks/channel_stack.py`, so readers
   following the docs to inspect the source no longer land on 404s
   (#262, part of #258).
+- In-repo docs and module docstrings swept of residual `starter`
+  naming. `CONTRIBUTING.md` was actively wrong — its local-dev snippet
+  told contributors to export `STARTER_BYPASS_GOOGLE_AUTH=1`, a
+  variable #259 removed, so the `?test_email=` bypass silently failed
+  for anyone following the guide; it now sets
+  `CHANNEL_BYPASS_GOOGLE_AUTH=1` and runs `channel.api.main:app`.
+  `infra/README.md` now documents the live `CHANNEL_TABLE_NAME` /
+  `CHANNEL_ISSUER` / `CHANNEL_JWT_SECRET_PARAM` names and the real
+  `stacks/channel_stack.py` / `cp -r src/channel` bundling step;
+  `src/channel/README.md`'s module index was renamed off `src/starter/`
+  and refreshed to match the package as it stands; and the
+  `starter.auth.*` docstring cross-references plus the
+  "Starter management API" OpenAPI description were corrected.
+  Each replacement was verified against live code rather than
+  mechanically re-prefixed, since the variable set drifted during
+  #259 (#263, part of #258). Deliberately left alone: the
+  `starter_mgmt_token` localStorage key (still the real key — that
+  rename is open as #295), the `Starter*` CDK construct logical IDs in
+  `infra/stacks/channel_stack.py` (renaming them would force a
+  replace of the DynamoDB table, CloudFront policy, and dashboard),
+  and frozen historical records under `docs/adr/`, `docs/retros/`,
+  `docs/superpowers/`, and past CHANGELOG sections.
 - Web search design doc: `docs/superpowers/specs/2026-06-07-182-web-search-design.md`.
 - `strands-agents-tools` pinned in `pyproject.toml` for the native Exa wrapper.
 - Memory invariant lifted into the `_payload_from_messages` docstring +

@@ -59,7 +59,7 @@ from typing import Literal
 # area label lands, refresh from the live taxonomy and extend whichever map
 # applies. Canonical refresh procedure:
 #
-#     gh api /repos/warlordofmars/agentcore-starter/labels --paginate \
+#     gh api /repos/warlordofmars/channel/labels --paginate \
 #         --jq '.[].name'
 #
 # Filter out priority:*, size:*, status:*, type labels (`bug`, `enhancement`,

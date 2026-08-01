@@ -1,6 +1,6 @@
 # Infrastructure
 
-AWS CDK (Python) stack that provisions all Channel resources. Defined in `stacks/starter_stack.py`.
+AWS CDK (Python) stack that provisions all Channel resources. Defined in `stacks/channel_stack.py`.
 
 ## Resources created
 
@@ -37,12 +37,19 @@ AWS CDK (Python) stack that provisions all Channel resources. Defined in `stacks
 
 The Lambda package is built inside a Docker container (the Lambda Python 3.12 build image) during CDK synthesis:
 
-1. Install `uv` via pip
-2. `uv export --no-group dev --no-group infra` → `/tmp/requirements.txt` (runtime deps only)
-3. `pip install -r /tmp/requirements.txt -t /asset-output`
-4. `cp -r src/starter /asset-output/starter`
+```bash
+pip install uv --quiet --no-cache-dir
+UV_CACHE_DIR=/tmp/uv-cache uv export --no-hashes --no-group dev --no-group infra --no-emit-project -o /tmp/requirements.txt
+pip install -r /tmp/requirements.txt -t /asset-output --quiet --no-cache-dir
+cp -r src/channel /asset-output/channel
+cp run.sh /asset-output/run.sh          # the AWS Lambda Web Adapter entrypoint
+chmod +x /asset-output/run.sh
+```
 
-The `dev` and `infra` dependency groups are excluded to keep the Lambda package under the 250 MB limit.
+That block is reproduced verbatim from `API_LAMBDA_BUNDLING_STEPS` in
+`stacks/channel_stack.py`, which is the canonical list — edit it there, not here.
+
+The `dev` and `infra` dependency groups are excluded to keep the Lambda package under the 250 MB limit. `--no-emit-project` is mandatory rather than cosmetic: without it the export includes the project itself as an editable requirement, `pip install` builds it inside the bundling container to generate metadata, and hatch-vcs version resolution fails from a git worktree (`.git` is a pointer file referencing a gitdir outside the bind mount) — which takes synth and deploy down with it. See the comment above `API_LAMBDA_BUNDLING_STEPS` for the full rationale.
 
 ## Initial deployment
 
@@ -120,7 +127,7 @@ All Lambda configuration is via environment variables set in the CDK stack:
 
 | Variable | Set by | Description |
 |---|---|---|
-| `STARTER_TABLE_NAME` | CDK | DynamoDB table name |
-| `STARTER_ISSUER` | CDK | JWT issuer URL |
-| `STARTER_JWT_SECRET_PARAM` | (optional) | SSM parameter name for JWT secret (defaults to `/channel/jwt-secret`) |
+| `CHANNEL_TABLE_NAME` | CDK | DynamoDB table name |
+| `CHANNEL_ISSUER` | CDK | JWT issuer URL |
+| `CHANNEL_JWT_SECRET_PARAM` | (optional) | SSM parameter name for JWT secret (defaults to `/channel/jwt-secret`) |
 | `DYNAMODB_ENDPOINT` | (local only) | Override DynamoDB endpoint for local development |
