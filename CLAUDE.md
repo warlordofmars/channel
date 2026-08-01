@@ -176,7 +176,14 @@ token is stored client-side in `localStorage` under the
   breach signal (RFC 9700 §4.14.2) and revokes the entire device
   token-family. Rows revoked for any other reason (`logout`,
   `user_revoked`, `reuse_detected`) are an already-dead family and do
-  not re-arm the cascade — #290, epic #241)
+  not re-arm the cascade. **Known window:** family revocation reads
+  `RefreshByUserIndex`, and DynamoDB refuses `ConsistentRead` on a GSI,
+  so a row minted inside the index-propagation window can survive a
+  cascade — the reuse path sweeps twice to narrow this, which does not
+  close it. Closing it needs a strongly-consistent per-device family
+  marker checked on consume; that belongs with the session row #293
+  introduces. Damage is bounded by the family's unchanged
+  `absolute_expires_at` — #290, epic #241)
 - Chat-index items: `PK=USER#{user_id}`, `SK=CHAT#{created_at}#{chat_id}`
   (one row per chat; sortable so the Recents query is a single
   `Query(ScanIndexForward=False)`; also projects onto `ChatByIdIndex`)

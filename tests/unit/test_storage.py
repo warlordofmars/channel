@@ -3425,3 +3425,62 @@ def test_refresh_consume_result_rejects_a_token_on_a_failure_outcome() -> None:
             raw_token="x",
             token=token,
         )
+
+
+def test_revoke_refresh_family_sweeps_the_index_the_requested_number_of_times(
+    table: FakeTable, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``RefreshByUserIndex`` is eventually consistent — DynamoDB refuses
+    ``ConsistentRead`` on a GSI — so the breach path re-queries. A row
+    that hadn't propagated during sweep 1 is caught by sweep 2."""
+    from channel import storage
+
+    sweeps: list[tuple[str, str | None]] = []
+    late_arrival = [
+        [{"token_hash": "early", "revoked": False}],
+        [{"token_hash": "early", "revoked": True}, {"token_hash": "late", "revoked": False}],
+    ]
+
+    def fake_query_rows(user_id: str, device_id: str | None = None) -> list[dict[str, Any]]:
+        sweeps.append((user_id, device_id))
+        return late_arrival[len(sweeps) - 1]
+
+    monkeypatch.setattr(storage, "_query_user_refresh_rows", fake_query_rows)
+
+    revoked = storage._revoke_refresh_family("u-1", "d-1", RefreshRevokeReason.LOGOUT, sweeps=2)
+
+    assert sweeps == [("u-1", "d-1"), ("u-1", "d-1")]
+    # "early" flipped on sweep 1, "late" on sweep 2 — the row that a
+    # single-pass cascade would have left live.
+    assert revoked == 2
+
+
+def test_reuse_cascade_double_sweeps_while_logout_and_sign_out_all_do_not(
+    table: FakeTable, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the security-critical path pays for the extra Query."""
+    from channel import storage
+
+    calls: list[int] = []
+
+    def fake_family(
+        user_id: str,
+        device_id: str | None,
+        reason: RefreshRevokeReason,
+        *,
+        sweeps: int = 1,
+    ) -> int:
+        calls.append(sweeps)
+        return 0
+
+    raw_reuse, _ = mint_refresh_token(user_id="u-1", device_id="d-1")
+    consume_refresh_token(raw_reuse)
+    raw_logout, _ = mint_refresh_token(user_id="u-1", device_id="d-2")
+
+    monkeypatch.setattr(storage, "_revoke_refresh_family", fake_family)
+    consume_refresh_token(raw_reuse)  # replay → reuse cascade
+    revoke_refresh_token(raw_logout)
+    revoke_all_user_refresh_tokens("u-1")
+
+    assert calls == [storage._REFRESH_REUSE_SWEEPS, 1, 1]
+    assert storage._REFRESH_REUSE_SWEEPS == 2

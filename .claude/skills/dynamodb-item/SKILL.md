@@ -278,6 +278,15 @@ Conventions:
   way to scope an index to a subset of item types (only chat-index
   rows carry `GSI3PK`; only refresh rows carry `GSI5PK`; only asset
   rows carry `owner_pk`).
+- **GSI reads are eventually consistent — always, unavoidably.**
+  DynamoDB rejects `ConsistentRead=True` on an index query, so a row
+  written moments ago may not be projected yet. Never build a
+  correctness- or security-critical invariant on "the index returned
+  everything": a base-table point read (`ConsistentRead=True`) is the
+  only strongly-consistent access this table has. Where a security
+  path has to sweep an index anyway — `storage._revoke_refresh_family`
+  is the live example — say so in the docstring, bound the damage, and
+  don't let the caller believe the sweep is exhaustive.
 - **A `FilterExpression` often beats a second index.** When the
   narrower query runs over a small partition, filter rather than
   add a GSI: `RefreshByUserIndex` keys on `user_id` alone and

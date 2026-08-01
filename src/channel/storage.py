@@ -1731,6 +1731,14 @@ _REFRESH_HASH_PREFIX_LEN = 16
 # log loudly rather than spin.
 _REFRESH_QUERY_MAX_PAGES = 25
 
+# Sweeps the reuse-detection cascade makes over a device's family.
+# ``RefreshByUserIndex`` is eventually consistent (no ConsistentRead on
+# a GSI), so a single pass can miss a row minted moments earlier. Two
+# passes force a concurrent mint to hide inside the propagation window
+# twice; see _revoke_refresh_family for what this does and does not
+# guarantee. Only the breach path pays for the extra Query.
+_REFRESH_REUSE_SWEEPS = 2
+
 # Revoke only rows that are still live. ``revoked`` is aliased because
 # expression attribute names are the cheap way to stay clear of
 # DynamoDB's reserved-word list without having to audit it.
@@ -1874,6 +1882,15 @@ def _query_user_refresh_rows(user_id: str, device_id: str | None = None) -> list
     second index. A user's partition holds at most a few hundred rows,
     so filtering server-side costs a negligible amount of read capacity
     and keeps the index single-purpose.
+
+    **This read is eventually consistent and cannot be made otherwise.**
+    DynamoDB rejects ``ConsistentRead=True`` on a global secondary
+    index, so — unlike :func:`_get_refresh_row`, which reads the base
+    table strongly — a row written moments ago may not be projected
+    onto the index yet and will be absent here. Every caller revokes
+    what it finds, which makes family revocation **best-effort with
+    respect to concurrent mints**. See :func:`_revoke_refresh_family`
+    for how that window is narrowed and what remains open.
     """
 
     kwargs: dict[str, Any] = {
@@ -1913,6 +1930,44 @@ def _revoke_refresh_rows(rows: list[dict[str, Any]], reason: RefreshRevokeReason
             continue
         if _mark_refresh_revoked(row["token_hash"], reason):
             revoked += 1
+    return revoked
+
+
+def _revoke_refresh_family(
+    user_id: str,
+    device_id: str | None,
+    reason: RefreshRevokeReason,
+    *,
+    sweeps: int = 1,
+) -> int:
+    """Query a user's (or one device's) refresh rows and revoke the live ones.
+
+    Returns the number of rows that flipped from live to revoked.
+
+    **Known window — read this before relying on the post-condition.**
+    The row set comes from ``RefreshByUserIndex``, and GSI reads are
+    eventually consistent by construction (DynamoDB does not accept
+    ``ConsistentRead`` on an index). A row minted between the last index
+    propagation and this query is invisible here and therefore survives.
+    Concretely: a rotation racing a revoke can leave the successor row
+    live, because its rotated ancestor is skipped (already revoked) and
+    the successor hasn't reached the index yet.
+
+    ``sweeps`` narrows that window for the security-critical caller —
+    a second pass runs after the first pass's writes have completed, so
+    a concurrent mint has to land inside the propagation window *twice*
+    to survive. It does not close the window, and no amount of sweeping
+    would; closing it needs a strongly-consistent family marker read on
+    the consume path, which belongs with the per-device session row
+    #293 introduces. Until then the honest contract is **best-effort
+    with respect to concurrent mints**, and the bound on the damage is
+    that any surviving row still expires at the family's unchanged
+    ``absolute_expires_at``.
+    """
+
+    revoked = 0
+    for _ in range(sweeps):
+        revoked += _revoke_refresh_rows(_query_user_refresh_rows(user_id, device_id), reason)
     return revoked
 
 
@@ -2025,11 +2080,19 @@ def consume_refresh_token(raw_token: str) -> RefreshConsumeResult:
 
 
 def _refresh_reuse_response(row: RefreshToken) -> RefreshConsumeResult:
-    """Revoke the presented row's device family and report the reuse."""
+    """Revoke the presented row's device family and report the reuse.
 
-    revoked = _revoke_refresh_rows(
-        _query_user_refresh_rows(row.user_id, row.device_id),
+    Uses :data:`_REFRESH_REUSE_SWEEPS` passes rather than one: this is
+    the breach path, so it is worth an extra Query on a small partition
+    to narrow the eventually-consistent gap described in
+    :func:`_revoke_refresh_family`.
+    """
+
+    revoked = _revoke_refresh_family(
+        row.user_id,
+        row.device_id,
         RefreshRevokeReason.REUSE_DETECTED,
+        sweeps=_REFRESH_REUSE_SWEEPS,
     )
     logger.warning(
         "refresh.reuse_detected user=%s device=%s revoked_rows=%d",
@@ -2054,15 +2117,17 @@ def revoke_refresh_token(raw_token: str) -> int:
     the family, not any single row, and revoking only the presented row
     would leave a concurrently-rotated successor alive and the user
     still signed in on a device they just signed out of.
+
+    Subject to the eventually-consistent index window documented on
+    :func:`_revoke_refresh_family` — a single sweep here, because a
+    logout racing a rotation from the same device is a self-inflicted
+    ordering problem, not an adversarial one.
     """
 
     row = _get_refresh_row(_refresh_token_hash(raw_token))
     if row is None:
         return 0
-    return _revoke_refresh_rows(
-        _query_user_refresh_rows(row.user_id, row.device_id),
-        RefreshRevokeReason.LOGOUT,
-    )
+    return _revoke_refresh_family(row.user_id, row.device_id, RefreshRevokeReason.LOGOUT)
 
 
 def revoke_all_user_refresh_tokens(user_id: str) -> int:
@@ -2072,12 +2137,13 @@ def revoke_all_user_refresh_tokens(user_id: str) -> int:
     many were still live. Already-revoked rows are left untouched so
     their original reason (and the reuse-detection signal that depends
     on it) survives.
+
+    Subject to the eventually-consistent index window documented on
+    :func:`_revoke_refresh_family`: a device that mints a token in the
+    same instant may not appear in the sweep.
     """
 
-    return _revoke_refresh_rows(
-        _query_user_refresh_rows(user_id),
-        RefreshRevokeReason.USER_REVOKED,
-    )
+    return _revoke_refresh_family(user_id, None, RefreshRevokeReason.USER_REVOKED)
 
 
 # ----------------------------------------------------------------
