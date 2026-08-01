@@ -1380,3 +1380,115 @@ html.is-electron-mac .sb-top {
   cursor: pointer;
 }
 .mcp-pill:hover { background: var(--canvas); }
+
+/* ============================================================
+   MOBILE — responsive chat-app layout (Tier 1 of #125, issue #425)
+
+   Everything in this block is gated behind `@media (max-width: 640px)`
+   so wide viewports stay byte-for-byte unchanged (desktop must not
+   regress). The two mobile-only chrome elements — `.mobile-topbar` and
+   `.mobile-nav-backdrop` — default to `display: none` here at base and
+   are switched on only inside the media query, so they are inert on
+   desktop even though Shell always renders the topbar.
+
+   Kept as a self-contained trailing section so a parallel edit to
+   app.css (e.g. #400 admin styles) rebases cleanly.
+   ============================================================ */
+
+.mobile-topbar { display: none; }
+.mobile-nav-backdrop { display: none; }
+
+@media (max-width: 640px) {
+  /* ----- sidebar → off-canvas drawer ----- */
+  /* The 264px rail becomes a fixed slide-in drawer. Default state is
+     off-canvas (translateX(-100%)); `.mobile-open` slides it in. The
+     desktop `.collapsed` width toggle is neutralised — on mobile the
+     drawer is driven by transform, never width, so the in-drawer
+     toggle button can't shrink it to zero. */
+  .sb {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: min(84vw, 300px);
+    z-index: 45;
+    transform: translateX(-100%);
+    transition: transform .22s cubic-bezier(.4, 0, .2, 1);
+  }
+  .sb.collapsed {
+    width: min(84vw, 300px);
+    margin-left: 0;
+    overflow: visible;
+  }
+  .sb.mobile-open {
+    transform: translateX(0);
+    box-shadow: var(--shadow-lg);
+  }
+  /* Click-catcher behind the open drawer — same idea as the popover
+     `.backdrop`, sitting just below the drawer (z 44 < 45). Rendered as
+     a real <button> (aria-label "Close menu") so keyboard + assistive-
+     tech users get a focusable dismiss path; the resets below strip the
+     native button chrome so only the scrim shows. */
+  .mobile-nav-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 44;
+    margin: 0;
+    border: 0;
+    padding: 0;
+    appearance: none;
+    -webkit-appearance: none;
+    background: oklch(0 0 0 / 0.4);
+    cursor: pointer;
+  }
+
+  /* ----- compact top bar + hamburger ----- */
+  .mobile-topbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    height: 52px;
+    flex-shrink: 0;
+    padding: 0 8px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border-soft);
+  }
+  .mobile-menu-btn { width: 40px; height: 40px; }
+  .mobile-topbar-brand { display: inline-flex; align-items: center; }
+  /* On mobile the hamburger owns nav-reveal; the desktop-collapse
+     "show sidebar" expand bar is redundant, so hide it. */
+  .main-top { display: none; }
+
+  /* ----- home / greeting ----- */
+  /* Anchor the greeting near the top (not vertically centred) so the
+     composer + quick actions sit in the thumb zone, and let the
+     greeting wrap instead of overflowing a long first name. */
+  .home { padding: 16px 12px 12px; justify-content: flex-start; padding-top: 8vh; }
+  .greet { gap: 12px; margin-bottom: 22px; }
+  .greet h1 { font-size: 28px; white-space: normal; }
+
+  /* ----- composer fits a ~390px width ----- */
+  .composer-wrap { max-width: none; }
+  .composer { padding: 12px 12px 8px; }
+  /* Let the control row wrap rather than overflow. When everything
+     fits it stays a single row (the spacer still pins send to the
+     right, same as desktop); when it doesn't, the controls wrap onto a
+     second line — no horizontal overflow either way. */
+  .composer-row { flex-wrap: wrap; gap: 6px; }
+  /* 16px textarea avoids iOS Safari's focus auto-zoom. */
+  .composer textarea { font-size: 16px; }
+  /* ≥40px touch targets for the primary composer controls (send +
+     the round attach/mic buttons, both `.cbtn.round`). */
+  .send { width: 40px; height: 40px; }
+  .cbtn.round { width: 40px; height: 40px; }
+  /* ≥40px too — the model picker is a primary composer control. */
+  .model-pick { height: 40px; }
+
+  /* ----- quick actions (already wrap; tighten spacing) ----- */
+  .quick { gap: 8px; margin-top: 16px; }
+
+  /* ----- conversation full-width w/ mobile padding ----- */
+  .convo-inner { padding: 14px 14px 32px; }
+  .bottom-composer { padding: 0 12px 14px; }
+}
