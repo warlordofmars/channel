@@ -394,7 +394,7 @@ def _user_row(
     """The one list/detail row shape (#238 consumes this verbatim)."""
     return {
         "user_id": user_id,
-        # JWT sub == email today (see auth.mgmt_auth._make_user), so the
+        # JWT sub == email today (see auth.mgmt_auth.make_mgmt_user), so the
         # derived fallback surfaces user_id as the email.
         "email": email or user_id,
         "created_at": created_at,

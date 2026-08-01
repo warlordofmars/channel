@@ -424,8 +424,13 @@ The management UI stores a signed JWT in browser `localStorage` and
 presents it as a `Bearer` token on every API call. The signature and
 claims are self-contained, but validation also performs a single
 `DENY#{jti}` denylist point-read (#240) so a revoked (logged-out)
-session is rejected before its `exp` — the compensating control for
-the 30-day TTL.
+session is rejected before its `exp` rather than staying live for the
+rest of its window.
+
+This is the short-lived **access** token. The long-lived credential is
+the opaque refresh token (`REFRESH#{sha256(token)}`, #290), exchanged at
+`POST /auth/refresh` (#291) — see
+[Refresh tokens](#refresh-tokens) below.
 
 | Field | Value |
 | --- | --- |
@@ -437,9 +442,9 @@ the 30-day TTL.
 | `role` claim | `"admin"` or `"user"` (set at login from `is_admin_email`) |
 | `typ` claim | `"mgmt"` (distinguishes from API access tokens) |
 | `jti` claim | unique per-token id (`uuid4().hex`); the `DENY#{jti}` denylist key used for revocation |
-| `iat` / `exp` claims | seconds since epoch; TTL = 30 days |
-| TTL constant | `MGMT_JWT_TTL_SECONDS = 2_592_000` (30 days) in `src/channel/auth/tokens.py` |
-| Revocation | logout writes `DENY#{jti}` (DynamoDB `ttl` = the token's `exp`); `require_mgmt_user` rejects a denied `jti` with HTTP 401 (#240) |
+| `iat` / `exp` claims | seconds since epoch; TTL = 1 hour |
+| TTL constant | `MGMT_JWT_TTL_SECONDS = 3600` (1 hour) in `src/channel/auth/tokens.py` |
+| Revocation | logout writes `DENY#{jti}` (DynamoDB `ttl` = the token's `exp`); `decode_mgmt_jwt` rejects a denied `jti`, surfacing as HTTP 401 (#240 / #291) |
 | Browser storage key | `localStorage["starter_mgmt_token"]` |
 | Issuer (server) | `src/channel/auth/tokens.py` (`issue_mgmt_jwt`) via `src/channel/auth/mgmt_auth.py` |
 | Validator (server) | `src/channel/auth/tokens.py` (`decode_mgmt_jwt`) via `src/channel/api/_auth.py` (`require_mgmt_user`, `require_admin`) |
@@ -451,23 +456,64 @@ the 30-day TTL.
 `decode_mgmt_jwt` enforces, in order:
 
 1. Signature verifies under the active JWT signing secret.
-2. `iss` claim equals `STARTER_ISSUER`.
+2. `iss` claim equals `CHANNEL_ISSUER`.
 3. `exp` claim is in the future.
 4. `typ` claim equals `"mgmt"` — an OAuth 2.1 access token cannot be
    replayed as a management session, and vice versa.
+5. `jti` is not on the `DENY#{jti}` revocation denylist (#240), via a
+   single strongly-consistent point read. A token minted before #240
+   carries no `jti` and skips the read.
 
 Failures raise `JWTError`, which `require_mgmt_user` translates to
 HTTP 401. `require_admin` adds an HTTP 403 if `role != "admin"`.
 
-`require_mgmt_user` adds one check beyond `decode_mgmt_jwt`: the
-token's `jti` is looked up against the `DENY#{jti}` revocation
-denylist (#240) via a single point read, and a revoked (logged-out)
-session is rejected with HTTP 401. This is the safety valve the
-30-day TTL relies on — a stolen or logged-out token can be killed
-before its `exp` passes.
+Step 5 lives inside `decode_mgmt_jwt` rather than in the caller (#291)
+so that every present and future consumer of a management JWT inherits
+revocation-awareness — one fail-closed enforcement point instead of a
+second call each caller has to remember. It is what lets a stolen or
+logged-out token be killed before its `exp` passes. A denylist *read
+failure* is not a `JWTError` and therefore is not translated to 401: it
+propagates as a 500, so revocation can never be bypassed by inducing
+DynamoDB errors.
 
 The UI clears `localStorage["starter_mgmt_token"]` on any 401 from
 the API; see `ui/src/api.js`.
+
+### Refresh tokens
+
+The access token above is short-lived by design (1 hour). The
+credential that survives across sessions is the **refresh token**: an
+opaque 256-bit random string, never a JWT, persisted only as
+`REFRESH#{sha256(token)}` so a database disclosure yields nothing
+usable (#290).
+
+`POST /auth/refresh` (#291) exchanges one for a fresh access JWT and a
+rotated successor. It is **unauthenticated** — by the time a client
+needs to refresh, the access token it holds has usually expired, so
+gating the route on one would deadlock the flow.
+
+| Property | Value |
+| --- | --- |
+| Web transport | `channel_refresh` cookie — `HttpOnly`, `Secure`, `SameSite=Strict`, `Path=/auth/refresh`, `Max-Age` = the family's `absolute_expires_at` |
+| Desktop/mobile transport | request body `{"refresh_token": ...}`; successor returned in the JSON body |
+| CSRF control | `X-Channel-Refresh` header required (presence only); missing → HTTP 403, checked before the token is consumed |
+| Rotation | hard — every use revokes the presented row and mints a successor; replaying a consumed token revokes the whole device family (RFC 9700 §4.14.2) |
+| Failure response | uniform HTTP 401 `Invalid or expired refresh token`; the specific reason is logged, never returned |
+| Cookie hygiene | a rejected cookie-transport request also clears the cookie, so a browser cannot replay a dead token |
+
+The web transport never returns the refresh token in the response body
+— that would defeat `HttpOnly`. The two CSRF layers are independent:
+`SameSite=Strict` keeps the cookie off cross-site requests at all, and
+the custom header cannot be set by a forged form or image POST without
+a CORS preflight this API does not grant.
+
+Revoking a refresh token is a conditional write on its row
+(`revoked=true`); `revoke_all_user_refresh_tokens` is the "sign out
+everywhere" path. Note the known window documented with
+`_revoke_refresh_family` in `src/channel/storage.py`: family revocation
+reads an eventually-consistent GSI, so it is best-effort with respect
+to concurrent mints, bounded by the family's unchanged
+`absolute_expires_at`.
 
 ### Rotation procedure
 
@@ -479,7 +525,11 @@ rotate the signing secret (see the
 [JWT signing secret](#jwt-signing-secret) section). Remove a user by
 deleting their email from `ALLOWED_EMAILS` so they cannot log in
 again; existing sessions then end by per-token denylisting, by a
-signing-secret rotation, or by waiting out the 30-day TTL.
+signing-secret rotation, or by waiting out the 1-hour access TTL.
+Removing the email does **not** by itself stop a refresh — role is
+recomputed from the allowlist on every refresh, but membership is not
+re-checked — so revoke the user's refresh tokens
+(`revoke_all_user_refresh_tokens`) to end their sessions for good.
 
 ## Rotation quick reference
 

@@ -8,10 +8,12 @@ the bearer mgmt JWT, revokes it via the JTI denylist, writes an
 
 Logout is a true server-side revocation point (#240): it adds the token's
 ``jti`` to the ``DENY#{jti}`` denylist (TTL = the token's own ``exp``), so
-the now-30-day token is rejected by ``require_mgmt_user`` on every
-subsequent request rather than remaining valid until expiry. The endpoint
-stays JWT-authenticated, so logging out proves the caller controls the
-token being revoked. Logout's other jobs:
+the token is rejected by ``decode_mgmt_jwt`` on every subsequent request
+rather than remaining valid until expiry. That still matters with the 1h
+access-token TTL (#291) — an hour is a long time to leave a stolen
+laptop's session live. The endpoint stays JWT-authenticated, so logging
+out proves the caller controls the token being revoked. Logout's other
+jobs:
 
 1. Record operator intent in the immutable audit log so a stolen-laptop
    event has a server-side signal for remediation.
@@ -79,7 +81,7 @@ async def mgmt_logout(
     fingerprint = _token_fingerprint(claims)
     # NOTE: ``actor_id`` is the JWT ``sub``, which equals the user's email
     # in the current mgmt-JWT shape (``user_id = email`` in
-    # ``mgmt_auth._make_user``). We deliberately do NOT also write
+    # ``mgmt_auth.make_mgmt_user``). We deliberately do NOT also write
     # ``details["email"]`` — it would duplicate ``actor_id`` byte-for-byte
     # without adding any correlation value. When a future #114 schema
     # moves to opaque user ids (e.g. ``USER#u-{uuid}``), the two will
@@ -90,7 +92,7 @@ async def mgmt_logout(
     }
     if jti := claims.get("jti"):
         details["jti"] = jti
-        # Revoke this token server-side so its (now 30-day) TTL cannot
+        # Revoke this token server-side so its remaining TTL cannot
         # outlive the user's intent to log out (#240). Best-effort,
         # mirroring the audit write below: a denylist-write failure is
         # logged loudly but must not strand the user mid-logout. The

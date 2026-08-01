@@ -133,14 +133,65 @@ channel/
 
 Google OAuth is the identity provider for management UI login
 (`/auth/login`). On successful Google sign-in, the API mints a
-management JWT (`typ=mgmt`, `role=admin|user`, 30-day TTL, revocable
-via the `DENY#{jti}` denylist — #240 / #298) signed with
+management **access** JWT (`typ=mgmt`, `role=admin|user`, **1-hour
+TTL**, revocable via the `DENY#{jti}` denylist — #240) signed with
 HS256 using a secret resolved from SSM
 (`/channel/{env}/jwt-secret`). All `/api/*` endpoints
-require a valid Bearer mgmt JWT. JWT validation enforces `iss`,
-`typ=mgmt`, and `exp`, then rejects any `jti` on the denylist. The
-token is stored client-side in `localStorage` under the
-`starter_mgmt_token` key.
+require a valid Bearer mgmt JWT. The token is stored client-side in
+`localStorage` under the `starter_mgmt_token` key.
+
+`decode_mgmt_jwt` (`src/channel/auth/tokens.py`) is the single
+validation point: it enforces the signature, `iss`, `exp`, and
+`typ=mgmt`, then rejects any `jti` on the `DENY#{jti}` denylist via one
+strongly-consistent point read. `require_mgmt_user`
+(`src/channel/api/_auth.py`) just maps the resulting `JWTError` to HTTP
+401 — revocation lives in the decode path (#291) so a future consumer
+cannot forget it. A token minted before #240 carries no `jti` and skips
+the read; a denylist *read failure* propagates as a 500 rather than
+degrading to "not revoked".
+
+**Two token types, different lifetimes.** The 1h access JWT is the
+bearer credential on every `/api/*` request. The long-lived credential
+is the opaque refresh token (`REFRESH#{sha256(token)}` rows, #290),
+which is server-side, hard-rotated on every use, and revocable.
+`MGMT_JWT_TTL_SECONDS` was 8h originally, 30 days under #240 (a stop-gap
+while no refresh flow existed), and is 1h again as of #291.
+
+### `POST /auth/refresh` (#291)
+
+Exchanges a refresh token for a fresh 1h access JWT, rotating the
+refresh token in the same round trip (`src/channel/auth/refresh.py`).
+**Unauthenticated by design** — the refresh token is the credential, and
+the access JWT it renews has usually already expired.
+
+- **Transport is pluggable.** Web SPA: the token rides the
+  `channel_refresh` cookie (`HttpOnly` + `Secure` + `SameSite=Strict`,
+  path-scoped to `/auth/refresh`, `Max-Age` pinned to the family's
+  `absolute_expires_at`) and the rotated successor goes back in a
+  `Set-Cookie` — never in the response body. Desktop/mobile: the token
+  arrives as `{"refresh_token": ...}` and the successor comes back in
+  the JSON body. A body token wins over a stray cookie.
+- **CSRF**: the `X-Channel-Refresh` header is required (presence only —
+  the value is meaningless). A cross-origin forgery cannot set a custom
+  header without a preflight this API won't grant. Missing header → 403,
+  checked *before* the token is consumed so a forged request can't burn
+  a rotation.
+- **Every failure is an indistinguishable 401** (`Invalid or expired
+  refresh token`); the not-found / revoked / reused / idle-expired /
+  absolute-expired taxonomy stays in the logs, since exposing it would
+  be an oracle. On the cookie transport a rejection also clears the dead
+  cookie, so a browser can't replay it and re-arm the reuse cascade.
+- **No refresh token at all → 401**, which is the epic's migration path
+  rather than an error: a session predating the refresh flow keeps using
+  its existing access token until it expires.
+- Response: `{access_token, token_type: "bearer", expires_in}` plus
+  `refresh_token` on the body transport only.
+
+Still to land in epic #241: minting the first refresh token at login
+(#292), the sessions API (#293), rate limiting + EMF counters (#294),
+the SPA's silent-refresh wrapper (#295), and desktop `safeStorage`
+persistence (#297). **Until #292 lands, no refresh token is ever
+issued**, so the 1h access TTL means an hourly re-login.
 
 ## DynamoDB single table design
 

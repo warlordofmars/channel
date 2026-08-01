@@ -9,7 +9,6 @@ from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from channel.auth.tokens import decode_mgmt_jwt
-from channel.storage import is_jti_denied
 
 _bearer = HTTPBearer()
 
@@ -19,29 +18,26 @@ def require_mgmt_user(
 ) -> dict[str, Any]:
     """Validate a management JWT and return its claims.
 
-    The JWT signature/claims are self-contained, but a revoked session
-    must be rejected too: after the signature + ``exp`` + ``typ`` checks,
-    the token's ``jti`` is checked against the ``DENY#{jti}`` denylist
-    (#240) via a single point read. Raises HTTP 401 on an
-    invalid/expired/revoked token.
+    Every rejection reason — bad signature, wrong issuer, expired,
+    ``typ != mgmt``, or a ``jti`` on the ``DENY#{jti}`` revocation
+    denylist (#240) — arrives as a ``JWTError`` from
+    :func:`~channel.auth.tokens.decode_mgmt_jwt` and maps to HTTP 401.
+    Revocation lives inside the decode path (#291) so it cannot be
+    forgotten by a future consumer; a revoked token therefore fails
+    closed with the same status as an expired one, its ``detail``
+    differing only to aid client debugging.
+
+    A *denylist read failure* is not a ``JWTError`` and so is not caught
+    here: it propagates as a 500, consistent with how every other
+    DDB-backed endpoint surfaces storage errors, and deliberately never
+    degrades to "not revoked".
     """
     from jose import JWTError
 
     try:
-        claims = decode_mgmt_jwt(credentials.credentials)
+        return decode_mgmt_jwt(credentials.credentials)
     except JWTError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
-
-    jti = claims.get("jti")
-    if jti and is_jti_denied(jti):
-        # A revoked (logged-out) token is rejected with 401 — the same
-        # status as an expired/invalid token, so revocation fails closed
-        # through the normal auth path. The detail string differs only to
-        # aid client debugging and is not a security boundary. A
-        # denylist-read failure propagates as a 500, consistent with how
-        # every other DDB-backed endpoint surfaces storage errors.
-        raise HTTPException(status_code=401, detail="Token revoked")
-    return claims
 
 
 def require_admin(
