@@ -201,6 +201,28 @@ def test_parse_blockers(body: str | None, expected: list[int]) -> None:
     assert sweep.parse_blockers(body) == expected
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        "This is not blocked by #99 anymore",
+        "No longer blocked by #99",
+        "It isn't blocked by #99",
+        "This wasn’t blocked by #99",  # smart apostrophe — GitHub bodies have them
+        "Never blocked by #99",
+    ],
+)
+def test_parse_blockers_ignores_negated_phrasing(body: str) -> None:
+    """ "not blocked by #99" says the dependency is done — reading it as live
+    would let --fix relabel an issue that explicitly says it is unblocked."""
+    assert sweep.parse_blockers(body) == []
+
+
+def test_parse_blockers_keeps_a_real_reference_next_to_a_negated_one() -> None:
+    body = "No longer blocked by #99.\n\nBlocked by #100."
+
+    assert sweep.parse_blockers(body) == [100]
+
+
 def test_parse_blockers_ignores_inline_code_spans() -> None:
     """Issue #457's own body quotes the syntax — it must not self-report."""
     body = "Cover the multi-blocker regex (`Blocked by #259 and #260`, comma-separated)."

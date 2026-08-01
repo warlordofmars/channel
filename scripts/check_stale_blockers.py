@@ -74,8 +74,16 @@ _GRAPHQL_BATCH = 50
 # "Blocked by: #1 & #2". The repetition only continues across an explicit
 # separator (comma / "and" / "&" / "+"), so a bare newline ends the run — an
 # unrelated "#300" on a later line is not swallowed into the reference list.
+#
+# The optional `neg` group captures a preceding negation ("not blocked by #99",
+# "no longer blocked by #99", "isn't blocked by #99"). Those phrasings are the
+# author saying the dependency is *done*; parse_blockers drops them, because
+# reading one as a live blocker is how --fix would relabel an issue that
+# explicitly says it is unblocked.
 _BLOCKED_RE = re.compile(
-    r"blocked\s+by\b[:\s]*((?:#\d+(?:\s*(?:,|and|&|\+)\s*)?)+)",
+    r"(?P<neg>\b(?:\w+n['’]t|not|no\s+longer|never)\s+)?"
+    r"blocked\s+by\b[:\s]*"
+    r"(?P<refs>(?:#\d+(?:\s*(?:,|and|&|\+)\s*)?)+)",
     re.IGNORECASE,
 )
 _REF_RE = re.compile(r"#(\d+)")
@@ -168,8 +176,10 @@ def parse_blockers(body: str | None) -> list[int]:
     if not body:
         return []
     found: list[int] = []
-    for tail in _BLOCKED_RE.findall(strip_code(body)):
-        found.extend(int(n) for n in _REF_RE.findall(tail))
+    for match in _BLOCKED_RE.finditer(strip_code(body)):
+        if match.group("neg"):
+            continue
+        found.extend(int(n) for n in _REF_RE.findall(match.group("refs")))
     # Preserve first-seen order, drop duplicates.
     return list(dict.fromkeys(found))
 

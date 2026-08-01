@@ -24,6 +24,7 @@ Usage:
 
 import os
 import re
+import shlex
 import signal
 import subprocess
 import sys
@@ -248,7 +249,8 @@ def check_blockers(ctx, json=False, fix=False, repo=None):
     if fix:
         cmd += " --fix"
     if repo:
-        cmd += f" --repo {repo}"
+        # ctx.run goes through a shell — quote the one caller-supplied value.
+        cmd += f" --repo {shlex.quote(repo)}"
     # warn=True so a findings exit (1) reports the backlog state instead of
     # raising invoke's UnexpectedExit traceback over the report.
     result = ctx.run(cmd, pty=True, warn=True)
