@@ -3483,8 +3483,8 @@ def test_adversarial_paths_double_sweep_while_plain_logout_does_not(
     revoke_refresh_token(raw_logout)
     revoke_all_user_refresh_tokens("u-1")
 
-    assert calls == [storage._REFRESH_REUSE_SWEEPS, 1, storage._REFRESH_REUSE_SWEEPS]
-    assert storage._REFRESH_REUSE_SWEEPS == 2
+    assert calls == [storage._REFRESH_ADVERSARIAL_SWEEPS, 1, storage._REFRESH_ADVERSARIAL_SWEEPS]
+    assert storage._REFRESH_ADVERSARIAL_SWEEPS == 2
 
 
 def test_refresh_consume_result_rejects_a_revoked_count_outside_the_reuse_path() -> None:

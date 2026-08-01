@@ -1738,7 +1738,7 @@ _REFRESH_QUERY_MAX_PAGES = 25
 # it. See _revoke_refresh_family for what this does and does not
 # guarantee. Ordinary logout keeps one sweep — it doesn't race an
 # adversary.
-_REFRESH_REUSE_SWEEPS = 2
+_REFRESH_ADVERSARIAL_SWEEPS = 2
 
 # Revoke only rows that are still live. ``revoked`` is aliased because
 # expression attribute names are the cheap way to stay clear of
@@ -2128,9 +2128,9 @@ def _refresh_race_loss_response(token_hash: str, row: RefreshToken) -> RefreshCo
 def _refresh_reuse_response(row: RefreshToken) -> RefreshConsumeResult:
     """Revoke the presented row's device family and report the reuse.
 
-    Uses :data:`_REFRESH_REUSE_SWEEPS` passes rather than one: this is
-    the breach path, so it is worth an extra Query on a small partition
-    to narrow the eventually-consistent gap described in
+    Uses :data:`_REFRESH_ADVERSARIAL_SWEEPS` passes rather than one:
+    this is the breach path, so it is worth an extra Query on a small
+    partition to narrow the eventually-consistent gap described in
     :func:`_revoke_refresh_family`.
     """
 
@@ -2138,7 +2138,7 @@ def _refresh_reuse_response(row: RefreshToken) -> RefreshConsumeResult:
         row.user_id,
         row.device_id,
         RefreshRevokeReason.REUSE_DETECTED,
-        sweeps=_REFRESH_REUSE_SWEEPS,
+        sweeps=_REFRESH_ADVERSARIAL_SWEEPS,
     )
     logger.warning(
         "refresh.reuse_detected user=%s device=%s revoked_rows=%d",
@@ -2197,7 +2197,7 @@ def revoke_all_user_refresh_tokens(user_id: str) -> int:
         user_id,
         None,
         RefreshRevokeReason.USER_REVOKED,
-        sweeps=_REFRESH_REUSE_SWEEPS,
+        sweeps=_REFRESH_ADVERSARIAL_SWEEPS,
     )
 
 
