@@ -193,12 +193,12 @@ def test_mermaid_fence_excluded_even_when_long() -> None:
 
 
 def test_extraction_enabled_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("STARTER_ASSET_EXTRACTION_ENABLED", raising=False)
+    monkeypatch.delenv("CHANNEL_ASSET_EXTRACTION_ENABLED", raising=False)
     assert ap.asset_extraction_enabled() is True
 
 
 def test_extraction_disabled_when_flag_zero(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("STARTER_ASSET_EXTRACTION_ENABLED", "0")
+    monkeypatch.setenv("CHANNEL_ASSET_EXTRACTION_ENABLED", "0")
     assert ap.asset_extraction_enabled() is False
 
 
@@ -565,7 +565,7 @@ async def test_fence_asset_persists_inline_with_fence_index_and_lang(
     metrics: AsyncMock,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("STARTER_ASSET_EXTRACTION_ENABLED", raising=False)
+    monkeypatch.delenv("CHANNEL_ASSET_EXTRACTION_ENABLED", raising=False)
     text = "Short one:\n\n" + _fence(3) + "\n\nLong one:\n\n" + _fence(20, lang="python")
     persisted = await ap.persist_fence_assets(chat_id="c-1", owner="u-1", msg_id="m-a", text=text)
     assert len(persisted) == 1
@@ -587,7 +587,7 @@ async def test_fence_asset_over_inline_cap_goes_to_s3(
     metrics: AsyncMock,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("STARTER_ASSET_EXTRACTION_ENABLED", raising=False)
+    monkeypatch.delenv("CHANNEL_ASSET_EXTRACTION_ENABLED", raising=False)
     # 20 lines whose total UTF-8 size exceeds the 100 KB inline cap.
     line = "x" * ((ASSET_INLINE_CONTENT_MAX_BYTES // 15) + 1)
     body = "\n".join([line] * 15)
@@ -608,7 +608,7 @@ async def test_fence_asset_over_inline_cap_goes_to_s3(
 async def test_fence_extraction_kill_switch_off_persists_nothing(
     monkeypatch: pytest.MonkeyPatch, metrics: AsyncMock
 ) -> None:
-    monkeypatch.setenv("STARTER_ASSET_EXTRACTION_ENABLED", "0")
+    monkeypatch.setenv("CHANNEL_ASSET_EXTRACTION_ENABLED", "0")
     called: list[Any] = []
     monkeypatch.setattr(
         "channel.agents.asset_producers.storage.put_asset", lambda a: called.append(a)
@@ -625,7 +625,7 @@ async def test_fence_extraction_kill_switch_off_persists_nothing(
 async def test_fence_persist_failure_is_isolated_per_fence(
     monkeypatch: pytest.MonkeyPatch, metrics: AsyncMock
 ) -> None:
-    monkeypatch.delenv("STARTER_ASSET_EXTRACTION_ENABLED", raising=False)
+    monkeypatch.delenv("CHANNEL_ASSET_EXTRACTION_ENABLED", raising=False)
     text = _fence(15, lang="python") + "\n\n" + _fence(16, lang="go")
     calls: list[Asset] = []
 
@@ -654,7 +654,7 @@ async def test_metric_emission_failure_never_breaks_producer(
     ``record_asset_persist_outcome`` must not abort the producer loop —
     the row is durable, the asset is still returned (so the frame still
     goes out)."""
-    monkeypatch.delenv("STARTER_ASSET_EXTRACTION_ENABLED", raising=False)
+    monkeypatch.delenv("CHANNEL_ASSET_EXTRACTION_ENABLED", raising=False)
 
     async def exploding_metric(*, success: bool) -> None:
         raise RuntimeError("EMF flush failed")
@@ -675,7 +675,7 @@ async def test_metric_emission_failure_in_failure_path_is_swallowed(
 ) -> None:
     """Both fail-soft tails compose: put_asset raises AND the failure
     counter raises — the producer still returns cleanly."""
-    monkeypatch.delenv("STARTER_ASSET_EXTRACTION_ENABLED", raising=False)
+    monkeypatch.delenv("CHANNEL_ASSET_EXTRACTION_ENABLED", raising=False)
 
     def exploding_put(_asset: Asset) -> None:
         raise RuntimeError("ddb down")
@@ -791,7 +791,7 @@ async def test_fence_row_write_failure_cleans_up_oversized_s3_object(
     delete_object_capture: list[tuple[str, str]],
     metrics: AsyncMock,
 ) -> None:
-    monkeypatch.delenv("STARTER_ASSET_EXTRACTION_ENABLED", raising=False)
+    monkeypatch.delenv("CHANNEL_ASSET_EXTRACTION_ENABLED", raising=False)
 
     def exploding_put(_asset: Asset) -> None:
         raise RuntimeError("ddb down")
@@ -816,7 +816,7 @@ async def test_fence_inline_failure_does_not_touch_s3(
 ) -> None:
     """Inline-content fences never wrote to S3, so a failed row write
     must not fire the compensating delete (coords are None)."""
-    monkeypatch.delenv("STARTER_ASSET_EXTRACTION_ENABLED", raising=False)
+    monkeypatch.delenv("CHANNEL_ASSET_EXTRACTION_ENABLED", raising=False)
 
     def exploding_put(_asset: Asset) -> None:
         raise RuntimeError("ddb down")
@@ -925,7 +925,7 @@ def test_classify_bare_nontabular_fence_stays_code() -> None:
 async def test_persist_csv_lang_fence_is_kind_data(
     put_asset_capture: list[Asset], metrics: AsyncMock, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.delenv("STARTER_ASSET_EXTRACTION_ENABLED", raising=False)
+    monkeypatch.delenv("CHANNEL_ASSET_EXTRACTION_ENABLED", raising=False)
     text = f"Here is the data:\n\n```csv\n{_tabular_body(',')}\n```"
     persisted = await ap.persist_fence_assets(chat_id="c-1", owner="u-1", msg_id="m-a", text=text)
     assert len(persisted) == 1
@@ -942,7 +942,7 @@ async def test_persist_csv_lang_fence_is_kind_data(
 async def test_persist_tsv_lang_fence_is_kind_data(
     put_asset_capture: list[Asset], metrics: AsyncMock, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.delenv("STARTER_ASSET_EXTRACTION_ENABLED", raising=False)
+    monkeypatch.delenv("CHANNEL_ASSET_EXTRACTION_ENABLED", raising=False)
     text = f"```tsv\n{_tabular_body(chr(9))}\n```"
     persisted = await ap.persist_fence_assets(chat_id="c-1", owner="u-1", msg_id="m-a", text=text)
     assert len(persisted) == 1
@@ -954,7 +954,7 @@ async def test_persist_tsv_lang_fence_is_kind_data(
 async def test_persist_bare_tabular_fence_is_kind_data(
     put_asset_capture: list[Asset], metrics: AsyncMock, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.delenv("STARTER_ASSET_EXTRACTION_ENABLED", raising=False)
+    monkeypatch.delenv("CHANNEL_ASSET_EXTRACTION_ENABLED", raising=False)
     text = f"```\n{_tabular_body(',')}\n```"
     persisted = await ap.persist_fence_assets(chat_id="c-1", owner="u-1", msg_id="m-a", text=text)
     assert len(persisted) == 1
@@ -967,7 +967,7 @@ async def test_persist_bare_tabular_fence_is_kind_data(
 async def test_persist_python_fence_stays_kind_code(
     put_asset_capture: list[Asset], metrics: AsyncMock, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.delenv("STARTER_ASSET_EXTRACTION_ENABLED", raising=False)
+    monkeypatch.delenv("CHANNEL_ASSET_EXTRACTION_ENABLED", raising=False)
     persisted = await ap.persist_fence_assets(
         chat_id="c-1", owner="u-1", msg_id="m-a", text=_fence(20, lang="python")
     )
@@ -985,7 +985,7 @@ async def test_persist_oversized_csv_uses_csv_mime_for_s3(
 ) -> None:
     """An over-inline-cap CSV fence carries text/csv to the S3 put too, not
     the code default — so the stored object's Content-Type matches."""
-    monkeypatch.delenv("STARTER_ASSET_EXTRACTION_ENABLED", raising=False)
+    monkeypatch.delenv("CHANNEL_ASSET_EXTRACTION_ENABLED", raising=False)
     cell = "v" * ((ASSET_INLINE_CONTENT_MAX_BYTES // 15) + 1)
     header = "a,b"
     rows = "\n".join(f"{cell},{i}" for i in range(15))
@@ -1006,7 +1006,7 @@ async def test_orphan_cleanup_failure_is_swallowed(
 ) -> None:
     """A doubly-failed cleanup (row write AND compensating delete both
     raise) still leaves the producer loop intact."""
-    monkeypatch.delenv("STARTER_ASSET_EXTRACTION_ENABLED", raising=False)
+    monkeypatch.delenv("CHANNEL_ASSET_EXTRACTION_ENABLED", raising=False)
 
     def exploding_put(_asset: Asset) -> None:
         raise RuntimeError("ddb down")

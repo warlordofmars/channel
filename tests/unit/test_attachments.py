@@ -13,9 +13,9 @@ from typing import Any
 
 import pytest
 
-os.environ.setdefault("STARTER_JWT_SECRET", "test-secret-for-unit-tests")
-os.environ.setdefault("STARTER_ATTACHMENTS_BUCKET", "channel-attachments-test")
-os.environ.setdefault("STARTER_TABLE_NAME", "channel-test")
+os.environ.setdefault("CHANNEL_JWT_SECRET", "test-secret-for-unit-tests")
+os.environ.setdefault("CHANNEL_ATTACHMENTS_BUCKET", "channel-attachments-test")
+os.environ.setdefault("CHANNEL_TABLE_NAME", "channel-test")
 
 from botocore.exceptions import ClientError  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
@@ -121,7 +121,7 @@ def test_presign_happy_path_returns_url_and_token(client: TestClient, fake_s3: _
 
     claim = jose_jwt.decode(
         out["presign_token"],
-        os.environ["STARTER_JWT_SECRET"],
+        os.environ["CHANNEL_JWT_SECRET"],
         algorithms=["HS256"],
         issuer=ISSUER,
     )
@@ -219,7 +219,7 @@ def _good_claim(*, sub: str = "u-1", **overrides: Any) -> str:
         "exp": int(time.time()) + 60,
     }
     claim.update(overrides)
-    return jose_jwt.encode(claim, os.environ["STARTER_JWT_SECRET"], algorithm="HS256")
+    return jose_jwt.encode(claim, os.environ["CHANNEL_JWT_SECRET"], algorithm="HS256")
 
 
 def test_finalize_happy_path_writes_row_and_flips_tag(
@@ -295,7 +295,7 @@ def test_finalize_rejects_wrong_token_type(
             "sub": "u-1",
             "exp": int(time.time()) + 60,
         },
-        os.environ["STARTER_JWT_SECRET"],
+        os.environ["CHANNEL_JWT_SECRET"],
         algorithm="HS256",
     )
     resp = client.post(
@@ -395,7 +395,7 @@ def test_finalize_rejects_expired_token(
             "s3_key": "attachments/user/u-1/att-fin-1",
             "exp": int(time.time()) - 1,
         },
-        os.environ["STARTER_JWT_SECRET"],
+        os.environ["CHANNEL_JWT_SECRET"],
         algorithm="HS256",
     )
     resp = client.post(
@@ -424,7 +424,7 @@ def test_finalize_rejects_wrong_issuer_token(
             "s3_key": "attachments/user/u-1/att-fin-1",
             "exp": int(time.time()) + 60,
         },
-        os.environ["STARTER_JWT_SECRET"],
+        os.environ["CHANNEL_JWT_SECRET"],
         algorithm="HS256",
     )
     resp = client.post(

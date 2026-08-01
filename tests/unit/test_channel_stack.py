@@ -4,7 +4,7 @@
 Runs as pure Python unit tests (no AWS calls). Guards env-specific
 configuration that the agent-safe checklist + spec Risk #5 require:
 
-- ``STARTER_ENABLE_DEBUG_ENDPOINTS`` must NEVER leak to the prod
+- ``CHANNEL_ENABLE_DEBUG_ENDPOINTS`` must NEVER leak to the prod
   Lambda — the dev-only ``/api/_debug/*`` routes are mgmt-JWT-gated
   but a misconfigured prod with the flag set still exposes
   authenticated dev surface to production users. The flag is set in
@@ -86,7 +86,7 @@ def _api_function(template: assertions.Template) -> dict:
 def test_prod_stack_does_not_set_debug_endpoints_env_var(prod_template):
     api_fn = _api_function(prod_template)
     env_vars = api_fn["Properties"]["Environment"]["Variables"]
-    assert "STARTER_ENABLE_DEBUG_ENDPOINTS" not in env_vars, (
+    assert "CHANNEL_ENABLE_DEBUG_ENDPOINTS" not in env_vars, (
         "Prod stack must NOT enable debug endpoints. See spec Risk #5."
     )
 
@@ -94,7 +94,7 @@ def test_prod_stack_does_not_set_debug_endpoints_env_var(prod_template):
 def test_dev_stack_sets_debug_endpoints_env_var(dev_template):
     api_fn = _api_function(dev_template)
     env_vars = api_fn["Properties"]["Environment"]["Variables"]
-    assert env_vars.get("STARTER_ENABLE_DEBUG_ENDPOINTS") == "1"
+    assert env_vars.get("CHANNEL_ENABLE_DEBUG_ENDPOINTS") == "1"
 
 
 def test_prod_stack_does_not_set_bypass_google_auth_env_var(prod_template):
@@ -102,11 +102,11 @@ def test_prod_stack_does_not_set_bypass_google_auth_env_var(prod_template):
     activates when a request carries ``?test_email=``, but a
     misconfigured prod with the flag set still hands an admin JWT to
     anyone who can guess that query param. Same risk shape as
-    ``STARTER_ENABLE_DEBUG_ENDPOINTS``."""
+    ``CHANNEL_ENABLE_DEBUG_ENDPOINTS``."""
 
     api_fn = _api_function(prod_template)
     env_vars = api_fn["Properties"]["Environment"]["Variables"]
-    assert "STARTER_BYPASS_GOOGLE_AUTH" not in env_vars, (
+    assert "CHANNEL_BYPASS_GOOGLE_AUTH" not in env_vars, (
         "Prod stack must NOT enable the Google-auth bypass."
     )
 
@@ -114,19 +114,19 @@ def test_prod_stack_does_not_set_bypass_google_auth_env_var(prod_template):
 def test_dev_stack_sets_bypass_google_auth_env_var(dev_template):
     api_fn = _api_function(dev_template)
     env_vars = api_fn["Properties"]["Environment"]["Variables"]
-    assert env_vars.get("STARTER_BYPASS_GOOGLE_AUTH") == "1"
+    assert env_vars.get("CHANNEL_BYPASS_GOOGLE_AUTH") == "1"
 
 
 def test_prod_stack_disables_clock_tool_env_var(prod_template):
     """#181 chassis policy P2 — the ``current_time`` smoke-test tool
     must NOT register in prod. The chassis registers the tool only
-    when ``STARTER_CLOCK_TOOL_ENABLED=="1"``; prod sets it to ``"0"``
+    when ``CHANNEL_CLOCK_TOOL_ENABLED=="1"``; prod sets it to ``"0"``
     explicitly so a future default-shift can't flip it on by accident.
     """
 
     api_fn = _api_function(prod_template)
     env_vars = api_fn["Properties"]["Environment"]["Variables"]
-    assert env_vars.get("STARTER_CLOCK_TOOL_ENABLED") == "0"
+    assert env_vars.get("CHANNEL_CLOCK_TOOL_ENABLED") == "0"
 
 
 def test_dev_stack_enables_clock_tool_env_var(dev_template):
@@ -136,7 +136,7 @@ def test_dev_stack_enables_clock_tool_env_var(dev_template):
 
     api_fn = _api_function(dev_template)
     env_vars = api_fn["Properties"]["Environment"]["Variables"]
-    assert env_vars.get("STARTER_CLOCK_TOOL_ENABLED") == "1"
+    assert env_vars.get("CHANNEL_CLOCK_TOOL_ENABLED") == "1"
 
 
 def test_lambda_role_grants_agentcore_write_and_lookup_actions(dev_template):
@@ -311,12 +311,12 @@ def test_attachments_bucket_cors_allows_desktop_app_origin(template_name, reques
 def test_lambda_env_has_attachments_bucket_var(dev_template):
     api_fn = _api_function(dev_template)
     env_vars = api_fn["Properties"]["Environment"]["Variables"]
-    assert "STARTER_ATTACHMENTS_BUCKET" in env_vars
+    assert "CHANNEL_ATTACHMENTS_BUCKET" in env_vars
     # Per #173 design: we use the AWS-managed aws/s3 key, so there's no
     # CMK ARN to plumb. Issue body originally listed
-    # STARTER_ATTACHMENTS_KMS_KEY_ARN; the AWS-managed-key choice made
+    # CHANNEL_ATTACHMENTS_KMS_KEY_ARN; the AWS-managed-key choice made
     # it redundant.
-    assert "STARTER_ATTACHMENTS_KMS_KEY_ARN" not in env_vars, (
+    assert "CHANNEL_ATTACHMENTS_KMS_KEY_ARN" not in env_vars, (
         "AWS-managed key has no CMK ARN to plumb — see #173"
     )
 
@@ -556,35 +556,35 @@ def test_synthed_dev_csp_resolves_dev_custom_domain(dev_template):
 
 
 def test_prod_stack_enables_web_search(prod_template):
-    """STARTER_WEB_SEARCH_ENABLED = '1' in prod (kill switch, not rollout)."""
+    """CHANNEL_WEB_SEARCH_ENABLED = '1' in prod (kill switch, not rollout)."""
     api_fn = _api_function(prod_template)
     env_vars = api_fn["Properties"]["Environment"]["Variables"]
-    assert env_vars.get("STARTER_WEB_SEARCH_ENABLED") == "1"
+    assert env_vars.get("CHANNEL_WEB_SEARCH_ENABLED") == "1"
 
 
 def test_dev_stack_enables_web_search(dev_template):
-    """STARTER_WEB_SEARCH_ENABLED = '1' in non-prod."""
+    """CHANNEL_WEB_SEARCH_ENABLED = '1' in non-prod."""
     api_fn = _api_function(dev_template)
     env_vars = api_fn["Properties"]["Environment"]["Variables"]
-    assert env_vars.get("STARTER_WEB_SEARCH_ENABLED") == "1"
+    assert env_vars.get("CHANNEL_WEB_SEARCH_ENABLED") == "1"
 
 
 def test_prod_stack_enables_image_gen(prod_template):
-    """STARTER_IMAGE_GEN_ENABLED = '1' in prod (#279 kill switch, on default);
-    STARTER_IMAGE_GEN_REGION pins the cross-region image call to us-west-2."""
+    """CHANNEL_IMAGE_GEN_ENABLED = '1' in prod (#279 kill switch, on default);
+    CHANNEL_IMAGE_GEN_REGION pins the cross-region image call to us-west-2."""
     api_fn = _api_function(prod_template)
     env_vars = api_fn["Properties"]["Environment"]["Variables"]
-    assert env_vars.get("STARTER_IMAGE_GEN_ENABLED") == "1"
-    assert env_vars.get("STARTER_IMAGE_GEN_REGION") == "us-west-2"
+    assert env_vars.get("CHANNEL_IMAGE_GEN_ENABLED") == "1"
+    assert env_vars.get("CHANNEL_IMAGE_GEN_REGION") == "us-west-2"
 
 
 def test_dev_stack_enables_image_gen(dev_template):
-    """STARTER_IMAGE_GEN_ENABLED = '1' in non-prod; STARTER_IMAGE_GEN_REGION
+    """CHANNEL_IMAGE_GEN_ENABLED = '1' in non-prod; CHANNEL_IMAGE_GEN_REGION
     pins the cross-region image call to us-west-2."""
     api_fn = _api_function(dev_template)
     env_vars = api_fn["Properties"]["Environment"]["Variables"]
-    assert env_vars.get("STARTER_IMAGE_GEN_ENABLED") == "1"
-    assert env_vars.get("STARTER_IMAGE_GEN_REGION") == "us-west-2"
+    assert env_vars.get("CHANNEL_IMAGE_GEN_ENABLED") == "1"
+    assert env_vars.get("CHANNEL_IMAGE_GEN_REGION") == "us-west-2"
 
 
 def test_lambda_role_grants_stability_image_invoke_model(dev_template):
@@ -593,7 +593,7 @@ def test_lambda_role_grants_stability_image_invoke_model(dev_template):
     these models are ACTIVE only in us-west-2, absent from the stack's
     us-east-1 region), so all three region-pinned foundation-model ARNs must
     appear in the API Lambda role's IAM policies. All three (Core / Ultra /
-    SD3.5 Large) are granted so a ``STARTER_IMAGE_GEN_MODEL`` switch needs no
+    SD3.5 Large) are granted so a ``CHANNEL_IMAGE_GEN_MODEL`` switch needs no
     redeploy. Without the grant every generation fails with
     AccessDeniedException. Scan every IAM::Policy resource because CDK
     distributes statements across multiple Policy resources."""
@@ -618,17 +618,17 @@ def test_lambda_role_grants_stability_image_invoke_model(dev_template):
 
 
 def test_prod_stack_carries_mcp_env_vars(prod_template):
-    """API Lambda must receive STARTER_MCP_REDIRECT_URI + STARTER_SPA_BASE_URL
-    + STARTER_MCP_TOKEN_KMS_KEY_ID + STARTER_MCP_REGISTRY_ENABLED.
+    """API Lambda must receive CHANNEL_MCP_REDIRECT_URI + CHANNEL_SPA_BASE_URL
+    + CHANNEL_MCP_TOKEN_KMS_KEY_ID + CHANNEL_MCP_REGISTRY_ENABLED.
 
     The KMS key ID isn't a literal at synth-time (it's a CFN ref) so
     we just confirm presence, not value."""
     api_fn = _api_function(prod_template)
     env_vars = api_fn["Properties"]["Environment"]["Variables"]
-    assert env_vars.get("STARTER_MCP_REGISTRY_ENABLED") == "1"
-    assert "STARTER_MCP_REDIRECT_URI" in env_vars
-    assert "STARTER_SPA_BASE_URL" in env_vars
-    assert "STARTER_MCP_TOKEN_KMS_KEY_ID" in env_vars
+    assert env_vars.get("CHANNEL_MCP_REGISTRY_ENABLED") == "1"
+    assert "CHANNEL_MCP_REDIRECT_URI" in env_vars
+    assert "CHANNEL_SPA_BASE_URL" in env_vars
+    assert "CHANNEL_MCP_TOKEN_KMS_KEY_ID" in env_vars
 
 
 def test_prod_stack_mcp_token_kms_key_id_is_not_local_sentinel(prod_template):
@@ -637,13 +637,13 @@ def test_prod_stack_mcp_token_kms_key_id_is_not_local_sentinel(prod_template):
     via key_arn; this test confirms it's not the literal string 'local'."""
     api_fn = _api_function(prod_template)
     env_vars = api_fn["Properties"]["Environment"]["Variables"]
-    assert env_vars.get("STARTER_MCP_TOKEN_KMS_KEY_ID") != "local"
+    assert env_vars.get("CHANNEL_MCP_TOKEN_KMS_KEY_ID") != "local"
 
 
 def test_dev_stack_mcp_token_kms_key_id_is_not_local_sentinel(dev_template):
     api_fn = _api_function(dev_template)
     env_vars = api_fn["Properties"]["Environment"]["Variables"]
-    assert env_vars.get("STARTER_MCP_TOKEN_KMS_KEY_ID") != "local"
+    assert env_vars.get("CHANNEL_MCP_TOKEN_KMS_KEY_ID") != "local"
 
 
 def test_stack_creates_mcp_token_kms_key(prod_template):
@@ -659,17 +659,17 @@ def test_stack_creates_mcp_token_kms_key(prod_template):
 
 
 def test_prod_stack_sets_exa_api_key_param_path(prod_template):
-    """STARTER_EXA_API_KEY_PARAM points at the per-env SSM path so the
+    """CHANNEL_EXA_API_KEY_PARAM points at the per-env SSM path so the
     Lambda knows where to fetch the key."""
     api_fn = _api_function(prod_template)
     env_vars = api_fn["Properties"]["Environment"]["Variables"]
-    assert env_vars.get("STARTER_EXA_API_KEY_PARAM") == "/channel/prod/exa-api-key"
+    assert env_vars.get("CHANNEL_EXA_API_KEY_PARAM") == "/channel/prod/exa-api-key"
 
 
 def test_dev_stack_sets_exa_api_key_param_path(dev_template):
     api_fn = _api_function(dev_template)
     env_vars = api_fn["Properties"]["Environment"]["Variables"]
-    assert env_vars.get("STARTER_EXA_API_KEY_PARAM") == "/channel/dev/exa-api-key"
+    assert env_vars.get("CHANNEL_EXA_API_KEY_PARAM") == "/channel/dev/exa-api-key"
 
 
 def test_api_role_has_ssm_read_on_exa_api_key(prod_template):
@@ -809,12 +809,12 @@ def test_api_lambda_can_invoke_sandbox(dev_template):
 
 
 def test_api_lambda_has_code_exec_env_vars(dev_template):
-    """API Lambda env vars include ``STARTER_CODE_EXEC_LAMBDA_ARN`` and
-    ``STARTER_CODE_EXEC_ENABLED=1``."""
+    """API Lambda env vars include ``CHANNEL_CODE_EXEC_LAMBDA_ARN`` and
+    ``CHANNEL_CODE_EXEC_ENABLED=1``."""
     api_fn = _api_function(dev_template)
     env_vars = api_fn["Properties"]["Environment"]["Variables"]
-    assert "STARTER_CODE_EXEC_LAMBDA_ARN" in env_vars
-    assert env_vars.get("STARTER_CODE_EXEC_ENABLED") == "1"
+    assert "CHANNEL_CODE_EXEC_LAMBDA_ARN" in env_vars
+    assert env_vars.get("CHANNEL_CODE_EXEC_ENABLED") == "1"
 
 
 # ----------------------------------------------------------------

@@ -84,10 +84,10 @@ def test_static_token_server_round_trip(monkeypatch: pytest.MonkeyPatch) -> None
     encrypted-at-rest and decrypts back to the original — exercising the
     crypto local-dev fallback so the local stack can run the flow without
     real KMS."""
-    # STARTER_MCP_TOKEN_KMS_KEY_ID="local" → crypto passthrough wrapping;
+    # CHANNEL_MCP_TOKEN_KMS_KEY_ID="local" → crypto passthrough wrapping;
     # this is exactly what `inv dev` uses so the round-trip proves the
     # local stack works without touching AWS KMS.
-    monkeypatch.setenv("STARTER_MCP_TOKEN_KMS_KEY_ID", "local")
+    monkeypatch.setenv("CHANNEL_MCP_TOKEN_KMS_KEY_ID", "local")
 
     server = storage.create_mcp_server(
         user_id="user-int-static",

@@ -440,24 +440,24 @@ class ChannelStack(cdk.Stack):
 
         app_version = os.environ.get("APP_VERSION", "dev")
         common_env = {
-            "STARTER_TABLE_NAME": table.table_name,
+            "CHANNEL_TABLE_NAME": table.table_name,
             # Custom domain is the canonical issuer URL for all environments.
-            "STARTER_ISSUER": f"https://{custom_domain}",
+            "CHANNEL_ISSUER": f"https://{custom_domain}",
             # Tell both Lambdas which SSM parameter holds the JWT secret.
-            "STARTER_JWT_SECRET_PARAM": ssm_param_name,
+            "CHANNEL_JWT_SECRET_PARAM": ssm_param_name,
             # Google OAuth 2.0 SSM parameter paths
             "GOOGLE_CLIENT_ID_PARAM": google_client_id_param.parameter_name,
             "GOOGLE_CLIENT_SECRET_PARAM": google_client_secret_param.parameter_name,
             "ALLOWED_EMAILS_PARAM": allowed_emails_param.parameter_name,
-            "STARTER_ORIGIN_VERIFY_PARAM": origin_verify_param.parameter_name,
+            "CHANNEL_ORIGIN_VERIFY_PARAM": origin_verify_param.parameter_name,
             # Operational SSM parameter — soft-warn check at startup logs if
             # still set to the CHANGE_ME_ON_FIRST_DEPLOY placeholder.
-            "STARTER_ALARM_EMAIL_PARAM": alarm_email_param.parameter_name,
+            "CHANNEL_ALARM_EMAIL_PARAM": alarm_email_param.parameter_name,
             # APP_VERSION is injected at deploy time via the APP_VERSION env var.
             # Falls back to "dev" for local synth/deploy without a version set.
             "APP_VERSION": app_version,
             # Used by EMF metrics as the "Environment" dimension.
-            "STARTER_ENV": env_name,
+            "CHANNEL_ENV": env_name,
         }
 
         # Tag every resource with the deployed version for operational visibility.
@@ -554,7 +554,7 @@ class ChannelStack(cdk.Stack):
                     # stack's region (``self.region`` is us-east-1). Empty
                     # account segment (``::``) is the foundation-model ARN
                     # shape. All three generators are granted so a
-                    # ``STARTER_IMAGE_GEN_MODEL`` switch to Ultra / SD3.5 Large
+                    # ``CHANNEL_IMAGE_GEN_MODEL`` switch to Ultra / SD3.5 Large
                     # needs no redeploy — still least-privilege (three pinned
                     # ARNs, no wildcard).
                     "arn:aws:bedrock:us-west-2::foundation-model/stability.stable-image-core-v1:1",
@@ -609,21 +609,21 @@ class ChannelStack(cdk.Stack):
         # ONLY on non-prod envs; the corresponding CDK assertion test
         # (``tests/unit/test_channel_stack.py``) guards against leaks.
         if not is_prod:
-            common_env["STARTER_ENABLE_DEBUG_ENDPOINTS"] = "1"
+            common_env["CHANNEL_ENABLE_DEBUG_ENDPOINTS"] = "1"
             # #179 — Google-auth bypass for e2e suites. Gates two distinct
             # short-circuits on /auth/login:
             #   - ``?test_email=`` query → mint a JWT directly (only fires
             #     when the query param is present; normal browser flows are
             #     unaffected).
             #   - ``desktop_callback=...`` query → only fires when this
-            #     stack ALSO sets ``STARTER_DESKTOP_DEV_EMAIL``, which it
+            #     stack ALSO sets ``CHANNEL_DESKTOP_DEV_EMAIL``, which it
             #     deliberately does NOT (only ``inv desktop-dev`` sets it
             #     locally). So real desktop sign-in on this stack routes
             #     through Google like any other browser flow.
             # Prod stacks MUST NOT set this; a sibling assertion in
             # ``tests/unit/test_channel_stack.py`` guards against the same
             # leak shape as the debug-endpoints flag.
-            common_env["STARTER_BYPASS_GOOGLE_AUTH"] = "1"
+            common_env["CHANNEL_BYPASS_GOOGLE_AUTH"] = "1"
 
         # #181 chassis — register ``current_time`` smoke-test tool only
         # in non-prod envs (strategy spec policy P2: smoke-test, not a
@@ -631,15 +631,15 @@ class ChannelStack(cdk.Stack):
         # so a future code path that reads it can't accidentally see an
         # unset variable as "on" if defaults shift. A sibling assertion
         # in ``tests/unit/test_channel_stack.py`` enforces both shapes.
-        common_env["STARTER_CLOCK_TOOL_ENABLED"] = "0" if is_prod else "1"
+        common_env["CHANNEL_CLOCK_TOOL_ENABLED"] = "0" if is_prod else "1"
 
         # #182 web search — Exa API key path in SSM, resolved lazily on
         # the first ``web_search()`` invocation (NOT at Lambda cold-start)
         # and cached for the warm pool's lifetime; see
         # ``src/channel/agents/tools/web_search._resolve_exa_api_key``.
-        common_env["STARTER_EXA_API_KEY_PARAM"] = f"/channel/{env_name}/exa-api-key"
+        common_env["CHANNEL_EXA_API_KEY_PARAM"] = f"/channel/{env_name}/exa-api-key"
         # Default enabled in every env; flag is a kill switch, not a rollout knob
-        common_env["STARTER_WEB_SEARCH_ENABLED"] = "1"
+        common_env["CHANNEL_WEB_SEARCH_ENABLED"] = "1"
 
         # #279 Stable Image Core image generation — kill switch only,
         # default-on in every deployed env (image gen is v0.1 scope). Set
@@ -647,13 +647,13 @@ class ChannelStack(cdk.Stack):
         # accident; the IAM grant for the us-west-2 Stability generators
         # rides the InvokeModel statement above. Billing is deferred, so
         # there is no cost/quota gate — this flag is the only control
-        # besides the EMF counter. STARTER_IMAGE_GEN_REGION is pinned to
+        # besides the EMF counter. CHANNEL_IMAGE_GEN_REGION is pinned to
         # us-west-2 here (the image models' only region — this is the app's
         # sole cross-region call; the rest of the stack stays us-east-1) so
         # the deployed region is auditable in the template rather than only
         # a code default.
-        common_env["STARTER_IMAGE_GEN_ENABLED"] = "1"
-        common_env["STARTER_IMAGE_GEN_REGION"] = "us-west-2"
+        common_env["CHANNEL_IMAGE_GEN_ENABLED"] = "1"
+        common_env["CHANNEL_IMAGE_GEN_REGION"] = "us-west-2"
 
         # #207 MCP registry — dedicated CMK + redirect-URI env + IAM.
         # The CMK has annual rotation enabled and is destroyed on stack
@@ -669,14 +669,14 @@ class ChannelStack(cdk.Stack):
             removal_policy=data_removal,
         )
         mcp_token_key.grant_encrypt_decrypt(api_role)
-        common_env["STARTER_MCP_TOKEN_KMS_KEY_ID"] = mcp_token_key.key_arn
-        common_env["STARTER_MCP_REGISTRY_ENABLED"] = "1"
+        common_env["CHANNEL_MCP_TOKEN_KMS_KEY_ID"] = mcp_token_key.key_arn
+        common_env["CHANNEL_MCP_REGISTRY_ENABLED"] = "1"
         # The redirect URI is the API origin's /auth/mcp/callback path.
         # MCP servers persist this in their DCR client record; changing
         # it later requires re-registering, so derive it from the env's
         # custom_domain.
-        common_env["STARTER_MCP_REDIRECT_URI"] = f"https://{custom_domain}/auth/mcp/callback"
-        common_env["STARTER_SPA_BASE_URL"] = f"https://{custom_domain}"
+        common_env["CHANNEL_MCP_REDIRECT_URI"] = f"https://{custom_domain}/auth/mcp/callback"
+        common_env["CHANNEL_SPA_BASE_URL"] = f"https://{custom_domain}"
 
         # ----------------------------------------------------------------
         # Attachments S3 bucket (#173) — file attachments + vision (epic #109)
@@ -785,7 +785,7 @@ class ChannelStack(cdk.Stack):
             )
         )
 
-        common_env["STARTER_ATTACHMENTS_BUCKET"] = attachments_bucket.bucket_name
+        common_env["CHANNEL_ATTACHMENTS_BUCKET"] = attachments_bucket.bucket_name
 
         # Server access logging is deferred — CloudTrail data events plus
         # the ChatDeleteAttachmentWipeFailures EMF metric (added in #174)
@@ -986,10 +986,10 @@ class ChannelStack(cdk.Stack):
         # invocations route to the warm snapshot.
         code_exec_fn.current_version.grant_invoke(api_fn)
         api_fn.add_environment(
-            "STARTER_CODE_EXEC_LAMBDA_ARN",
+            "CHANNEL_CODE_EXEC_LAMBDA_ARN",
             code_exec_fn.current_version.function_arn,
         )
-        api_fn.add_environment("STARTER_CODE_EXEC_ENABLED", "1")
+        api_fn.add_environment("CHANNEL_CODE_EXEC_ENABLED", "1")
 
         api_url = api_fn.add_function_url(
             auth_type=lambda_.FunctionUrlAuthType.NONE,

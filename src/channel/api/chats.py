@@ -110,7 +110,7 @@ _HISTORY_TURNS_LIMIT = 100
 # normal per-turn burn, which exhausted the account's Bedrock daily-token
 # quota). This caps how many tools any single server contributes so one
 # heavy server can't dominate every chat's budget. Overridable via
-# ``STARTER_MCP_MAX_TOOLS_PER_SERVER``; a non-positive override disables
+# ``CHANNEL_MCP_MAX_TOOLS_PER_SERVER``; a non-positive override disables
 # the cap (see ``_mcp_max_tools_per_server``).
 _DEFAULT_MCP_MAX_TOOLS_PER_SERVER = 24
 
@@ -385,7 +385,7 @@ def _agentcore_client() -> Any:
 def _memory_id_for_env() -> str:
     """Resolve the current env's AgentCore memoryId. Cached by
     ``get_or_create_memory``; cheap to call per request."""
-    env = os.environ.get("STARTER_ENV", "unknown")
+    env = os.environ.get("CHANNEL_ENV", "unknown")
     return get_or_create_memory(env)
 
 
@@ -591,25 +591,25 @@ async def delete_chat(
 def _build_tool_registry() -> list[Any]:
     """Assemble the per-turn tool registry from env-var kill switches.
 
-    Each tool's registration is gated by a ``STARTER_<NAME>_ENABLED``
+    Each tool's registration is gated by a ``CHANNEL_<NAME>_ENABLED``
     flag — one flag per tool, except ``web_fetch``, which rides
-    ``STARTER_WEB_SEARCH_ENABLED`` alongside ``web_search`` (see
+    ``CHANNEL_WEB_SEARCH_ENABLED`` alongside ``web_search`` (see
     below). The code treats anything other than ``"1"`` as disabled —
     so an unset flag in a stale dev env (e.g. someone running tests
     without the CDK env vars wired up) results in the tool being
     silently omitted rather than crashing on import.
 
     The deployed envs ship explicit values:
-      * ``STARTER_WEB_SEARCH_ENABLED`` — "1" everywhere (kill switch
+      * ``CHANNEL_WEB_SEARCH_ENABLED`` — "1" everywhere (kill switch
         only; default-on posture once deployed). Gates BOTH
         ``web_search`` and ``web_fetch`` (#232): the pair is backed by
         the same Exa API key, so one availability signal covers the
         discover/deep-read pair without a second CDK env var.
-      * ``STARTER_CODE_EXEC_ENABLED`` — "1" everywhere (kill switch
+      * ``CHANNEL_CODE_EXEC_ENABLED`` — "1" everywhere (kill switch
         only; default-on posture once deployed)
-      * ``STARTER_IMAGE_GEN_ENABLED`` — "1" everywhere (kill switch
+      * ``CHANNEL_IMAGE_GEN_ENABLED`` — "1" everywhere (kill switch
         only; gates the Stable Image Core ``generate_image`` tool, #279)
-      * ``STARTER_CLOCK_TOOL_ENABLED`` — "1" in dev, "0" in prod
+      * ``CHANNEL_CLOCK_TOOL_ENABLED`` — "1" in dev, "0" in prod
         (strategy spec policy P2: clock is a smoke-test tool, not a
         user-visible capability)
 
@@ -623,19 +623,19 @@ def _build_tool_registry() -> list[Any]:
     ``strands-agents-tools`` / ``boto3`` installed still loads ``chats``
     for a smoke test."""
     registry: list[Any] = []
-    if os.environ.get("STARTER_CLOCK_TOOL_ENABLED") == "1":
+    if os.environ.get("CHANNEL_CLOCK_TOOL_ENABLED") == "1":
         registry.append(current_time)
-    if os.environ.get("STARTER_WEB_SEARCH_ENABLED") == "1":
+    if os.environ.get("CHANNEL_WEB_SEARCH_ENABLED") == "1":
         from channel.agents.tools.web_fetch import web_fetch  # noqa: PLC0415
         from channel.agents.tools.web_search import web_search  # noqa: PLC0415
 
         registry.append(web_search)
         registry.append(web_fetch)
-    if os.environ.get("STARTER_CODE_EXEC_ENABLED") == "1":
+    if os.environ.get("CHANNEL_CODE_EXEC_ENABLED") == "1":
         from channel.agents.tools.code_exec import code_exec  # noqa: PLC0415
 
         registry.append(code_exec)
-    if os.environ.get("STARTER_IMAGE_GEN_ENABLED") == "1":
+    if os.environ.get("CHANNEL_IMAGE_GEN_ENABLED") == "1":
         from channel.agents.tools.generate_image import generate_image  # noqa: PLC0415
 
         registry.append(generate_image)
@@ -645,7 +645,7 @@ def _build_tool_registry() -> list[Any]:
 def _mcp_max_tools_per_server() -> int:
     """Resolve the per-server MCP tool budget from the environment (#389).
 
-    ``STARTER_MCP_MAX_TOOLS_PER_SERVER`` overrides
+    ``CHANNEL_MCP_MAX_TOOLS_PER_SERVER`` overrides
     ``_DEFAULT_MCP_MAX_TOOLS_PER_SERVER``. Semantics:
 
     * unset → the default (``_DEFAULT_MCP_MAX_TOOLS_PER_SERVER``).
@@ -657,7 +657,7 @@ def _mcp_max_tools_per_server() -> int:
       warning — a fat-fingered env var must not silently drop tool
       coverage.
     """
-    raw = os.environ.get("STARTER_MCP_MAX_TOOLS_PER_SERVER")
+    raw = os.environ.get("CHANNEL_MCP_MAX_TOOLS_PER_SERVER")
     if raw is None:
         return _DEFAULT_MCP_MAX_TOOLS_PER_SERVER
     try:
@@ -759,12 +759,12 @@ async def _build_mcp_clients_for_chat(
     the streaming generator. A broken Hive registration must not block
     the chain's other tools.
 
-    Kill switch: ``STARTER_MCP_REGISTRY_ENABLED != "1"`` short-circuits
+    Kill switch: ``CHANNEL_MCP_REGISTRY_ENABLED != "1"`` short-circuits
     to an empty list with no DynamoDB reads. Defaults to enabled when
     unset so dev / test envs that don't provision the env var still see
     MCP behavior; CDK + ``inv dev`` both wire ``"1"`` explicitly.
     """
-    if os.environ.get("STARTER_MCP_REGISTRY_ENABLED", "1") != "1":
+    if os.environ.get("CHANNEL_MCP_REGISTRY_ENABLED", "1") != "1":
         return []
 
     max_tools = _mcp_max_tools_per_server()
@@ -990,12 +990,12 @@ _DEFAULT_STREAM_KEEPALIVE_INTERVAL = 15.0
 def _stream_keepalive_interval() -> float:
     """Resolve the keepalive interval in seconds (#391).
 
-    ``STARTER_STREAM_KEEPALIVE_INTERVAL`` overrides the default; a
+    ``CHANNEL_STREAM_KEEPALIVE_INTERVAL`` overrides the default; a
     non-positive value disables the keepalive entirely. A non-numeric
     value falls back to the default rather than error on a bad env
     string.
     """
-    raw = os.environ.get("STARTER_STREAM_KEEPALIVE_INTERVAL")
+    raw = os.environ.get("CHANNEL_STREAM_KEEPALIVE_INTERVAL")
     if raw is None:
         return _DEFAULT_STREAM_KEEPALIVE_INTERVAL
     try:
@@ -1287,7 +1287,7 @@ async def _stream_bedrock_reply(
     # loop (every 50 deltas). Off by default — Sonnet streams emit
     # thousands of deltas per turn and the log volume isn't worth it
     # outside an active investigation.
-    heartbeat = os.environ.get("STARTER_STREAM_HEARTBEAT_ENABLED", "0") == "1"
+    heartbeat = os.environ.get("CHANNEL_STREAM_HEARTBEAT_ENABLED", "0") == "1"
 
     # #391 + #417 idle-based keepalive: a keepalive comment frame is
     # written every ``keepalive_interval`` seconds that the stream idles
@@ -1547,7 +1547,7 @@ async def _stream_bedrock_reply(
     # close — the SPA's readSse loop iterates until reader is done.
     # Fail-soft: titler errors log + EMF + swallow; the user's stream
     # has already completed by this point.
-    if was_first_round_trip and os.environ.get("STARTER_AUTO_TITLE_ENABLED", "1") == "1":
+    if was_first_round_trip and os.environ.get("CHANNEL_AUTO_TITLE_ENABLED", "1") == "1":
         truncated = False
         try:
             titler = build_titler_agent()
@@ -1592,7 +1592,7 @@ async def _stream_bedrock_reply(
     # ``suggest_followups`` pref (default True). Fail-soft: a generation
     # error logs + EMF + swallow; the stream has already completed
     # successfully by this point.
-    followups_enabled = os.environ.get("STARTER_FOLLOWUPS_ENABLED", "1") == "1"
+    followups_enabled = os.environ.get("CHANNEL_FOLLOWUPS_ENABLED", "1") == "1"
     if followups_enabled and prefs.suggest_followups:
         try:
             followups_agent = build_followups_agent()

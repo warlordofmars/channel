@@ -225,7 +225,7 @@ class AgentCoreRecallHook:
         agent doesn't expose chat_id natively; this is a
         Channel-specific attribute.
         """
-        if os.environ.get("STARTER_RECALL_ENABLED", "1") != "1":
+        if os.environ.get("CHANNEL_RECALL_ENABLED", "1") != "1":
             return
         chat_id = getattr(event.agent, "chat_id", None) or ""
 
@@ -353,7 +353,7 @@ class AgentCoreRecallHook:
           the cache could inject a block up to ``_RECALL_CACHE_REFRESH_TURNS``
           turns stale; the preview shows the un-cached truth.
         - **Ignores the kill-switch** — the block is computed even when
-          ``STARTER_RECALL_ENABLED=0`` so it stays inspectable during an
+          ``CHANNEL_RECALL_ENABLED=0`` so it stays inspectable during an
           A/B comparison (the endpoint reports the flag separately).
 
         Each record's ``sessionId`` is the source chat id (``sessionId ==

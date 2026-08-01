@@ -5,7 +5,7 @@ Synchronously invokes the ``CodeExecLambda`` sandbox via boto3 and
 returns the sandbox's response dict (``{stdout, stderr, exit_code,
 duration_ms, truncated, timed_out, images}``).
 
-The sandbox Lambda's ARN is resolved from ``STARTER_CODE_EXEC_LAMBDA_ARN``
+The sandbox Lambda's ARN is resolved from ``CHANNEL_CODE_EXEC_LAMBDA_ARN``
 on each call (cheap env lookup; no caching needed). The boto3 Lambda
 client is lazy-loaded via ``@functools.lru_cache(maxsize=1)`` — mirrors
 ``web_search``'s ``_get_exa_search`` pattern so a cold start without
@@ -97,7 +97,7 @@ def code_exec(code: str) -> dict[str, Any]:
     Args:
         code: The Python source to execute.
     """
-    arn = os.environ.get("STARTER_CODE_EXEC_LAMBDA_ARN")
+    arn = os.environ.get("CHANNEL_CODE_EXEC_LAMBDA_ARN")
     if not arn:
         return _error_result("not_configured")
     client = _get_lambda_client()

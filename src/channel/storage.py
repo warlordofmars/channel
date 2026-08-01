@@ -75,7 +75,7 @@ def _now_iso() -> str:
 
 
 def _get_table() -> Any:  # pragma: no cover - tests replace this seam
-    table_name = os.environ["STARTER_TABLE_NAME"]
+    table_name = os.environ["CHANNEL_TABLE_NAME"]
     endpoint = os.environ.get("DYNAMODB_ENDPOINT")
     kwargs: dict[str, Any] = {"region_name": os.environ.get("AWS_DEFAULT_REGION", "us-east-1")}
     if endpoint:
@@ -598,14 +598,14 @@ def put_prefs(user_id: str, updates: dict[str, Any]) -> Prefs:
 
 
 def _audit_retention_seconds() -> int:
-    """Resolve the audit-log TTL from ``STARTER_AUDIT_RETENTION_DAYS``.
+    """Resolve the audit-log TTL from ``CHANNEL_AUDIT_RETENTION_DAYS``.
 
     Default 365 days, matching CLAUDE.md §"DynamoDB single table design".
     The env var is read at call time (not import time) so tests can vary
     retention windows without re-importing the module.
     """
 
-    return int(os.environ.get("STARTER_AUDIT_RETENTION_DAYS", "365")) * 86400
+    return int(os.environ.get("CHANNEL_AUDIT_RETENTION_DAYS", "365")) * 86400
 
 
 def put_audit_event(
@@ -618,7 +618,7 @@ def put_audit_event(
 
     Hour-sharded ``PK=AUDIT#{date}#{hour}`` with ``SK={timestamp}#{uuid}``
     per CLAUDE.md §"DynamoDB single table design" and the dynamodb-item
-    skill. TTL comes from ``STARTER_AUDIT_RETENTION_DAYS`` (default 365);
+    skill. TTL comes from ``CHANNEL_AUDIT_RETENTION_DAYS`` (default 365);
     DynamoDB's TTL service requires an integer Unix timestamp under the
     table-configured ``ttl`` attribute.
 
@@ -1095,7 +1095,7 @@ def put_asset_bytes(*, chat_id: str, asset_id: str, data: bytes, mime: str) -> t
     wrap per-asset for fail-soft isolation.
     """
 
-    bucket = os.environ["STARTER_ATTACHMENTS_BUCKET"]
+    bucket = os.environ["CHANNEL_ATTACHMENTS_BUCKET"]
     key = f"assets/chat/{chat_id}/{asset_id}"
     _get_s3_client().put_object(
         Bucket=bucket,

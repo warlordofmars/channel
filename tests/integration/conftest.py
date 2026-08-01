@@ -30,13 +30,13 @@ os.environ.setdefault("AWS_ACCESS_KEY_ID", "local")
 os.environ.setdefault("AWS_SECRET_ACCESS_KEY", "local")
 os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
 os.environ.setdefault("DYNAMODB_ENDPOINT", "http://localhost:8000")
-os.environ.setdefault("STARTER_JWT_SECRET", "integration-test-secret")
-os.environ.setdefault("STARTER_TABLE_NAME", "channel-test")
+os.environ.setdefault("CHANNEL_JWT_SECRET", "integration-test-secret")
+os.environ.setdefault("CHANNEL_TABLE_NAME", "channel-test")
 
 
 @pytest.fixture(scope="session")
 def table_name() -> str:
-    return os.environ["STARTER_TABLE_NAME"]
+    return os.environ["CHANNEL_TABLE_NAME"]
 
 
 @pytest.fixture(scope="session")
@@ -67,7 +67,7 @@ def starter_table(dynamodb_resource: Any, table_name: str) -> Any:
 
     **Safety guard**: the integration env vars at the top of this file
     are set via ``setdefault()``, which means a developer or CI
-    environment that already has ``STARTER_TABLE_NAME`` /
+    environment that already has ``CHANNEL_TABLE_NAME`` /
     ``DYNAMODB_ENDPOINT`` set could point this fixture at a real
     DynamoDB endpoint and the destructive drop step below would delete
     an externally-managed table. We refuse to proceed unless the

@@ -34,14 +34,14 @@ field, mirroring ``code_exec``'s error-shape contract — so the SPA sees
 ``error_type="content_filtered"``.
 
 There is NO cost gating — billing is deferred (product decision). The
-only controls are the ``STARTER_IMAGE_GEN_ENABLED`` registration
+only controls are the ``CHANNEL_IMAGE_GEN_ENABLED`` registration
 kill-switch (gated in ``chats._build_tool_registry``) and the
 ``ImageGenInvocations`` / ``ImageGenFailures`` EMF counters
 (``record_image_gen_outcome`` emits the invocation counter on every
 call and the failure counter on each non-success). All three Stability
 text-to-image generators (Core / Ultra / SD3.5 Large) share ONE
 InvokeModel request/response contract, so a later switch to a premium
-tier is a pure ``STARTER_IMAGE_GEN_MODEL`` env flip — no code change.
+tier is a pure ``CHANNEL_IMAGE_GEN_MODEL`` env flip — no code change.
 
 NOTE: this module deliberately does NOT use ``from __future__ import
 annotations``. Strands' ``@tool`` decorator validates the injected
@@ -66,7 +66,7 @@ from channel.metrics import record_image_gen_outcome
 
 logger = logging.getLogger(__name__)
 
-# Default image model id. Overridable via ``STARTER_IMAGE_GEN_MODEL`` —
+# Default image model id. Overridable via ``CHANNEL_IMAGE_GEN_MODEL`` —
 # the fallback mechanism to a premium generator, since all three
 # Stability text-to-image models (Stable Image Core / Ultra / SD3.5
 # Large) share the SAME InvokeModel request/response contract. Verified
@@ -84,9 +84,9 @@ _DEFAULT_MODEL_ID = "stability.stable-image-core-v1:1"
 # to the us-east-1 Lambda and persists to the us-east-1 assets bucket via
 # the unchanged pipeline — data at rest stays in us-east-1. The matching
 # IAM foundation-model ARNs in ``channel_stack.py`` are region-pinned to
-# us-west-2 to authorize this call. ``STARTER_IMAGE_GEN_REGION`` overrides
+# us-west-2 to authorize this call. ``CHANNEL_IMAGE_GEN_REGION`` overrides
 # the region (e.g. a personal dev env); default us-west-2.
-_IMAGE_GEN_REGION_ENV = "STARTER_IMAGE_GEN_REGION"
+_IMAGE_GEN_REGION_ENV = "CHANNEL_IMAGE_GEN_REGION"
 _DEFAULT_IMAGE_GEN_REGION = "us-west-2"
 
 # Attribute name of the per-turn sink stashed on the invoking Agent. The
@@ -141,7 +141,7 @@ def _error_result(error_type: str) -> dict[str, Any]:
 def _image_gen_region() -> str:
     """Region to invoke the image model in — default ``us-west-2``.
 
-    ``STARTER_IMAGE_GEN_REGION`` overrides it (unset or empty → the
+    ``CHANNEL_IMAGE_GEN_REGION`` overrides it (unset or empty → the
     default). See ``_IMAGE_GEN_REGION_ENV`` for why this crosses regions:
     the Stability text-to-image generators are offered only in us-west-2,
     so this tool's client targets us-west-2 even though the rest of the
@@ -239,11 +239,11 @@ def _invoke_image_model(prompt: str, aspect_ratio: str) -> tuple[str | None, str
 
     The flat request body (``{prompt, aspect_ratio, output_format}``) and
     the ``{images, seeds, finish_reasons}`` response are shared by all
-    three Stability text-to-image generators, so ``STARTER_IMAGE_GEN_MODEL``
+    three Stability text-to-image generators, so ``CHANNEL_IMAGE_GEN_MODEL``
     can switch to Ultra / SD3.5 Large with no code change. A content-filter
     rejection comes back as a non-null ``finish_reasons[0]`` with ``images``
     absent → mapped via ``_classify_finish_reason``."""
-    model_id = os.environ.get("STARTER_IMAGE_GEN_MODEL", _DEFAULT_MODEL_ID)
+    model_id = os.environ.get("CHANNEL_IMAGE_GEN_MODEL", _DEFAULT_MODEL_ID)
     body = {
         "prompt": prompt[:_PROMPT_MAX_CHARS],
         "aspect_ratio": aspect_ratio,

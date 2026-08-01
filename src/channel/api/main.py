@@ -112,13 +112,13 @@ async def _log_requests(request: Request, call_next):
 async def _verify_origin_secret(request: Request, call_next):
     """Reject requests missing the CloudFront X-Origin-Verify secret.
 
-    Disabled when neither ``STARTER_ORIGIN_VERIFY_PARAM`` nor
-    ``STARTER_ORIGIN_VERIFY_SECRET`` provides a secret (local dev /
+    Disabled when neither ``CHANNEL_ORIGIN_VERIFY_PARAM`` nor
+    ``CHANNEL_ORIGIN_VERIFY_SECRET`` provides a secret (local dev /
     non-prod). The placeholder-value short-circuit was removed for the
-    SSM-backed ``STARTER_ORIGIN_VERIFY_PARAM`` path — the fail-closed
+    SSM-backed ``CHANNEL_ORIGIN_VERIFY_PARAM`` path — the fail-closed
     startup check (:mod:`channel.startup`) guarantees that secret is
     rotated before the Lambda will start. The direct env-var path
-    (``STARTER_ORIGIN_VERIFY_SECRET``) is for local dev and bypasses
+    (``CHANNEL_ORIGIN_VERIFY_SECRET``) is for local dev and bypasses
     startup validation.
     """
     from channel.auth.tokens import _origin_verify_secret
@@ -167,13 +167,13 @@ app.include_router(prefs_router)
 # MCP server registry — /api/mcp/* (auth-gated) + /auth/mcp/callback
 # (browser redirect target, unauthenticated, state-store guarded).
 #
-# Kill switch: ``STARTER_MCP_REGISTRY_ENABLED != "1"`` skips both
+# Kill switch: ``CHANNEL_MCP_REGISTRY_ENABLED != "1"`` skips both
 # router mounts so there's no /api/mcp/* surface at all. Defaults to
 # enabled when unset so tests / local dev that don't provision the
 # env var still work; CDK + ``inv dev`` both wire ``"1"`` explicitly,
 # and ``_build_mcp_clients_for_chat`` short-circuits on the same flag
 # so DDB reads are also skipped when disabled.
-if os.environ.get("STARTER_MCP_REGISTRY_ENABLED", "1") == "1":
+if os.environ.get("CHANNEL_MCP_REGISTRY_ENABLED", "1") == "1":
     from channel.api.mcp import callback_router as mcp_callback_router  # noqa: E402
     from channel.api.mcp import router as mcp_router  # noqa: E402
 
@@ -183,7 +183,7 @@ if os.environ.get("STARTER_MCP_REGISTRY_ENABLED", "1") == "1":
 # Dev-only debug router (Phase 7c). Mounted ONLY when the env flag is
 # explicitly set; prod stacks must not set it. See channel_stack.py +
 # tests/unit/test_channel_stack.py for the deploy-time guard.
-if os.environ.get("STARTER_ENABLE_DEBUG_ENDPOINTS") == "1":
+if os.environ.get("CHANNEL_ENABLE_DEBUG_ENDPOINTS") == "1":
     from channel.api._debug import router as debug_router
 
     app.include_router(debug_router)

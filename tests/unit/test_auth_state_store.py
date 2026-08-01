@@ -356,8 +356,8 @@ def test_consume_state_atomic_race_one_winner_one_loser(fake_table):
 
 
 def test_get_table_uses_env_vars(monkeypatch):
-    """STARTER_TABLE_NAME / DYNAMODB_ENDPOINT must be read at call time."""
-    monkeypatch.setenv("STARTER_TABLE_NAME", "test-table-from-env")
+    """CHANNEL_TABLE_NAME / DYNAMODB_ENDPOINT must be read at call time."""
+    monkeypatch.setenv("CHANNEL_TABLE_NAME", "test-table-from-env")
     monkeypatch.setenv("DYNAMODB_ENDPOINT", "http://localhost:9999")
     monkeypatch.setenv("AWS_REGION", "us-west-2")
 
@@ -385,7 +385,7 @@ def test_get_table_uses_env_vars(monkeypatch):
 
 def test_get_table_uses_defaults_when_env_unset(monkeypatch):
     """No region env var set → region_name not passed; boto3 uses ~/.aws/config."""
-    monkeypatch.delenv("STARTER_TABLE_NAME", raising=False)
+    monkeypatch.delenv("CHANNEL_TABLE_NAME", raising=False)
     monkeypatch.delenv("DYNAMODB_ENDPOINT", raising=False)
     monkeypatch.delenv("AWS_REGION", raising=False)
     monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
@@ -413,7 +413,7 @@ def test_get_table_falls_back_to_aws_default_region(monkeypatch):
     """``AWS_DEFAULT_REGION`` is honoured when ``AWS_REGION`` is unset."""
     monkeypatch.delenv("AWS_REGION", raising=False)
     monkeypatch.setenv("AWS_DEFAULT_REGION", "eu-west-1")
-    monkeypatch.setenv("STARTER_TABLE_NAME", "tbl")
+    monkeypatch.setenv("CHANNEL_TABLE_NAME", "tbl")
     monkeypatch.delenv("DYNAMODB_ENDPOINT", raising=False)
 
     captured: dict[str, Any] = {}

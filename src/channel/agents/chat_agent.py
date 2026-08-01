@@ -206,12 +206,12 @@ def _bedrock_max_attempts() -> int:
     """Resolve the botocore ``max_attempts`` cap for the Bedrock client.
 
     Defaults to ``_DEFAULT_BEDROCK_MAX_ATTEMPTS`` (2 — one retry).
-    ``STARTER_BEDROCK_MAX_ATTEMPTS`` overrides it so the cap can be
+    ``CHANNEL_BEDROCK_MAX_ATTEMPTS`` overrides it so the cap can be
     dialled back without a redeploy if legitimate transient throttles
     start failing too eagerly. Non-integer or non-positive values fall
     back to the default rather than error on a bad env string.
     """
-    raw = os.environ.get("STARTER_BEDROCK_MAX_ATTEMPTS")
+    raw = os.environ.get("CHANNEL_BEDROCK_MAX_ATTEMPTS")
     if raw is None:
         return _DEFAULT_BEDROCK_MAX_ATTEMPTS
     try:
@@ -233,13 +233,13 @@ def _tool_result_max_bytes() -> int:
     """Resolve the UTF-8 byte budget for :class:`ToolResultSizeBoundHook`.
 
     Defaults to ``_DEFAULT_MCP_TOOL_RESULT_MAX_BYTES``.
-    ``STARTER_MCP_TOOL_RESULT_MAX_BYTES`` overrides it so the budget can
+    ``CHANNEL_MCP_TOOL_RESULT_MAX_BYTES`` overrides it so the budget can
     be dialled without a redeploy. Non-integer or non-positive values
     fall back to the default rather than error on a bad env string (a
     zero/negative budget would clip every result to empty) — mirrors
     :func:`_bedrock_max_attempts`.
     """
-    raw = os.environ.get("STARTER_MCP_TOOL_RESULT_MAX_BYTES")
+    raw = os.environ.get("CHANNEL_MCP_TOOL_RESULT_MAX_BYTES")
     if raw is None:
         return _DEFAULT_MCP_TOOL_RESULT_MAX_BYTES
     try:
@@ -279,7 +279,7 @@ def build_agent(
     ``user_id`` becomes the AgentCore ``actorId`` and ``chat_id`` the
     AgentCore ``sessionId``.  The Memory resource itself is discovered
     (or created) once per Lambda cold-start, keyed off the
-    ``STARTER_ENV`` env var.
+    ``CHANNEL_ENV`` env var.
 
     ``prior_messages`` seeds the agent with the chat's stored history
     so each turn doesn't restart from scratch.  Shape is Strands'
@@ -295,11 +295,11 @@ def build_agent(
     ``tools`` is the Strands ``tools`` list registered on the Agent. The
     caller-supplied list (assembled in ``chats._build_tool_registry``)
     carries the stateless tools — ``current_time`` behind
-    ``STARTER_CLOCK_TOOL_ENABLED``, ``web_search`` behind
-    ``STARTER_WEB_SEARCH_ENABLED``, ``code_exec`` behind
-    ``STARTER_CODE_EXEC_ENABLED``. The per-request ``remember`` /
+    ``CHANNEL_CLOCK_TOOL_ENABLED``, ``web_search`` behind
+    ``CHANNEL_WEB_SEARCH_ENABLED``, ``code_exec`` behind
+    ``CHANNEL_CODE_EXEC_ENABLED``. The per-request ``remember`` /
     ``recall`` memory tools (#273) are appended HERE, not by the caller,
-    behind ``STARTER_MEMORY_TOOLS_ENABLED`` (default on) — they need this
+    behind ``CHANNEL_MEMORY_TOOLS_ENABLED`` (default on) — they need this
     turn's ``memory_id`` / ``user_id`` / ``chat_id`` binding, which only
     exists inside this factory. A fresh :class:`ChainState` is
     attached to the Agent as ``agent.chain_state`` so the chassis hooks
@@ -326,18 +326,18 @@ def build_agent(
         # backoff that idles out the SSE connection first.
         boto_client_config=_bedrock_client_config(),
     )
-    memory_id = get_or_create_memory(os.environ["STARTER_ENV"])
+    memory_id = get_or_create_memory(os.environ["CHANNEL_ENV"])
     # #273: agent-driven persistent memory. Register the ``remember`` /
     # ``recall`` tools bound to THIS request's actor + session, behind a
     # kill-switch (default on — same memory-family convention as
-    # STARTER_RECALL_ENABLED / STARTER_AUTO_TITLE_ENABLED). They are thin
+    # CHANNEL_RECALL_ENABLED / CHANNEL_AUTO_TITLE_ENABLED). They are thin
     # wrappers over the same AgentCore CreateEvent / ListEvents plumbing
     # the hooks below use. Unlike the stateless clock/web_search tools
     # (assembled in chats._build_tool_registry), these need per-request
     # context, so they're built here where memory_id/user_id/chat_id are
     # in scope and appended to any caller-supplied tools.
     resolved_tools = list(tools or [])
-    if os.environ.get("STARTER_MEMORY_TOOLS_ENABLED", "1") == "1":
+    if os.environ.get("CHANNEL_MEMORY_TOOLS_ENABLED", "1") == "1":
         resolved_tools.extend(
             build_memory_tools(memory_id=memory_id, actor_id=user_id, session_id=chat_id)
         )
@@ -418,12 +418,12 @@ def build_agent(
 def build_titler_agent() -> Agent:
     """Build a one-shot Strands Agent for auto-title generation.
 
-    Cheap model (Haiku by default; ``STARTER_TITLER_MODEL`` overrides),
+    Cheap model (Haiku by default; ``CHANNEL_TITLER_MODEL`` overrides),
     tight max_tokens, NO memory hooks — we don't want titling events
     polluting AgentCore Memory. Caller invokes ``stream_async`` with
     the user/assistant pair and reads the accumulated text.
     """
-    titler_model_id = os.environ.get("STARTER_TITLER_MODEL", _DEFAULT_TITLER_MODEL)
+    titler_model_id = os.environ.get("CHANNEL_TITLER_MODEL", _DEFAULT_TITLER_MODEL)
     bedrock = BedrockModel(
         model_id=resolve_model_id(titler_model_id),
         max_tokens=_TITLER_MAX_TOKENS,
@@ -649,11 +649,11 @@ def build_followups_agent() -> Agent:
     """Build a one-shot Strands Agent for follow-up prompt suggestions.
 
     Mirrors :func:`build_titler_agent`: cheap model (Haiku by default;
-    ``STARTER_FOLLOWUPS_MODEL`` overrides), tight max_tokens, NO memory
+    ``CHANNEL_FOLLOWUPS_MODEL`` overrides), tight max_tokens, NO memory
     hooks — follow-up generation runs after the assistant turn is
     persisted and must not write anything to AgentCore Memory itself.
     """
-    model_id = os.environ.get("STARTER_FOLLOWUPS_MODEL", _DEFAULT_FOLLOWUPS_MODEL)
+    model_id = os.environ.get("CHANNEL_FOLLOWUPS_MODEL", _DEFAULT_FOLLOWUPS_MODEL)
     bedrock = BedrockModel(
         model_id=resolve_model_id(model_id),
         max_tokens=_FOLLOWUPS_MAX_TOKENS,

@@ -1,7 +1,7 @@
 # Copyright (c) 2026 John Carter. All rights reserved.
 """Dev-only debug endpoints.
 
-Mounted by ``main.py`` only when ``STARTER_ENABLE_DEBUG_ENDPOINTS=1``.
+Mounted by ``main.py`` only when ``CHANNEL_ENABLE_DEBUG_ENDPOINTS=1``.
 The check happens at app construction so prod (which never sets the
 env var) doesn't register these routes at all — see Phase 7c spec
 Risk #5.
@@ -62,7 +62,7 @@ async def list_memory_events(
     claims: dict[str, Any] = Depends(require_mgmt_user),
 ) -> dict[str, Any]:
     """Return the most recent AgentCore events for caller + chat_id."""
-    memory_id = get_or_create_memory(os.environ["STARTER_ENV"])
+    memory_id = get_or_create_memory(os.environ["CHANNEL_ENV"])
     client = boto3.client("bedrock-agentcore")
     resp = client.list_events(
         memoryId=memory_id,
@@ -87,7 +87,7 @@ async def delete_memory_event(
     drop on the wire and AgentCore would reject the resulting
     digits-only id with a regex validation error.
     """
-    memory_id = get_or_create_memory(os.environ["STARTER_ENV"])
+    memory_id = get_or_create_memory(os.environ["CHANNEL_ENV"])
     client = boto3.client("bedrock-agentcore")
     client.delete_event(
         memoryId=memory_id,
@@ -122,11 +122,11 @@ async def inspect_recall(
     Reuses the hook's own fetch + formatting path via
     ``preview_addendum`` so the output matches what really gets injected.
     That path bypasses the hook's 5-turn cache (a fresh view of Memory)
-    and ignores the ``STARTER_RECALL_ENABLED`` kill-switch so the block is
+    and ignores the ``CHANNEL_RECALL_ENABLED`` kill-switch so the block is
     inspectable during an A/B run; ``recall_enabled`` reports whether a
     live turn would actually inject it.
     """
-    memory_id = get_or_create_memory(os.environ["STARTER_ENV"])
+    memory_id = get_or_create_memory(os.environ["CHANNEL_ENV"])
     client = boto3.client("bedrock-agentcore")
     hook = AgentCoreRecallHook(
         memory_id=memory_id,
@@ -145,7 +145,7 @@ async def inspect_recall(
     return {
         "chat_id": chat_id,
         "actor_id": _sanitize_actor_id(claims["sub"]),
-        "recall_enabled": os.environ.get("STARTER_RECALL_ENABLED", "1") == "1",
+        "recall_enabled": os.environ.get("CHANNEL_RECALL_ENABLED", "1") == "1",
         "block": block,
         "fragments": fragments,
         "session_count": len(fragments),

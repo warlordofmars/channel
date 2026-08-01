@@ -209,9 +209,9 @@ async def test_build_mcp_clients_skips_expired_servers(
 async def test_build_mcp_clients_kill_switch_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """STARTER_MCP_REGISTRY_ENABLED != '1' short-circuits with zero DDB
+    """CHANNEL_MCP_REGISTRY_ENABLED != '1' short-circuits with zero DDB
     reads."""
-    monkeypatch.setenv("STARTER_MCP_REGISTRY_ENABLED", "0")
+    monkeypatch.setenv("CHANNEL_MCP_REGISTRY_ENABLED", "0")
 
     def _explode(*_a: Any, **_kw: Any) -> Any:
         raise AssertionError("must not be called when kill switch is off")
@@ -230,7 +230,7 @@ async def test_build_mcp_clients_kill_switch_default_on(
 ) -> None:
     """Unset env var defaults to enabled — test/dev envs that don't
     provision the flag still see MCP behavior."""
-    monkeypatch.delenv("STARTER_MCP_REGISTRY_ENABLED", raising=False)
+    monkeypatch.delenv("CHANNEL_MCP_REGISTRY_ENABLED", raising=False)
     called: dict[str, bool] = {}
 
     def _track(_user_id: str) -> list[Any]:
@@ -507,21 +507,21 @@ async def test_capped_provider_forwards_consumer_lifecycle() -> None:
 
 
 def test_mcp_max_tools_per_server_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("STARTER_MCP_MAX_TOOLS_PER_SERVER", raising=False)
+    monkeypatch.delenv("CHANNEL_MCP_MAX_TOOLS_PER_SERVER", raising=False)
     assert (
         chats_module._mcp_max_tools_per_server() == chats_module._DEFAULT_MCP_MAX_TOOLS_PER_SERVER
     )
 
 
 def test_mcp_max_tools_per_server_override(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("STARTER_MCP_MAX_TOOLS_PER_SERVER", "5")
+    monkeypatch.setenv("CHANNEL_MCP_MAX_TOOLS_PER_SERVER", "5")
     assert chats_module._mcp_max_tools_per_server() == 5
 
 
 def test_mcp_max_tools_per_server_zero_disables(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("STARTER_MCP_MAX_TOOLS_PER_SERVER", "0")
+    monkeypatch.setenv("CHANNEL_MCP_MAX_TOOLS_PER_SERVER", "0")
     assert chats_module._mcp_max_tools_per_server() == 0
 
 
@@ -530,7 +530,7 @@ def test_mcp_max_tools_per_server_invalid_falls_back(
 ) -> None:
     """A non-integer env value must not silently drop coverage — fall
     back to the default and warn."""
-    monkeypatch.setenv("STARTER_MCP_MAX_TOOLS_PER_SERVER", "not-a-number")
+    monkeypatch.setenv("CHANNEL_MCP_MAX_TOOLS_PER_SERVER", "not-a-number")
     mock_logger = MagicMock()
     monkeypatch.setattr(chats_module, "logger", mock_logger)
 
@@ -552,7 +552,7 @@ async def test_build_mcp_clients_two_servers_each_get_own_budget(
     """The budget is per-server, not global: two active servers each get
     their own cap, so a user with two small servers isn't penalised for
     one big one."""
-    monkeypatch.setenv("STARTER_MCP_MAX_TOOLS_PER_SERVER", "7")
+    monkeypatch.setenv("CHANNEL_MCP_MAX_TOOLS_PER_SERVER", "7")
     monkeypatch.setattr(
         chats_module.storage,
         "list_mcp_servers_for_user",

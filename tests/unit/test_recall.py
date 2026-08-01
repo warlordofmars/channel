@@ -502,7 +502,7 @@ async def test_hook_swallows_list_failures_and_emits_failure_metric():
 
 @pytest.mark.asyncio
 async def test_hook_short_circuits_when_kill_switch_off(monkeypatch):
-    monkeypatch.setenv("STARTER_RECALL_ENABLED", "0")
+    monkeypatch.setenv("CHANNEL_RECALL_ENABLED", "0")
     fake_client = MagicMock()
     hook = AgentCoreRecallHook(
         memory_id="m",

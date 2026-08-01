@@ -8,7 +8,7 @@ environments: send "what time is it?", read the SSE stream, and assert
 the new tool SSE event types appear with a ``current_time``
 ``tool_use_id`` correlating across them.
 
-Gated by ``STARTER_CLOCK_TOOL_ENABLED=1`` — default on in jc/dev, off
+Gated by ``CHANNEL_CLOCK_TOOL_ENABLED=1`` — default on in jc/dev, off
 in prod. The test skips when the flag is unset so prod runs don't fail.
 
 The harness is direct HTTP rather than Playwright: this test exercises
@@ -24,7 +24,7 @@ shared module.
 
 Run:
 
-    STARTER_CLOCK_TOOL_ENABLED=1 \
+    CHANNEL_CLOCK_TOOL_ENABLED=1 \
         uv run inv e2e-local --tests tests/e2e/test_tool_use_smoke.py
 """
 
@@ -46,8 +46,8 @@ from tests.e2e._http_helpers import (
 
 
 @pytest.mark.skipif(
-    os.environ.get("STARTER_CLOCK_TOOL_ENABLED") != "1",
-    reason="chassis exit test requires STARTER_CLOCK_TOOL_ENABLED=1",
+    os.environ.get("CHANNEL_CLOCK_TOOL_ENABLED") != "1",
+    reason="chassis exit test requires CHANNEL_CLOCK_TOOL_ENABLED=1",
 )
 def test_current_time_round_trip() -> None:
     """The chassis exit test: send "what time is it?" and assert the
@@ -71,7 +71,7 @@ def test_current_time_round_trip() -> None:
     streaming progress events, and the SSE protocol covers it via unit
     tests in ``test_strands_sse.py``.
     """
-    api_url = os.environ.get("STARTER_API_URL", "http://localhost:8001")
+    api_url = os.environ.get("CHANNEL_API_URL", "http://localhost:8001")
 
     tag = f"e2e-181-{int(time.time())}-{uuid.uuid4().hex[:6]}"
     email = f"{tag}@example.com"

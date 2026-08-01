@@ -12,7 +12,7 @@ ingestion lag from 7d is gone.
 Requirements (same as 7c):
 
 - ``inv dev`` running in another terminal.
-- ``STARTER_RECALL_ENABLED=1`` AND ``STARTER_AUTO_TITLE_ENABLED=1``
+- ``CHANNEL_RECALL_ENABLED=1`` AND ``CHANNEL_AUTO_TITLE_ENABLED=1``
   (``inv dev`` sets both).
 - Personal AWS credentials with Bedrock + AgentCore permissions.
 """
@@ -43,10 +43,10 @@ async def test_cross_session_recall_surfaces_planted_facts() -> None:
     facts written 3s ago are immediately queryable. No multi-minute
     wait required (the SemanticMemoryStrategy ingestion lag from 7d
     is gone)."""
-    ui_url = os.environ.get("STARTER_UI_URL")
-    api_url = os.environ.get("STARTER_API_URL", "http://localhost:8001")
+    ui_url = os.environ.get("CHANNEL_UI_URL")
+    api_url = os.environ.get("CHANNEL_API_URL", "http://localhost:8001")
     if not ui_url:
-        pytest.skip("STARTER_UI_URL not set — run via `inv e2e-local`")
+        pytest.skip("CHANNEL_UI_URL not set — run via `inv e2e-local`")
 
     tag = f"e2e-8a-recall-{int(time.time())}-{uuid.uuid4().hex[:6]}"
     email = f"{tag}@example.com"
@@ -151,10 +151,10 @@ async def test_cross_session_recall_surfaces_planted_facts() -> None:
 @pytest.mark.asyncio
 async def test_auto_title_fires_on_first_round_trip_only() -> None:
     """First assistant reply triggers title; second turn doesn't change it."""
-    ui_url = os.environ.get("STARTER_UI_URL")
-    api_url = os.environ.get("STARTER_API_URL", "http://localhost:8001")
+    ui_url = os.environ.get("CHANNEL_UI_URL")
+    api_url = os.environ.get("CHANNEL_API_URL", "http://localhost:8001")
     if not ui_url:
-        pytest.skip("STARTER_UI_URL not set — run via `inv e2e-local`")
+        pytest.skip("CHANNEL_UI_URL not set — run via `inv e2e-local`")
 
     tag = f"e2e-7d-title-{int(time.time())}-{uuid.uuid4().hex[:6]}"
     email = f"{tag}@example.com"

@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-os.environ.setdefault("STARTER_JWT_SECRET", "test-secret-for-unit-tests")
+os.environ.setdefault("CHANNEL_JWT_SECRET", "test-secret-for-unit-tests")
 os.environ.setdefault("GOOGLE_CLIENT_ID", "test-google-client-id")
 
 from channel.api.main import app  # noqa: E402
@@ -478,11 +478,11 @@ def test_callback_rejects_tampered_desktop_callback(monkeypatch):
 
 
 def test_mgmt_login_desktop_bypass_mints_jwt_and_redirects_to_loopback(monkeypatch):
-    """When _BYPASS=1 AND STARTER_DESKTOP_DEV_EMAIL is set, /auth/login skips
+    """When _BYPASS=1 AND CHANNEL_DESKTOP_DEV_EMAIL is set, /auth/login skips
     Google entirely and redirects to the loopback URL with ?token=<jwt>&state=<S>.
     """
     monkeypatch.setenv("ALLOWED_EMAILS", "[]")
-    monkeypatch.setenv("STARTER_DESKTOP_DEV_EMAIL", "dev@channel.local")
+    monkeypatch.setenv("CHANNEL_DESKTOP_DEV_EMAIL", "dev@channel.local")
     state = "F" * 43
     desktop_callback = "http://127.0.0.1:60123/callback"
     with patch("channel.auth.mgmt_auth._BYPASS", True):
@@ -497,10 +497,10 @@ def test_mgmt_login_desktop_bypass_mints_jwt_and_redirects_to_loopback(monkeypat
     assert "token=" in location
 
 
-def test_mgmt_login_desktop_bypass_honours_STARTER_DESKTOP_DEV_EMAIL(monkeypatch):
-    """The minted JWT's email is the value of STARTER_DESKTOP_DEV_EMAIL."""
+def test_mgmt_login_desktop_bypass_honours_CHANNEL_DESKTOP_DEV_EMAIL(monkeypatch):
+    """The minted JWT's email is the value of CHANNEL_DESKTOP_DEV_EMAIL."""
     monkeypatch.setenv("ALLOWED_EMAILS", "[]")
-    monkeypatch.setenv("STARTER_DESKTOP_DEV_EMAIL", "custom@example.test")
+    monkeypatch.setenv("CHANNEL_DESKTOP_DEV_EMAIL", "custom@example.test")
     state = "G" * 43
     desktop_callback = "http://127.0.0.1:60124/callback"
     captured: dict[str, Any] = {}
@@ -519,8 +519,8 @@ def test_mgmt_login_desktop_bypass_honours_STARTER_DESKTOP_DEV_EMAIL(monkeypatch
     assert captured["email"] == "custom@example.test"
 
 
-def test_mgmt_login_desktop_bypass_skipped_when_STARTER_DESKTOP_DEV_EMAIL_unset(monkeypatch):
-    """When _BYPASS=1 but STARTER_DESKTOP_DEV_EMAIL is NOT set (deployed dev
+def test_mgmt_login_desktop_bypass_skipped_when_CHANNEL_DESKTOP_DEV_EMAIL_unset(monkeypatch):
+    """When _BYPASS=1 but CHANNEL_DESKTOP_DEV_EMAIL is NOT set (deployed dev
     environment shape), /auth/login does NOT silently auto-mint a synthetic
     JWT — it falls through to the real Google OAuth flow.
 
@@ -530,7 +530,7 @@ def test_mgmt_login_desktop_bypass_skipped_when_STARTER_DESKTOP_DEV_EMAIL_unset(
     dev domain was auto-logged-in as 'dev@channel.local'.
     """
     monkeypatch.setenv("ALLOWED_EMAILS", "[]")
-    monkeypatch.delenv("STARTER_DESKTOP_DEV_EMAIL", raising=False)
+    monkeypatch.delenv("CHANNEL_DESKTOP_DEV_EMAIL", raising=False)
     state = "H" * 43
     desktop_callback = "http://127.0.0.1:60125/callback"
 

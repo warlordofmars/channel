@@ -50,7 +50,7 @@ def test_code_exec_returns_sandbox_payload_unchanged(monkeypatch):
         "channel.agents.tools.code_exec._get_lambda_client",
         lambda: fake_client,
     )
-    monkeypatch.setenv("STARTER_CODE_EXEC_LAMBDA_ARN", "arn:fake")
+    monkeypatch.setenv("CHANNEL_CODE_EXEC_LAMBDA_ARN", "arn:fake")
 
     from channel.agents.tools.code_exec import code_exec
 
@@ -77,7 +77,7 @@ def test_code_exec_invokes_request_response_with_json_payload(monkeypatch):
         "channel.agents.tools.code_exec._get_lambda_client",
         lambda: fake_client,
     )
-    monkeypatch.setenv("STARTER_CODE_EXEC_LAMBDA_ARN", "arn:fake")
+    monkeypatch.setenv("CHANNEL_CODE_EXEC_LAMBDA_ARN", "arn:fake")
 
     from channel.agents.tools.code_exec import code_exec
 
@@ -98,8 +98,8 @@ def test_code_exec_is_a_strands_tool():
 
 
 def test_code_exec_returns_not_configured_when_arn_unset(monkeypatch):
-    """No ``STARTER_CODE_EXEC_LAMBDA_ARN`` → ``not_configured`` error."""
-    monkeypatch.delenv("STARTER_CODE_EXEC_LAMBDA_ARN", raising=False)
+    """No ``CHANNEL_CODE_EXEC_LAMBDA_ARN`` → ``not_configured`` error."""
+    monkeypatch.delenv("CHANNEL_CODE_EXEC_LAMBDA_ARN", raising=False)
 
     from channel.agents.tools.code_exec import code_exec
 
@@ -121,7 +121,7 @@ def test_code_exec_returns_rate_limit_on_too_many_requests(monkeypatch):
         "channel.agents.tools.code_exec._get_lambda_client",
         lambda: fake_client,
     )
-    monkeypatch.setenv("STARTER_CODE_EXEC_LAMBDA_ARN", "arn:fake")
+    monkeypatch.setenv("CHANNEL_CODE_EXEC_LAMBDA_ARN", "arn:fake")
 
     from channel.agents.tools.code_exec import code_exec
 
@@ -144,7 +144,7 @@ def test_code_exec_returns_invoke_failed_on_generic_client_error(monkeypatch):
         "channel.agents.tools.code_exec._get_lambda_client",
         lambda: fake_client,
     )
-    monkeypatch.setenv("STARTER_CODE_EXEC_LAMBDA_ARN", "arn:fake")
+    monkeypatch.setenv("CHANNEL_CODE_EXEC_LAMBDA_ARN", "arn:fake")
 
     from channel.agents.tools.code_exec import code_exec
 
@@ -168,7 +168,7 @@ def test_code_exec_returns_sandbox_init_error_on_function_error(monkeypatch):
         "channel.agents.tools.code_exec._get_lambda_client",
         lambda: fake_client,
     )
-    monkeypatch.setenv("STARTER_CODE_EXEC_LAMBDA_ARN", "arn:fake")
+    monkeypatch.setenv("CHANNEL_CODE_EXEC_LAMBDA_ARN", "arn:fake")
 
     from channel.agents.tools.code_exec import code_exec
 
@@ -198,7 +198,7 @@ def test_code_exec_returns_invoke_failed_on_endpoint_connection_error(monkeypatc
         "channel.agents.tools.code_exec._get_lambda_client",
         lambda: fake_client,
     )
-    monkeypatch.setenv("STARTER_CODE_EXEC_LAMBDA_ARN", "arn:fake")
+    monkeypatch.setenv("CHANNEL_CODE_EXEC_LAMBDA_ARN", "arn:fake")
 
     from channel.agents.tools.code_exec import code_exec
 
@@ -224,7 +224,7 @@ def test_code_exec_returns_invalid_payload_on_non_json_response(monkeypatch):
         "channel.agents.tools.code_exec._get_lambda_client",
         lambda: fake_client,
     )
-    monkeypatch.setenv("STARTER_CODE_EXEC_LAMBDA_ARN", "arn:fake")
+    monkeypatch.setenv("CHANNEL_CODE_EXEC_LAMBDA_ARN", "arn:fake")
 
     from channel.agents.tools.code_exec import code_exec
 
@@ -255,7 +255,7 @@ def test_code_exec_error_round_trips_through_translate_event(monkeypatch):
         "channel.agents.tools.code_exec._get_lambda_client",
         lambda: fake_client,
     )
-    monkeypatch.setenv("STARTER_CODE_EXEC_LAMBDA_ARN", "arn:fake")
+    monkeypatch.setenv("CHANNEL_CODE_EXEC_LAMBDA_ARN", "arn:fake")
 
     from channel.agents.strands_sse import translate_event
     from channel.agents.tools.code_exec import code_exec

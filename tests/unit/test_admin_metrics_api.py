@@ -22,7 +22,7 @@ import pytest
 from botocore.stub import ANY, Stubber
 from fastapi.testclient import TestClient
 
-os.environ.setdefault("STARTER_JWT_SECRET", "test-secret-for-unit-tests")
+os.environ.setdefault("CHANNEL_JWT_SECRET", "test-secret-for-unit-tests")
 
 from channel.api.admin import _METRIC_ALLOWLIST  # noqa: E402
 from channel.api.main import app  # noqa: E402
