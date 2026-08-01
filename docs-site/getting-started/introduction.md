@@ -1,6 +1,6 @@
 # Introduction
 
-Channel is a production-ready template for building AWS-native AI agent backend services.
+Channel is an AI agent chat backend on AWS.
 
 ## What's included
 

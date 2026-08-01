@@ -18,7 +18,7 @@ gh pr diff <PR>               # full diff
 
 Two rules govern every grep in the checklist below:
 
-1. **`gh pr diff` takes the PR number and nothing else.** It has no pathspec support — `gh pr diff <PR> -- '*.jsx'` exits with `accepts at most 1 arg(s), received 2` and pipes an *empty* stdout into whatever follows, so a check written that way silently never fires. Scope with `grep`, never with a trailing `-- <path>`.
+1. **`gh pr diff` takes exactly one positional argument — the PR number.** Flags are fine (`--name-only`, `--patch`), but there is no pathspec support: `gh pr diff <PR> -- '*.jsx'` exits with `accepts at most 1 arg(s), received 2` and pipes an *empty* stdout into whatever follows, so a check written that way silently never fires. Scope with `grep`, never with a trailing `-- <path>`.
 2. **A grep hit is a candidate, not a finding.** Because the diff can't be path-scoped, every pattern also sees Markdown, CHANGELOG prose, lockfiles, and this file itself. Before raising anything, confirm *which* file the hit came from (`gh pr diff <PR> --name-only`) and that it's the kind of file the check applies to. A convention discussed in prose is never a violation of that convention. Raising a false `FAIL` is worse than missing one — it blocks a correct PR on an instruction the author cannot satisfy.
 
 `grep -P` (check 5) is a PCRE extension that stock BSD/macOS `grep` rejects. If it errors, fall back to `grep -E` with an explicit character class or skip the emoji sweep and read the diff — don't let the `2>/dev/null || true` silently turn it into a pass.
@@ -126,7 +126,10 @@ Exception: `ui/src/styles/channel.css` and `docs-site/.vitepress/theme/style.css
 ### 5. Icon usage — no emoji as UI elements
 
 ```bash
-gh pr diff <PR> | grep -E '^\+' | grep -P '[\x{1F300}-\x{1FFFF}]|[\x{2600}-\x{26FF}]' 2>/dev/null || true
+# `|| true` absorbs grep's "no matches" exit 1 — the good case. stderr is
+# deliberately NOT redirected, so `grep: invalid option -- P` on a stock BSD
+# grep stays visible instead of masquerading as a clean pass (§Invocation).
+gh pr diff <PR> | grep -E '^\+' | grep -P '[\x{1F300}-\x{1FFFF}]|[\x{2600}-\x{26FF}]' || true
 ```
 
 Emoji used as visible UI elements in JSX/JS → `FAIL`.
@@ -156,7 +159,9 @@ gh pr diff <PR> --name-only | grep -E '(^|/)package\.json$'
 # 2. Added dependency-shaped lines. Anchored on `"<key>":` so prose can't
 #    match, but it is NOT scoped to a file — a lockfile in the diff will
 #    swamp this (ui/package-lock.json alone has ~1900 such lines), so only
-#    read it when step 1 says a manifest moved.
+#    read it when step 1 says a manifest moved. If the PR branch is checked
+#    out locally, prefer `git` — it DOES take a pathspec, unlike `gh pr diff`:
+#      git diff origin/development...HEAD -- ui/package.json
 gh pr diff <PR> | grep -E '^\+\s*"[^"]+"\s*:\s*"[^"]*"'
 # 3. Fast path for the usual suspects — same anchoring, so a package name
 #    merely *discussed* in Markdown or CHANGELOG prose is not a hit.
