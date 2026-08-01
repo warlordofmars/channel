@@ -38,7 +38,8 @@ SCRIPT_PATH = ROOT / "scripts" / "check_stale_blockers.py"
 # scripts/ isn't a package; load by file path so tests don't depend on
 # PYTHONPATH being set (mirrors tests/unit/test_check_branch_protection_drift.py).
 _spec = importlib.util.spec_from_file_location("check_stale_blockers", SCRIPT_PATH)
-assert _spec is not None and _spec.loader is not None
+assert _spec is not None
+assert _spec.loader is not None
 sweep = importlib.util.module_from_spec(_spec)
 sys.modules["check_stale_blockers"] = sweep
 _spec.loader.exec_module(sweep)
@@ -257,21 +258,25 @@ def test_status_labels_tolerates_a_null_labels_field() -> None:
 def test_refstate_describes_an_open_issue() -> None:
     ref = _open_issue(10)
 
-    assert ref.exists and ref.is_open and not ref.is_not_planned
+    assert ref.exists
+    assert ref.is_open
+    assert not ref.is_not_planned
     assert ref.describe() == "OPEN/-"
 
 
 def test_refstate_describes_a_not_planned_closure() -> None:
     ref = _closed_issue(11, "NOT_PLANNED")
 
-    assert not ref.is_open and ref.is_not_planned
+    assert not ref.is_open
+    assert ref.is_not_planned
     assert ref.describe() == "CLOSED/NOT_PLANNED"
 
 
 def test_refstate_describes_a_missing_ref() -> None:
     ref = sweep.RefState(12, "Missing")
 
-    assert not ref.exists and not ref.is_open
+    assert not ref.exists
+    assert not ref.is_open
     assert ref.describe() == "NOTFOUND"
 
 
@@ -314,7 +319,8 @@ def test_fetch_ref_states_resolves_issues_prs_and_missing(
     assert run.call_count == 1
     argv = run.call_args.args[0]
     assert argv[:3] == ["gh", "api", "graphql"]
-    assert "owner=acme" in argv and "name=widgets" in argv
+    assert "owner=acme" in argv
+    assert "name=widgets" in argv
     assert argv.count("-F") == 2
 
 
@@ -411,7 +417,8 @@ def test_fetch_open_issues_requests_the_fields_we_parse(
     argv = run.call_args.args[0]
     assert argv[:2] == ["gh", "issue"]
     assert "number,title,body,labels" in argv
-    assert "--state" in argv and "open" in argv
+    assert "--state" in argv
+    assert "open" in argv
 
 
 def test_fetch_open_issues_warns_when_truncated(
