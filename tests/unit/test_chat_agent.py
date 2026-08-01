@@ -827,7 +827,10 @@ def test_default_system_prompt_carries_development_self_awareness():
     # references the tools generically — it must NOT enumerate github_*
     # tool names (the toolset evolves and is capped per-server by #389).
     assert "github tools" in prompt
-    assert "live" in prompt
+    # Pinned to the full clause, not a bare "live": #438 added "live data"
+    # to the tool-discipline paragraph, so a bare substring would survive
+    # deletion of this entire read-live-state instruction.
+    assert "read the current state live" in prompt
     assert "stale recall" in prompt
     assert "github_" not in prompt
     # (c) Narrate through knowledge of the agent system.
@@ -882,9 +885,11 @@ def test_default_system_prompt_does_not_suppress_warranted_tool_use():
     chain-depth nudge (#152, 2026-06-14 comment) so a partial first result
     leads to a follow-up call rather than a half answer."""
     prompt = DEFAULT_SYSTEM_PROMPT.lower()
-    # Tools remain licensed for the cases they exist for.
-    assert "live data, external content, or computation" in prompt
-    assert "genuinely required" in prompt
+    # Tools remain licensed for the cases they exist for. The enumeration
+    # must include the durable memory write, or the later general sentence
+    # reads as governing and silently excludes a proactive #273 `remember`.
+    assert "live data, external content, computation" in prompt
+    assert "a durable memory write is genuinely required" in prompt
     # Explicit anti-avoidance clause.
     assert "discipline is not avoidance" in prompt
     # Chain depth: an incomplete result means call again, don't stop.
@@ -901,7 +906,7 @@ def test_default_system_prompt_dev_awareness_trigger_is_narrowed_to_repo_questio
     # The trigger now requires the user to actually ask about repo state.
     assert "actually asks about that repository's state" in prompt
     # ...and the loose reading is ruled out by name.
-    assert "not any status-flavoured remark" in prompt
+    assert "not any status-flavored remark" in prompt
     assert "how are we doing?" in prompt
     assert "not a cue" in prompt
 
