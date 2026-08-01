@@ -2,10 +2,28 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- viewport-fit=cover lets an installed standalone window draw into the
+         notch / home-indicator areas; app.css pays that back with
+         env(safe-area-inset-*) padding on the mobile chrome (#437). -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>Channel</title>
     <meta name="description" content="Channel — an AI agent chat backend on AWS." />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+
+    <!-- Installable PWA (#437, Tier 2 of #125).
+         iOS does not accept SVG for home-screen icons, so apple-touch-icon
+         is a 180x180 PNG. The colour literals below are the computed sRGB
+         value of the dark `--canvas` token (oklch(0.183 0.007 58)) from
+         ui/src/styles/channel.css — neither a <meta> nor a JSON manifest can
+         reference a CSS custom property, so this is the one place the token's
+         value is repeated rather than var()'d. -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <meta name="theme-color" content="#15120f" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Channel" />
 
     <!-- Google Analytics 4 — gated on the consent banner. Only loads when
          VITE_GA_MEASUREMENT_ID is set AND the visitor has opted in. -->
