@@ -274,7 +274,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `stacks/channel_stack.py` / `cp -r src/channel` bundling step;
   `src/channel/README.md`'s module index was renamed off `src/starter/`
   and refreshed to match the package as it stands; and the
-  `:mod:`starter.auth.*`` docstring cross-references plus the
+  `starter.auth.*` docstring cross-references plus the
   "Starter management API" OpenAPI description were corrected.
   Each replacement was verified against live code rather than
   mechanically re-prefixed, since the variable set drifted during
