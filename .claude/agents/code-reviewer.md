@@ -16,6 +16,13 @@ gh pr diff <PR> --name-only   # file list
 gh pr diff <PR>               # full diff
 ```
 
+Two rules govern every grep in the checklist below:
+
+1. **`gh pr diff` takes exactly one positional argument — the PR number.** Flags are fine (`--name-only`, `--patch`), but there is no pathspec support: `gh pr diff <PR> -- '*.jsx'` exits with `accepts at most 1 arg(s), received 2` and pipes an *empty* stdout into whatever follows, so a check written that way silently never fires. Scope with `grep`, never with a trailing `-- <path>`.
+2. **A grep hit is a candidate, not a finding.** Because the diff can't be path-scoped, every pattern also sees Markdown, CHANGELOG prose, lockfiles, and this file itself. Before raising anything, confirm *which* file the hit came from (`gh pr diff <PR> --name-only`) and that it's the kind of file the check applies to. A convention discussed in prose is never a violation of that convention. Raising a false `FAIL` is worse than missing one — it blocks a correct PR on an instruction the author cannot satisfy.
+
+`grep -P` (check 5) is a PCRE extension that stock BSD/macOS `grep` rejects. If it errors, fall back to `grep -E` with an explicit character class or skip the emoji sweep and read the diff — don't let the `2>/dev/null || true` silently turn it into a pass.
+
 ---
 
 ## Skill discovery
@@ -105,41 +112,76 @@ Any addition of AWS access key patterns, literal account IDs, or hardcoded crede
 Applies to `.css`, `.jsx`, `.js` files only:
 
 ```bash
-gh pr diff <PR> -- '*.css' '*.jsx' '*.js' | grep -E '^\+' | grep -vE '^\+\s*//' | grep -E '(#[0-9a-fA-F]{3,8}\b|:\s*rgb\(|:\s*rgba\(|:\s*hsl\()'
+gh pr diff <PR> | grep -E '^\+' | grep -vE '^\+\s*//' | grep -E '(#[0-9a-fA-F]{3,8}\b|:\s*rgb\(|:\s*rgba\(|:\s*hsl\()'
 ```
 
 Hardcoded hex, rgb, or hsl colour values in UI files → `FAIL`. All colours must use `var(--token-name)`.
 
-Exception: `docs-site/.vitepress/theme/style.css` and `ui/src/index.css` may define CSS variable tokens — verify the flagged lines are variable *definitions* (for example `:root { --colour: #... }`, `[data-theme="dark"] { --colour: #... }`, or `@theme { --color-foo: #... }`) not *usages*. New chart palette tokens (`--chart-<name>: #...`) added to `ui/src/index.css`'s root blocks, and Tailwind theme tokens added in its `@theme` block, fall under this exception; consuming them in `*.jsx` / `*.js` must still go through `var(--chart-<name>)` or the appropriate CSS variable reference.
+Per §Invocation rule 2, confirm each hit actually lands in a `.css` / `.jsx` / `.js` file before raising it — a hex quoted in Markdown, or a `#449`-style issue reference, is not a finding.
+
+Exception: `ui/src/styles/channel.css` and `docs-site/.vitepress/theme/style.css` may define CSS variable tokens — verify the flagged lines are variable *definitions* (for example `:root { --colour: #... }` or `[data-theme="dark"] { --colour: #... }`) not *usages*. New chart palette tokens (`--chart-<name>: #...`) added to `ui/src/styles/channel.css`'s theme blocks fall under this exception; consuming them in `*.jsx` / `*.js` must still go through `var(--chart-<name>)` or the appropriate CSS variable reference.
 
 ---
 
 ### 5. Icon usage — no emoji as UI elements
 
 ```bash
-gh pr diff <PR> -- '*.jsx' '*.js' | grep -E '^\+' | grep -P '[\x{1F300}-\x{1FFFF}]|[\x{2600}-\x{26FF}]' 2>/dev/null || true
+# `|| true` absorbs grep's "no matches" exit 1 — the good case. stderr is
+# deliberately NOT redirected, so `grep: invalid option -- P` on a stock BSD
+# grep stays visible instead of masquerading as a clean pass (§Invocation).
+gh pr diff <PR> | grep -E '^\+' | grep -P '[\x{1F300}-\x{1FFFF}]|[\x{2600}-\x{26FF}]' || true
 ```
 
-Emoji used as visible UI elements in JSX/JS → `FAIL`. All icons must use `lucide-react`. If a needed icon isn't in `lucide-react`, that's a design conversation — flag as `WARN` with a suggested search.
+Emoji used as visible UI elements in JSX/JS → `FAIL`.
+
+All icons come from `ui/src/components/Icon.jsx` — the project's hand-rolled 24×24 `currentColor` stroke set, used as `<Icon name="search" size={18} />`. If a needed glyph isn't in the set, the fix is to add a `case` to `Icon.jsx`, not to reach for an icon package. Channel ships **no** icon dependency (`lucide-react` was removed in #445 / PR #447), so a new icon-library import is also a `FAIL`:
+
+```bash
+# NOTE: `gh pr diff` takes the PR number and nothing else — it accepts no
+# pathspec (`gh pr diff <PR> -- 'ui/src'` fails with "accepts at most 1
+# arg(s), received 2"), so scope with grep, never with a trailing `-- path`.
+gh pr diff <PR> | grep -E "^\+.*(from|require\()\s*['\"](lucide-react|react-icons|@heroicons|@tabler/icons|@phosphor-icons|@fortawesome)"
+```
+
+The named packages are the common offenders, not an exhaustive list — **any** new icon-package import is the `FAIL`. Cross-check by eye: an `import` in the diff whose specifier isn't a relative path, a `@/`-aliased project path, or an already-present dependency in `ui/package.json` deserves a look.
+
+`Icon` takes `name` / `size` / `stroke` / `style` and strokes in `currentColor` — it has no colour prop, so an icon's colour is set by the surrounding element's token-driven `color`. A hex literal reaching it via `style` is already check 4's `FAIL`; nothing extra to flag here.
 
 ---
 
-### 6. shadcn/ui primitives
+### 6. Hand-rolled primitives — no component library
 
-Raw HTML form elements in JSX outside `ui/src/components/ui/`:
+Channel's UI uses no Tailwind and no component library. Reusable primitives are plain `.jsx` files directly under `ui/src/components/` (`Icon.jsx`, `Modal.jsx`, `ErrorBoundary.jsx`, `ChannelMark.jsx`, `AuthGate.jsx`), styled with the CSS-variable tokens from check 4. There is **no** `ui/src/components/ui/` layer — a raw `<button>` / `<input>` / `<select>` / `<textarea>` carrying a semantic `className` is the correct shape and is **not** a finding.
 
 ```bash
-gh pr diff <PR> -- '*.jsx' | grep -E '^\+.*<(button|input|select|textarea)\b' | grep -v 'components/ui/'
+# 1. Did a manifest change at all? If not, this check is done.
+gh pr diff <PR> --name-only | grep -E '(^|/)package\.json$'
+# 2. Added dependency-shaped lines. Anchored on `"<key>":` so prose can't
+#    match, but it is NOT scoped to a file — a lockfile in the diff will
+#    swamp this (ui/package-lock.json alone has ~1900 such lines), so only
+#    read it when step 1 says a manifest moved. If the PR branch is checked
+#    out locally, prefer `git` — it DOES take a pathspec, unlike `gh pr diff`:
+#      git diff origin/development...HEAD -- ui/package.json
+gh pr diff <PR> | grep -E '^\+\s*"[^"]+"\s*:\s*"[^"]*"'
+# 3. Fast path for the usual suspects — same anchoring, so a package name
+#    merely *discussed* in Markdown or CHANGELOG prose is not a hit.
+gh pr diff <PR> | grep -E '^\+\s*"(tailwindcss|@tailwindcss/[^"]*|@radix-ui/[^"]*|@mui/[^"]*|@chakra-ui/[^"]*|@headlessui/[^"]*|class-variance-authority|tailwind-merge|shadcn[^"]*|lucide-react)"\s*:'
 ```
 
-Raw HTML form elements that should be shadcn primitives → `WARN`. Add the primitive to `ui/src/components/ui/` first, then use it.
+- Any new UI component-library, CSS-framework, or icon dependency → `FAIL` — read the **second** grep and judge each addition on its merits; the third only fast-paths the usual suspects and is **not** the boundary of the rule. A package added to `ui/package.json` with no import site yet still counts — that is exactly the state #445 / PR #447 existed to clean up. This is a design conversation, not a PR-time decision (CLAUDE.md §"UI conventions").
+- A new dialog or destructive-confirm that hand-rolls its own backdrop + Esc handling instead of using `ui/src/components/Modal.jsx` → `WARN`.
+- A new popover that doesn't follow the established `<div className="backdrop" />` + `<div className="pop" />` pattern (ModelPicker / AttachMenu / AccountPopover in `ui/src/app/`) → `WARN`.
+
+Full conventions: `.claude/skills/react-component/SKILL.md` §1.
 
 ---
 
 ### 7. GitHub Actions — no mutable version tags
 
 ```bash
-gh pr diff <PR> -- '.github/workflows/*.yml' | grep -E '^\+.*uses:.*@v[0-9]'
+# Anchored on the YAML step shape so this check's own prose — and any other
+# Markdown that quotes `uses: owner/action@v1` — isn't a hit.
+gh pr diff <PR> | grep -E '^\+\s*-?\s*uses:\s*\S+@v[0-9]'
 ```
 
 `uses: owner/action@v1`-style references → `FAIL`. Must use full commit SHA with a `# vN` comment per CLAUDE.md. Use `gh api repos/{owner}/{repo}/git/ref/tags/{tag}` to resolve the SHA when creating or reviewing.
