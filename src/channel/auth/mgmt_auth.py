@@ -40,7 +40,13 @@ from channel.logging_config import get_logger
 router = APIRouter(tags=["mgmt-auth"])
 logger = get_logger(__name__)
 
-_BYPASS = bool(os.environ.get("CHANNEL_BYPASS_GOOGLE_AUTH"))
+# Opt-in ONLY on the exact string "1" — matching the repo's default-off
+# flag convention (CHANNEL_ENABLE_DEBUG_ENDPOINTS, CHANNEL_MCP_ALLOW_LOCALHOST,
+# CHANNEL_CLOCK_TOOL_ENABLED, ...). Deliberately NOT `bool(...)`: every
+# non-empty string is truthy, so `CHANNEL_BYPASS_GOOGLE_AUTH=0` — the obvious
+# way to turn a flag off — used to *enable* the auth bypass. A security
+# control must fail closed on anything it doesn't explicitly recognise.
+_BYPASS = os.environ.get("CHANNEL_BYPASS_GOOGLE_AUTH") == "1"
 _STATE_TTL_SECONDS = 600  # 10 minutes
 
 _DESKTOP_STATE_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
@@ -114,9 +120,10 @@ def _make_user(email: str, display_name: str) -> dict[str, Any]:
 async def mgmt_login(request: Request) -> RedirectResponse:
     """Redirect the management UI user to Google for authentication.
 
-    In CHANNEL_BYPASS_GOOGLE_AUTH mode (non-prod), issue a synthetic JWT directly
-    when a test_email query parameter is provided, so e2e tests can run without
-    a real Google account.
+    In CHANNEL_BYPASS_GOOGLE_AUTH=1 mode (non-prod), issue a synthetic JWT
+    directly when a test_email query parameter is provided, so e2e tests can run
+    without a real Google account.  Any other value — including "0" and
+    "false" — leaves the bypass disabled.
 
     Optionally accepts ``desktop_callback`` and ``state`` query parameters for
     the Electron loopback OAuth flow.  When present both are validated strictly:

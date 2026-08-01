@@ -8,6 +8,7 @@ mirrors the production contract: ``put_state`` records the state and
 ``None`` thereafter.
 """
 
+import importlib
 import os
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -19,7 +20,7 @@ os.environ.setdefault("CHANNEL_JWT_SECRET", "test-secret-for-unit-tests")
 os.environ.setdefault("GOOGLE_CLIENT_ID", "test-google-client-id")
 
 from channel.api.main import app  # noqa: E402
-from channel.auth import state_store  # noqa: E402
+from channel.auth import mgmt_auth, state_store  # noqa: E402
 from channel.auth.google import _google_client_id, _reset_allowed_emails_cache  # noqa: E402
 from channel.auth.mgmt_auth import (  # noqa: E402
     _consume_pending_state,
@@ -553,3 +554,118 @@ def test_mgmt_login_desktop_bypass_skipped_when_CHANNEL_DESKTOP_DEV_EMAIL_unset(
     assert "127.0.0.1" not in resp.headers["location"]
     # And the state was persisted for the real callback to consume.
     assert fake_put_state.called
+
+
+# ---------------------------------------------------------------------------
+# CHANNEL_BYPASS_GOOGLE_AUTH parsing (issue #446)
+#
+# ``_BYPASS`` is evaluated once at module-import time, so flipping the env var
+# requires ``importlib.reload`` — the same technique test_debug_api.py uses for
+# CHANNEL_ENABLE_DEBUG_ENDPOINTS. Reload re-executes the module body in the
+# *existing* module dict, so the route functions already registered on ``app``
+# (whose ``__globals__`` is that dict) observe the new value — which is what
+# lets the route-level tests below exercise the real request path.
+#
+# Two consequences of reloading a module that ``app`` already mounted:
+#   - ``mgmt_auth.router`` is rebound to a *fresh* APIRouter while ``app``
+#     keeps routes from the pre-reload object. Harmless here (nothing
+#     re-includes the router), but a future test that re-includes it or
+#     asserts route identity must not assume the two are the same object.
+#   - ``mgmt_auth`` imports state_store as a *module*
+#     (``from channel.auth import state_store``), so reload rebinds to the
+#     same object the autouse ``_fake_state_store`` fixture patched and the
+#     fall-through tests stay offline. If that import is ever narrowed to
+#     ``from channel.auth.state_store import put_state``, reload would pick
+#     up the real function and these tests would reach DynamoDB — hence the
+#     explicit "state was persisted" assertion below, which fails loudly
+#     rather than silently going live.
+#
+# These tests deliberately pin the module-level expression rather than a
+# helper: the regression being guarded is precisely that line reverting to
+# ``bool(os.environ.get(...))``, under which "0" and "false" would silently
+# re-enable the auth bypass.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def bypass_env():
+    """Set CHANNEL_BYPASS_GOOGLE_AUTH and re-evaluate the module-level flag.
+
+    Yields a callable taking the env value (``None`` means unset) and
+    returning the freshly computed ``_BYPASS``. Restores the original
+    environment and reloads once more on teardown so no later test inherits
+    a mutated bypass state.
+    """
+    original = os.environ.get("CHANNEL_BYPASS_GOOGLE_AUTH")
+
+    def _apply(value: str | None) -> bool:
+        if value is None:
+            os.environ.pop("CHANNEL_BYPASS_GOOGLE_AUTH", None)
+        else:
+            os.environ["CHANNEL_BYPASS_GOOGLE_AUTH"] = value
+        importlib.reload(mgmt_auth)
+        return mgmt_auth._BYPASS
+
+    yield _apply
+
+    if original is None:
+        os.environ.pop("CHANNEL_BYPASS_GOOGLE_AUTH", None)
+    else:
+        os.environ["CHANNEL_BYPASS_GOOGLE_AUTH"] = original
+    importlib.reload(mgmt_auth)
+
+
+def test_bypass_enabled_only_by_exact_string_one(bypass_env):
+    """The documented contract: CHANNEL_BYPASS_GOOGLE_AUTH=1 enables the bypass."""
+    assert bypass_env("1") is True
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param("0", id="zero"),
+        pytest.param("false", id="false"),
+        pytest.param("False", id="False-capitalised"),
+        pytest.param("no", id="no"),
+        pytest.param("true", id="true-not-one"),
+        pytest.param("yes", id="yes-not-one"),
+        pytest.param(" 1 ", id="padded-one"),
+        pytest.param("", id="empty"),
+        pytest.param(None, id="unset"),
+    ],
+)
+def test_bypass_disabled_for_every_value_other_than_one(value, bypass_env):
+    """Fail closed: anything the flag doesn't explicitly recognise leaves it off.
+
+    Before #446 this used ``bool(os.environ.get(...))``, so "0" and "false" —
+    the obvious ways to turn a flag *off* — ENABLED the Google-auth bypass.
+    """
+    assert bypass_env(value) is False
+
+
+def test_login_with_test_email_is_refused_when_flag_is_zero(
+    bypass_env, monkeypatch, _fake_state_store
+):
+    """?test_email= must NOT mint a synthetic JWT when the flag is "0"."""
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "test-google-id")
+    bypass_env("0")
+
+    resp = _client.get("/auth/login?test_email=e2e@test.com")
+
+    assert resp.status_code == 302
+    assert "accounts.google.com" in resp.headers["location"]
+    # The request fell through to the real Google path far enough to persist
+    # OAuth state — and it landed in the fake store, confirming the reloaded
+    # module still writes through the patched state_store rather than DynamoDB.
+    assert len(_fake_state_store) == 1
+
+
+def test_login_with_test_email_still_works_when_flag_is_one(bypass_env, monkeypatch):
+    """The local dev shortcut (`inv dev` sets the flag to "1") keeps working."""
+    monkeypatch.setenv("ALLOWED_EMAILS", "[]")
+    bypass_env("1")
+
+    resp = _client.get("/auth/login?test_email=e2e@test.com")
+
+    assert resp.status_code == 200
+    assert "starter_mgmt_token" in resp.text
