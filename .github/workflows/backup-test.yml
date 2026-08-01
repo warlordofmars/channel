@@ -1,12 +1,48 @@
 # Copyright (c) 2026 John Carter. All rights reserved.
-# Scheduled DynamoDB PITR restore test — validates that prod backups are recoverable.
-# Runs weekly and on workflow_dispatch.
+# DynamoDB PITR restore test — validates that prod backups are recoverable.
 # On failure, opens or updates a GitHub issue labelled 'reliability'.
+#
+# ---------------------------------------------------------------------------
+# THE WEEKLY SCHEDULE IS DELIBERATELY DISABLED (see issue #49).
+# ---------------------------------------------------------------------------
+# This check validates a PITR restore of the *production* table. Production
+# does not exist yet, so every scheduled run was guaranteed to fail — it never
+# passed once across its entire history, and each failure appended a "still
+# failing" comment to issue #49. That is false signal, not safety: an alarm
+# that has never been capable of going green trains everyone to ignore it.
+#
+# Three independent preconditions are unmet today:
+#
+#   1. `secrets.AWS_DEPLOY_ROLE_ARN` (the prod OIDC deploy role) is not
+#      configured — not at repo scope, not at environment scope. The empty
+#      value made `role-to-assume` vanish from the action's inputs, so the
+#      run died with a cryptic "Could not load credentials from any
+#      providers" after 12 retries.
+#   2. The `production` GitHub environment does not exist. The deploy role's
+#      trust policy pins the OIDC `sub` claim to
+#      `repo:warlordofmars/channel:environment:production`
+#      (infra/stacks/channel_stack.py), so a job without `environment:` could
+#      not assume the role even once the secret is set. Fixed below.
+#   3. There is no PITR-enabled table to restore from. PITR is prod-only —
+#      `point_in_time_recovery_enabled=is_prod` in channel_stack.py — so
+#      `channel-dev` and `channel-jc` both report PITR DISABLED, and the prod
+#      `channel` table has never been created.
+#
+# RE-ENABLE CONDITION — turn the schedule back on as part of the prod
+# cutover, once all three hold: the `channel` table exists with PITR enabled,
+# the `production` GitHub environment exists, and `AWS_DEPLOY_ROLE_ARN` is
+# wired. Uncomment the `schedule:` block below. Tracked as the follow-up
+# issue linked from #49.
+#
+# Until then the workflow remains runnable on demand via workflow_dispatch,
+# and its preflight fails fast with an actionable message instead of a
+# cryptic credentials error.
 name: Backup Restore Test
 
 on:
-  schedule:
-    - cron: "0 3 * * 0"  # every Sunday at 03:00 UTC
+  # Re-enable at prod cutover — see the header comment above and issue #49.
+  # schedule:
+  #   - cron: "0 3 * * 0"  # every Sunday at 03:00 UTC
   workflow_dispatch:
 
 permissions:
@@ -18,26 +54,64 @@ jobs:
   backup-restore-test:
     name: DynamoDB PITR Restore Test
     runs-on: ubuntu-latest
+    # Required: the prod deploy role's OIDC trust policy pins the token's
+    # `sub` claim to `repo:<owner>/<repo>:environment:production`. Without
+    # this key the AssumeRoleWithWebIdentity call is rejected outright.
+    environment: production
     env:
       RESTORE_TABLE: channel-backup-test-${{ github.run_id }}
       SOURCE_TABLE: channel
       AWS_REGION: us-east-1
 
     steps:
+      # Fail fast, before any checkout or dependency install, when the prod
+      # deploy role is not configured. Without this the run burns ~70s and
+      # then reports "Could not load credentials from any providers", which
+      # says nothing about the actual cause.
+      - name: Preflight — prod deploy role configured
+        env:
+          DEPLOY_ROLE_ARN: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+        run: |
+          if [ -z "$DEPLOY_ROLE_ARN" ]; then
+            echo "::error::AWS_DEPLOY_ROLE_ARN is not configured; prod backup validation cannot run."
+            echo "The prod OIDC deploy role secret is unset at both repo and environment scope."
+            echo "This is expected until the prod cutover — see issue #49."
+            echo "To resolve: deploy the prod stack, then set AWS_DEPLOY_ROLE_ARN to the"
+            echo "GitHubActionsDeployRole ARN emitted by the ChannelStack prod deployment."
+            exit 1
+          fi
+          echo "Prod deploy role secret is configured."
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
-
-      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
-        with:
-          version: "latest"
-
-      - name: Install dependencies
-        run: uv sync --all-extras
 
       - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
         with:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           aws-region: us-east-1
+
+      # Verify there is actually something restorable before kicking off a
+      # restore that would otherwise fail deep inside the AWS call with a
+      # less obvious error.
+      - name: Preflight — source table exists with PITR enabled
+        run: |
+          if ! aws dynamodb describe-table --table-name "$SOURCE_TABLE" >/dev/null 2>&1; then
+            echo "::error::Source table '$SOURCE_TABLE' does not exist in $AWS_REGION; there is nothing to restore."
+            echo "The prod table is created by the prod ChannelStack deployment — see issue #49."
+            exit 1
+          fi
+
+          PITR_STATUS=$(aws dynamodb describe-continuous-backups \
+            --table-name "$SOURCE_TABLE" \
+            --query 'ContinuousBackupsDescription.PointInTimeRecoveryDescription.PointInTimeRecoveryStatus' \
+            --output text)
+          echo "PITR status on $SOURCE_TABLE: $PITR_STATUS"
+          if [ "$PITR_STATUS" != "ENABLED" ]; then
+            echo "::error::PITR is $PITR_STATUS on '$SOURCE_TABLE' — no restorable backup exists."
+            echo "PITR is enabled only for prod (point_in_time_recovery_enabled=is_prod in channel_stack.py)."
+            exit 1
+          fi
+          echo "Preflight passed: $SOURCE_TABLE exists with PITR ENABLED."
 
       - name: Restore DynamoDB table from PITR
         id: restore
@@ -72,7 +146,7 @@ jobs:
       - name: Validate restored table
         id: validate
         run: |
-          # Verify the table has items (row count > 0)
+          # 1. Data check — the restore must contain items.
           COUNT=$(aws dynamodb scan \
             --table-name "$RESTORE_TABLE" \
             --select COUNT \
@@ -80,10 +154,35 @@ jobs:
             --output text)
           echo "Restored table item count: $COUNT"
           if [ "$COUNT" -lt 1 ]; then
-            echo "ERROR: Restored table is empty — backup may be corrupt or PITR not enabled."
+            echo "::error::Restored table is empty — backup may be corrupt or PITR not enabled."
             exit 1
           fi
-          echo "Validation passed: $COUNT items found."
+          echo "Item count check passed: $COUNT items found."
+
+          # 2. Schema check — every GSI on the source must come back on the
+          # restore. A restore that silently drops an index would leave the
+          # app unable to serve the query paths that depend on it (e.g.
+          # RefreshByUserIndex powers per-device refresh-token family revoke),
+          # which an item-count check alone cannot detect.
+          SOURCE_GSIS=$(aws dynamodb describe-table \
+            --table-name "$SOURCE_TABLE" \
+            --query 'sort(Table.GlobalSecondaryIndexes[].IndexName)' \
+            --output text)
+          RESTORED_GSIS=$(aws dynamodb describe-table \
+            --table-name "$RESTORE_TABLE" \
+            --query 'sort(Table.GlobalSecondaryIndexes[].IndexName)' \
+            --output text)
+          echo "Source GSIs:   $SOURCE_GSIS"
+          echo "Restored GSIs: $RESTORED_GSIS"
+          if [ "$SOURCE_GSIS" != "$RESTORED_GSIS" ]; then
+            echo "::error::GSI parity check failed — the restored table's indexes do not match the source."
+            echo "Expected: $SOURCE_GSIS"
+            echo "Actual:   $RESTORED_GSIS"
+            exit 1
+          fi
+          echo "GSI parity check passed."
+
+          echo "Validation passed: $COUNT items, GSIs match ($SOURCE_GSIS)."
 
       - name: Delete temporary restore table
         if: always()
@@ -110,7 +209,7 @@ jobs:
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 title: 'DynamoDB backup restore test failing',
-                body: `## Backup Restore Failure\n\nThe weekly DynamoDB PITR restore test failed, indicating a potential issue with the prod backup chain.\n\nSee the [workflow run](${run_url}) for details.\n\n**Action required:** Verify PITR is enabled on the \`channel\` table and investigate the restore failure.`,
+                body: `## Backup Restore Failure\n\nThe DynamoDB PITR restore test failed, indicating a potential issue with the prod backup chain.\n\nSee the [workflow run](${run_url}) for details — the preflight steps report which precondition was not met.\n\n**Action required:** Verify PITR is enabled on the \`channel\` table and investigate the restore failure.`,
                 labels: ['reliability', 'bug'],
               });
             } else {
