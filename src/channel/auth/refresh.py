@@ -59,7 +59,13 @@ from channel.auth.mgmt_auth import make_mgmt_user
 from channel.auth.tokens import MGMT_JWT_TTL_SECONDS, issue_mgmt_jwt
 from channel.logging_config import fingerprint_id, get_logger
 from channel.models import RefreshConsumeOutcome, RefreshToken
-from channel.storage import consume_refresh_token
+
+# ``_parse_iso_utc`` is module-private by naming convention but is the
+# canonical parser for this table's ISO columns — ``consume_refresh_token``
+# runs it against ``absolute_expires_at`` (the very field read below)
+# earlier in this same request. Re-implementing the normalisation here
+# would be exactly the drift it exists to prevent.
+from channel.storage import _parse_iso_utc, consume_refresh_token
 
 router = APIRouter(tags=["mgmt-auth"])
 logger = get_logger(__name__)
@@ -105,10 +111,34 @@ def _cookie_max_age(absolute_expires_at: str) -> int:
     enforces server-side, mirrored into the browser so the cookie dies
     with the family rather than lingering as a credential the server has
     already stopped honouring.
+
+    Parsed with storage's ``_parse_iso_utc`` rather than a bare
+    ``fromisoformat``: this runs *after* ``consume_refresh_token`` has
+    already revoked the presented row and minted its successor, so an
+    ``aware - naive`` ``TypeError`` here would 500 a client that has
+    just irrecoverably spent its refresh token — on the one path whose
+    whole job is to stop exactly that.
     """
 
-    remaining = datetime.fromisoformat(absolute_expires_at) - datetime.now(timezone.utc)
+    remaining = _parse_iso_utc(absolute_expires_at) - datetime.now(timezone.utc)
     return max(0, int(remaining.total_seconds()))
+
+
+def _no_store(response: JSONResponse) -> JSONResponse:
+    """Mark a response uncacheable.
+
+    Every response this module returns is a token response — the 200
+    carries a freshly minted access JWT and, on the body transport, the
+    plaintext rotated refresh token. RFC 6749 §5.1 and RFC 9700 both
+    require ``no-store`` on those. POST responses are already exempt
+    from heuristic caching (RFC 7234 §4), so this is belt-and-braces
+    rather than a live hole — but it is the highest-value body the app
+    emits, and the repo already sets the header on far less sensitive
+    payloads (``api/prefs.py``, ``api/mcp.py``).
+    """
+
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 def _rejection(*, via_cookie: bool) -> JSONResponse:
@@ -122,7 +152,7 @@ def _rejection(*, via_cookie: bool) -> JSONResponse:
     :func:`~channel.storage.consume_refresh_token`.
     """
 
-    response = JSONResponse(status_code=401, content={"detail": _REJECTION_DETAIL})
+    response = _no_store(JSONResponse(status_code=401, content={"detail": _REJECTION_DETAIL}))
     if via_cookie:
         response.delete_cookie(
             REFRESH_COOKIE_NAME,
@@ -169,7 +199,7 @@ def _issued(row: RefreshToken, rotated: str, *, via_cookie: bool) -> JSONRespons
     if not via_cookie:
         payload["refresh_token"] = rotated
 
-    response = JSONResponse(content=payload)
+    response = _no_store(JSONResponse(content=payload))
     if via_cookie:
         response.set_cookie(
             REFRESH_COOKIE_NAME,
@@ -211,14 +241,18 @@ async def refresh_session(request: Request, body: RefreshRequest | None = None) 
         raise HTTPException(status_code=403, detail="Missing X-Channel-Refresh header")
 
     body_token = (body.refresh_token or "").strip() if body else ""
-    cookie_token = (request.cookies.get(REFRESH_COOKIE_NAME) or "").strip()
+    raw_cookie = request.cookies.get(REFRESH_COOKIE_NAME)
+    cookie_token = (raw_cookie or "").strip()
     # Body wins: an Electron client that also happens to carry a cookie
     # means the explicit credential, not an incidental one.
     presented = body_token or cookie_token
-    via_cookie = not body_token and bool(cookie_token)
+    # Keyed off the cookie's *presence*, not its stripped value, so a
+    # whitespace-only cookie still gets cleared on the way out instead of
+    # sitting in the jar forever failing every subsequent refresh.
+    via_cookie = not body_token and raw_cookie is not None
 
     if not presented:
-        return _rejection(via_cookie=False)
+        return _rejection(via_cookie=via_cookie)
 
     result = consume_refresh_token(presented)
     rotated, row = result.raw_token, result.token

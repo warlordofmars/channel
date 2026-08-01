@@ -261,6 +261,29 @@ def test_body_token_wins_over_a_stray_cookie(consumed):
 
 
 # ----------------------------------------------------------------
+# Cacheability
+# ----------------------------------------------------------------
+
+
+def test_success_response_is_no_store(consumed):
+    """RFC 6749 §5.1 / RFC 9700 — a token response must never be cached."""
+    resp = _client.post("/auth/refresh", json={"refresh_token": "t"}, headers=_CSRF)
+    assert resp.headers["cache-control"] == "no-store"
+
+
+def test_cookie_success_response_is_no_store(consumed):
+    resp = _with_cookie("cookie-token").post("/auth/refresh", headers=_CSRF)
+    assert resp.headers["cache-control"] == "no-store"
+
+
+def test_rejection_response_is_no_store(consumed):
+    box = consumed[1]
+    box["result"] = RefreshConsumeResult(outcome=RefreshConsumeOutcome.NOT_FOUND)
+    resp = _client.post("/auth/refresh", json={"refresh_token": "t"}, headers=_CSRF)
+    assert resp.headers["cache-control"] == "no-store"
+
+
+# ----------------------------------------------------------------
 # Rejections
 # ----------------------------------------------------------------
 
@@ -279,6 +302,20 @@ def test_blank_body_token_is_401(consumed):
     resp = _client.post("/auth/refresh", json={"refresh_token": "   "}, headers=_CSRF)
     assert resp.status_code == 401
     assert seen == []
+
+
+def test_whitespace_only_cookie_is_rejected_and_cleared(consumed):
+    """A junk cookie must not sit in the jar failing every future refresh.
+
+    ``via_cookie`` keys off the cookie's presence rather than its
+    stripped value precisely so this corner still gets a clearing
+    ``Set-Cookie``.
+    """
+    seen, _ = consumed
+    resp = _with_cookie("   ").post("/auth/refresh", headers=_CSRF)
+    assert resp.status_code == 401
+    assert seen == []
+    assert "Max-Age=0" in resp.headers["set-cookie"]
 
 
 @pytest.mark.parametrize(
