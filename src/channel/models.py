@@ -373,6 +373,135 @@ class MCPToken(BaseModel):
     updated_at: str
 
 
+# ----------------------------------------------------------------
+# Refresh tokens (#290, epic #241)
+# ----------------------------------------------------------------
+
+# Absolute session lifetime. A refresh-token family lives at most this
+# long from the login that created it — rotation never extends it, so a
+# stolen token can never outlive the original sign-in by more than the
+# idle window. Also drives the DynamoDB ``ttl`` on every row in the
+# family, so the whole family self-prunes together.
+REFRESH_ABSOLUTE_LIFETIME_SECONDS = 30 * 24 * 3600
+
+# Idle timeout. Every successful rotation pushes the new row's
+# ``idle_expires_at`` this far into the future; a session that goes
+# quiet for longer than this is dead even though the absolute window
+# is still open.
+REFRESH_IDLE_TIMEOUT_SECONDS = 7 * 24 * 3600
+
+
+class RefreshRevokeReason(str, Enum):
+    """Why a refresh row stopped being usable.
+
+    The distinction is load-bearing, not cosmetic: reuse detection keys
+    off :attr:`ROTATED` specifically. A row revoked because it was
+    legitimately consumed and superseded is the *only* shape whose
+    re-presentation means "someone replayed a token that already did its
+    job" — the OAuth 2.1 reuse signal (RFC 9700 §4.14.2). Rows revoked
+    by logout or by an earlier reuse cascade belong to a family that is
+    already dead, so re-presenting one is a plain rejection, not a fresh
+    breach signal, and must not re-trigger the cascade.
+    """
+
+    ROTATED = "rotated"
+    LOGOUT = "logout"
+    REUSE_DETECTED = "reuse_detected"
+    USER_REVOKED = "user_revoked"
+
+
+class RefreshConsumeOutcome(str, Enum):
+    """Result of presenting a refresh token to :func:`storage.consume_refresh_token`.
+
+    Deliberately finer-grained than a bare ``RefreshToken | None``: #294
+    needs to emit a ``RefreshReuseDetected`` counter separately from
+    ``RefreshFailure``, and that is only possible if the storage layer
+    tells the caller *which* rejection it hit.
+    """
+
+    OK = "ok"
+    NOT_FOUND = "not_found"
+    REUSED = "reused"
+    REVOKED = "revoked"
+    EXPIRED_ABSOLUTE = "expired_absolute"
+    EXPIRED_IDLE = "expired_idle"
+
+
+class RefreshToken(BaseModel):
+    """One refresh-token row — ``PK=REFRESH#{token_hash}, SK=META`` (#290).
+
+    **The raw token is never persisted.** ``token_hash`` is the SHA-256
+    hex digest of the opaque 256-bit token handed to the client; a
+    database disclosure therefore yields no usable credential. The same
+    reasoning as the MCP-token application-layer encryption, one notch
+    stronger — a hash is not reversible even with the key.
+
+    Rows also project onto ``RefreshByUserIndex``
+    (``GSI5PK=REFRESH_USER#{user_id}``,
+    ``GSI5SK={issued_at}#{token_hash prefix}``) so a user's whole session
+    set is one Query — the read path behind per-device revoke and the
+    #293 sessions API.
+
+    Two independent expiry columns, both enforced on consume:
+
+    - ``absolute_expires_at`` — fixed at first login
+      (:data:`REFRESH_ABSOLUTE_LIFETIME_SECONDS`) and *carried forward
+      unchanged* by every rotation.
+    - ``idle_expires_at`` — recomputed
+      (:data:`REFRESH_IDLE_TIMEOUT_SECONDS` from now) on each rotation.
+
+    ``revoked`` is the live/dead flag; ``revoked_reason`` records why so
+    reuse detection can tell a superseded row from a logged-out one.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    token_hash: str
+    user_id: str
+    device_id: str
+    issued_at: str
+    last_used_at: str
+    absolute_expires_at: str
+    idle_expires_at: str
+    revoked: bool = False
+    revoked_reason: RefreshRevokeReason | None = None
+    revoked_at: str | None = None
+
+    @model_validator(mode="after")
+    def _revocation_fields_agree(self) -> RefreshToken:
+        if not self.revoked and (self.revoked_reason is not None or self.revoked_at is not None):
+            raise ValueError("RefreshToken.revoked_reason/revoked_at require revoked=True")
+        return self
+
+
+class RefreshConsumeResult(BaseModel):
+    """Outcome of a refresh-token consume, plus whatever it produced.
+
+    On :attr:`RefreshConsumeOutcome.OK` the caller gets both the freshly
+    minted ``raw_token`` (the only place that plaintext ever exists) and
+    the ``token`` row describing it. Every other outcome carries neither.
+    ``revoked_count`` is non-zero only on the reuse path, where the
+    breach response revokes the rest of the device's family.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    outcome: RefreshConsumeOutcome
+    raw_token: str | None = None
+    token: RefreshToken | None = None
+    revoked_count: int = 0
+
+    @model_validator(mode="after")
+    def _payload_matches_outcome(self) -> RefreshConsumeResult:
+        produced = self.raw_token is not None and self.token is not None
+        partial = (self.raw_token is None) != (self.token is None)
+        if partial:
+            raise ValueError("RefreshConsumeResult.raw_token and .token must be set together")
+        if produced != (self.outcome == RefreshConsumeOutcome.OK):
+            raise ValueError("RefreshConsumeResult carries a rotated token iff outcome is 'ok'")
+        return self
+
+
 class ChatMCPMode(str, Enum):
     INHERIT = "inherit"
     EXPLICIT = "explicit"

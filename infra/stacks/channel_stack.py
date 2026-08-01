@@ -288,6 +288,22 @@ class ChannelStack(cdk.Stack):
             projection_type=dynamodb.ProjectionType.ALL,
         )
 
+        # GSI 6 — RefreshByUserIndex: list / bulk-revoke a user's
+        # refresh-token rows (#290, epic #241). Sparse — only
+        # ``REFRESH#{token_hash}`` rows carry GSI5PK/GSI5SK. The GSI5
+        # slot is the next free numbered pair: GSI3 belongs to
+        # ChatByIdIndex, GSI4 to UserEmailIndex, and AssetOwnerIndex
+        # deliberately uses semantic ``owner_pk``/``owner_sk`` names
+        # instead of a numbered slot (#324), so GSI5 was never taken.
+        # Sort key is ``{issued_at}#{token_hash prefix}`` so the #293
+        # sessions list reads newest-first straight off the index.
+        table.add_global_secondary_index(
+            index_name="RefreshByUserIndex",
+            partition_key=dynamodb.Attribute(name="GSI5PK", type=dynamodb.AttributeType.STRING),
+            sort_key=dynamodb.Attribute(name="GSI5SK", type=dynamodb.AttributeType.STRING),
+            projection_type=dynamodb.ProjectionType.ALL,
+        )
+
         # ----------------------------------------------------------------
         # SSM Parameters
         # ----------------------------------------------------------------

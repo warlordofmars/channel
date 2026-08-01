@@ -54,8 +54,8 @@ def starter_table(dynamodb_resource: Any, table_name: str) -> Any:
     """Provision the StarterTable in DynamoDB Local for the test session.
 
     Mirrors the schema declared in :mod:`infra.stacks.channel_stack` —
-    ``PK`` / ``SK`` partition + sort, five GSIs (the ``GSI{1..4}PK`` /
-    ``GSI{1..2}SK`` slots plus the ``owner_pk`` / ``owner_sk``
+    ``PK`` / ``SK`` partition + sort, six GSIs (the ``GSI{1..5}PK`` /
+    ``GSI{1..3,5}SK`` slots plus the ``owner_pk`` / ``owner_sk``
     AssetOwnerIndex from #324), and the ``ttl`` attribute used for TTL
     sweeps. CDK is not invoked because DynamoDB Local doesn't run
     CloudFormation; this fixture is the test-environment analogue.

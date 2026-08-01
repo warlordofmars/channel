@@ -30,6 +30,8 @@ ATTRIBUTE_DEFINITIONS: list[dict[str, str]] = [
     {"AttributeName": "GSI3PK", "AttributeType": "S"},
     {"AttributeName": "GSI3SK", "AttributeType": "S"},
     {"AttributeName": "GSI4PK", "AttributeType": "S"},
+    {"AttributeName": "GSI5PK", "AttributeType": "S"},
+    {"AttributeName": "GSI5SK", "AttributeType": "S"},
     {"AttributeName": "owner_pk", "AttributeType": "S"},
     {"AttributeName": "owner_sk", "AttributeType": "S"},
 ]
@@ -78,6 +80,18 @@ GLOBAL_SECONDARY_INDEXES: list[dict[str, Any]] = [
         "KeySchema": [
             {"AttributeName": "owner_pk", "KeyType": "HASH"},
             {"AttributeName": "owner_sk", "KeyType": "RANGE"},
+        ],
+        "Projection": {"ProjectionType": "ALL"},
+    },
+    {
+        # #290 (epic #241) — per-user refresh-token lookup. Sparse: only
+        # ``REFRESH#{token_hash}`` rows set GSI5PK/GSI5SK. GSI5 is the
+        # next free numbered slot (GSI3 = ChatByIdIndex, GSI4 =
+        # UserEmailIndex, AssetOwnerIndex uses semantic names).
+        "IndexName": "RefreshByUserIndex",
+        "KeySchema": [
+            {"AttributeName": "GSI5PK", "KeyType": "HASH"},
+            {"AttributeName": "GSI5SK", "KeyType": "RANGE"},
         ],
         "Projection": {"ProjectionType": "ALL"},
     },

@@ -9,6 +9,9 @@ counterpart.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -23,9 +26,20 @@ from boto3.dynamodb.conditions import (
     Or,
 )
 from botocore.exceptions import ClientError
+from pydantic import ValidationError
 
-from channel.models import MessageRole
+from channel.logging_config import fingerprint_id
+from channel.models import (
+    REFRESH_ABSOLUTE_LIFETIME_SECONDS,
+    REFRESH_IDLE_TIMEOUT_SECONDS,
+    MessageRole,
+    RefreshConsumeOutcome,
+    RefreshConsumeResult,
+    RefreshRevokeReason,
+    RefreshToken,
+)
 from channel.storage import (
+    consume_refresh_token,
     count_active_users,
     create_chat,
     delete_last_assistant_message,
@@ -39,8 +53,11 @@ from channel.storage import (
     list_messages,
     list_messages_page,
     list_recent_messages,
+    mint_refresh_token,
     patch_chat,
     put_message,
+    revoke_all_user_refresh_tokens,
+    revoke_refresh_token,
     scan_users,
     update_chat_index,
 )
@@ -2835,3 +2852,576 @@ def test_delete_asset_object_deletes_by_raw_coordinates(
     monkeypatch.setattr("channel.storage._get_s3_client", lambda: _DeleteOnlyS3())
     storage.delete_asset_object(bucket="channel-attachments-test", key="assets/chat/c-1/a-1")
     assert calls == [("channel-attachments-test", "assets/chat/c-1/a-1")]
+
+
+# ----------------------------------------------------------------
+# Refresh-token rows (#290, epic #241)
+# ----------------------------------------------------------------
+
+
+def _iso(delta_seconds: float) -> str:
+    """ISO-8601 timestamp ``delta_seconds`` from now, in the stored shape."""
+    return (datetime.now(timezone.utc) + timedelta(seconds=delta_seconds)).isoformat(
+        timespec="microseconds"
+    )
+
+
+def _seed_refresh_row(table: FakeTable, **overrides: Any) -> tuple[str, RefreshToken]:
+    """Write a refresh row for an arbitrary raw token, bypassing mint.
+
+    Lets a test place a row in a state ``mint_refresh_token`` never
+    produces (already expired, revoked by logout) without reaching into
+    the item dict by hand — the row still goes through the real
+    ``_refresh_item`` renderer, so key shape stays honest.
+    """
+    from channel import storage
+
+    raw = overrides.pop("raw_token", "raw-" + uuid.uuid4().hex)
+    fields: dict[str, Any] = {
+        "token_hash": storage._refresh_token_hash(raw),
+        "user_id": "u-refresh",
+        "device_id": "d-1",
+        "issued_at": _iso(-60),
+        "last_used_at": _iso(-60),
+        "absolute_expires_at": _iso(REFRESH_ABSOLUTE_LIFETIME_SECONDS),
+        "idle_expires_at": _iso(REFRESH_IDLE_TIMEOUT_SECONDS),
+    }
+    fields.update(overrides)
+    token = RefreshToken(**fields)
+    table.put_item(Item=storage._refresh_item(token))
+    return raw, token
+
+
+def _refresh_rows(table: FakeTable) -> list[dict[str, Any]]:
+    return [i for i in table.items.values() if i["PK"].startswith("REFRESH#")]
+
+
+def test_mint_refresh_token_never_persists_the_raw_token(table: FakeTable) -> None:
+    """The headline security property of #290: the plaintext token is
+    returned to the caller and exists nowhere in the row."""
+    from channel import storage
+
+    raw, token = mint_refresh_token(user_id="u-1", device_id="d-1")
+
+    rows = _refresh_rows(table)
+    assert len(rows) == 1
+    row = rows[0]
+    assert raw not in json.dumps(row, default=str)
+    assert row["PK"] == f"REFRESH#{hashlib.sha256(raw.encode()).hexdigest()}"
+    assert row["token_hash"] == token.token_hash
+    assert token.token_hash != raw
+    assert storage._refresh_token_hash(raw) == token.token_hash
+
+
+def test_mint_refresh_token_generates_256_bits_of_entropy(table: FakeTable) -> None:
+    first, _ = mint_refresh_token(user_id="u-1", device_id="d-1")
+    second, _ = mint_refresh_token(user_id="u-1", device_id="d-1")
+    assert first != second
+    # ``token_urlsafe(32)`` renders 32 random bytes as 43 base64url chars.
+    assert len(first) == 43
+
+
+def test_mint_refresh_token_row_shape_carries_gsi_and_ttl(table: FakeTable) -> None:
+    from channel import storage
+
+    _, token = mint_refresh_token(user_id="u-1", device_id="d-1")
+    row = _refresh_rows(table)[0]
+
+    assert row["SK"] == "META"
+    assert row["type"] == "REFRESH"
+    assert row["GSI5PK"] == "REFRESH_USER#u-1"
+    assert row["GSI5SK"] == f"{token.issued_at}#{token.token_hash[:16]}"
+    assert row["revoked"] is False
+    assert "revoked_reason" not in row
+    assert "revoked_at" not in row
+    # ttl must be an integer Unix second matching the absolute expiry —
+    # DynamoDB's TTL service silently ignores any other representation.
+    assert isinstance(row["ttl"], int)
+    assert row["ttl"] == int(storage._parse_iso_utc(token.absolute_expires_at).timestamp())
+
+
+def test_mint_refresh_token_defaults_to_thirty_day_absolute_and_seven_day_idle(
+    table: FakeTable,
+) -> None:
+    from channel import storage
+
+    _, token = mint_refresh_token(user_id="u-1", device_id="d-1")
+
+    issued = storage._parse_iso_utc(token.issued_at)
+    absolute = storage._parse_iso_utc(token.absolute_expires_at)
+    idle = storage._parse_iso_utc(token.idle_expires_at)
+    assert abs((absolute - issued).total_seconds() - REFRESH_ABSOLUTE_LIFETIME_SECONDS) < 5
+    assert abs((idle - issued).total_seconds() - REFRESH_IDLE_TIMEOUT_SECONDS) < 5
+    assert token.last_used_at == token.issued_at
+    assert REFRESH_ABSOLUTE_LIFETIME_SECONDS == 30 * 24 * 3600
+    assert REFRESH_IDLE_TIMEOUT_SECONDS == 7 * 24 * 3600
+
+
+def test_mint_refresh_token_honours_a_carried_over_absolute_expiry(table: FakeTable) -> None:
+    carried = _iso(120)
+    _, token = mint_refresh_token(user_id="u-1", device_id="d-1", absolute_expires_at=carried)
+    assert token.absolute_expires_at == carried
+
+
+def test_refresh_item_renders_revocation_columns_when_present() -> None:
+    from channel import storage
+
+    revoked_at = _iso(0)
+    row = storage._refresh_item(
+        RefreshToken(
+            token_hash="h" * 64,
+            user_id="u-1",
+            device_id="d-1",
+            issued_at=_iso(-10),
+            last_used_at=_iso(-10),
+            absolute_expires_at=_iso(100),
+            idle_expires_at=_iso(50),
+            revoked=True,
+            revoked_reason=RefreshRevokeReason.LOGOUT,
+            revoked_at=revoked_at,
+        )
+    )
+    assert row["revoked"] is True
+    assert row["revoked_reason"] == "logout"
+    assert row["revoked_at"] == revoked_at
+
+
+def test_refresh_from_item_round_trips_a_live_row(table: FakeTable) -> None:
+    from channel import storage
+
+    mint_refresh_token(user_id="u-1", device_id="d-1")
+    token = storage._refresh_from_item(_refresh_rows(table)[0])
+    assert token.revoked is False
+    assert token.revoked_reason is None
+    assert token.revoked_at is None
+
+
+def test_get_refresh_row_returns_none_for_unknown_hash(table: FakeTable) -> None:
+    from channel import storage
+
+    assert storage._get_refresh_row("0" * 64) is None
+
+
+def test_get_refresh_row_reads_consistently(table: FakeTable) -> None:
+    """Rotation writes ``revoked=True``; the very next presentation of
+    that token must observe it, so the point-read cannot be eventually
+    consistent."""
+    from channel import storage
+
+    _, token = mint_refresh_token(user_id="u-1", device_id="d-1")
+    storage._get_refresh_row(token.token_hash)
+    assert table.last_get_item_kwargs == {"ConsistentRead": True}
+
+
+def test_consume_refresh_token_rotates_and_returns_a_new_token(table: FakeTable) -> None:
+    from channel import storage
+
+    raw, original = mint_refresh_token(user_id="u-1", device_id="d-1")
+
+    result = consume_refresh_token(raw)
+
+    assert result.outcome == RefreshConsumeOutcome.OK
+    assert result.raw_token is not None and result.raw_token != raw
+    assert result.token is not None
+    assert result.token.token_hash != original.token_hash
+    assert result.token.user_id == "u-1"
+    assert result.token.device_id == "d-1"
+    assert result.revoked_count == 0
+
+    old_row = table.items[(f"REFRESH#{original.token_hash}", "META")]
+    assert old_row["revoked"] is True
+    assert old_row["revoked_reason"] == "rotated"
+    assert old_row["revoked_at"]
+    assert storage._get_refresh_row(result.token.token_hash) is not None
+
+
+def test_consume_refresh_token_carries_the_absolute_expiry_forward(table: FakeTable) -> None:
+    """Rotation renews the idle window but must never extend the
+    absolute one — otherwise a stolen token could be refreshed
+    indefinitely."""
+    raw, original = mint_refresh_token(user_id="u-1", device_id="d-1")
+
+    result = consume_refresh_token(raw)
+
+    assert result.token is not None
+    assert result.token.absolute_expires_at == original.absolute_expires_at
+    assert result.token.idle_expires_at > original.idle_expires_at
+
+
+def test_consume_refresh_token_unknown_token_is_not_found(table: FakeTable) -> None:
+    result = consume_refresh_token("never-minted")
+    assert result.outcome == RefreshConsumeOutcome.NOT_FOUND
+    assert result.raw_token is None
+    assert result.token is None
+
+
+def test_consume_refresh_token_is_single_use(table: FakeTable) -> None:
+    raw, _ = mint_refresh_token(user_id="u-1", device_id="d-1")
+    assert consume_refresh_token(raw).outcome == RefreshConsumeOutcome.OK
+    assert consume_refresh_token(raw).outcome == RefreshConsumeOutcome.REUSED
+
+
+def test_consume_refresh_token_reuse_revokes_the_whole_device_family(table: FakeTable) -> None:
+    """RFC 9700 §4.14.2 — replaying an already-rotated token means the
+    family is compromised; every live descendant dies with it."""
+    raw1, _ = mint_refresh_token(user_id="u-1", device_id="d-1")
+    first = consume_refresh_token(raw1)
+    assert first.raw_token is not None
+    second = consume_refresh_token(first.raw_token)
+    assert second.outcome == RefreshConsumeOutcome.OK
+
+    # A different device must survive the cascade untouched.
+    _, other_device = mint_refresh_token(user_id="u-1", device_id="d-2")
+
+    replay = consume_refresh_token(raw1)
+
+    assert replay.outcome == RefreshConsumeOutcome.REUSED
+    assert replay.revoked_count == 1  # only the still-live d-1 descendant
+    family = [r for r in _refresh_rows(table) if r["device_id"] == "d-1"]
+    assert all(r["revoked"] for r in family)
+    assert {r["revoked_reason"] for r in family} == {"rotated", "reuse_detected"}
+    survivor = table.items[(f"REFRESH#{other_device.token_hash}", "META")]
+    assert survivor["revoked"] is False
+
+
+def test_consume_refresh_token_logged_out_row_is_revoked_not_reuse(table: FakeTable) -> None:
+    """A row killed by logout is a dead family, not a fresh breach — it
+    must not re-arm the reuse cascade (or the #294 counter)."""
+    raw, _ = _seed_refresh_row(
+        table,
+        revoked=True,
+        revoked_reason=RefreshRevokeReason.LOGOUT,
+        revoked_at=_iso(-1),
+    )
+    result = consume_refresh_token(raw)
+    assert result.outcome == RefreshConsumeOutcome.REVOKED
+    assert result.revoked_count == 0
+
+
+def test_consume_refresh_token_enforces_the_absolute_expiry(table: FakeTable) -> None:
+    raw, _ = _seed_refresh_row(
+        table,
+        absolute_expires_at=_iso(-1),
+        idle_expires_at=_iso(REFRESH_IDLE_TIMEOUT_SECONDS),
+    )
+    assert consume_refresh_token(raw).outcome == RefreshConsumeOutcome.EXPIRED_ABSOLUTE
+
+
+def test_consume_refresh_token_enforces_the_idle_expiry(table: FakeTable) -> None:
+    raw, _ = _seed_refresh_row(table, idle_expires_at=_iso(-1))
+    assert consume_refresh_token(raw).outcome == RefreshConsumeOutcome.EXPIRED_IDLE
+
+
+def test_consume_refresh_token_checks_absolute_before_idle(table: FakeTable) -> None:
+    """Both windows blown: report the ceiling, which is the one the user
+    cannot fix by being more active."""
+    raw, _ = _seed_refresh_row(table, absolute_expires_at=_iso(-1), idle_expires_at=_iso(-2))
+    assert consume_refresh_token(raw).outcome == RefreshConsumeOutcome.EXPIRED_ABSOLUTE
+
+
+def test_consume_refresh_token_loser_of_the_conditional_race_sees_reuse(
+    table: FakeTable, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two simultaneous consumes serialize on the conditional update.
+    The loser is indistinguishable from a replay, so it takes the reuse
+    path rather than silently tolerating a fast attacker (epic #241 Q1)."""
+    raw, _ = mint_refresh_token(user_id="u-1", device_id="d-1")
+
+    def fake_update_item(**_kwargs: Any) -> dict[str, Any]:
+        raise ClientError(
+            {"Error": {"Code": "ConditionalCheckFailedException", "Message": "lost"}},
+            "UpdateItem",
+        )
+
+    monkeypatch.setattr(table, "update_item", fake_update_item)
+
+    result = consume_refresh_token(raw)
+
+    assert result.outcome == RefreshConsumeOutcome.REUSED
+    assert result.raw_token is None
+    # The cascade's own updates fail the same way, so nothing flips.
+    assert result.revoked_count == 0
+    assert len(_refresh_rows(table)) == 1  # no successor minted
+
+
+def test_mark_refresh_revoked_re_raises_unexpected_client_errors(
+    table: FakeTable, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from channel import storage
+
+    _, token = mint_refresh_token(user_id="u-1", device_id="d-1")
+
+    def fake_update_item(**_kwargs: Any) -> dict[str, Any]:
+        raise ClientError({"Error": {"Code": "ThrottlingException"}}, "UpdateItem")
+
+    monkeypatch.setattr(table, "update_item", fake_update_item)
+
+    with pytest.raises(ClientError):
+        storage._mark_refresh_revoked(token.token_hash, RefreshRevokeReason.LOGOUT)
+
+
+def test_mark_refresh_revoked_guards_against_ghost_rows(table: FakeTable) -> None:
+    """``attribute_exists(PK) AND #revoked = :live`` is what makes the
+    consume race-safe and stops UpdateItem resurrecting a TTL-swept row
+    as a partial ghost."""
+    from channel import storage
+
+    captured: dict[str, Any] = {}
+    original = table.update_item
+
+    def spy(**kwargs: Any) -> dict[str, Any]:
+        captured.update(kwargs)
+        return original(**kwargs)
+
+    table.update_item = spy  # type: ignore[method-assign]
+    _, token = mint_refresh_token(user_id="u-1", device_id="d-1")
+    assert storage._mark_refresh_revoked(token.token_hash, RefreshRevokeReason.LOGOUT) is True
+
+    assert captured["ConditionExpression"] == "attribute_exists(PK) AND #revoked = :live"
+    assert captured["ExpressionAttributeNames"] == {"#revoked": "revoked"}
+    assert captured["ExpressionAttributeValues"][":live"] is False
+    assert captured["ExpressionAttributeValues"][":revoked"] is True
+
+
+def test_revoke_refresh_token_kills_the_device_family(table: FakeTable) -> None:
+    raw, _ = mint_refresh_token(user_id="u-1", device_id="d-1")
+    rotated = consume_refresh_token(raw)
+    assert rotated.raw_token is not None
+    _, other = mint_refresh_token(user_id="u-1", device_id="d-2")
+
+    # Logging out with the *rotated* handle still kills the live successor.
+    revoked = revoke_refresh_token(rotated.raw_token)
+
+    assert revoked == 1
+    family = [r for r in _refresh_rows(table) if r["device_id"] == "d-1"]
+    assert all(r["revoked"] for r in family)
+    assert table.items[(f"REFRESH#{other.token_hash}", "META")]["revoked"] is False
+
+
+def test_revoke_refresh_token_is_idempotent_and_quiet_on_unknown_tokens(
+    table: FakeTable,
+) -> None:
+    raw, _ = mint_refresh_token(user_id="u-1", device_id="d-1")
+    assert revoke_refresh_token(raw) == 1
+    assert revoke_refresh_token(raw) == 0  # already dead, nothing flips
+    assert revoke_refresh_token("never-minted") == 0
+
+
+def test_revoke_refresh_token_records_the_logout_reason(table: FakeTable) -> None:
+    raw, token = mint_refresh_token(user_id="u-1", device_id="d-1")
+    revoke_refresh_token(raw)
+    assert table.items[(f"REFRESH#{token.token_hash}", "META")]["revoked_reason"] == "logout"
+
+
+def test_revoke_all_user_refresh_tokens_spans_every_device(table: FakeTable) -> None:
+    mint_refresh_token(user_id="u-1", device_id="d-1")
+    mint_refresh_token(user_id="u-1", device_id="d-2")
+    mint_refresh_token(user_id="u-1", device_id="d-3")
+    _, untouched = mint_refresh_token(user_id="u-2", device_id="d-9")
+
+    assert revoke_all_user_refresh_tokens("u-1") == 3
+
+    mine = [r for r in _refresh_rows(table) if r["user_id"] == "u-1"]
+    assert all(r["revoked"] for r in mine)
+    assert {r["revoked_reason"] for r in mine} == {"user_revoked"}
+    assert table.items[(f"REFRESH#{untouched.token_hash}", "META")]["revoked"] is False
+
+
+def test_revoke_all_user_refresh_tokens_preserves_prior_revocation_reasons(
+    table: FakeTable,
+) -> None:
+    """Already-revoked rows keep their original reason — reuse detection
+    depends on being able to tell ``rotated`` from everything else."""
+    raw, original = mint_refresh_token(user_id="u-1", device_id="d-1")
+    consume_refresh_token(raw)
+
+    assert revoke_all_user_refresh_tokens("u-1") == 1  # only the successor was live
+
+    assert table.items[(f"REFRESH#{original.token_hash}", "META")]["revoked_reason"] == "rotated"
+
+
+def test_revoke_all_user_refresh_tokens_returns_zero_for_a_user_with_no_sessions(
+    table: FakeTable,
+) -> None:
+    assert revoke_all_user_refresh_tokens("u-nobody") == 0
+
+
+def test_query_user_refresh_rows_follows_pagination_cursors(
+    table: FakeTable, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from channel import storage
+
+    pages = [
+        {"Items": [{"token_hash": "a", "revoked": False}], "LastEvaluatedKey": {"PK": "x"}},
+        {"Items": [{"token_hash": "b", "revoked": False}]},
+    ]
+    seen: list[Any] = []
+
+    def fake_query(**kwargs: Any) -> dict[str, Any]:
+        seen.append(kwargs.get("ExclusiveStartKey"))
+        return pages[len(seen) - 1]
+
+    monkeypatch.setattr(table, "query", fake_query)
+
+    rows = storage._query_user_refresh_rows("u-1")
+
+    assert [r["token_hash"] for r in rows] == ["a", "b"]
+    assert seen == [None, {"PK": "x"}]
+
+
+def test_query_user_refresh_rows_stops_and_warns_at_the_page_cap(
+    table: FakeTable, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A never-terminating cursor means something is wrong upstream —
+    bail loudly rather than spin.
+
+    The module-level ``logger`` is mocked directly rather than using
+    ``caplog`` because the ``channel`` logger sets ``propagate = False``
+    once ``configure_logging`` has run in the test session (same
+    workaround as ``test_admin_api`` / ``test_chats_api``).
+    """
+    from unittest.mock import MagicMock
+
+    from channel import storage
+
+    calls = {"n": 0}
+
+    def fake_query(**_kwargs: Any) -> dict[str, Any]:
+        calls["n"] += 1
+        return {"Items": [{"token_hash": f"h{calls['n']}"}], "LastEvaluatedKey": {"PK": "more"}}
+
+    monkeypatch.setattr(table, "query", fake_query)
+    mock_logger = MagicMock()
+    monkeypatch.setattr("channel.storage.logger", mock_logger)
+
+    rows = storage._query_user_refresh_rows("u-1")
+
+    assert calls["n"] == storage._REFRESH_QUERY_MAX_PAGES
+    assert len(rows) == storage._REFRESH_QUERY_MAX_PAGES
+    (warning,) = mock_logger.warning.call_args_list
+    assert "refresh.user_query_truncated" in warning.args[0]
+    # The user id is fingerprinted, never logged raw (Sonar S5145 / PII).
+    assert "u-1" not in warning.args
+    assert warning.args[1] == fingerprint_id("u-1")
+
+
+def test_reuse_detection_logs_fingerprinted_identifiers_only(
+    table: FakeTable, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reuse warning is a security signal that will be read in
+    CloudWatch — it must correlate without writing raw identifiers."""
+    from unittest.mock import MagicMock
+
+    raw, _ = mint_refresh_token(user_id="u-secret", device_id="d-secret")
+    consume_refresh_token(raw)
+
+    mock_logger = MagicMock()
+    monkeypatch.setattr("channel.storage.logger", mock_logger)
+    consume_refresh_token(raw)
+
+    (warning,) = mock_logger.warning.call_args_list
+    assert "refresh.reuse_detected" in warning.args[0]
+    assert warning.args[1] == fingerprint_id("u-secret")
+    assert warning.args[2] == fingerprint_id("d-secret")
+    assert "u-secret" not in warning.args
+    assert "d-secret" not in warning.args
+
+
+def test_query_user_refresh_rows_filters_by_device_only_when_asked(
+    table: FakeTable, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from channel import storage
+
+    captured: list[dict[str, Any]] = []
+
+    def fake_query(**kwargs: Any) -> dict[str, Any]:
+        captured.append(kwargs)
+        return {"Items": []}
+
+    monkeypatch.setattr(table, "query", fake_query)
+
+    storage._query_user_refresh_rows("u-1")
+    storage._query_user_refresh_rows("u-1", "d-1")
+
+    assert captured[0]["IndexName"] == "RefreshByUserIndex"
+    assert "FilterExpression" not in captured[0]
+    assert captured[1]["FilterExpression"] is not None
+
+
+def test_revoke_refresh_rows_skips_rows_that_are_already_revoked(
+    table: FakeTable, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from channel import storage
+
+    called: list[str] = []
+    monkeypatch.setattr(
+        storage,
+        "_mark_refresh_revoked",
+        lambda token_hash, reason: called.append(token_hash) or True,
+    )
+
+    count = storage._revoke_refresh_rows(
+        [
+            {"token_hash": "live", "revoked": False},
+            {"token_hash": "dead", "revoked": True},
+        ],
+        RefreshRevokeReason.LOGOUT,
+    )
+
+    assert count == 1
+    assert called == ["live"]
+
+
+def test_revoke_refresh_rows_does_not_count_conditional_losers(
+    table: FakeTable, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from channel import storage
+
+    monkeypatch.setattr(storage, "_mark_refresh_revoked", lambda token_hash, reason: False)
+    count = storage._revoke_refresh_rows(
+        [{"token_hash": "h", "revoked": False}], RefreshRevokeReason.LOGOUT
+    )
+    assert count == 0
+
+
+def test_refresh_token_model_rejects_revocation_metadata_without_the_flag() -> None:
+    with pytest.raises(ValidationError):
+        RefreshToken(
+            token_hash="h" * 64,
+            user_id="u-1",
+            device_id="d-1",
+            issued_at=_iso(0),
+            last_used_at=_iso(0),
+            absolute_expires_at=_iso(100),
+            idle_expires_at=_iso(50),
+            revoked=False,
+            revoked_reason=RefreshRevokeReason.LOGOUT,
+        )
+
+
+def test_refresh_consume_result_requires_a_token_pair_on_success() -> None:
+    with pytest.raises(ValidationError):
+        RefreshConsumeResult(outcome=RefreshConsumeOutcome.OK)
+
+
+def test_refresh_consume_result_rejects_a_half_populated_token_pair() -> None:
+    with pytest.raises(ValidationError):
+        RefreshConsumeResult(outcome=RefreshConsumeOutcome.OK, raw_token="x")
+
+
+def test_refresh_consume_result_rejects_a_token_on_a_failure_outcome() -> None:
+    token = RefreshToken(
+        token_hash="h" * 64,
+        user_id="u-1",
+        device_id="d-1",
+        issued_at=_iso(0),
+        last_used_at=_iso(0),
+        absolute_expires_at=_iso(100),
+        idle_expires_at=_iso(50),
+    )
+    with pytest.raises(ValidationError):
+        RefreshConsumeResult(
+            outcome=RefreshConsumeOutcome.REUSED,
+            raw_token="x",
+            token=token,
+        )
