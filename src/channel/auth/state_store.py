@@ -42,7 +42,7 @@ def _get_table() -> Any:
     """Return the DynamoDB Table resource for the configured table.
 
     Resolved at call time (not import time) so test fixtures that set
-    ``STARTER_TABLE_NAME`` / ``DYNAMODB_ENDPOINT`` after the module is
+    ``CHANNEL_TABLE_NAME`` / ``DYNAMODB_ENDPOINT`` after the module is
     imported still take effect.
 
     Region resolution follows boto3 precedence: ``AWS_REGION`` →
@@ -50,7 +50,7 @@ def _get_table() -> Any:
     ``region_name`` when one of the env vars is explicitly set so
     local dev and CI inherit the configured default naturally.
     """
-    table_name = os.environ.get("STARTER_TABLE_NAME", "channel-dev")
+    table_name = os.environ.get("CHANNEL_TABLE_NAME", "channel-dev")
     endpoint_url = os.environ.get("DYNAMODB_ENDPOINT")  # set for DynamoDB Local
     region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
     kwargs: dict[str, Any] = {"endpoint_url": endpoint_url}

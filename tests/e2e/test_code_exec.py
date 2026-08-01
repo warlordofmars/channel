@@ -2,7 +2,7 @@
 """Code-exec sandbox e2e smoke test (#183). Exercises the Lambda
 sandbox end-to-end via the chassis SSE protocol.
 
-Gated by ``STARTER_CODE_EXEC_ENABLED=1`` AND ``STARTER_CODE_EXEC_LAMBDA_ARN``
+Gated by ``CHANNEL_CODE_EXEC_ENABLED=1`` AND ``CHANNEL_CODE_EXEC_LAMBDA_ARN``
 present (both are set by CDK in deployed envs; local dev without the
 sandbox stack falls through the skip).
 
@@ -41,7 +41,7 @@ def _run_code_exec_chat(prompt: str, timeout: float = _CODE_EXEC_TIMEOUT) -> lis
 
     Mints a JWT, creates a chat, streams the user prompt, and returns
     the SSE event list. Always deletes the chat in finally."""
-    api_url = os.environ.get("STARTER_API_URL", "http://localhost:8001")
+    api_url = os.environ.get("CHANNEL_API_URL", "http://localhost:8001")
     tag = f"e2e-183-{int(time.time())}-{uuid.uuid4().hex[:6]}"
     email = f"{tag}@example.com"
     jwt = _mint_jwt_via_bypass(api_url, email)
@@ -53,11 +53,11 @@ def _run_code_exec_chat(prompt: str, timeout: float = _CODE_EXEC_TIMEOUT) -> lis
 
 
 @pytest.mark.skipif(
-    os.environ.get("STARTER_CODE_EXEC_ENABLED") != "1"
-    or not os.environ.get("STARTER_CODE_EXEC_LAMBDA_ARN"),
+    os.environ.get("CHANNEL_CODE_EXEC_ENABLED") != "1"
+    or not os.environ.get("CHANNEL_CODE_EXEC_LAMBDA_ARN"),
     reason=(
-        "requires STARTER_CODE_EXEC_ENABLED=1 AND "
-        "STARTER_CODE_EXEC_LAMBDA_ARN set (deployed-env config)"
+        "requires CHANNEL_CODE_EXEC_ENABLED=1 AND "
+        "CHANNEL_CODE_EXEC_LAMBDA_ARN set (deployed-env config)"
     ),
 )
 def test_code_exec_happy_path() -> None:
@@ -121,11 +121,11 @@ def test_code_exec_happy_path() -> None:
 
 
 @pytest.mark.skipif(
-    os.environ.get("STARTER_CODE_EXEC_ENABLED") != "1"
-    or not os.environ.get("STARTER_CODE_EXEC_LAMBDA_ARN"),
+    os.environ.get("CHANNEL_CODE_EXEC_ENABLED") != "1"
+    or not os.environ.get("CHANNEL_CODE_EXEC_LAMBDA_ARN"),
     reason=(
-        "requires STARTER_CODE_EXEC_ENABLED=1 AND "
-        "STARTER_CODE_EXEC_LAMBDA_ARN set (deployed-env config)"
+        "requires CHANNEL_CODE_EXEC_ENABLED=1 AND "
+        "CHANNEL_CODE_EXEC_LAMBDA_ARN set (deployed-env config)"
     ),
 )
 def test_code_exec_subprocess_isolation_shape() -> None:
@@ -165,11 +165,11 @@ def test_code_exec_subprocess_isolation_shape() -> None:
 
 
 @pytest.mark.skipif(
-    os.environ.get("STARTER_CODE_EXEC_ENABLED") != "1"
-    or not os.environ.get("STARTER_CODE_EXEC_LAMBDA_ARN"),
+    os.environ.get("CHANNEL_CODE_EXEC_ENABLED") != "1"
+    or not os.environ.get("CHANNEL_CODE_EXEC_LAMBDA_ARN"),
     reason=(
-        "requires STARTER_CODE_EXEC_ENABLED=1 AND "
-        "STARTER_CODE_EXEC_LAMBDA_ARN set (deployed-env config)"
+        "requires CHANNEL_CODE_EXEC_ENABLED=1 AND "
+        "CHANNEL_CODE_EXEC_LAMBDA_ARN set (deployed-env config)"
     ),
 )
 def test_code_exec_caps_huge_stdout() -> None:
@@ -195,11 +195,11 @@ def test_code_exec_caps_huge_stdout() -> None:
 
 
 @pytest.mark.skipif(
-    os.environ.get("STARTER_CODE_EXEC_ENABLED") != "1"
-    or not os.environ.get("STARTER_CODE_EXEC_LAMBDA_ARN"),
+    os.environ.get("CHANNEL_CODE_EXEC_ENABLED") != "1"
+    or not os.environ.get("CHANNEL_CODE_EXEC_LAMBDA_ARN"),
     reason=(
-        "requires STARTER_CODE_EXEC_ENABLED=1 AND "
-        "STARTER_CODE_EXEC_LAMBDA_ARN set (deployed-env config)"
+        "requires CHANNEL_CODE_EXEC_ENABLED=1 AND "
+        "CHANNEL_CODE_EXEC_LAMBDA_ARN set (deployed-env config)"
     ),
 )
 def test_code_exec_returns_matplotlib_image() -> None:

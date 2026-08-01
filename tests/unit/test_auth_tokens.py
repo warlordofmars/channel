@@ -6,7 +6,7 @@ import os
 import pytest
 from jose import JWTError
 
-os.environ.setdefault("STARTER_JWT_SECRET", "test-secret-for-unit-tests")
+os.environ.setdefault("CHANNEL_JWT_SECRET", "test-secret-for-unit-tests")
 
 from channel.auth.tokens import (  # noqa: E402
     Token,
@@ -96,7 +96,7 @@ def test_origin_verify_secret_from_env(monkeypatch):
     from channel.auth import tokens
 
     tokens._origin_verify_secret.cache_clear()
-    monkeypatch.setenv("STARTER_ORIGIN_VERIFY_SECRET", "my-verify-secret")
+    monkeypatch.setenv("CHANNEL_ORIGIN_VERIFY_SECRET", "my-verify-secret")
     result = tokens._origin_verify_secret()
     assert result == "my-verify-secret"
     tokens._origin_verify_secret.cache_clear()

@@ -46,7 +46,7 @@ def validate_mcp_server_url(url: str) -> None:
 
     Reject any URL whose scheme isn't ``https`` (except the explicit
     dev-only ``http://localhost[:port]/...`` form, gated by
-    ``STARTER_MCP_ALLOW_LOCALHOST=1``), whose userinfo is set, or whose
+    ``CHANNEL_MCP_ALLOW_LOCALHOST=1``), whose userinfo is set, or whose
     hostname resolves to a loopback / link-local / private / multicast
     / reserved address. Raise :class:`HTTPException` 400 on failure.
 
@@ -64,7 +64,7 @@ def validate_mcp_server_url(url: str) -> None:
     if not parsed.hostname:
         raise HTTPException(status_code=400, detail="URL must include a hostname")
 
-    allow_localhost = os.environ.get("STARTER_MCP_ALLOW_LOCALHOST") == "1"
+    allow_localhost = os.environ.get("CHANNEL_MCP_ALLOW_LOCALHOST") == "1"
     if parsed.scheme == "https":
         pass
     elif parsed.scheme == "http" and allow_localhost and parsed.hostname == "localhost":

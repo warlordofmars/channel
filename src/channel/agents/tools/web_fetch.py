@@ -6,7 +6,7 @@ specific URL the user pasted (or one it picked out of ``web_search``
 results) instead of guessing at a search query that might surface the
 page. Same Exa API key, same extraction quality, same SSM/IAM plumbing
 as ``web_search`` — the two tools are a discover/deep-read pair and
-ship under the same ``STARTER_WEB_SEARCH_ENABLED`` kill switch.
+ship under the same ``CHANNEL_WEB_SEARCH_ENABLED`` kill switch.
 
 The shared helpers are imported from ``web_search`` rather than copied:
 ``_resolve_exa_api_key`` keeps its single warm-pool ``lru_cache`` (one

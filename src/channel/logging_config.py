@@ -81,7 +81,7 @@ def configure_logging(service: str) -> None:
     global _SERVICE, _VERSION, _ENV
 
     _SERVICE = service
-    _ENV = os.environ.get("STARTER_ENV", os.environ.get("APP_ENV", "dev"))
+    _ENV = os.environ.get("CHANNEL_ENV", os.environ.get("APP_ENV", "dev"))
     try:
         _VERSION = importlib.metadata.version("channel")
     except importlib.metadata.PackageNotFoundError:  # pragma: no cover

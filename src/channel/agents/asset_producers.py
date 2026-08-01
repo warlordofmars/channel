@@ -99,12 +99,12 @@ def _now_iso() -> str:
 def asset_extraction_enabled() -> bool:
     """Kill-switch for the fenced-code heuristic (decision Q3).
 
-    ``STARTER_ASSET_EXTRACTION_ENABLED`` gates ONLY the extraction
+    ``CHANNEL_ASSET_EXTRACTION_ENABLED`` gates ONLY the extraction
     producer — the deterministic producers (upload projection,
     code-exec images) have no flag. Default on, matching the
-    ``STARTER_AUTO_TITLE_ENABLED`` posture.
+    ``CHANNEL_AUTO_TITLE_ENABLED`` posture.
     """
-    return os.environ.get("STARTER_ASSET_EXTRACTION_ENABLED", "1") == "1"
+    return os.environ.get("CHANNEL_ASSET_EXTRACTION_ENABLED", "1") == "1"
 
 
 def asset_card_descriptor(asset: Asset) -> dict[str, Any]:
@@ -557,7 +557,7 @@ async def persist_fence_assets(
 
     Inline ``content`` for bodies <= 100 KB UTF-8; larger bodies go to
     S3 (decision Q2). Short-circuits to ``[]`` when the
-    ``STARTER_ASSET_EXTRACTION_ENABLED`` kill-switch is off.
+    ``CHANNEL_ASSET_EXTRACTION_ENABLED`` kill-switch is off.
 
     Returns the assets that actually persisted. Per-fence failures are
     logged + counted + skipped.

@@ -101,7 +101,7 @@ async def presign(
 
     att_id = str(uuid4())
     user_id = claims["sub"]
-    bucket = os.environ["STARTER_ATTACHMENTS_BUCKET"]
+    bucket = os.environ["CHANNEL_ATTACHMENTS_BUCKET"]
     key = f"attachments/user/{user_id}/{att_id}"
 
     url = _get_s3_client().generate_presigned_url(

@@ -21,9 +21,9 @@ from channel.agents.chat_agent import (
 
 
 @pytest.fixture(autouse=True)
-def _set_starter_env(monkeypatch):
-    """build_agent needs STARTER_ENV to derive the AgentCore Memory name."""
-    monkeypatch.setenv("STARTER_ENV", "test")
+def _set_channel_env(monkeypatch):
+    """build_agent needs CHANNEL_ENV to derive the AgentCore Memory name."""
+    monkeypatch.setenv("CHANNEL_ENV", "test")
 
 
 def test_resolve_model_id_returns_full_bedrock_id_for_known_id():
@@ -102,25 +102,25 @@ def _patch_strands(monkeypatch, captured):
 
 
 def test_bedrock_max_attempts_defaults_to_two(monkeypatch):
-    monkeypatch.delenv("STARTER_BEDROCK_MAX_ATTEMPTS", raising=False)
+    monkeypatch.delenv("CHANNEL_BEDROCK_MAX_ATTEMPTS", raising=False)
     assert _bedrock_max_attempts() == 2
 
 
 def test_bedrock_max_attempts_respects_valid_override(monkeypatch):
-    monkeypatch.setenv("STARTER_BEDROCK_MAX_ATTEMPTS", "5")
+    monkeypatch.setenv("CHANNEL_BEDROCK_MAX_ATTEMPTS", "5")
     assert _bedrock_max_attempts() == 5
 
 
 def test_bedrock_max_attempts_falls_back_on_non_numeric(monkeypatch):
     # A bad env string must not crash agent construction.
-    monkeypatch.setenv("STARTER_BEDROCK_MAX_ATTEMPTS", "lots")
+    monkeypatch.setenv("CHANNEL_BEDROCK_MAX_ATTEMPTS", "lots")
     assert _bedrock_max_attempts() == 2
 
 
 def test_bedrock_max_attempts_falls_back_on_non_positive(monkeypatch):
     # max_attempts must be >= 1 (at least one attempt); 0 / negative
     # would disable the call entirely, so fall back to the default.
-    monkeypatch.setenv("STARTER_BEDROCK_MAX_ATTEMPTS", "0")
+    monkeypatch.setenv("CHANNEL_BEDROCK_MAX_ATTEMPTS", "0")
     assert _bedrock_max_attempts() == 2
 
 
@@ -130,25 +130,25 @@ def test_bedrock_max_attempts_falls_back_on_non_positive(monkeypatch):
 
 
 def test_tool_result_max_bytes_defaults(monkeypatch):
-    monkeypatch.delenv("STARTER_MCP_TOOL_RESULT_MAX_BYTES", raising=False)
+    monkeypatch.delenv("CHANNEL_MCP_TOOL_RESULT_MAX_BYTES", raising=False)
     assert _tool_result_max_bytes() == _DEFAULT_MCP_TOOL_RESULT_MAX_BYTES
 
 
 def test_tool_result_max_bytes_respects_valid_override(monkeypatch):
-    monkeypatch.setenv("STARTER_MCP_TOOL_RESULT_MAX_BYTES", "8192")
+    monkeypatch.setenv("CHANNEL_MCP_TOOL_RESULT_MAX_BYTES", "8192")
     assert _tool_result_max_bytes() == 8192
 
 
 def test_tool_result_max_bytes_falls_back_on_non_numeric(monkeypatch):
     # A bad env string must not crash agent construction.
-    monkeypatch.setenv("STARTER_MCP_TOOL_RESULT_MAX_BYTES", "big")
+    monkeypatch.setenv("CHANNEL_MCP_TOOL_RESULT_MAX_BYTES", "big")
     assert _tool_result_max_bytes() == _DEFAULT_MCP_TOOL_RESULT_MAX_BYTES
 
 
 def test_tool_result_max_bytes_falls_back_on_non_positive(monkeypatch):
     # A zero/negative budget would clip every result to empty — fall back
     # to the default rather than honour a footgun value.
-    monkeypatch.setenv("STARTER_MCP_TOOL_RESULT_MAX_BYTES", "0")
+    monkeypatch.setenv("CHANNEL_MCP_TOOL_RESULT_MAX_BYTES", "0")
     assert _tool_result_max_bytes() == _DEFAULT_MCP_TOOL_RESULT_MAX_BYTES
 
 
@@ -157,7 +157,7 @@ def test_build_agent_passes_low_retry_config_to_bedrock(monkeypatch):
     retries at ``max_attempts=2`` (standard mode) so a throttle reaches
     the stream loop fast, and pins read_timeout to Strands' prior
     default so we don't regress to botocore's 60s."""
-    monkeypatch.delenv("STARTER_BEDROCK_MAX_ATTEMPTS", raising=False)
+    monkeypatch.delenv("CHANNEL_BEDROCK_MAX_ATTEMPTS", raising=False)
     captured: dict[str, object] = {}
     _patch_strands(monkeypatch, captured)
     build_agent(model_id="claude-sonnet-4-6", user_id="u-1", chat_id="c-1")
@@ -167,7 +167,7 @@ def test_build_agent_passes_low_retry_config_to_bedrock(monkeypatch):
 
 
 def test_build_agent_retry_config_honours_env_override(monkeypatch):
-    monkeypatch.setenv("STARTER_BEDROCK_MAX_ATTEMPTS", "4")
+    monkeypatch.setenv("CHANNEL_BEDROCK_MAX_ATTEMPTS", "4")
     captured: dict[str, object] = {}
     _patch_strands(monkeypatch, captured)
     build_agent(model_id="claude-sonnet-4-6", user_id="u-1", chat_id="c-1")
@@ -406,10 +406,10 @@ def test_build_titler_agent_uses_haiku_with_no_hooks(monkeypatch):
     assert captured["agent_kwargs"].get("hooks", []) == []
 
 
-def test_build_titler_agent_respects_starter_titler_model_override(monkeypatch):
+def test_build_titler_agent_respects_channel_titler_model_override(monkeypatch):
     from channel.agents.chat_agent import build_titler_agent
 
-    monkeypatch.setenv("STARTER_TITLER_MODEL", "claude-sonnet-4-6")
+    monkeypatch.setenv("CHANNEL_TITLER_MODEL", "claude-sonnet-4-6")
     captured: dict[str, object] = {}
 
     class FakeBedrockModel:
@@ -449,10 +449,10 @@ def test_build_followups_agent_uses_haiku_with_no_hooks(monkeypatch):
     assert "follow-up" in captured["agent_kwargs"]["system_prompt"].lower()
 
 
-def test_build_followups_agent_respects_starter_followups_model_override(monkeypatch):
+def test_build_followups_agent_respects_channel_followups_model_override(monkeypatch):
     from channel.agents.chat_agent import build_followups_agent
 
-    monkeypatch.setenv("STARTER_FOLLOWUPS_MODEL", "claude-sonnet-4-6")
+    monkeypatch.setenv("CHANNEL_FOLLOWUPS_MODEL", "claude-sonnet-4-6")
     captured: dict[str, object] = {}
 
     class FakeBedrockModel:
@@ -489,7 +489,7 @@ def test_build_agent_accepts_tools_and_attaches_chain_state(monkeypatch):
 
     # Disable the default-on memory tools (#273) so this test asserts on
     # the caller-supplied passthrough surface only.
-    monkeypatch.setenv("STARTER_MEMORY_TOOLS_ENABLED", "0")
+    monkeypatch.setenv("CHANNEL_MEMORY_TOOLS_ENABLED", "0")
     captured: dict[str, object] = {}
     _patch_strands(monkeypatch, captured)
     monkeypatch.setattr("channel.agents.chat_agent.Agent", FakeAgent)
@@ -522,7 +522,7 @@ def test_build_agent_works_without_tools(monkeypatch):
 
     # Disable the default-on memory tools (#273) so "no tools" means the
     # empty list this test asserts.
-    monkeypatch.setenv("STARTER_MEMORY_TOOLS_ENABLED", "0")
+    monkeypatch.setenv("CHANNEL_MEMORY_TOOLS_ENABLED", "0")
     captured: dict[str, object] = {}
     _patch_strands(monkeypatch, captured)
     monkeypatch.setattr("channel.agents.chat_agent.Agent", FakeAgent)
@@ -594,7 +594,7 @@ def test_build_agent_attaches_chassis_hooks_in_documented_order(monkeypatch):
 
 def test_build_agent_registers_size_bound_hook_with_configured_budget(monkeypatch):
     """#390: the ToolResultSizeBoundHook must be constructed with the
-    byte budget resolved from ``STARTER_MCP_TOOL_RESULT_MAX_BYTES`` (or
+    byte budget resolved from ``CHANNEL_MCP_TOOL_RESULT_MAX_BYTES`` (or
     the default). It is the fifth hook in the documented order and its
     ``_max_bytes`` must reflect the env override."""
     from channel.agents.tool_hooks import ToolResultSizeBoundHook
@@ -613,7 +613,7 @@ def test_build_agent_registers_size_bound_hook_with_configured_budget(monkeypatc
         lambda **_: MagicMock(write_meta_event=MagicMock()),
     )
     monkeypatch.setattr("channel.agents.chat_agent.get_or_create_memory", lambda env: "m")
-    monkeypatch.setenv("STARTER_MCP_TOOL_RESULT_MAX_BYTES", "4096")
+    monkeypatch.setenv("CHANNEL_MCP_TOOL_RESULT_MAX_BYTES", "4096")
 
     build_agent(model_id="claude-sonnet-4-6", user_id="u", chat_id="c")
 
@@ -639,7 +639,7 @@ def test_build_agent_passes_tools_kwarg_to_strands_agent(monkeypatch):
     monkeypatch.setattr("channel.agents.chat_agent.get_or_create_memory", lambda env: "m")
     # Disable the default-on memory tools (#273) so the passthrough
     # assertions see exactly the caller-supplied list.
-    monkeypatch.setenv("STARTER_MEMORY_TOOLS_ENABLED", "0")
+    monkeypatch.setenv("CHANNEL_MEMORY_TOOLS_ENABLED", "0")
 
     build_agent(model_id="claude-sonnet-4-6", user_id="u", chat_id="c")
     assert captured["agent_kwargs"]["tools"] == []
@@ -721,11 +721,11 @@ class _ToolNamesAgent:
 
 
 def test_build_agent_appends_memory_tools_by_default(monkeypatch):
-    """With ``STARTER_MEMORY_TOOLS_ENABLED`` unset (default on), the
+    """With ``CHANNEL_MEMORY_TOOLS_ENABLED`` unset (default on), the
     ``remember`` / ``recall`` tools are appended to the agent's tool list
     even when the caller supplies none. The tools are built lazily (no
     boto3 client until invoked) so this exercises the real factory."""
-    monkeypatch.delenv("STARTER_MEMORY_TOOLS_ENABLED", raising=False)
+    monkeypatch.delenv("CHANNEL_MEMORY_TOOLS_ENABLED", raising=False)
     captured: dict[str, object] = {}
     _patch_strands(monkeypatch, captured)
     monkeypatch.setattr("channel.agents.chat_agent.Agent", _ToolNamesAgent)
@@ -741,7 +741,7 @@ def test_build_agent_appends_memory_tools_after_caller_tools(monkeypatch):
     (not replacing them)."""
     from channel.agents.tools.clock import current_time
 
-    monkeypatch.delenv("STARTER_MEMORY_TOOLS_ENABLED", raising=False)
+    monkeypatch.delenv("CHANNEL_MEMORY_TOOLS_ENABLED", raising=False)
     captured: dict[str, object] = {}
     _patch_strands(monkeypatch, captured)
     monkeypatch.setattr("channel.agents.chat_agent.Agent", _ToolNamesAgent)
@@ -757,9 +757,9 @@ def test_build_agent_appends_memory_tools_after_caller_tools(monkeypatch):
 
 
 def test_build_agent_omits_memory_tools_when_flag_disabled(monkeypatch):
-    """``STARTER_MEMORY_TOOLS_ENABLED=0`` is the kill switch — no memory
+    """``CHANNEL_MEMORY_TOOLS_ENABLED=0`` is the kill switch — no memory
     tools register."""
-    monkeypatch.setenv("STARTER_MEMORY_TOOLS_ENABLED", "0")
+    monkeypatch.setenv("CHANNEL_MEMORY_TOOLS_ENABLED", "0")
     captured: dict[str, object] = {}
     _patch_strands(monkeypatch, captured)
     monkeypatch.setattr("channel.agents.chat_agent.Agent", _ToolNamesAgent)
@@ -785,7 +785,7 @@ def test_build_agent_binds_memory_tools_to_actor_and_session(monkeypatch):
         return ["remember_tool", "recall_tool"]
 
     monkeypatch.setattr("channel.agents.chat_agent.build_memory_tools", fake_build_memory_tools)
-    monkeypatch.delenv("STARTER_MEMORY_TOOLS_ENABLED", raising=False)
+    monkeypatch.delenv("CHANNEL_MEMORY_TOOLS_ENABLED", raising=False)
 
     build_agent(model_id="claude-sonnet-4-6", user_id="user-abc", chat_id="chat-xyz")
 

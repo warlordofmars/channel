@@ -101,15 +101,15 @@ def test_image_gen_region_defaults_to_us_west_2(monkeypatch):
     generators (the app's sole cross-region service dependency)."""
     from channel.agents.tools.generate_image import _image_gen_region
 
-    monkeypatch.delenv("STARTER_IMAGE_GEN_REGION", raising=False)
+    monkeypatch.delenv("CHANNEL_IMAGE_GEN_REGION", raising=False)
     assert _image_gen_region() == "us-west-2"
 
 
 def test_image_gen_region_env_overrides(monkeypatch):
-    """STARTER_IMAGE_GEN_REGION overrides the default region."""
+    """CHANNEL_IMAGE_GEN_REGION overrides the default region."""
     from channel.agents.tools.generate_image import _image_gen_region
 
-    monkeypatch.setenv("STARTER_IMAGE_GEN_REGION", "eu-central-1")
+    monkeypatch.setenv("CHANNEL_IMAGE_GEN_REGION", "eu-central-1")
     assert _image_gen_region() == "eu-central-1"
 
 
@@ -117,7 +117,7 @@ def test_image_gen_region_empty_falls_back_to_default(monkeypatch):
     """An empty override falls back to the us-west-2 default."""
     from channel.agents.tools.generate_image import _image_gen_region
 
-    monkeypatch.setenv("STARTER_IMAGE_GEN_REGION", "")
+    monkeypatch.setenv("CHANNEL_IMAGE_GEN_REGION", "")
     assert _image_gen_region() == "us-west-2"
 
 
@@ -207,7 +207,7 @@ def test_invoke_builds_stability_request_body(monkeypatch):
         "channel.agents.tools.generate_image._get_bedrock_runtime_client",
         lambda: fake_client,
     )
-    monkeypatch.delenv("STARTER_IMAGE_GEN_MODEL", raising=False)
+    monkeypatch.delenv("CHANNEL_IMAGE_GEN_MODEL", raising=False)
     from channel.agents.tools.generate_image import _invoke_image_model
 
     _invoke_image_model("a photo of a fox", "16:9")
@@ -225,7 +225,7 @@ def test_invoke_builds_stability_request_body(monkeypatch):
 
 
 def test_invoke_honours_model_override_env(monkeypatch):
-    """STARTER_IMAGE_GEN_MODEL flips to a premium Stability generator with
+    """CHANNEL_IMAGE_GEN_MODEL flips to a premium Stability generator with
     no code change (identical request contract)."""
     fake_client = MagicMock()
     fake_client.invoke_model.return_value = _fake_invoke_response(_success_payload())
@@ -233,7 +233,7 @@ def test_invoke_honours_model_override_env(monkeypatch):
         "channel.agents.tools.generate_image._get_bedrock_runtime_client",
         lambda: fake_client,
     )
-    monkeypatch.setenv("STARTER_IMAGE_GEN_MODEL", "stability.stable-image-ultra-v1:1")
+    monkeypatch.setenv("CHANNEL_IMAGE_GEN_MODEL", "stability.stable-image-ultra-v1:1")
     from channel.agents.tools.generate_image import _invoke_image_model
 
     _invoke_image_model("x", "1:1")

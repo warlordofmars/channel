@@ -16,7 +16,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-os.environ.setdefault("STARTER_JWT_SECRET", "test-secret-for-unit-tests")
+os.environ.setdefault("CHANNEL_JWT_SECRET", "test-secret-for-unit-tests")
 os.environ.setdefault("GOOGLE_CLIENT_ID", "test-google-client-id")
 
 from channel.api.main import app  # noqa: E402

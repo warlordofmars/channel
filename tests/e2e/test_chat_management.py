@@ -30,10 +30,10 @@ pytestmark = pytest.mark.asyncio
 
 @pytest.mark.asyncio
 async def test_rename_and_delete_chat_from_sidebar() -> None:
-    ui_url = os.environ.get("STARTER_UI_URL")
-    api_url = os.environ.get("STARTER_API_URL", "http://localhost:8001")
+    ui_url = os.environ.get("CHANNEL_UI_URL")
+    api_url = os.environ.get("CHANNEL_API_URL", "http://localhost:8001")
     if not ui_url:
-        pytest.skip("STARTER_UI_URL not set — run via `inv e2e-local`")
+        pytest.skip("CHANNEL_UI_URL not set — run via `inv e2e-local`")
 
     tag = f"e2e-rd-{int(time.time())}-{uuid.uuid4().hex[:6]}"
     email = f"{tag}@example.com"

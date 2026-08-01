@@ -273,7 +273,7 @@ def test_integration(ctx):
         "AWS_ACCESS_KEY_ID": "local",
         "AWS_SECRET_ACCESS_KEY": "local",
         "AWS_DEFAULT_REGION": "us-east-1",
-        "STARTER_JWT_SECRET": "test-secret",
+        "CHANNEL_JWT_SECRET": "test-secret",
     }
     ctx.run("uv run pytest tests/integration -v", env=env, pty=True)
 
@@ -332,8 +332,8 @@ def test_combined_coverage(ctx):
         "AWS_ACCESS_KEY_ID": "local",
         "AWS_SECRET_ACCESS_KEY": "local",
         "AWS_DEFAULT_REGION": "us-east-1",
-        "STARTER_JWT_SECRET": "test-secret",
-        "STARTER_TABLE_NAME": "starter-integration",
+        "CHANNEL_JWT_SECRET": "test-secret",
+        "CHANNEL_TABLE_NAME": "channel-integration",
     }
     ctx.run(
         "uv run pytest tests/unit tests/integration "
@@ -444,8 +444,8 @@ def e2e(ctx, env="prod"):
     api_url = _cfn_output(ctx, "ApiFunctionUrl", env=env)
     ui_url = _cfn_output(ctx, "UiUrl", env=env)
     extra_env = {
-        "STARTER_API_URL": api_url,
-        "STARTER_UI_URL": ui_url,
+        "CHANNEL_API_URL": api_url,
+        "CHANNEL_UI_URL": ui_url,
     }
     ctx.run(
         "uv run pytest tests/e2e -v",
@@ -478,8 +478,8 @@ def e2e_local(ctx, tests="tests/e2e", n=1):
     print(f"  UI:  {ui_url}")
     extra_env = {
         **os.environ,
-        "STARTER_API_URL": api_url,
-        "STARTER_UI_URL": ui_url,
+        "CHANNEL_API_URL": api_url,
+        "CHANNEL_UI_URL": ui_url,
     }
     # Docs tests require a deployed VitePress build — skip unless explicitly targeted
     ignore = " --ignore=tests/e2e/test_docs_e2e.py" if tests == "tests/e2e" else ""
@@ -538,7 +538,7 @@ def dev(ctx, seed=False):
 
     Pass --seed to automatically seed demo data once the API is ready.
     """
-    jwt_secret = os.environ.get("STARTER_JWT_SECRET", "dev-secret")
+    jwt_secret = os.environ.get("CHANNEL_JWT_SECRET", "dev-secret")
     # Allow all localhost Vite ports (5173–5179) so CORS doesn't break when
     # 5173 is already occupied by another project and Vite picks the next port.
     cors_origins = ",".join(f"http://localhost:{p}" for p in range(5173, 5180))
@@ -553,8 +553,8 @@ def dev(ctx, seed=False):
     # running `inv dev`.
     dev_env = {
         **os.environ,
-        "STARTER_JWT_SECRET": jwt_secret,
-        "STARTER_TABLE_NAME": "channel",
+        "CHANNEL_JWT_SECRET": jwt_secret,
+        "CHANNEL_TABLE_NAME": "channel",
         "DYNAMODB_ENDPOINT": f"http://localhost:{DYNAMO_PORT}",
         "AWS_DEFAULT_REGION": "us-east-1",
         "CORS_ORIGINS": cors_origins,
@@ -567,54 +567,54 @@ def dev(ctx, seed=False):
         #     JWT directly (only fires when the query param is present;
         #     normal browser flows that omit it are unaffected).
         #   - `desktop_callback=...` on /auth/login → only fires when BOTH
-        #     this flag AND STARTER_DESKTOP_DEV_EMAIL below are set, so the
+        #     this flag AND CHANNEL_DESKTOP_DEV_EMAIL below are set, so the
         #     deployed dev env (which sets only this flag) routes real
         #     desktop sign-in to Google.
-        "STARTER_BYPASS_GOOGLE_AUTH": "1",
+        "CHANNEL_BYPASS_GOOGLE_AUTH": "1",
         # Second gate for the desktop OAuth short-circuit: when both this
-        # and STARTER_BYPASS_GOOGLE_AUTH are set, the Electron loopback
+        # and CHANNEL_BYPASS_GOOGLE_AUTH are set, the Electron loopback
         # flow on /auth/login mints a synthetic JWT for this email instead
         # of bouncing through Google. Local dev only — the deployed dev
         # stack deliberately does NOT set this so real desktop sign-in on
         # the dev environment goes through Google.
-        "STARTER_DESKTOP_DEV_EMAIL": "dev@channel.local",
+        "CHANNEL_DESKTOP_DEV_EMAIL": "dev@channel.local",
         # Phase 7c: mount /api/_debug/* so the Playwright e2e can verify
         # AgentCore writes. Prod stacks do NOT set this — see
         # tests/unit/test_channel_stack.py for the guard.
-        "STARTER_ENABLE_DEBUG_ENDPOINTS": "1",
+        "CHANNEL_ENABLE_DEBUG_ENDPOINTS": "1",
         # #207 MCP registry — local-dev sentinel for KMS so the encrypt/
         # decrypt helpers don't try to talk to a real AWS KMS key. The
         # passthrough wrapping is documented in src/channel/mcp/crypto.py
         # and guarded by tests/unit/test_channel_stack.py against ever
         # reaching a deployed env.
-        "STARTER_MCP_TOKEN_KMS_KEY_ID": "local",
-        "STARTER_MCP_REDIRECT_URI": "http://localhost:8001/auth/mcp/callback",
-        "STARTER_SPA_BASE_URL": "http://localhost:5173",
-        "STARTER_MCP_REGISTRY_ENABLED": "1",
+        "CHANNEL_MCP_TOKEN_KMS_KEY_ID": "local",
+        "CHANNEL_MCP_REDIRECT_URI": "http://localhost:8001/auth/mcp/callback",
+        "CHANNEL_SPA_BASE_URL": "http://localhost:5173",
+        "CHANNEL_MCP_REGISTRY_ENABLED": "1",
         # Allow http://localhost MCP server URLs in local dev only — the
         # SSRF defender in src/channel/api/mcp.py refuses non-https
         # otherwise. Production sets neither.
-        "STARTER_MCP_ALLOW_LOCALHOST": "1",
+        "CHANNEL_MCP_ALLOW_LOCALHOST": "1",
         # Phase 7c: AgentCore Memory writes need an env tag for the
         # ``channel-{env}`` naming convention. Personal dev points at
         # the developer's own AWS account, so default to "jc"; override
-        # via STARTER_AGENTCORE_MEMORY_NAME if pointing at a shared
+        # via CHANNEL_AGENTCORE_MEMORY_NAME if pointing at a shared
         # pre-existing Memory.
-        "STARTER_ENV": os.environ.get("STARTER_ENV", "jc"),
+        "CHANNEL_ENV": os.environ.get("CHANNEL_ENV", "jc"),
         # Phase 7d: both kill-switches explicit-on for local-dev so
         # behaviour mirrors the prod default and the env vars are
         # discoverable. Set to "0" to disable either feature.
-        "STARTER_RECALL_ENABLED": "1",
-        "STARTER_AUTO_TITLE_ENABLED": "1",
+        "CHANNEL_RECALL_ENABLED": "1",
+        "CHANNEL_AUTO_TITLE_ENABLED": "1",
     }
     # #182 — pull Exa API key from SSM into the local Lambda env so the
     # web_search tool can call Exa during `inv dev` smoke tests. Path
-    # derives from STARTER_ENV (default "jc") so dev clones pointing at
+    # derives from CHANNEL_ENV (default "jc") so dev clones pointing at
     # `/channel/dev/exa-api-key` (or any other env) load the right key.
     # Skip cleanly if the parameter isn't set — the tool only fires when
-    # STARTER_WEB_SEARCH_ENABLED=1 AND the user asks something that needs
+    # CHANNEL_WEB_SEARCH_ENABLED=1 AND the user asks something that needs
     # it, so missing key = clear runtime error when it's actually needed.
-    exa_param = f"/channel/{dev_env['STARTER_ENV']}/exa-api-key"
+    exa_param = f"/channel/{dev_env['CHANNEL_ENV']}/exa-api-key"
     try:
         import boto3
 

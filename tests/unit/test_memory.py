@@ -295,7 +295,7 @@ def test_get_or_create_memory_raises_when_terminal_status(monkeypatch):
 
 
 def test_get_or_create_memory_respects_override_env_var(monkeypatch):
-    monkeypatch.setenv("STARTER_AGENTCORE_MEMORY_NAME", "preexisting_mem")
+    monkeypatch.setenv("CHANNEL_AGENTCORE_MEMORY_NAME", "preexisting_mem")
     fake_control = MagicMock()
     fake_control.list_memories.return_value = {
         "memories": [{"id": "preexisting_mem-Q1R2S3T4"}],
