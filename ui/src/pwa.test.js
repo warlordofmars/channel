@@ -51,6 +51,19 @@ describe("manifest.webmanifest", () => {
     expect(manifest.background_color).toBe("#15120f");
   });
 
+  it("stays pinned to the dark --canvas token it claims to mirror", () => {
+    // Closes the drift loop: without this, retuning the token in
+    // channel.css would leave the manifest and the index.html meta
+    // agreeing with each other but silently disagreeing with the app.
+    // Neither a <meta> nor JSON can reference a custom property, so the
+    // hex is duplicated by necessity — this asserts the source of truth
+    // it was derived from has not moved.
+    const channelCss = readText("./styles/channel.css");
+    const darkCanvas = /\[data-theme="dark"\][^}]*?--canvas:\s*([^;]+);/.exec(channelCss);
+    expect(darkCanvas).not.toBeNull();
+    expect(darkCanvas[1].trim()).toBe("oklch(0.183 0.007 58)");
+  });
+
   it("declares 192, 512 and a maskable 512 icon", () => {
     expect(manifest.icons.map((icon) => icon.src)).toEqual([
       "/icon-192.png",
@@ -68,22 +81,30 @@ describe("manifest.webmanifest", () => {
 });
 
 describe("index.html PWA wiring", () => {
+  // Parsed rather than string-matched so a formatting-only edit to
+  // index.html (attribute order, `>` vs `/>`, wrapping) can't fail the
+  // suite — only an actual change to the wiring can.
+  const doc = new DOMParser().parseFromString(indexHtml, "text/html");
+  const meta = (name) => doc.querySelector(`meta[name="${name}"]`)?.getAttribute("content");
+  const linkHref = (rel) => doc.querySelector(`link[rel="${rel}"]`)?.getAttribute("href");
+
   it("opts the viewport into the safe-area insets", () => {
-    expect(indexHtml).toContain("viewport-fit=cover");
+    expect(meta("viewport")).toMatch(/(^|,)\s*viewport-fit=cover\s*($|,)/);
   });
 
   it("links the manifest and the Apple touch icon", () => {
-    expect(indexHtml).toContain('<link rel="manifest" href="/manifest.webmanifest" />');
-    expect(indexHtml).toContain('<link rel="apple-touch-icon" href="/apple-touch-icon.png" />');
+    expect(linkHref("manifest")).toBe("/manifest.webmanifest");
+    expect(linkHref("apple-touch-icon")).toBe("/apple-touch-icon.png");
   });
 
   it("declares standalone display and theme colour", () => {
-    expect(indexHtml).toContain('<meta name="apple-mobile-web-app-capable" content="yes" />');
-    expect(indexHtml).toContain('<meta name="mobile-web-app-capable" content="yes" />');
-    expect(indexHtml).toContain(
-      '<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />',
-    );
-    expect(indexHtml).toContain('<meta name="theme-color" content="#15120f" />');
+    expect(meta("apple-mobile-web-app-capable")).toBe("yes");
+    expect(meta("mobile-web-app-capable")).toBe("yes");
+    expect(meta("apple-mobile-web-app-status-bar-style")).toBe("black-translucent");
+    expect(meta("apple-mobile-web-app-title")).toBe("Channel");
+    // Must agree with the manifest, which the token test below pins to
+    // the dark --canvas value.
+    expect(meta("theme-color")).toBe(manifest.theme_color);
   });
 });
 
