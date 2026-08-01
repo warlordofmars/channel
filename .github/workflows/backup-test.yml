@@ -209,10 +209,17 @@ jobs:
           # GSIs, so an empty source list means describe-table returned
           # something unexpected and the parity comparison below would
           # succeed without asserting anything.
-          if [ -z "$SOURCE_GSIS" ]; then
-            echo "::error::Source table '$SOURCE_TABLE' reports no GSIs — the Channel schema always defines several, so this is not a valid baseline to compare against."
-            exit 1
-          fi
+          # `None` is belt-and-braces: the `|| `[]`` guard above already makes
+          # an absent key yield an empty string rather than the literal "None"
+          # the AWS CLI prints for a null result. Matching both means removing
+          # that guard later can't silently reintroduce a vacuous `None ==
+          # None` pass. (No Channel index is named "None".)
+          case "$SOURCE_GSIS" in
+            ''|None)
+              echo "::error::Source table '$SOURCE_TABLE' reports no GSIs — the Channel schema always defines several, so this is not a valid baseline to compare against."
+              exit 1
+              ;;
+          esac
 
           if [ "$SOURCE_GSIS" != "$RESTORED_GSIS" ]; then
             echo "::error::GSI parity check failed — the restored table's indexes do not match the source."
