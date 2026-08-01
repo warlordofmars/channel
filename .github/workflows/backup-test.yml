@@ -69,20 +69,22 @@ jobs:
       # then reports "Could not load credentials from any providers", which
       # says nothing about the actual cause.
       - name: Preflight — prod deploy role configured
+        id: preflight_role
         env:
           DEPLOY_ROLE_ARN: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
         run: |
           if [ -z "$DEPLOY_ROLE_ARN" ]; then
             echo "::error::AWS_DEPLOY_ROLE_ARN is not configured; prod backup validation cannot run."
             echo "The prod OIDC deploy role secret is unset at both repo and environment scope."
-            echo "This is expected until the prod cutover — see issue #49."
+            echo "This is expected until the prod cutover — see issue #459."
             echo "To resolve: deploy the prod stack, then set AWS_DEPLOY_ROLE_ARN to the"
             echo "GitHubActionsDeployRole ARN emitted by the ChannelStack prod deployment."
             exit 1
           fi
           echo "Prod deploy role secret is configured."
 
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+      # No `actions/checkout` step: every step below is an inline script or
+      # an inline `github-script` block, so nothing reads a repo file.
 
       - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
@@ -95,9 +97,20 @@ jobs:
       # less obvious error.
       - name: Preflight — source table exists with PITR enabled
         run: |
-          if ! aws dynamodb describe-table --table-name "$SOURCE_TABLE" >/dev/null 2>&1; then
-            echo "::error::Source table '$SOURCE_TABLE' does not exist in $AWS_REGION; there is nothing to restore."
-            echo "The prod table is created by the prod ChannelStack deployment — see issue #49."
+          # Capture stderr so a missing table can be distinguished from
+          # AccessDenied / expired credentials / throttling. Collapsing all of
+          # those into "table does not exist" would be its own legibility bug.
+          if ! DESCRIBE_ERR=$(aws dynamodb describe-table --table-name "$SOURCE_TABLE" 2>&1 >/dev/null); then
+            case "$DESCRIBE_ERR" in
+              *ResourceNotFoundException*)
+                echo "::error::Source table '$SOURCE_TABLE' does not exist in $AWS_REGION; there is nothing to restore."
+                echo "The prod table is created by the prod ChannelStack deployment — see issue #459."
+                ;;
+              *)
+                echo "::error::Could not describe source table '$SOURCE_TABLE' — this is NOT a 'table missing' result, so treat it as a live failure."
+                echo "$DESCRIBE_ERR"
+                ;;
+            esac
             exit 1
           fi
 
@@ -153,6 +166,17 @@ jobs:
             --query 'Count' \
             --output text)
           echo "Restored table item count: $COUNT"
+          # Reject a non-numeric count before comparing. Under `bash -e` a
+          # non-numeric or empty value makes `[ "$COUNT" -lt 1 ]` exit 2, and
+          # because `if` conditions are exempt from `set -e` the step would
+          # sail past and report "passed: None items found" — the same
+          # vacuous-pass hole the GSI guard below closes.
+          case "$COUNT" in
+            ''|*[!0-9]*)
+              echo "::error::Could not read a numeric item count from '$RESTORE_TABLE' (got: '$COUNT')."
+              exit 1
+              ;;
+          esac
           if [ "$COUNT" -lt 1 ]; then
             echo "::error::Restored table is empty — backup may be corrupt or PITR not enabled."
             exit 1
@@ -200,15 +224,29 @@ jobs:
 
           echo "Validation passed: $COUNT items, GSIs match ($SOURCE_GSIS)."
 
+      # Skipped when the restore step never ran (e.g. a preflight failed), so
+      # cleanup can't burn the credential-provider chain deleting a table that
+      # was never created.
       - name: Delete temporary restore table
-        if: always()
+        if: always() && steps.restore.outcome != 'skipped'
         run: |
           echo "Cleaning up temporary table $RESTORE_TABLE..."
           aws dynamodb delete-table --table-name "$RESTORE_TABLE" || true
           echo "Cleanup complete."
 
+      # Suppressed when the run failed *only* because the prod deploy role
+      # isn't configured yet — that is the documented, expected pre-cutover
+      # state (issue #459), not a backup-chain problem. Filing a bug for it on
+      # every manual dispatch would recreate the exact false signal this
+      # workflow's schedule was disabled to stop: #49 is closed, and #459's
+      # title doesn't match the predicate below, so each run would open a
+      # brand-new reliability bug.
+      #
+      # Deliberately narrower than "suppress unless restore/validate failed":
+      # a credentials failure, a missing source table, or PITR switched off
+      # ARE genuine alarms once prod exists, and must still file.
       - name: Open or update issue on failure
-        if: failure()
+        if: failure() && steps.preflight_role.outcome != 'failure'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
