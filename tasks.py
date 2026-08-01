@@ -15,6 +15,7 @@ Usage:
     uv run inv deploy                       # deploy to AWS via CDK
     uv run inv synth                        # synthesize CDK template (runs Docker asset bundling; needs Docker running)
     uv run inv outputs                      # print CloudFormation stack outputs
+    uv run inv check-blockers               # sweep the backlog for stale `Blocked by #N` refs
     uv run inv install-hooks               # install pre-push hook (run once after clone)
     uv run inv worktree-setup              # prep a fresh worktree: python + ui/ + desktop/ deps
     uv run inv pre-push                    # full local CI gate (lint+typecheck+unit+combined-coverage+frontend+desktop)
@@ -31,7 +32,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from invoke import task
+from invoke import Exit, task
 
 ROOT = Path(__file__).parent
 UI = ROOT / "ui"
@@ -221,6 +222,37 @@ def typecheck(ctx):
 def check_copyright(ctx):
     """Check all source files have a copyright header"""
     ctx.run("uv run python scripts/check_copyright.py", pty=True)
+
+
+@task(
+    help={
+        "json": "Machine-readable output",
+        "fix": "Apply the two unambiguous label flips (stale-block, missing-block)",
+        "repo": "owner/name to sweep (default: the current repo)",
+    }
+)
+def check_blockers(ctx, json=False, fix=False, repo=None):
+    """Sweep the backlog for `Blocked by #N` refs that outlived their blocker.
+
+    Read-only unless ``--fix`` is passed. Deliberately NOT part of ``lint`` or
+    ``pre-push``: it needs network + an authenticated ``gh``, and a stale label
+    on someone else's issue must never block your push. It is the weekly
+    triage step (CLAUDE.md §"Triage cadence"), also run on a cron by
+    ``.github/workflows/stale-blockers.yml`` (report-only there — never ``--fix``).
+
+    Exit codes mirror the script: 0 clean, 1 findings, 2 fetch error.
+    """
+    cmd = "uv run python scripts/check_stale_blockers.py"
+    if json:
+        cmd += " --json"
+    if fix:
+        cmd += " --fix"
+    if repo:
+        cmd += f" --repo {repo}"
+    # warn=True so a findings exit (1) reports the backlog state instead of
+    # raising invoke's UnexpectedExit traceback over the report.
+    result = ctx.run(cmd, pty=True, warn=True)
+    raise Exit(code=result.exited)
 
 
 @task(lint_backend, lint_frontend, lint_infra, typecheck, check_copyright)

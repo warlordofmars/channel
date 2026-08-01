@@ -1181,6 +1181,14 @@ create the next one and promote items from the hardening bucket.
 
 - **Weekly** — glance at issues created in the last 7 days; fix any
   missing priority / size / area labels
+- **Weekly** — run `uv run inv check-blockers` (read-only) to catch
+  `Blocked by #N` references that outlived their blocker: a
+  `status:blocked` issue whose blockers all closed, an unlabelled issue
+  naming an open blocker, a blocker closed `NOT_PLANNED` (re-point it,
+  don't just clear it), or a reference to a non-existent issue. Add
+  `--fix` to apply the two mechanical label flips. The
+  `stale-blockers.yml` workflow runs the same sweep every Monday, but
+  **report-only** — it never passes `--fix`
 - **Monthly** — review the hardening bucket and promote shippable items
   into the current release
 - **Quarterly** — review `priority:p3` and `status:design-needed` issues;
