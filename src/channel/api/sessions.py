@@ -25,13 +25,25 @@ is simply absent and falls out as "not found". Returning 403 would
 confirm the device exists and turn this endpoint into an oracle for
 other users' device ids.
 
-**Revoking a session does not immediately kill outstanding access
-tokens.** These routes revoke *refresh* rows, which stops the device
-from minting further access tokens; a mgmt JWT already issued to that
-device stays valid until its own ``exp`` unless its ``jti`` is also
-denylisted (``/auth/logout``, #240). With the 1-hour access-token TTL
-that epic #241 restores (#291) the residual window is bounded by that
-TTL. Anything needing instant cutoff must go through the denylist.
+**Revoking a refresh family does not by itself kill an outstanding
+access token.** These routes revoke *refresh* rows, which stops a device
+minting further access tokens; a mgmt JWT already issued stays valid
+until its own ``exp`` unless its ``jti`` is denylisted (#240). That
+matters more than it sounds: ``MGMT_JWT_TTL_SECONDS`` is **30 days**
+today, and only returns to 1 hour when #291 lands. So the two routes
+differ deliberately:
+
+* ``DELETE /api/me/sessions`` (all) **also denylists the caller's own
+  access token**, the same write ``/auth/logout`` performs. Without it,
+  a user who clicks "sign out everywhere" would stay signed in on the
+  device they clicked it from for up to 30 more days — which is the
+  opposite of what the button says.
+* ``DELETE /api/me/sessions/{device_id}`` cannot do the equivalent for
+  the target device: the mgmt JWT carries no ``device_id`` claim, so
+  there is no way to map a device to the ``jti`` it holds. That device
+  stops being able to refresh immediately, and its current access token
+  dies at its own ``exp``. Closing that gap needs a device claim on the
+  access token, which is mint-path work (#292).
 
 **The reads are eventually consistent** — they walk
 ``RefreshByUserIndex``, and DynamoDB refuses ``ConsistentRead`` on a
@@ -63,9 +75,11 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Response
 from pydantic import BaseModel, ConfigDict
 
 from .. import storage
+from ..logging_config import get_logger
 from ._auth import require_mgmt_user
 
 router = APIRouter(prefix="/me/sessions", tags=["sessions"])
+logger = get_logger(__name__)
 
 
 class Session(BaseModel):
@@ -142,6 +156,33 @@ def _load_owned_session(device_id: str, user_id: str) -> Session:
     raise HTTPException(status_code=404, detail="Session not found")
 
 
+def _audit_revocation(event_type: str, claims: dict[str, Any], **details: Any) -> None:
+    """Record a session revocation in the immutable audit trail.
+
+    ``/auth/logout`` writes ``auth.logout`` explicitly so "a stolen-laptop
+    event has a server-side signal for remediation"; these two routes are
+    that same remediation surface reached deliberately, so they must not
+    be the quieter path.
+
+    Best-effort for the same reason logout's audit write is: by the time
+    this runs the revocation has already been applied, so failing the
+    response would tell the user the sign-out did not happen when it
+    did. A failure is logged loudly instead. Note this is the *opposite*
+    call from the denylist write in :func:`revoke_all_my_sessions`,
+    which is allowed to fail the request — losing an audit row degrades
+    forensics, losing the denylist write leaves the caller signed in.
+    """
+
+    try:
+        storage.put_audit_event(
+            event_type=event_type,
+            actor_id=str(claims.get("sub") or ""),
+            details={"role": claims.get("role", "user"), **details},
+        )
+    except Exception:
+        logger.exception("%s audit write failed", event_type)
+
+
 @router.get("", response_model=SessionListResponse)
 def list_my_sessions(
     response: Response,
@@ -162,11 +203,16 @@ def revoke_my_session(
     device_id: str = Path(...),
     claims: dict[str, Any] = Depends(require_mgmt_user),
 ) -> Response:
-    """Revoke one device's refresh-token family. 204, or 404 if not the caller's."""
+    """Revoke one device's refresh-token family. 204, or 404 if not the caller's.
+
+    The target device's *current* access token is not denylisted — see
+    the module docstring: there is no ``device_id`` claim to match it by.
+    """
 
     user_id = claims["sub"]
     _load_owned_session(device_id, user_id)
-    storage.revoke_device_refresh_tokens(user_id, device_id)
+    revoked = storage.revoke_device_refresh_tokens(user_id, device_id)
+    _audit_revocation("auth.session_revoke", claims, device_id=device_id, revoked_rows=revoked)
     return Response(status_code=204)
 
 
@@ -181,8 +227,28 @@ def revoke_all_my_sessions(
     spared the device issuing the request would be the more surprising
     behaviour for a user who believes their account is compromised.
 
+    The caller's own access token is denylisted too (#240), so the button
+    means what it says on the device that pressed it rather than leaving
+    it authenticated for the remainder of a 30-day TTL.
+
+    **Ordering is retry-safety, not taste.** Refresh families first, then
+    the denylist write. Both writes are idempotent, so a failure at any
+    point leaves the caller still holding a working token and able to
+    retry the whole call; denylisting first would mean a later failure
+    locked the user out of the retry. Storage errors are *not* swallowed
+    here — a silent denylist failure would report success while leaving
+    the calling device signed in.
+
     Idempotent: a caller with no live sessions still gets 204.
     """
 
-    storage.revoke_all_user_refresh_tokens(claims["sub"])
+    revoked = storage.revoke_all_user_refresh_tokens(claims["sub"])
+    # Tokens minted before #240 carry no ``jti`` and cannot be denylisted;
+    # they simply expire. Mirrors the same guard in ``/auth/logout``.
+    denied = bool(jti := claims.get("jti"))
+    if jti:
+        storage.deny_jti(jti, claims["exp"])
+    _audit_revocation(
+        "auth.session_revoke_all", claims, revoked_rows=revoked, access_token_denied=denied
+    )
     return Response(status_code=204)

@@ -51,16 +51,21 @@ def _token(user_id: str, device_id: str, *, age_seconds: float = 0.0) -> Refresh
 
 
 class _Store:
-    """Stands in for the three storage helpers the router calls.
+    """Stands in for the storage helpers the router calls.
 
-    Rows are held per ``user_id`` and every helper reads only its own
-    caller's bucket — the fake's whole job is to reproduce the tenancy
-    scoping of ``GSI5PK=REFRESH_USER#{user_id}``.
+    Refresh rows are held per ``user_id`` and every helper reads only its
+    own caller's bucket — the fake's whole job is to reproduce the
+    tenancy scoping of ``GSI5PK=REFRESH_USER#{user_id}``. ``deny_jti``
+    and ``put_audit_event`` are captured rather than modelled; the
+    assertions are about *whether and with what* they were called.
     """
 
     def __init__(self) -> None:
         self.rows: dict[str, list[RefreshToken]] = {}
         self.revoked_calls: list[tuple[str, str | None]] = []
+        self.denied_jtis: list[tuple[str, int]] = []
+        self.audit_events: list[dict[str, Any]] = []
+        self.audit_raises = False
 
     def seed(self, *tokens: RefreshToken) -> None:
         for token in tokens:
@@ -84,6 +89,18 @@ class _Store:
         self.revoked_calls.append((user_id, None))
         return self._drop(user_id, lambda _row: True)
 
+    def deny_jti(self, jti: str, exp: int) -> None:
+        self.denied_jtis.append((jti, exp))
+
+    def put_audit_event(
+        self, *, event_type: str, actor_id: str, details: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        if self.audit_raises:
+            raise RuntimeError("audit table unavailable")
+        event = {"event_type": event_type, "actor_id": actor_id, "details": details or {}}
+        self.audit_events.append(event)
+        return event
+
     def _drop(self, user_id: str, predicate: Callable[[RefreshToken], bool]) -> int:
         kept = [row for row in self.rows.get(user_id, []) if not predicate(row)]
         dropped = len(self.rows.get(user_id, [])) - len(kept)
@@ -98,6 +115,8 @@ def store(monkeypatch: pytest.MonkeyPatch) -> _Store:
         "list_live_refresh_tokens",
         "revoke_device_refresh_tokens",
         "revoke_all_user_refresh_tokens",
+        "deny_jti",
+        "put_audit_event",
     ):
         monkeypatch.setattr(f"channel.api.sessions.storage.{name}", getattr(fake, name))
     return fake
@@ -107,9 +126,12 @@ def store(monkeypatch: pytest.MonkeyPatch) -> _Store:
 def as_user() -> Iterator[Callable[..., TestClient]]:
     """Build a ``TestClient`` whose mgmt JWT resolves to ``sub``."""
 
-    def _make(sub: str = "u-1") -> TestClient:
+    def _make(sub: str = "u-1", *, jti: str | None = None, exp: int = 1_900_000_000) -> TestClient:
         def _stub_user() -> dict[str, Any]:
-            return {"sub": sub, "role": "user"}
+            claims: dict[str, Any] = {"sub": sub, "role": "user"}
+            if jti is not None:
+                claims |= {"jti": jti, "exp": exp}
+            return claims
 
         app.dependency_overrides[require_mgmt_user] = _stub_user
         return TestClient(app)
@@ -304,3 +326,208 @@ def test_revoke_all_sessions_is_idempotent_when_there_are_none(
 
 def test_revoke_all_sessions_requires_auth(store: _Store) -> None:
     assert TestClient(app).delete("/api/me/sessions").status_code in (401, 403)
+
+
+# ----------------------------------------------------------------
+# Access-token denylist + audit trail
+# ----------------------------------------------------------------
+
+
+def test_revoke_all_sessions_denylists_the_callers_own_access_token(
+    store: _Store, as_user: Callable[..., TestClient]
+) -> None:
+    """Without this the user who pressed "sign out everywhere" stays
+    signed in on the device they pressed it from for the rest of the
+    access token's TTL — 30 days at today's MGMT_JWT_TTL_SECONDS."""
+    store.seed(_token("u-1", "laptop"))
+
+    r = as_user("u-1", jti="jti-abc", exp=1_800_000_000).delete("/api/me/sessions", headers=_AUTH)
+
+    assert r.status_code == 204
+    assert store.denied_jtis == [("jti-abc", 1_800_000_000)]
+
+
+def test_revoke_all_sessions_revokes_refresh_families_before_the_denylist_write(
+    store: _Store, as_user: Callable[..., TestClient], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ordering is retry-safety: if the denylist write blows up, the
+    caller must still hold a working token to retry the whole call."""
+    order: list[str] = []
+    monkeypatch.setattr(
+        "channel.api.sessions.storage.revoke_all_user_refresh_tokens",
+        lambda user_id: order.append("revoke") or 0,
+    )
+    monkeypatch.setattr(
+        "channel.api.sessions.storage.deny_jti",
+        lambda jti, exp: order.append("deny"),
+    )
+
+    as_user("u-1", jti="jti-abc").delete("/api/me/sessions", headers=_AUTH)
+
+    assert order == ["revoke", "deny"]
+
+
+def test_revoke_all_sessions_surfaces_a_denylist_failure_as_a_server_error(
+    store: _Store, as_user: Callable[..., TestClient], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unlike the audit write, this one is not best-effort: swallowing it
+    would report a successful sign-out while leaving the calling device
+    authenticated."""
+
+    def _boom(jti: str, exp: int) -> None:
+        raise RuntimeError("denylist table unavailable")
+
+    monkeypatch.setattr("channel.api.sessions.storage.deny_jti", _boom)
+    client = as_user("u-1", jti="jti-abc")
+
+    with pytest.raises(RuntimeError):
+        client.delete("/api/me/sessions", headers=_AUTH)
+
+
+def test_revoke_all_sessions_skips_the_denylist_for_a_pre_240_token(
+    store: _Store, as_user: Callable[..., TestClient]
+) -> None:
+    """Tokens minted before the jti claim existed cannot be denylisted;
+    they just expire. Must not blow up."""
+    r = as_user("u-1").delete("/api/me/sessions", headers=_AUTH)
+
+    assert r.status_code == 204
+    assert store.denied_jtis == []
+    assert store.audit_events[0]["details"]["access_token_denied"] is False
+
+
+def test_revoke_one_device_does_not_denylist_anything(
+    store: _Store, as_user: Callable[..., TestClient]
+) -> None:
+    """There is no device_id claim on the mgmt JWT, so a per-device
+    revoke cannot identify the access token that device holds."""
+    store.seed(_token("u-1", "laptop"))
+
+    as_user("u-1", jti="jti-abc").delete("/api/me/sessions/laptop", headers=_AUTH)
+
+    assert store.denied_jtis == []
+
+
+def test_revoke_one_device_writes_an_audit_event(
+    store: _Store, as_user: Callable[..., TestClient]
+) -> None:
+    """These routes are the stolen-laptop remediation surface, so the
+    intent has to leave a server-side signal like /auth/logout does."""
+    store.seed(_token("u-1", "laptop"))
+
+    as_user("u-1").delete("/api/me/sessions/laptop", headers=_AUTH)
+
+    assert store.audit_events == [
+        {
+            "event_type": "auth.session_revoke",
+            "actor_id": "u-1",
+            "details": {"role": "user", "device_id": "laptop", "revoked_rows": 1},
+        }
+    ]
+
+
+def test_revoke_all_sessions_writes_an_audit_event(
+    store: _Store, as_user: Callable[..., TestClient]
+) -> None:
+    store.seed(_token("u-1", "laptop"), _token("u-1", "phone"))
+
+    as_user("u-1", jti="jti-abc").delete("/api/me/sessions", headers=_AUTH)
+
+    assert store.audit_events == [
+        {
+            "event_type": "auth.session_revoke_all",
+            "actor_id": "u-1",
+            "details": {"role": "user", "revoked_rows": 2, "access_token_denied": True},
+        }
+    ]
+
+
+def test_a_failed_audit_write_does_not_fail_the_revocation(
+    store: _Store, as_user: Callable[..., TestClient]
+) -> None:
+    """The revoke has already been applied by then — failing the response
+    would tell the user the sign-out did not happen when it did."""
+    store.seed(_token("u-1", "laptop"))
+    store.audit_raises = True
+
+    r = as_user("u-1").delete("/api/me/sessions/laptop", headers=_AUTH)
+
+    assert r.status_code == 204
+    assert store.revoked_calls == [("u-1", "laptop")]
+
+
+def test_a_404_revoke_writes_no_audit_event(
+    store: _Store, as_user: Callable[..., TestClient]
+) -> None:
+    """Nothing happened, so nothing is recorded — the audit trail must
+    not fill with probes for device ids that were never the caller's."""
+    store.seed(_token("u-1", "laptop"))
+
+    assert as_user("u-2").delete("/api/me/sessions/laptop", headers=_AUTH).status_code == 404
+    assert store.audit_events == []
+
+
+# ----------------------------------------------------------------
+# The ownership boundary through the real auth path
+# ----------------------------------------------------------------
+#
+# Every test above overrides ``require_mgmt_user`` (as the five sibling
+# /api suites do) to vary ``sub`` cheaply. The 404-not-403 rule is the
+# security property of this router, though, so it also gets proven end
+# to end through the real validator with real signed tokens — no
+# dependency override — per the ``fastapi-route`` skill's "don't mock
+# auth; mock the AWS boundary" rule.
+
+
+def test_cross_user_revoke_is_404_with_a_real_signed_token(
+    store: _Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CHANNEL_JWT_SECRET", "test-secret-for-unit-tests")
+    from channel.auth.tokens import issue_mgmt_jwt
+
+    store.seed(_token("victim@example.com", "victim-laptop"))
+    attacker = issue_mgmt_jwt(
+        {
+            "user_id": "attacker@example.com",
+            "email": "attacker@example.com",
+            "display_name": "attacker",
+            "role": "user",
+        }
+    )
+
+    r = TestClient(app).delete(
+        "/api/me/sessions/victim-laptop",
+        headers={"Authorization": f"Bearer {attacker}"},
+    )
+
+    assert r.status_code == 404
+    assert store.revoked_calls == []
+    assert [row.device_id for row in store.rows["victim@example.com"]] == ["victim-laptop"]
+
+
+def test_a_real_token_only_lists_its_own_subjects_sessions(
+    store: _Store, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CHANNEL_JWT_SECRET", "test-secret-for-unit-tests")
+    from channel.auth.tokens import issue_mgmt_jwt
+
+    store.seed(
+        _token("victim@example.com", "victim-laptop"),
+        _token("attacker@example.com", "attacker-phone"),
+    )
+    attacker = issue_mgmt_jwt(
+        {
+            "user_id": "attacker@example.com",
+            "email": "attacker@example.com",
+            "display_name": "attacker",
+            "role": "user",
+        }
+    )
+
+    body = (
+        TestClient(app)
+        .get("/api/me/sessions", headers={"Authorization": f"Bearer {attacker}"})
+        .json()
+    )
+
+    assert [s["device_id"] for s in body["sessions"]] == ["attacker-phone"]

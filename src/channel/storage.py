@@ -1894,9 +1894,12 @@ def _query_user_refresh_rows(user_id: str, device_id: str | None = None) -> list
     **Ordering is oldest-first.** This helper does not set
     ``ScanIndexForward``, so DynamoDB's default ascending order applies
     — every caller here revokes the whole set, for which order is
-    irrelevant. #293 wants the reverse and must pass
-    ``ScanIndexForward=False`` explicitly; nothing about the index
-    makes newest-first automatic.
+    irrelevant, and nothing about the index makes newest-first
+    automatic. #293's session list, which does want newest-first, sorts
+    in Python inside :func:`list_live_refresh_tokens` rather than
+    passing ``ScanIndexForward=False`` here: this helper already walks
+    every page, and #293 groups the rows by ``device_id`` afterwards,
+    which would not preserve index order anyway.
 
     **This read is eventually consistent and cannot be made otherwise.**
     DynamoDB rejects ``ConsistentRead=True`` on a global secondary
@@ -1975,11 +1978,14 @@ def _revoke_refresh_family(
     apart and their outcomes are highly correlated, so this is a
     meaningful reduction, not two independent trials. It does not close
     the window, and no amount of sweeping would; closing it needs a
-    strongly-consistent family marker read on the consume path, which
-    belongs with the per-device session row #293 introduces. Until then
-    the honest contract is **best-effort with respect to concurrent
-    mints**, and the bound on the damage is that any surviving row
-    still expires at the family's unchanged ``absolute_expires_at``.
+    strongly-consistent family marker read on the consume path. #293 did
+    **not** add one — its sessions API is a read-and-revoke surface over
+    this same index and inherits the window (see
+    :func:`list_live_refresh_tokens`); a family marker is mint/consume-path
+    work and remains unbuilt. Until then the honest contract is
+    **best-effort with respect to concurrent mints**, and the bound on
+    the damage is that any surviving row still expires at the family's
+    unchanged ``absolute_expires_at``.
     """
 
     revoked = 0
