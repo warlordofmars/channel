@@ -121,18 +121,34 @@ def test_two_consumes_of_one_token_serialize_on_the_conditional_update(starter_t
     The second caller cannot also rotate: DynamoDB rejects its update
     with ``ConditionalCheckFailedException`` because ``revoked`` is no
     longer ``false``. Exactly one successor row exists afterwards.
+
+    Every assertion below goes through ``_get_refresh_row`` — a
+    strongly-consistent base-table point read — and none through
+    ``RefreshByUserIndex``. Inferring "no live rows remain" from a GSI
+    scan would be the exact mistake this module documents: the index is
+    eventually consistent, so it can omit a freshly-minted successor
+    and let the test pass while a live token still exists. The winner's
+    own result hands us the successor's hash, so no enumeration is
+    needed.
     """
     user_id = _user()
-    raw, _ = storage.mint_refresh_token(user_id=user_id, device_id="d-1")
+    raw, original = storage.mint_refresh_token(user_id=user_id, device_id="d-1")
 
     winner = storage.consume_refresh_token(raw)
     loser = storage.consume_refresh_token(raw)
 
     assert winner.outcome == RefreshConsumeOutcome.OK
+    assert winner.token is not None
     assert loser.outcome == RefreshConsumeOutcome.REUSED
     assert loser.raw_token is None
-    live = [r for r in storage._query_user_refresh_rows(user_id) if not r["revoked"]]
-    assert live == []
+
+    # Only the winner minted a successor, so exactly these two rows can
+    # exist for this device — and both must now be dead.
+    first = storage._get_refresh_row(original.token_hash)
+    successor = storage._get_refresh_row(winner.token.token_hash)
+    assert first is not None and successor is not None
+    assert first.revoked and first.revoked_reason == RefreshRevokeReason.ROTATED
+    assert successor.revoked and successor.revoked_reason == RefreshRevokeReason.REUSE_DETECTED
 
 
 def test_reuse_detection_revokes_every_live_row_for_that_device(starter_table) -> None:  # type: ignore[no-untyped-def]
