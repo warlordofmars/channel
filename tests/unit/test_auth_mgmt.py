@@ -566,6 +566,20 @@ def test_mgmt_login_desktop_bypass_skipped_when_CHANNEL_DESKTOP_DEV_EMAIL_unset(
 # (whose ``__globals__`` is that dict) observe the new value — which is what
 # lets the route-level tests below exercise the real request path.
 #
+# Two consequences of reloading a module that ``app`` already mounted:
+#   - ``mgmt_auth.router`` is rebound to a *fresh* APIRouter while ``app``
+#     keeps routes from the pre-reload object. Harmless here (nothing
+#     re-includes the router), but a future test that re-includes it or
+#     asserts route identity must not assume the two are the same object.
+#   - ``mgmt_auth`` imports state_store as a *module*
+#     (``from channel.auth import state_store``), so reload rebinds to the
+#     same object the autouse ``_fake_state_store`` fixture patched and the
+#     fall-through tests stay offline. If that import is ever narrowed to
+#     ``from channel.auth.state_store import put_state``, reload would pick
+#     up the real function and these tests would reach DynamoDB — hence the
+#     explicit "state was persisted" assertion below, which fails loudly
+#     rather than silently going live.
+#
 # These tests deliberately pin the module-level expression rather than a
 # helper: the regression being guarded is precisely that line reverting to
 # ``bool(os.environ.get(...))``, under which "0" and "false" would silently
@@ -629,7 +643,9 @@ def test_bypass_disabled_for_every_value_other_than_one(value, bypass_env):
     assert bypass_env(value) is False
 
 
-def test_login_with_test_email_is_refused_when_flag_is_zero(bypass_env, monkeypatch):
+def test_login_with_test_email_is_refused_when_flag_is_zero(
+    bypass_env, monkeypatch, _fake_state_store
+):
     """?test_email= must NOT mint a synthetic JWT when the flag is "0"."""
     monkeypatch.setenv("GOOGLE_CLIENT_ID", "test-google-id")
     bypass_env("0")
@@ -638,6 +654,10 @@ def test_login_with_test_email_is_refused_when_flag_is_zero(bypass_env, monkeypa
 
     assert resp.status_code == 302
     assert "accounts.google.com" in resp.headers["location"]
+    # The request fell through to the real Google path far enough to persist
+    # OAuth state — and it landed in the fake store, confirming the reloaded
+    # module still writes through the patched state_store rather than DynamoDB.
+    assert len(_fake_state_store) == 1
 
 
 def test_login_with_test_email_still_works_when_flag_is_one(bypass_env, monkeypatch):
