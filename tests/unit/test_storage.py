@@ -3995,3 +3995,30 @@ def test_list_messages_unsummarized_respects_the_limit(table: FakeTable) -> None
     # Oldest-first and bounded — successive passes walk covers_through
     # forward until the backlog is drained.
     assert [m.text for m in got] == ["m0", "m1", "m2"]
+
+
+def test_list_messages_unsummarized_limit_is_exact_despite_boundary_rows(
+    table: FakeTable,
+) -> None:
+    """``limit`` counts rows the CALLER gets.
+
+    DynamoDB applies ``Limit`` before the inclusive ``between`` boundary
+    rows are stripped, so a naive pass-through would return ``limit - 1``
+    whenever ``after_sk`` is a real message key (the normal case once a
+    summary exists). The query over-fetches by two and slices back down.
+    """
+
+    chat = create_chat(user_id="u-1", title=None, model_default="m")
+    msgs = [
+        put_message(chat_id=chat.chat_id, role=MessageRole.USER, text=f"m{i}", model=None)
+        for i in range(10)
+    ]
+
+    got = list_messages_unsummarized(
+        chat.chat_id,
+        after_sk=message_sk(msgs[0]),  # a REAL row — consumes a Limit slot
+        before_sk=message_sk(msgs[9]),
+        limit=3,
+    )
+
+    assert [m.text for m in got] == ["m1", "m2", "m3"]

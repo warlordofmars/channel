@@ -399,6 +399,12 @@ def list_messages_unsummarized(
     chat". Bounded by ``limit``: an oversized backlog is folded in over
     successive turns as ``covers_through`` walks forward, so a chat that
     jumps far past the budget in one step still converges.
+
+    ``limit`` counts rows the CALLER gets. DynamoDB applies ``Limit``
+    before this function strips the two inclusive ``between`` boundary
+    rows, so the query over-fetches by exactly those two and the result
+    is sliced back down — otherwise a pass asking for 100 could return
+    98 and the bound would silently under-deliver.
     """
 
     lower = after_sk or _MESSAGE_SK_FLOOR
@@ -408,16 +414,18 @@ def list_messages_unsummarized(
         KeyConditionExpression=(
             Key("PK").eq(f"CHAT#{chat_id}") & Key("SK").between(lower, before_sk)
         ),
-        Limit=limit,
+        Limit=limit + 2,
         ScanIndexForward=True,
     )
     # ``between`` is inclusive on both ends; the range we want is open,
-    # so drop the boundary rows themselves.
-    return [
+    # so drop the boundary rows themselves, then honour the caller's
+    # bound exactly.
+    kept = [
         _message_from_item(item)
         for item in (result.get("Items") or [])
         if item["SK"] != lower and item["SK"] != before_sk
     ]
+    return kept[:limit]
 
 
 def update_chat_index(

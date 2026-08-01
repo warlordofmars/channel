@@ -124,6 +124,13 @@ _HISTORY_TOKEN_BUDGET = 64_000
 # Hard sanity cap on rows read per turn, independent of the token
 # budget. Also the signal that a window MAY have slid without the token
 # budget firing (see ``_apply_history_token_budget``).
+#
+# Raising this from the old fixed 100 does NOT make short chats more
+# expensive to read: a DynamoDB Query returns at most ``Limit`` items OR
+# 1 MB, whichever comes first, and is billed on bytes actually read — a
+# 10-message chat reads 10 rows whether Limit is 100 or 500. The extra
+# read cost lands only on chats that genuinely hold more than 100 turns,
+# which is exactly the case this issue exists to serve.
 _HISTORY_MAX_MESSAGES = 500
 
 # Chars per estimated token. Crude on purpose — see above.
