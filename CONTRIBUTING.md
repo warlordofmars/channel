@@ -1,4 +1,4 @@
-# Contributing to AgentCore Starter
+# Contributing to Channel
 
 Thanks for your interest in contributing! This guide covers local dev setup, the test workflow, and how to open a PR.
 
@@ -13,7 +13,7 @@ Thanks for your interest in contributing! This guide covers local dev setup, the
 
 ```bash
 git clone <your-fork>
-cd agentcore-starter
+cd channel
 
 # Python deps (creates .venv automatically)
 uv sync --all-extras
@@ -32,8 +32,8 @@ uv run inv install-hooks
 uv run inv dev
 
 # Or start the API manually (port 8001)
-STARTER_BYPASS_GOOGLE_AUTH=1 \
-uv run uvicorn starter.api.main:app --port 8001 --reload
+CHANNEL_BYPASS_GOOGLE_AUTH=1 \
+uv run uvicorn channel.api.main:app --port 8001 --reload
 
 # React UI (port 5173)
 cd ui && npm run dev

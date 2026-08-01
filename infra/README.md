@@ -1,6 +1,6 @@
 # Infrastructure
 
-AWS CDK (Python) stack that provisions all Channel resources. Defined in `stacks/starter_stack.py`.
+AWS CDK (Python) stack that provisions all Channel resources. Defined in `stacks/channel_stack.py`.
 
 ## Resources created
 
@@ -40,7 +40,7 @@ The Lambda package is built inside a Docker container (the Lambda Python 3.12 bu
 1. Install `uv` via pip
 2. `uv export --no-group dev --no-group infra` → `/tmp/requirements.txt` (runtime deps only)
 3. `pip install -r /tmp/requirements.txt -t /asset-output`
-4. `cp -r src/starter /asset-output/starter`
+4. `cp -r src/channel /asset-output/channel`
 
 The `dev` and `infra` dependency groups are excluded to keep the Lambda package under the 250 MB limit.
 
@@ -120,7 +120,7 @@ All Lambda configuration is via environment variables set in the CDK stack:
 
 | Variable | Set by | Description |
 |---|---|---|
-| `STARTER_TABLE_NAME` | CDK | DynamoDB table name |
-| `STARTER_ISSUER` | CDK | JWT issuer URL |
-| `STARTER_JWT_SECRET_PARAM` | (optional) | SSM parameter name for JWT secret (defaults to `/channel/jwt-secret`) |
+| `CHANNEL_TABLE_NAME` | CDK | DynamoDB table name |
+| `CHANNEL_ISSUER` | CDK | JWT issuer URL |
+| `CHANNEL_JWT_SECRET_PARAM` | (optional) | SSM parameter name for JWT secret (defaults to `/channel/jwt-secret`) |
 | `DYNAMODB_ENDPOINT` | (local only) | Override DynamoDB endpoint for local development |
