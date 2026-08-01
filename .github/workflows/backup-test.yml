@@ -164,16 +164,32 @@ jobs:
           # app unable to serve the query paths that depend on it (e.g.
           # RefreshByUserIndex powers per-device refresh-token family revoke),
           # which an item-count check alone cannot detect.
+          # The `|| `[]`` guard matters: on a table with no GSIs the
+          # GlobalSecondaryIndexes key is absent entirely, and an unguarded
+          # `sort(Table.GlobalSecondaryIndexes[].IndexName)` aborts with
+          # "In function sort(), invalid type for value: None" — a cryptic
+          # failure of exactly the kind this workflow's preflights exist to
+          # eliminate. The guard yields an empty list instead.
           SOURCE_GSIS=$(aws dynamodb describe-table \
             --table-name "$SOURCE_TABLE" \
-            --query 'sort(Table.GlobalSecondaryIndexes[].IndexName)' \
+            --query 'sort((Table.GlobalSecondaryIndexes || `[]`)[].IndexName)' \
             --output text)
           RESTORED_GSIS=$(aws dynamodb describe-table \
             --table-name "$RESTORE_TABLE" \
-            --query 'sort(Table.GlobalSecondaryIndexes[].IndexName)' \
+            --query 'sort((Table.GlobalSecondaryIndexes || `[]`)[].IndexName)' \
             --output text)
           echo "Source GSIs:   $SOURCE_GSIS"
           echo "Restored GSIs: $RESTORED_GSIS"
+
+          # Guard against a vacuous pass: the Channel schema always defines
+          # GSIs, so an empty source list means describe-table returned
+          # something unexpected and the parity comparison below would
+          # succeed without asserting anything.
+          if [ -z "$SOURCE_GSIS" ]; then
+            echo "::error::Source table '$SOURCE_TABLE' reports no GSIs — the Channel schema always defines several, so this is not a valid baseline to compare against."
+            exit 1
+          fi
+
           if [ "$SOURCE_GSIS" != "$RESTORED_GSIS" ]; then
             echo "::error::GSI parity check failed — the restored table's indexes do not match the source."
             echo "Expected: $SOURCE_GSIS"
