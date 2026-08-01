@@ -1491,4 +1491,48 @@ html.is-electron-mac .sb-top {
   /* ----- conversation full-width w/ mobile padding ----- */
   .convo-inner { padding: 14px 14px 32px; }
   .bottom-composer { padding: 0 12px 14px; }
+
+  /* ----- standalone safe areas (installable PWA, Tier 2 of #125, #437) -----
+
+     Self-contained sub-block, appended last inside the mobile section so a
+     parallel edit to the rules above (e.g. PR #430's `.home` padding dedup)
+     rebases cleanly.
+
+     index.html sets `viewport-fit=cover` +
+     `apple-mobile-web-app-status-bar-style: black-translucent`, so an
+     installed standalone window draws *under* the notch / Dynamic Island and
+     the home indicator. Without the insets below, the hamburger sits behind
+     the status bar and the composer behind the home indicator.
+
+     `env(safe-area-inset-*)` resolves to 0 in an ordinary browser tab and on
+     every non-notched device, so each `max()` collapses to the value already
+     set above and each `calc()` collapses to the bare pixel value —
+     in-browser mobile rendering is unchanged, and the whole block is behind
+     the 640px media query so desktop never sees it. ----- */
+  .mobile-topbar {
+    height: calc(52px + env(safe-area-inset-top));
+    padding-top: env(safe-area-inset-top);
+    padding-left: max(8px, env(safe-area-inset-left));
+    padding-right: max(8px, env(safe-area-inset-right));
+  }
+  /* The drawer is `position: fixed; top: 0; bottom: 0`, so it spans the full
+     screen height including both unsafe strips. */
+  .sb {
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+    padding-left: env(safe-area-inset-left);
+  }
+  .home {
+    padding-left: max(12px, env(safe-area-inset-left));
+    padding-right: max(12px, env(safe-area-inset-right));
+  }
+  .convo-inner {
+    padding-left: max(14px, env(safe-area-inset-left));
+    padding-right: max(14px, env(safe-area-inset-right));
+  }
+  .bottom-composer {
+    padding-bottom: calc(14px + env(safe-area-inset-bottom));
+    padding-left: max(12px, env(safe-area-inset-left));
+    padding-right: max(12px, env(safe-area-inset-right));
+  }
 }
