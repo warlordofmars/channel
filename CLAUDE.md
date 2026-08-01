@@ -158,6 +158,32 @@ token is stored client-side in `localStorage` under the
   revoked session is rejected; `ttl` = the denied token's own `exp` so
   the row self-prunes exactly when the token would have expired anyway,
   keeping the denylist bounded by the live-token set — #240)
+- Refresh-token items: `PK=REFRESH#{sha256(raw_token)}`, `SK=META`
+  (one row per refresh token; **the raw token is never persisted** —
+  the row keys off its SHA-256 hex digest, so a database disclosure
+  yields no usable credential. Carries `user_id`, `device_id`,
+  `issued_at`, `last_used_at`, plus two independent expiry columns:
+  `absolute_expires_at` (30 days, fixed at login, carried forward
+  unchanged by every rotation) and `idle_expires_at` (7 days, renewed
+  on each rotation). `ttl` = `absolute_expires_at` as integer Unix
+  seconds so a whole token-family self-prunes together. Hard rotation:
+  `consume_refresh_token` flips the presented row to `revoked=True` /
+  `revoked_reason=rotated` via a **conditional `update_item`**
+  (`attribute_exists(PK) AND #revoked = :live`) and mints a successor —
+  the condition is what makes concurrent consumes serialize. Revoked
+  ancestors are kept until TTL because they are what makes reuse
+  detection possible: re-presenting a `rotated` row is the OAuth 2.1
+  breach signal (RFC 9700 §4.14.2) and revokes the entire device
+  token-family. Rows revoked for any other reason (`logout`,
+  `user_revoked`, `reuse_detected`) are an already-dead family and do
+  not re-arm the cascade. **Known window:** family revocation reads
+  `RefreshByUserIndex`, and DynamoDB refuses `ConsistentRead` on a GSI,
+  so a row minted inside the index-propagation window can survive a
+  cascade — the reuse path sweeps twice to narrow this, which does not
+  close it. Closing it needs a strongly-consistent per-device family
+  marker checked on consume; that belongs with the session row #293
+  introduces. Damage is bounded by the family's unchanged
+  `absolute_expires_at` — #290, epic #241)
 - Chat-index items: `PK=USER#{user_id}`, `SK=CHAT#{created_at}#{chat_id}`
   (one row per chat; sortable so the Recents query is a single
   `Query(ScanIndexForward=False)`; also projects onto `ChatByIdIndex`)
@@ -203,6 +229,15 @@ token is stored client-side in `localStorage` under the
   - `AssetOwnerIndex` — `PK=ASSETOWNER#{owner}`,
     `SK={created_at}#{asset_id}` (sparse; only asset rows project onto
     it; powers the cross-chat asset browse view, newest first)
+  - `RefreshByUserIndex` — `GSI5PK=REFRESH_USER#{user_id}`,
+    `GSI5SK={issued_at}#{token_hash[:16]}` (sparse; only refresh rows
+    project onto it; powers per-device family revoke, "sign out
+    everywhere", and the #293 sessions list. GSI5 was the next free
+    numbered slot — GSI3 is `ChatByIdIndex`, GSI4 is `UserEmailIndex`,
+    and `AssetOwnerIndex` uses semantic `owner_pk`/`owner_sk` names
+    rather than a numbered pair. Per-device narrowing is a
+    `FilterExpression` on `device_id`, not a sharper key, so the sort
+    key stays time-ordered for the sessions list)
 
 ## Asset producers (#326, epic #321)
 

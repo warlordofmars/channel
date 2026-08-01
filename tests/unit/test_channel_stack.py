@@ -358,6 +358,57 @@ def test_table_declares_owner_key_attributes_as_strings(dev_template):
     assert attrs.get("owner_sk") == "S"
 
 
+# ----------------------------------------------------------------
+# Refresh tokens (#290, epic #241) — per-user lookup GSI
+# ----------------------------------------------------------------
+
+
+def test_table_has_refresh_by_user_index(dev_template):
+    """RefreshByUserIndex must exist on the GSI5PK/GSI5SK slot (#290).
+
+    GSI3 is ChatByIdIndex and GSI4 is UserEmailIndex; AssetOwnerIndex
+    deliberately uses semantic ``owner_pk``/``owner_sk`` names rather
+    than a numbered slot (#324), which left GSI5 free. Asserting the
+    exact key schema here is what stops a future index from silently
+    reusing the slot and colliding with refresh rows.
+    """
+
+    gsis = _single_table(dev_template)["Properties"]["GlobalSecondaryIndexes"]
+    by_name = {g["IndexName"]: g for g in gsis}
+    assert "RefreshByUserIndex" in by_name, f"RefreshByUserIndex missing; found {sorted(by_name)}"
+    index = by_name["RefreshByUserIndex"]
+    assert index["KeySchema"] == [
+        {"AttributeName": "GSI5PK", "KeyType": "HASH"},
+        {"AttributeName": "GSI5SK", "KeyType": "RANGE"},
+    ]
+    # Projection ALL: #293's session list reads device_id / issued_at /
+    # last_used_at straight off the index, and the revoke helpers need
+    # token_hash + revoked without a base-table round trip per row.
+    assert index["Projection"]["ProjectionType"] == "ALL"
+
+
+def test_table_declares_gsi5_key_attributes_as_strings(dev_template):
+    attrs = {
+        a["AttributeName"]: a["AttributeType"]
+        for a in _single_table(dev_template)["Properties"]["AttributeDefinitions"]
+    }
+    assert attrs.get("GSI5PK") == "S"
+    assert attrs.get("GSI5SK") == "S"
+
+
+def test_table_ttl_attribute_covers_refresh_row_expiry(dev_template):
+    """Refresh rows self-prune via the table-wide ``ttl`` attribute (#290).
+
+    ``_refresh_item`` writes ``ttl`` as the absolute expiry in integer
+    Unix seconds; that only prunes anything if the table's TTL
+    specification names exactly that attribute.
+    """
+
+    spec = _single_table(dev_template)["Properties"]["TimeToLiveSpecification"]
+    assert spec["AttributeName"] == "ttl"
+    assert spec["Enabled"] is True
+
+
 def _actions_touching_resource_substring(template: assertions.Template, needle: str) -> set[str]:
     """Collect every IAM action from statements whose Resource JSON
     mentions ``needle``. CDK renders prefix-scoped bucket grants as

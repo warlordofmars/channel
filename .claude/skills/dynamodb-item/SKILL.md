@@ -63,6 +63,38 @@ Two patterns to avoid:
   in the same partition, sort order breaks. Pick one per partition
   and stick to it.
 
+### 1.1 When the id IS a credential, hash it
+
+Some row families are keyed by a secret the caller presents —
+refresh tokens today, API keys or share links later. Those key off
+the **SHA-256 hex digest**, never the secret itself:
+
+```python
+PK = f"REFRESH#{hashlib.sha256(raw_token.encode('utf-8')).hexdigest()}"
+```
+
+Lookup still works (the presenter supplies the secret, you hash it
+and point-read), but a table dump, a PITR restore, a CloudWatch
+export, or a stray log line yields nothing usable. Same instinct as
+the app-layer KMS encryption on `MCPTOKEN#` rows, one notch stronger
+— a hash has no key to leak.
+
+Three rules:
+
+- **Plain SHA-256, not a password KDF.** These inputs are ≥128 bits
+  of CSPRNG output, so there is no dictionary to attack and bcrypt /
+  argon2 would only add latency to a hot path. Reach for a KDF only
+  when the input is human-chosen.
+- **The plaintext exists in exactly one place: the return value of
+  the mint helper.** Hand it to the client and drop it — no log
+  line, no audit row, no sibling attribute.
+  `storage.mint_refresh_token` is the reference implementation, and
+  a unit test asserts the plaintext is absent from the rendered row.
+- **Revoke by flag, not by delete.** Keep the row with a boolean and
+  a reason. The tombstone is what makes reuse detection possible —
+  a deleted row is indistinguishable from one that never existed
+  (see the `REFRESH#` entry in §2).
+
 ## 2. Prefix taxonomy
 
 Current item families in the single table (canonical list — mirrors
@@ -77,6 +109,7 @@ aren't yet documented in CLAUDE.md; keep the two in sync):
 | `USER#{user_id}` | `META` | User record | no | Would surface on `UserEmailIndex` via `GSI4PK=EMAIL#{email}`, but no current `src/channel/` code sets `GSI4PK` (the index is provisioned, not yet written). |
 | `MGMT_STATE#{state}` | `META` | Google OAuth state parameter | yes | Short single-use TTL. |
 | `DENY#{jti}` | `META` | JWT revocation denylist | yes | Point-read by the mgmt JWT's `jti`; written on `/auth/logout`; `ttl` = the denied token's own `exp` so the row self-prunes (#240). |
+| `REFRESH#{sha256(raw_token)}` | `META` | Refresh-token row (one per token) | yes | **Raw token never persisted** — keyed by its SHA-256 digest (§1.1). Two expiry columns: `absolute_expires_at` (30d, fixed at login, carried forward unchanged by rotation) and `idle_expires_at` (7d, renewed per rotation); `ttl` = absolute expiry so a whole family prunes together. Hard rotation via conditional `update_item` (`attribute_exists(PK) AND #revoked = :live`) — that condition is what serializes concurrent consumes. Revoked ancestors are retained until TTL because re-presenting a `revoked_reason=rotated` row is the OAuth 2.1 reuse signal (RFC 9700 §4.14.2) and revokes the device's whole token-family. Projects onto `RefreshByUserIndex` via `GSI5PK`/`GSI5SK` (#290, epic #241). |
 | `USER#{user_id}` | `CHAT#{created_at}#{chat_id}` | Chat-index row (one per chat) | no | Sortable so Recents is a single `Query(ScanIndexForward=False)`; projects onto `ChatByIdIndex`. |
 | `CHAT#{chat_id}` | `MSG#{created_at}#{msg_id}` | Chat message row (one per turn) | no | UUID suffix avoids same-microsecond collisions across Lambda instances. |
 | `IDEMP#{user_id}` | `{key}` | Idempotency reservation | yes | TTL = 1h after reserve; streaming POST replay short-circuit. |
@@ -185,8 +218,8 @@ peak.
 
 ## 5. GSI naming and the GSIxPK convention
 
-The table defines five GSIs. The four numbered indexes name their
-partition/sort attributes by slot (`GSI1PK`…`GSI4PK`); the asset
+The table defines six GSIs. The five numbered indexes name their
+partition/sort attributes by slot (`GSI1PK`…`GSI5PK`); the asset
 index uses named attributes. The authoritative shape lives in
 `src/channel/_table_schema.py` (mirrored into
 `infra/stacks/channel_stack.py` for production):
@@ -197,7 +230,14 @@ index uses named attributes. The authoritative shape lives in
 | `TagIndex` (GSI2) | `GSI2PK` | `GSI2SK` | Generic secondary index; not projected by any current row family. |
 | `ChatByIdIndex` (GSI3) | `GSI3PK` | `GSI3SK` | Direct chat-id → chat-index-row lookup. Chat-index rows set `GSI3PK=CHAT_ID#{chat_id}`, `GSI3SK=META`. Sparse. |
 | `UserEmailIndex` (GSI4) | `GSI4PK` | — | User lookup by email. **Provisioned but not yet written by any `src/channel/` code** — a writer would set `GSI4PK=EMAIL#{email}` on the `USER#` row to project it. |
+| `RefreshByUserIndex` (GSI5) | `GSI5PK` | `GSI5SK` | A user's refresh rows — per-device family revoke, sign-out-everywhere, and the #293 sessions list. Refresh rows set `GSI5PK=REFRESH_USER#{user_id}`, `GSI5SK={issued_at}#{token_hash[:16]}`. Sparse. |
 | `AssetOwnerIndex` | `owner_pk` | `owner_sk` | Cross-chat asset browse, newest first. Asset rows set `owner_pk=ASSETOWNER#{owner}`, `owner_sk={created_at}#{asset_id}`. Sparse. |
+
+Slot numbering is **not** declaration order — `ChatByIdIndex` holds
+the GSI3 slot while being declared fourth in both files, and
+`AssetOwnerIndex` skipped the numbering entirely (which is why GSI5
+was still free when #290 needed it). Read the attribute names; never
+infer a slot from position.
 
 To put an item on a GSI, set the matching attribute(s) on the item:
 
@@ -226,18 +266,49 @@ Conventions:
 
 - **GSI naming.** `<Domain>Index` (PascalCase, "Index" suffix).
   Existing examples: `ChatByIdIndex`, `UserEmailIndex`,
-  `AssetOwnerIndex`.
+  `AssetOwnerIndex`, `RefreshByUserIndex`.
+- **Numbered slots by default.** Take the next free
+  `GSI{n}PK` / `GSI{n}SK` pair unless the attribute name itself
+  carries meaning — `AssetOwnerIndex` uses `owner_pk`/`owner_sk`
+  because the settled #321 design makes the workspace-tenancy
+  migration a one-attribute swap (§8). That's the exception, not
+  the pattern.
 - **Sparse indexes are fine.** Items without the matching GSI key
   attribute simply do not appear on that GSI. This is the standard
   way to scope an index to a subset of item types (only chat-index
-  rows carry `GSI3PK`; only asset rows carry `owner_pk`).
-- **Adding a new GSI is an infra change — in two places.** Declare
-  the index in **both** `src/channel/_table_schema.py` (so
-  DynamoDB Local and the integration suite get it) **and**
-  `infra/stacks/channel_stack.py` (so the deployed table gets it),
-  then add the storage code that writes the GSI keys. New GSI →
-  per-environment migration; coordinate via a dedicated PR if
-  prod data exists.
+  rows carry `GSI3PK`; only refresh rows carry `GSI5PK`; only asset
+  rows carry `owner_pk`).
+- **GSI reads are eventually consistent — always, unavoidably.**
+  DynamoDB rejects `ConsistentRead=True` on an index query, so a row
+  written moments ago may not be projected yet. Never build a
+  correctness- or security-critical invariant on "the index returned
+  everything": a base-table point read (`ConsistentRead=True`) is the
+  only strongly-consistent access this table has. Where a security
+  path has to sweep an index anyway — `storage._revoke_refresh_family`
+  is the live example — say so in the docstring, bound the damage, and
+  don't let the caller believe the sweep is exhaustive.
+- **A `FilterExpression` often beats a second index.** When the
+  narrower query runs over a small partition, filter rather than
+  add a GSI: `RefreshByUserIndex` keys on `user_id` alone and
+  filters on `device_id`, which leaves the sort key free to be
+  `{issued_at}#{hash prefix}` — time-ordered for the sessions list,
+  and one index instead of two.
+- **Adding a new GSI is an infra change — in two places, plus two
+  assertions.** Declare the index in **both**
+  `src/channel/_table_schema.py` (so DynamoDB Local and the
+  integration suite get it) **and** `infra/stacks/channel_stack.py`
+  (so the deployed table gets it); assert its key schema in
+  `tests/unit/test_table_schema.py` and
+  `tests/unit/test_channel_stack.py`; then add the storage code
+  that writes the GSI keys. Declaring it in only one of the two
+  files yields a suite that passes locally and a
+  `ValidationException` in AWS, or the reverse.
+- **New GSI → a real schema migration.** CloudFormation applies at
+  most one GSI addition per stack update, and backfill is
+  asynchronous: the index sits in `CREATING` for a while after the
+  deploy reports success. Never ship a read path that assumes the
+  index is queryable the instant the stack update finishes, and
+  coordinate via a dedicated PR when prod data exists.
 
 ## 6. Table name source
 

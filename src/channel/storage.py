@@ -4,10 +4,13 @@
 Single-table design with these row families:
 - Chat-index row  ``PK=USER#{u}, SK=CHAT#{created_at}#{chat_id}``
 - Message row     ``PK=CHAT#{chat_id}, SK=MSG#{created_at}#{msg_id}``
+- Refresh row     ``PK=REFRESH#{sha256(token)}, SK=META``
 
 The chat-index row also projects onto the ``ChatByIdIndex`` GSI
 (``GSI3PK=CHAT_ID#{chat_id}, GSI3SK=META``) so direct chat-id lookups
-don't have to know the original ``created_at``.
+don't have to know the original ``created_at``. Refresh rows project
+onto ``RefreshByUserIndex`` (``GSI5PK=REFRESH_USER#{user_id}``) so a
+user's whole session set is one Query.
 
 Tests inject a fake table via the module-level ``_get_table`` symbol; in
 production it returns the real boto3 ``Table`` resource.
@@ -16,8 +19,10 @@ production it returns the real boto3 ``Table`` resource.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import logging
 import os
+import secrets
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -31,6 +36,8 @@ from pydantic import ValidationError
 
 from channel.logging_config import fingerprint_id
 from channel.models import (
+    REFRESH_ABSOLUTE_LIFETIME_SECONDS,
+    REFRESH_IDLE_TIMEOUT_SECONDS,
     Asset,
     Attachment,
     Chat,
@@ -45,6 +52,10 @@ from channel.models import (
     Message,
     MessageRole,
     Prefs,
+    RefreshConsumeOutcome,
+    RefreshConsumeResult,
+    RefreshRevokeReason,
+    RefreshToken,
 )
 
 logger = logging.getLogger(__name__)
@@ -1694,6 +1705,500 @@ def is_jti_denied(jti: str) -> bool:
         ConsistentRead=True,
     )
     return "Item" in resp
+
+
+# ----------------------------------------------------------------
+# Refresh-token rows (#290) — foundation of the epic-#241 rework
+# ----------------------------------------------------------------
+
+_REFRESH_USER_GSI = "RefreshByUserIndex"
+
+# 32 bytes = 256 bits of entropy, per the epic's "opaque 256-bit random
+# string (NOT a JWT)" decision. ``token_urlsafe`` renders that as 43
+# URL-safe characters, so the token survives a cookie / JSON body / URL
+# fragment untouched.
+_REFRESH_TOKEN_BYTES = 32
+
+# How much of the SHA-256 digest disambiguates the GSI sort key. The
+# sort key is ``{issued_at}#{prefix}``; ``issued_at`` already has
+# microsecond resolution, so 64 bits of hash is far more than enough to
+# keep two same-instant mints from colliding.
+_REFRESH_HASH_PREFIX_LEN = 16
+
+# Safety valve on the per-user GSI walk. A user's refresh rows are
+# bounded (one family per device, one row per rotation, all pruned by
+# the shared 30-day ttl), so hitting this means something is wrong —
+# log loudly rather than spin.
+_REFRESH_QUERY_MAX_PAGES = 25
+
+# Sweeps the adversarial revoke paths make over a family — reuse
+# detection and "sign out everywhere". ``RefreshByUserIndex`` is
+# eventually consistent (no ConsistentRead on a GSI), so a single pass
+# can miss a row minted moments earlier; a second pass usually catches
+# it. See _revoke_refresh_family for what this does and does not
+# guarantee. Ordinary logout keeps one sweep — it doesn't race an
+# adversary.
+_REFRESH_ADVERSARIAL_SWEEPS = 2
+
+# Revoke only rows that are still live. ``revoked`` is aliased because
+# expression attribute names are the cheap way to stay clear of
+# DynamoDB's reserved-word list without having to audit it.
+_REFRESH_STILL_LIVE = "attribute_exists(PK) AND #revoked = :live"
+
+
+def _refresh_token_hash(raw_token: str) -> str:
+    """SHA-256 hex digest of a raw refresh token — the row's identity.
+
+    This is the ONLY form of the token that ever reaches storage. Plain
+    SHA-256 (not a password KDF) is correct here: the input is 256 bits
+    of CSPRNG output, so there is no dictionary to attack and stretching
+    would only add latency to every refresh.
+    """
+
+    return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+
+
+def _refresh_pk(token_hash: str) -> str:
+    return f"REFRESH#{token_hash}"
+
+
+def _refresh_gsi_pk(user_id: str) -> str:
+    return f"REFRESH_USER#{user_id}"
+
+
+def _refresh_gsi_sk(issued_at: str, token_hash: str) -> str:
+    return f"{issued_at}#{token_hash[:_REFRESH_HASH_PREFIX_LEN]}"
+
+
+def _refresh_item(token: RefreshToken) -> dict[str, Any]:
+    """Render a :class:`RefreshToken` as its DynamoDB row.
+
+    ``ttl`` is the absolute expiry as integer Unix seconds (DynamoDB's
+    TTL service ignores anything else), so every row in a family —
+    including the revoked ancestors kept around for reuse detection —
+    disappears at the same moment the session could no longer have been
+    refreshed anyway.
+    """
+
+    item: dict[str, Any] = {
+        "PK": _refresh_pk(token.token_hash),
+        "SK": "META",
+        "GSI5PK": _refresh_gsi_pk(token.user_id),
+        "GSI5SK": _refresh_gsi_sk(token.issued_at, token.token_hash),
+        "type": "REFRESH",
+        "token_hash": token.token_hash,
+        "user_id": token.user_id,
+        "device_id": token.device_id,
+        "issued_at": token.issued_at,
+        "last_used_at": token.last_used_at,
+        "absolute_expires_at": token.absolute_expires_at,
+        "idle_expires_at": token.idle_expires_at,
+        "revoked": token.revoked,
+        "ttl": int(_parse_iso_utc(token.absolute_expires_at).timestamp()),
+    }
+    if token.revoked_reason is not None:
+        item["revoked_reason"] = token.revoked_reason.value
+    if token.revoked_at is not None:
+        item["revoked_at"] = token.revoked_at
+    return item
+
+
+def _refresh_from_item(item: dict[str, Any]) -> RefreshToken:
+    reason = item.get("revoked_reason")
+    return RefreshToken(
+        token_hash=item["token_hash"],
+        user_id=item["user_id"],
+        device_id=item["device_id"],
+        issued_at=item["issued_at"],
+        last_used_at=item["last_used_at"],
+        absolute_expires_at=item["absolute_expires_at"],
+        idle_expires_at=item["idle_expires_at"],
+        revoked=bool(item.get("revoked", False)),
+        revoked_reason=RefreshRevokeReason(reason) if reason else None,
+        revoked_at=item.get("revoked_at"),
+    )
+
+
+def _get_refresh_row(token_hash: str) -> RefreshToken | None:
+    """Strongly-consistent point-read of one refresh row.
+
+    ``ConsistentRead`` for the same reason :func:`is_jti_denied` uses it:
+    a rotation that just wrote ``revoked=True`` must be visible to the
+    very next presentation of that token, or an eventually-consistent
+    replica would silently hand an attacker the replay window that
+    rotation exists to close.
+    """
+
+    resp = _get_table().get_item(
+        Key={"PK": _refresh_pk(token_hash), "SK": "META"},
+        ConsistentRead=True,
+    )
+    item = resp.get("Item")
+    return _refresh_from_item(item) if item else None
+
+
+def _mark_refresh_revoked(token_hash: str, reason: RefreshRevokeReason) -> bool:
+    """Atomically flip one live refresh row to revoked. Returns success.
+
+    The conditional ``update_item`` is what makes consume race-safe:
+    ``#revoked = :live`` means exactly one concurrent caller can win the
+    transition out of the live state, and the losers get
+    ``ConditionalCheckFailedException`` rather than both believing they
+    rotated the same token. ``attribute_exists(PK)`` additionally stops
+    DynamoDB from resurrecting a TTL-swept row as a ghost item holding
+    only the attributes this expression touches.
+
+    ``False`` means "the row was already not-live" (gone, or someone
+    else won) — never an error the caller needs to handle.
+    """
+
+    try:
+        _get_table().update_item(
+            Key={"PK": _refresh_pk(token_hash), "SK": "META"},
+            UpdateExpression=(
+                "SET #revoked = :revoked, revoked_reason = :reason, revoked_at = :now"
+            ),
+            ExpressionAttributeNames={"#revoked": "revoked"},
+            ExpressionAttributeValues={
+                ":revoked": True,
+                ":reason": reason.value,
+                ":now": _now_iso(),
+                ":live": False,
+            },
+            ConditionExpression=_REFRESH_STILL_LIVE,
+        )
+        return True
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            return False
+        raise
+
+
+def _query_user_refresh_rows(user_id: str, device_id: str | None = None) -> list[dict[str, Any]]:
+    """All refresh rows for a user (optionally one device) via the GSI.
+
+    ``device_id`` narrows with a ``FilterExpression`` rather than a
+    sharper key: the epic pins the sort key to ``{issued_at}#{prefix}``,
+    which keeps the index ordered by issue time so the per-user session
+    list (#293) can page it without a second index. A user's partition
+    holds at most a few hundred rows, so filtering server-side costs a
+    negligible amount of read capacity and keeps the index
+    single-purpose.
+
+    **Ordering is oldest-first.** This helper does not set
+    ``ScanIndexForward``, so DynamoDB's default ascending order applies
+    — every caller here revokes the whole set, for which order is
+    irrelevant. #293 wants the reverse and must pass
+    ``ScanIndexForward=False`` explicitly; nothing about the index
+    makes newest-first automatic.
+
+    **This read is eventually consistent and cannot be made otherwise.**
+    DynamoDB rejects ``ConsistentRead=True`` on a global secondary
+    index, so — unlike :func:`_get_refresh_row`, which reads the base
+    table strongly — a row written moments ago may not be projected
+    onto the index yet and will be absent here. Every caller revokes
+    what it finds, which makes family revocation **best-effort with
+    respect to concurrent mints**. See :func:`_revoke_refresh_family`
+    for how that window is narrowed and what remains open.
+    """
+
+    kwargs: dict[str, Any] = {
+        "IndexName": _REFRESH_USER_GSI,
+        "KeyConditionExpression": Key("GSI5PK").eq(_refresh_gsi_pk(user_id)),
+    }
+    if device_id is not None:
+        kwargs["FilterExpression"] = Attr("device_id").eq(device_id)
+
+    rows: list[dict[str, Any]] = []
+    cursor: dict[str, Any] | None = None
+    for _ in range(_REFRESH_QUERY_MAX_PAGES):
+        page = _get_table().query(**({**kwargs, "ExclusiveStartKey": cursor} if cursor else kwargs))
+        rows.extend(page.get("Items") or [])
+        cursor = page.get("LastEvaluatedKey")
+        if not cursor:
+            return rows
+    logger.warning(
+        "refresh.user_query_truncated user=%s pages=%d",
+        fingerprint_id(user_id),
+        _REFRESH_QUERY_MAX_PAGES,
+    )
+    return rows
+
+
+def _revoke_refresh_rows(rows: list[dict[str, Any]], reason: RefreshRevokeReason) -> int:
+    """Revoke every still-live row in ``rows``; return how many flipped.
+
+    Rows already revoked are skipped without a write, and a row that
+    loses the conditional race simply doesn't count — either way the
+    post-condition is the same: none of these rows is usable afterwards.
+    """
+
+    revoked = 0
+    for row in rows:
+        if row.get("revoked"):
+            continue
+        if _mark_refresh_revoked(row["token_hash"], reason):
+            revoked += 1
+    return revoked
+
+
+def _revoke_refresh_family(
+    user_id: str,
+    device_id: str | None,
+    reason: RefreshRevokeReason,
+    *,
+    sweeps: int = 1,
+) -> int:
+    """Query a user's (or one device's) refresh rows and revoke the live ones.
+
+    Returns the number of rows that flipped from live to revoked.
+
+    **Known window — read this before relying on the post-condition.**
+    The row set comes from ``RefreshByUserIndex``, and GSI reads are
+    eventually consistent by construction (DynamoDB does not accept
+    ``ConsistentRead`` on an index). A row minted between the last index
+    propagation and this query is invisible here and therefore survives.
+    Concretely: a rotation racing a revoke can leave the successor row
+    live, because its rotated ancestor is skipped (already revoked) and
+    the successor hasn't reached the index yet.
+
+    ``sweeps`` narrows that window for the security-critical callers: a
+    second pass runs after the first pass's writes, so a row that was
+    still propagating during pass 1 is usually caught by pass 2. Be
+    honest about how much that buys — the two passes are milliseconds
+    apart and their outcomes are highly correlated, so this is a
+    meaningful reduction, not two independent trials. It does not close
+    the window, and no amount of sweeping would; closing it needs a
+    strongly-consistent family marker read on the consume path, which
+    belongs with the per-device session row #293 introduces. Until then
+    the honest contract is **best-effort with respect to concurrent
+    mints**, and the bound on the damage is that any surviving row
+    still expires at the family's unchanged ``absolute_expires_at``.
+    """
+
+    revoked = 0
+    for _ in range(sweeps):
+        revoked += _revoke_refresh_rows(_query_user_refresh_rows(user_id, device_id), reason)
+    return revoked
+
+
+def mint_refresh_token(
+    *,
+    user_id: str,
+    device_id: str,
+    absolute_expires_at: str | None = None,
+) -> tuple[str, RefreshToken]:
+    """Create a refresh row for ``(user_id, device_id)``.
+
+    Returns ``(raw_token, row)``. The raw token is returned and never
+    stored — the row keys off its SHA-256 digest — so this return value
+    is the single point in the system where the plaintext exists.
+    Callers must hand it straight to the client and drop it.
+
+    ``absolute_expires_at`` carries a family's original deadline across
+    a rotation. Left ``None`` (the fresh-login case) it defaults to
+    :data:`REFRESH_ABSOLUTE_LIFETIME_SECONDS` from now. Rotation passes
+    the previous row's value so refreshing can never walk the absolute
+    lifetime forward — that property is the whole point of having an
+    absolute window alongside the idle one.
+    """
+
+    raw_token = secrets.token_urlsafe(_REFRESH_TOKEN_BYTES)
+    now = datetime.now(timezone.utc)
+    now_iso = now.isoformat(timespec="microseconds")
+    absolute = absolute_expires_at or (
+        now + timedelta(seconds=REFRESH_ABSOLUTE_LIFETIME_SECONDS)
+    ).isoformat(timespec="microseconds")
+    token = RefreshToken(
+        token_hash=_refresh_token_hash(raw_token),
+        user_id=user_id,
+        device_id=device_id,
+        issued_at=now_iso,
+        last_used_at=now_iso,
+        absolute_expires_at=absolute,
+        idle_expires_at=(now + timedelta(seconds=REFRESH_IDLE_TIMEOUT_SECONDS)).isoformat(
+            timespec="microseconds"
+        ),
+    )
+    _get_table().put_item(Item=_refresh_item(token))
+    return raw_token, token
+
+
+def consume_refresh_token(raw_token: str) -> RefreshConsumeResult:
+    """Exchange a refresh token for its successor — hard rotation (#290).
+
+    A token is consumable exactly once. On success the presented row is
+    flipped to ``revoked`` with reason
+    :attr:`~channel.models.RefreshRevokeReason.ROTATED` via a conditional
+    ``update_item`` and a fresh row is minted carrying the family's
+    unchanged ``absolute_expires_at`` and a renewed idle window.
+
+    **Reuse detection.** Presenting a token that was already rotated is
+    the OAuth 2.1 breach signal (RFC 9700 §4.14.2): either the client
+    replayed it or an attacker captured it, and the server cannot tell
+    which. The response is to revoke the entire device token-family, so
+    both the legitimate holder and the attacker are forced back through
+    login. Rows revoked for any *other* reason (logout, an earlier reuse
+    cascade) return :attr:`RefreshConsumeOutcome.REVOKED` instead — that
+    family is already dead and re-flagging it would inflate the #294
+    breach counter with noise.
+
+    The conditional-update loser lands on the same reuse path
+    deliberately. Two simultaneous consumes of one token are
+    indistinguishable at the server from a replay microseconds apart,
+    and epic #241 Q1 settles the trade-off in favour of hard rotation on
+    the server with single-flight in the SPA (#295) preventing the race
+    client-side. Treating the loser as a rejection would leave a real
+    replay silently tolerated whenever it arrived fast enough.
+
+    Both expiry columns are enforced, absolute before idle, so a session
+    that blew through its 30-day ceiling reports that rather than
+    whichever bound happened to be checked first.
+    """
+
+    token_hash = _refresh_token_hash(raw_token)
+    row = _get_refresh_row(token_hash)
+    if row is None:
+        return RefreshConsumeResult(outcome=RefreshConsumeOutcome.NOT_FOUND)
+
+    if row.revoked:
+        if row.revoked_reason != RefreshRevokeReason.ROTATED:
+            return RefreshConsumeResult(outcome=RefreshConsumeOutcome.REVOKED)
+        return _refresh_reuse_response(row)
+
+    now = datetime.now(timezone.utc)
+    if now >= _parse_iso_utc(row.absolute_expires_at):
+        return RefreshConsumeResult(outcome=RefreshConsumeOutcome.EXPIRED_ABSOLUTE)
+    if now >= _parse_iso_utc(row.idle_expires_at):
+        return RefreshConsumeResult(outcome=RefreshConsumeOutcome.EXPIRED_IDLE)
+
+    if not _mark_refresh_revoked(token_hash, RefreshRevokeReason.ROTATED):
+        return _refresh_race_loss_response(token_hash, row)
+
+    new_raw, new_row = mint_refresh_token(
+        user_id=row.user_id,
+        device_id=row.device_id,
+        absolute_expires_at=row.absolute_expires_at,
+    )
+    return RefreshConsumeResult(
+        outcome=RefreshConsumeOutcome.OK,
+        raw_token=new_raw,
+        token=new_row,
+    )
+
+
+def _refresh_race_loss_response(token_hash: str, row: RefreshToken) -> RefreshConsumeResult:
+    """Classify a lost conditional update by re-reading who won.
+
+    Failing ``#revoked = :live`` only says *someone* took the row out of
+    the live state — not who. Two very different things can have done
+    it, and reporting both as reuse would be wrong: a concurrent
+    *consume* is the replay-shaped case that should arm the cascade,
+    but a concurrent *revoke* (logout, or sign-out-everywhere) is the
+    user deliberately ending the session while a refresh was in flight.
+    Treating that second case as a breach would log a false
+    ``refresh.reuse_detected``, inflate #294's breach counter, and
+    overwrite the family's real ``revoked_reason`` — contradicting this
+    module's own rule that an already-dead family does not re-arm the
+    cascade.
+
+    So: re-read strongly-consistently and branch on who got there
+    first. The re-read is one point-read on a path that is already
+    exceptional, so it costs nothing in the normal case.
+    """
+
+    current = _get_refresh_row(token_hash)
+    if current is None:
+        # Swept by TTL between the read and the update. Nothing to
+        # rotate and no family worth cascading over.
+        return RefreshConsumeResult(outcome=RefreshConsumeOutcome.NOT_FOUND)
+    if current.revoked and current.revoked_reason != RefreshRevokeReason.ROTATED:
+        # A deliberate revoke won. The family is already dead for a
+        # known reason; leave that reason intact.
+        return RefreshConsumeResult(outcome=RefreshConsumeOutcome.REVOKED)
+    # A concurrent consume won: indistinguishable at the server from a
+    # replay arriving microseconds later, so it takes the reuse path
+    # (epic #241 Q1 — hard rotation on the server, single-flight in the
+    # SPA). Deliberately also the fallback for the can't-happen case
+    # where the row reads back live, since a token we failed to claim
+    # is not a token we may hand out a successor for.
+    return _refresh_reuse_response(row)
+
+
+def _refresh_reuse_response(row: RefreshToken) -> RefreshConsumeResult:
+    """Revoke the presented row's device family and report the reuse.
+
+    Uses :data:`_REFRESH_ADVERSARIAL_SWEEPS` passes rather than one:
+    this is the breach path, so it is worth an extra Query on a small
+    partition to narrow the eventually-consistent gap described in
+    :func:`_revoke_refresh_family`.
+    """
+
+    revoked = _revoke_refresh_family(
+        row.user_id,
+        row.device_id,
+        RefreshRevokeReason.REUSE_DETECTED,
+        sweeps=_REFRESH_ADVERSARIAL_SWEEPS,
+    )
+    logger.warning(
+        "refresh.reuse_detected user=%s device=%s revoked_rows=%d",
+        fingerprint_id(row.user_id),
+        fingerprint_id(row.device_id),
+        revoked,
+    )
+    return RefreshConsumeResult(
+        outcome=RefreshConsumeOutcome.REUSED,
+        revoked_count=revoked,
+    )
+
+
+def revoke_refresh_token(raw_token: str) -> int:
+    """Revoke the presented token's whole device token-family (logout).
+
+    Returns the number of rows that flipped from live to revoked — ``0``
+    for an unknown token, which keeps logout idempotent and leaks
+    nothing about whether the token ever existed.
+
+    Family-wide rather than row-wide on purpose: a device's session is
+    the family, not any single row, and revoking only the presented row
+    would leave a concurrently-rotated successor alive and the user
+    still signed in on a device they just signed out of.
+
+    Subject to the eventually-consistent index window documented on
+    :func:`_revoke_refresh_family` — a single sweep here, because a
+    logout racing a rotation from the same device is a self-inflicted
+    ordering problem, not an adversarial one.
+    """
+
+    row = _get_refresh_row(_refresh_token_hash(raw_token))
+    if row is None:
+        return 0
+    return _revoke_refresh_family(row.user_id, row.device_id, RefreshRevokeReason.LOGOUT)
+
+
+def revoke_all_user_refresh_tokens(user_id: str) -> int:
+    """Revoke every live refresh row for ``user_id`` ("sign out everywhere").
+
+    Reads the user's rows off ``RefreshByUserIndex`` and returns how
+    many were still live. Already-revoked rows are left untouched so
+    their original reason (and the reuse-detection signal that depends
+    on it) survives.
+
+    Sweeps twice, like the reuse cascade and unlike logout: "sign out
+    everywhere" is the button a user reaches for when they believe
+    they have been compromised, so an attacker actively racing the
+    sweep is a plausible scenario here. The self-inflicted-ordering
+    argument that justifies a single sweep for logout does not
+    transfer. Still subject to the eventually-consistent index window
+    documented on :func:`_revoke_refresh_family`.
+    """
+
+    return _revoke_refresh_family(
+        user_id,
+        None,
+        RefreshRevokeReason.USER_REVOKED,
+        sweeps=_REFRESH_ADVERSARIAL_SWEEPS,
+    )
 
 
 # ----------------------------------------------------------------

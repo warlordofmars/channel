@@ -25,6 +25,8 @@ def test_attribute_definitions_cover_all_pk_sk_and_gsi_keys():
         "GSI3PK",
         "GSI3SK",
         "GSI4PK",
+        "GSI5PK",
+        "GSI5SK",
         "owner_pk",
         "owner_sk",
     }
@@ -40,7 +42,7 @@ def test_key_schema_is_pk_hash_sk_range():
     ]
 
 
-def test_global_secondary_indexes_named_for_all_five_gsis():
+def test_global_secondary_indexes_named_for_all_six_gsis():
     names = {gsi["IndexName"] for gsi in GLOBAL_SECONDARY_INDEXES}
     assert names == {
         "KeyIndex",
@@ -48,7 +50,20 @@ def test_global_secondary_indexes_named_for_all_five_gsis():
         "UserEmailIndex",
         "ChatByIdIndex",
         "AssetOwnerIndex",
+        "RefreshByUserIndex",
     }
+
+
+def test_refresh_by_user_index_keyed_on_gsi5_slot():
+    # #290 — the refresh-row lookup index takes the next free numbered
+    # slot. GSI3/GSI4 are ChatByIdIndex/UserEmailIndex and
+    # AssetOwnerIndex uses semantic names, so GSI5 was never claimed.
+    gsi = next(g for g in GLOBAL_SECONDARY_INDEXES if g["IndexName"] == "RefreshByUserIndex")
+    assert gsi["KeySchema"] == [
+        {"AttributeName": "GSI5PK", "KeyType": "HASH"},
+        {"AttributeName": "GSI5SK", "KeyType": "RANGE"},
+    ]
+    assert gsi["Projection"]["ProjectionType"] == "ALL"
 
 
 def test_asset_owner_index_keyed_on_owner_pk_and_owner_sk():
