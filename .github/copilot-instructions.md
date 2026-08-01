@@ -1,6 +1,6 @@
 # Copilot review instructions for Channel
 
-Channel is a production-ready starter template for AWS-native AI agent backend services (FastAPI + React + DynamoDB on AWS Lambda). Use the rules below when reviewing pull requests in this repo so the autonomous agent can act on your feedback cleanly.
+Channel is an AI agent chat backend on AWS (FastAPI + React + DynamoDB on AWS Lambda). Use the rules below when reviewing pull requests in this repo so the autonomous agent can act on your feedback cleanly.
 
 ## What to flag
 

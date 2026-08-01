@@ -16,7 +16,12 @@ gh pr diff <PR> --name-only   # file list
 gh pr diff <PR>               # full diff
 ```
 
-**`gh pr diff` takes the PR number and nothing else.** It has no pathspec support — `gh pr diff <PR> -- '*.jsx'` exits with `accepts at most 1 arg(s), received 2` and pipes an *empty* stdout into whatever follows, so a check written that way silently never fires. Every grep below therefore scopes with `grep`, not with a trailing `-- <path>`. When a check needs to know *which* file a hit came from, cross-reference `gh pr diff <PR> --name-only`.
+Two rules govern every grep in the checklist below:
+
+1. **`gh pr diff` takes the PR number and nothing else.** It has no pathspec support — `gh pr diff <PR> -- '*.jsx'` exits with `accepts at most 1 arg(s), received 2` and pipes an *empty* stdout into whatever follows, so a check written that way silently never fires. Scope with `grep`, never with a trailing `-- <path>`.
+2. **A grep hit is a candidate, not a finding.** Because the diff can't be path-scoped, every pattern also sees Markdown, CHANGELOG prose, lockfiles, and this file itself. Before raising anything, confirm *which* file the hit came from (`gh pr diff <PR> --name-only`) and that it's the kind of file the check applies to. A convention discussed in prose is never a violation of that convention. Raising a false `FAIL` is worse than missing one — it blocks a correct PR on an instruction the author cannot satisfy.
+
+`grep -P` (check 5) is a PCRE extension that stock BSD/macOS `grep` rejects. If it errors, fall back to `grep -E` with an explicit character class or skip the emoji sweep and read the diff — don't let the `2>/dev/null || true` silently turn it into a pass.
 
 ---
 
@@ -112,7 +117,7 @@ gh pr diff <PR> | grep -E '^\+' | grep -vE '^\+\s*//' | grep -E '(#[0-9a-fA-F]{3
 
 Hardcoded hex, rgb, or hsl colour values in UI files → `FAIL`. All colours must use `var(--token-name)`.
 
-The grep spans the whole diff (see §Invocation — `gh pr diff` can't be path-scoped), so confirm each hit actually lands in a `.css` / `.jsx` / `.js` file before raising it; a hex quoted in Markdown or a CHANGELOG entry is not a finding.
+Per §Invocation rule 2, confirm each hit actually lands in a `.css` / `.jsx` / `.js` file before raising it — a hex quoted in Markdown, or a `#449`-style issue reference, is not a finding.
 
 Exception: `ui/src/styles/channel.css` and `docs-site/.vitepress/theme/style.css` may define CSS variable tokens — verify the flagged lines are variable *definitions* (for example `:root { --colour: #... }` or `[data-theme="dark"] { --colour: #... }`) not *usages*. New chart palette tokens (`--chart-<name>: #...`) added to `ui/src/styles/channel.css`'s theme blocks fall under this exception; consuming them in `*.jsx` / `*.js` must still go through `var(--chart-<name>)` or the appropriate CSS variable reference.
 
@@ -146,9 +151,16 @@ The named packages are the common offenders, not an exhaustive list — **any** 
 Channel's UI uses no Tailwind and no component library. Reusable primitives are plain `.jsx` files directly under `ui/src/components/` (`Icon.jsx`, `Modal.jsx`, `ErrorBoundary.jsx`, `ChannelMark.jsx`, `AuthGate.jsx`), styled with the CSS-variable tokens from check 4. There is **no** `ui/src/components/ui/` layer — a raw `<button>` / `<input>` / `<select>` / `<textarea>` carrying a semantic `className` is the correct shape and is **not** a finding.
 
 ```bash
-gh pr diff <PR> --name-only | grep -E '(^|/)package\.json$'    # did a manifest move?
-gh pr diff <PR> | grep -E '^\+\s*"[^"]+"\s*:\s*"[~^]?[0-9]'    # every added dependency line
-gh pr diff <PR> | grep -E '^\+.*"(tailwindcss|@tailwindcss/|@radix-ui/|@mui/|@chakra-ui/|@headlessui/|class-variance-authority|tailwind-merge|shadcn|lucide-react)'
+# 1. Did a manifest change at all? If not, this check is done.
+gh pr diff <PR> --name-only | grep -E '(^|/)package\.json$'
+# 2. Added dependency-shaped lines. Anchored on `"<key>":` so prose can't
+#    match, but it is NOT scoped to a file — a lockfile in the diff will
+#    swamp this (ui/package-lock.json alone has ~1900 such lines), so only
+#    read it when step 1 says a manifest moved.
+gh pr diff <PR> | grep -E '^\+\s*"[^"]+"\s*:\s*"[^"]*"'
+# 3. Fast path for the usual suspects — same anchoring, so a package name
+#    merely *discussed* in Markdown or CHANGELOG prose is not a hit.
+gh pr diff <PR> | grep -E '^\+\s*"(tailwindcss|@tailwindcss/[^"]*|@radix-ui/[^"]*|@mui/[^"]*|@chakra-ui/[^"]*|@headlessui/[^"]*|class-variance-authority|tailwind-merge|shadcn[^"]*|lucide-react)"\s*:'
 ```
 
 - Any new UI component-library, CSS-framework, or icon dependency → `FAIL` — read the **second** grep and judge each addition on its merits; the third only fast-paths the usual suspects and is **not** the boundary of the rule. A package added to `ui/package.json` with no import site yet still counts — that is exactly the state #445 / PR #447 existed to clean up. This is a design conversation, not a PR-time decision (CLAUDE.md §"UI conventions").
@@ -162,7 +174,9 @@ Full conventions: `.claude/skills/react-component/SKILL.md` §1.
 ### 7. GitHub Actions — no mutable version tags
 
 ```bash
-gh pr diff <PR> | grep -E '^\+.*uses:.*@v[0-9]'
+# Anchored on the YAML step shape so this check's own prose — and any other
+# Markdown that quotes `uses: owner/action@v1` — isn't a hit.
+gh pr diff <PR> | grep -E '^\+\s*-?\s*uses:\s*\S+@v[0-9]'
 ```
 
 `uses: owner/action@v1`-style references → `FAIL`. Must use full commit SHA with a `# vN` comment per CLAUDE.md. Use `gh api repos/{owner}/{repo}/git/ref/tags/{tag}` to resolve the SHA when creating or reviewing.

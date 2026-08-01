@@ -242,7 +242,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   vestigial `ui/components.json` (shadcn CLI config pointing at a
   Tailwind config and `src/index.css` that don't exist) is deleted, and
   the `react-component` skill drops its now-false "the dependency still
-  lingers in `ui/package.json`" parenthetical.
+  lingers in `ui/package.json`" parenthetical. Reviewing the rewrite
+  surfaced a second, quieter defect in the same file: `gh pr diff` takes
+  a PR number and nothing else, so every check written as
+  `gh pr diff <PR> -- '*.jsx'` was exiting with `accepts at most 1
+  arg(s)` and piping empty stdout into its grep — checks 4, 5 and 7 had
+  been silently passing everything. All of them now scope with `grep`,
+  anchored so that a convention merely *discussed* in Markdown or
+  CHANGELOG prose can't be mistaken for a violation of it, and
+  §Invocation states both rules once: `gh pr diff` can't be
+  path-scoped, and a grep hit is a candidate rather than a finding
+  until the reviewer has confirmed which file it came from.
 - Swept `CLAUDE.md` for the stale `STARTER_*` environment-variable
   prefix left behind by the #259 hard-cut rename: all 17 occurrences
   across 13 distinct variables (the debug-endpoint gate, audit
