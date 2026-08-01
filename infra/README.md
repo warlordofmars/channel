@@ -37,14 +37,17 @@ AWS CDK (Python) stack that provisions all Channel resources. Defined in `stacks
 
 The Lambda package is built inside a Docker container (the Lambda Python 3.12 build image) during CDK synthesis:
 
-1. Install `uv` via pip
-2. `uv export --no-hashes --no-group dev --no-group infra --no-emit-project` → `/tmp/requirements.txt` (third-party runtime deps only)
-3. `pip install -r /tmp/requirements.txt -t /asset-output`
-4. `cp -r src/channel /asset-output/channel`
-5. `cp run.sh /asset-output/run.sh` — the AWS Lambda Web Adapter entrypoint
-6. `chmod +x /asset-output/run.sh`
+```bash
+pip install uv --quiet --no-cache-dir
+UV_CACHE_DIR=/tmp/uv-cache uv export --no-hashes --no-group dev --no-group infra --no-emit-project -o /tmp/requirements.txt
+pip install -r /tmp/requirements.txt -t /asset-output --quiet --no-cache-dir
+cp -r src/channel /asset-output/channel
+cp run.sh /asset-output/run.sh          # the AWS Lambda Web Adapter entrypoint
+chmod +x /asset-output/run.sh
+```
 
-`API_LAMBDA_BUNDLING_STEPS` in `stacks/channel_stack.py` is the canonical list.
+That block is reproduced verbatim from `API_LAMBDA_BUNDLING_STEPS` in
+`stacks/channel_stack.py`, which is the canonical list — edit it there, not here.
 
 The `dev` and `infra` dependency groups are excluded to keep the Lambda package under the 250 MB limit. `--no-emit-project` is mandatory rather than cosmetic: without it the export includes the project itself as an editable requirement, `pip install` builds it inside the bundling container to generate metadata, and hatch-vcs version resolution fails from a git worktree (`.git` is a pointer file referencing a gitdir outside the bind mount) — which takes synth and deploy down with it. See the comment above `API_LAMBDA_BUNDLING_STEPS` for the full rationale.
 
