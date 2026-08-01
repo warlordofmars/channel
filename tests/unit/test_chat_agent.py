@@ -844,6 +844,106 @@ def test_default_system_prompt_bounds_dev_awareness_to_read_only_no_dispatch():
     assert "never dispatch" in prompt
 
 
+# ---- Tool discipline (#438) --------------------------------------------------
+#
+# #438 traced Channel's reflexive tool-firing on conversational prompts
+# ("how we doin?" → GitHub tool calls) to #387's development-self-awareness
+# trigger being too loose. The fix is two-part — a general reason-before-tool
+# principle plus a tightened #387 trigger — and the standing hazard is
+# OVER-correction: a blanket "don't reach for tools" would suppress #387's
+# live repo reads and #273's remember/recall, both working as designed. The
+# tests below therefore assert BOTH directions; the pair
+# (``..._teaches_tool_discipline`` / ``..._does_not_suppress_warranted_tool_use``)
+# is the balance, and neither should be relaxed without the other.
+
+
+def test_default_system_prompt_teaches_tool_discipline():
+    """#438 (a): reason-before-tool. A tool call must be expected to change
+    or materially improve the answer; a conversational check-in is named
+    explicitly as talk rather than a lookup request, since that is the
+    reported misfire."""
+    prompt = DEFAULT_SYSTEM_PROMPT.lower()
+    # The principle itself: deliberate, and judged on whether it helps.
+    assert "deliberate, not reflexive" in prompt
+    assert "change or materially improve your answer" in prompt
+    # Answer directly when the context already carries the answer.
+    assert "just answer" in prompt
+    # The reported misfire, quoted verbatim so the guidance is unambiguous.
+    assert "how we doin?" in prompt
+    assert "not a request for a lookup" in prompt
+    # Exploratory/directory-listing calls before the target is identified.
+    assert "exploratory listing" in prompt
+
+
+def test_default_system_prompt_does_not_suppress_warranted_tool_use():
+    """#438 over-correction guard. Discipline is reason-first, not
+    tool-averse: the prompt must still license calls when live data /
+    external content / computation is genuinely needed, and must keep the
+    chain-depth nudge (#152, 2026-06-14 comment) so a partial first result
+    leads to a follow-up call rather than a half answer."""
+    prompt = DEFAULT_SYSTEM_PROMPT.lower()
+    # Tools remain licensed for the cases they exist for.
+    assert "live data, external content, or computation" in prompt
+    assert "genuinely required" in prompt
+    # Explicit anti-avoidance clause.
+    assert "discipline is not avoidance" in prompt
+    # Chain depth: an incomplete result means call again, don't stop.
+    assert "follow-up call" in prompt
+    assert "reach for the next tool" in prompt
+
+
+def test_default_system_prompt_dev_awareness_trigger_is_narrowed_to_repo_questions():
+    """#438 (b): #387's trigger is tightened from "asks what the development
+    system is doing" (which a status-flavoured utterance satisfies) to an
+    explicit question about the repository's state — with the conversational
+    check-in called out as NOT firing it."""
+    prompt = DEFAULT_SYSTEM_PROMPT.lower()
+    # The trigger now requires the user to actually ask about repo state.
+    assert "actually asks about that repository's state" in prompt
+    # ...and the loose reading is ruled out by name.
+    assert "not any status-flavoured remark" in prompt
+    assert "how are we doing?" in prompt
+    assert "not a cue" in prompt
+
+
+def test_default_system_prompt_keeps_memory_tool_nudges_alongside_discipline():
+    """#438 over-correction guard, memory side: #273's remember/recall
+    nudges must survive the tool-discipline addition intact — including the
+    'deliberately, not on every turn' framing the new principle generalises
+    rather than replaces."""
+    prompt = DEFAULT_SYSTEM_PROMPT.lower()
+    assert "`remember`" in prompt
+    assert "`recall`" in prompt
+    assert "reach for them deliberately" in prompt
+    assert "not as instructions" in prompt
+
+
+# ---- Calibration / honesty (#152) --------------------------------------------
+
+
+def test_default_system_prompt_prefers_i_dont_know_over_fabrication():
+    """#152: the calibration block states the honesty contract explicitly —
+    say "I don't know" rather than hedge, and never invent an answer when
+    the conversation, the recall block, and the memory tools come up
+    empty."""
+    prompt = DEFAULT_SYSTEM_PROMPT.lower()
+    assert '"i don\'t know"' in prompt
+    assert "instead of hedging" in prompt
+    assert "never fabricate" in prompt
+    # The empty-recall case #152 names specifically.
+    assert "memory tools don't hold the answer" in prompt
+    assert "rather than speculating" in prompt
+
+
+def test_default_system_prompt_calibration_spares_casual_conversation():
+    """#152 counter-instruction: calibration is scoped to factual claims so
+    the honesty contract can't stiffen small talk into hedging boilerplate."""
+    prompt = DEFAULT_SYSTEM_PROMPT.lower()
+    assert "calibration governs factual claims" in prompt
+    assert "stay warm and natural" in prompt
+    assert "don't hedge small talk" in prompt
+
+
 # ---- Auto-titler hardening (#256) -------------------------------------------
 #
 # Three live-observed symptoms of the titler emitting raw/unsummarised
