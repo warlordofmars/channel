@@ -561,11 +561,21 @@ app uses external-browser + loopback instead:
    renderer via IPC, closes the loopback server, and serves the browser
    a "you can close this window" HTML page.
 
-In `inv desktop-dev`, the dev FastAPI runs with `CHANNEL_BYPASS_GOOGLE_AUTH=1`,
-but the desktop renderer does not send the `?test_email=` shortcut, so the
-dev flow currently still goes through Google. A follow-up will wire a
-desktop-specific bypass path that mints a synthetic JWT and short-circuits
-the loopback for faster dev iteration.
+In `inv desktop-dev`, the dev FastAPI runs with **both**
+`CHANNEL_BYPASS_GOOGLE_AUTH=1` and `CHANNEL_DESKTOP_DEV_EMAIL`
+(`dev@channel.local`). When both are set, `/auth/login` still validates
+`desktop_callback` + `state` as in step 3, but then skips the `MGMT_STATE`
+write and the whole of step 4: it mints a synthetic mgmt JWT for that
+address and redirects straight back to the loopback with `?token=&state=`,
+so local desktop iteration never touches Google or DynamoDB. Step 5 is
+unchanged.
+
+The dev-email gate is load-bearing. Every deployed non-prod stack sets
+`CHANNEL_BYPASS_GOOGLE_AUTH=1` (for the `?test_email=` e2e shortcut) but
+deliberately never sets `CHANNEL_DESKTOP_DEV_EMAIL`, so real desktop
+sign-in on deployed dev routes through Google like any other browser flow.
+Gating the short-circuit on the bypass flag alone would silently
+auto-log-in every deployed-dev desktop user as the placeholder account.
 
 ### Why these decisions
 
