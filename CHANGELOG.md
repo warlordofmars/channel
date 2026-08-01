@@ -223,6 +223,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Meta
 
+- Swept `CLAUDE.md` for the stale `STARTER_*` environment-variable
+  prefix left behind by the #259 hard-cut rename: all 17 occurrences
+  across 13 distinct variables (the debug-endpoint gate, audit
+  retention, the image-generation trio, asset extraction, the
+  AgentCore Memory name override, the recall / memory-tools /
+  auto-title kill-switch family, the titler model override, the
+  Google-auth bypass, and the e2e UI URL) now read `CHANNEL_*`, each
+  name verified against the live readers in `src/`, `infra/`, and
+  `tasks.py` rather than mechanically re-prefixed. This is the
+  env-var half of #264 only — the `starter_mgmt_token` localStorage
+  key is deliberately left untouched because it is still the key the
+  SPA actually writes; that rename rides with #295, and a second
+  documentation pass follows it. The same pass also corrects the
+  Electron OAuth section, whose closing paragraph still promised a
+  desktop-specific dev bypass as future work — it has since shipped, so
+  the text now documents the real behaviour: `inv desktop-dev` sets both
+  `CHANNEL_BYPASS_GOOGLE_AUTH` and `CHANNEL_DESKTOP_DEV_EMAIL`, and
+  `/auth/login` mints a synthetic JWT straight back to the loopback
+  callback when both are present, while deployed dev (which sets only the
+  former) still goes through Google (#264, part of #258).
 - Renamed every production environment variable from the legacy
   `STARTER_*` prefix (a leftover from the `agentcore-starter` fork) to
   `CHANNEL_*` across the CDK Lambda env block
@@ -233,7 +253,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reads a new name or vice versa). Pure mechanical rename, zero
   behaviour change; the SSM parameter *paths* held as `*_PARAM` values
   are untouched (#259, part of #258). Documentation of the new names in
-  the READMEs and `CLAUDE.md` follows in #5 and #6.
+  the READMEs and `CLAUDE.md` follows in #263 and #264.
 - Public docs-site operations pages now cite the correct module paths:
   the stale `src/starter/*` references in
   `docs-site/operations/security.md` and
