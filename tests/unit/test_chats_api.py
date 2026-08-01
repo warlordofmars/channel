@@ -84,6 +84,17 @@ def _stub_get_prefs(monkeypatch: pytest.MonkeyPatch) -> None:
         lambda chat_id: _ChatMCPSettings(chat_id=chat_id),
     )
 
+    # #245 — default the rolling head-summary seams to "no summary, and
+    # nothing to summarise" so legacy send-path tests never reach the
+    # real DynamoDB client. Tests asserting head-summary behaviour
+    # override these inline.
+    monkeypatch.setattr("channel.api.chats.storage.get_chat_summary", lambda _chat_id: None)
+    monkeypatch.setattr(
+        "channel.api.chats.storage.list_messages_unsummarized",
+        lambda *_a, **_kw: [],
+    )
+    monkeypatch.setattr("channel.api.chats.storage.put_chat_summary", lambda **_kwargs: None)
+
 
 @pytest.fixture
 def client() -> TestClient:
@@ -1087,23 +1098,34 @@ def _stub_storage_with_history(monkeypatch: pytest.MonkeyPatch, history: list[Me
     return chat
 
 
-def test_post_message_feeds_newest_history_window_to_agent(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Streaming a chat with > 100 prior messages must seed Strands with
-    the most recent 100 turns, NOT the oldest 100 (#244)."""
+def _history(count: int, *, chars: int = 0) -> list[Message]:
+    """Build ``count`` alternating-role messages with sortable created_at."""
 
-    history = [
+    return [
         Message(
             chat_id="c1",
             msg_id=f"m{i}",
             role=MessageRole.USER if i % 2 == 0 else MessageRole.ASSISTANT,
-            text=f"turn-{i}",
+            text=f"turn-{i}" + ("x" * chars),
             model=None,
             created_at=f"t{i:04d}",
         )
-        for i in range(120)
+        for i in range(count)
     ]
+
+
+def test_post_message_feeds_newest_history_window_to_agent(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Streaming a long chat must seed Strands from the NEWEST end of the
+    chat, never the oldest (#244).
+
+    Pre-#245 this window was a fixed 100 turns; the budget replaced the
+    count, so 120 short turns now all fit. The end the window is anchored
+    to — the regression #244 actually guards — is unchanged.
+    """
+
+    history = _history(120)
     _stub_storage_with_history(monkeypatch, history)
 
     captured: dict[str, Any] = {}
@@ -1119,9 +1141,48 @@ def test_post_message_feeds_newest_history_window_to_agent(
     assert response.status_code == 200
 
     texts = [m["content"][0]["text"] for m in captured["build_agent_kwargs"]["prior_messages"]]
-    assert len(texts) == 100
-    assert texts[0] == "turn-20"
+    assert len(texts) == 120
+    assert texts[0] == "turn-0"
     assert texts[-1] == "turn-119"
+
+
+def test_post_message_history_window_is_token_budgeted_not_turn_counted(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#245: a chat whose messages exceed the token budget loads the
+    NEWEST turns that fit, and the budget — not a turn count — is what
+    gates the depth.
+
+    Each turn here is ~8 000 chars ≈ 2 000 estimated tokens, so a
+    64 000-token budget admits ~32 of the 60 turns. The pre-#245 fixed
+    window would have loaded a flat 60 (all of them) regardless of size.
+    """
+
+    history = _history(60, chars=8_000)
+    _stub_storage_with_history(monkeypatch, history)
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        "channel.api.chats.build_agent",
+        _fake_streaming_agent_factory(captured),
+    )
+
+    response = client.post(
+        "/api/chats/c1/messages",
+        json={"message": "hi", "model": "claude-sonnet-4-6"},
+    )
+    assert response.status_code == 200
+
+    texts = [m["content"][0]["text"] for m in captured["build_agent_kwargs"]["prior_messages"]]
+    # Budget-gated: fewer than the full chat, and the newest turn is the
+    # last one in the window.
+    assert 0 < len(texts) < 60
+    assert texts[-1].split("x")[0] == "turn-59"
+    # Everything loaded is contiguous from the newest end.
+    assert texts[0].split("x")[0] == f"turn-{60 - len(texts)}"
+    # And the estimated cost of the window is inside the budget.
+    total = sum(len(t) // 4 for t in texts)
+    assert total <= 64_000
 
 
 def test_regenerate_picks_true_last_user_message_in_long_chat(
@@ -5278,3 +5339,408 @@ def test_post_message_bedrock_metric_failure_does_not_break_the_stream(
     events = _sse_events(response.text)
     done = next(e for e in events if e["type"] == "done")
     assert done["stop_reason"] == "end_turn"
+
+
+# ----------------------------------------------------------------
+# #245 — token-budgeted history window + rolling head summary
+# ----------------------------------------------------------------
+
+
+def _summarizer_capture(monkeypatch: pytest.MonkeyPatch, reply: str = "gist of the head"):
+    """Stub ``build_head_summary_agent`` and record its prompt + calls."""
+
+    captured: dict[str, Any] = {"calls": 0}
+
+    async def fake_stream(self, prompt):  # noqa: ANN001, ANN202
+        captured["calls"] += 1
+        captured["prompt"] = prompt
+        for chunk in reply:
+            yield {"event": {"contentBlockDelta": {"delta": {"text": chunk}}}}
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+
+    class FakeSummarizer:
+        stream_async = fake_stream
+
+    monkeypatch.setattr(
+        "channel.api.chats.build_head_summary_agent",
+        lambda: FakeSummarizer(),
+    )
+    return captured
+
+
+def _drive_one_turn(client: TestClient) -> Any:
+    return client.post(
+        "/api/chats/c1/messages",
+        json={"message": "hi", "model": "claude-sonnet-4-6"},
+    )
+
+
+def test_head_summary_is_injected_into_build_agent(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An existing SUMMARY row reaches ``build_agent`` as ``head_summary``."""
+
+    from channel.models import ChatSummary
+
+    _stub_storage_for_one_turn(monkeypatch)
+    monkeypatch.setattr(
+        "channel.api.chats.storage.get_chat_summary",
+        lambda _cid: ChatSummary(
+            chat_id="c1",
+            text="They agreed on OKLCH tokens.",
+            covers_through="MSG#t0001#m1",
+            updated_at="t",
+        ),
+    )
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        "channel.api.chats.build_agent",
+        _fake_streaming_agent_factory(captured),
+    )
+
+    assert _drive_one_turn(client).status_code == 200
+    assert captured["build_agent_kwargs"]["head_summary"] == "They agreed on OKLCH tokens."
+
+
+def test_head_summary_kill_switch_disables_injection(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``CHANNEL_HEAD_SUMMARY_ENABLED=0`` skips the DDB read entirely."""
+
+    _stub_storage_for_one_turn(monkeypatch)
+    monkeypatch.setenv("CHANNEL_HEAD_SUMMARY_ENABLED", "0")
+
+    def _boom(_cid):  # pragma: no cover - must never be called
+        raise AssertionError("get_chat_summary must not run when disabled")
+
+    monkeypatch.setattr("channel.api.chats.storage.get_chat_summary", _boom)
+
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        "channel.api.chats.build_agent",
+        _fake_streaming_agent_factory(captured),
+    )
+
+    assert _drive_one_turn(client).status_code == 200
+    assert captured["build_agent_kwargs"]["head_summary"] is None
+
+
+def test_in_budget_chat_never_invokes_the_summarizer(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A chat that fits the budget is a strict no-op: no range query, no
+    Bedrock call, no counter."""
+
+    _stub_storage_with_history(monkeypatch, _history(10))
+
+    def _boom(*_a, **_kw):  # pragma: no cover - must never be called
+        raise AssertionError("no range query for an in-budget chat")
+
+    monkeypatch.setattr("channel.api.chats.storage.list_messages_unsummarized", _boom)
+    summarizer = _summarizer_capture(monkeypatch)
+    monkeypatch.setattr("channel.api.chats.build_agent", _fake_streaming_agent_factory({}))
+
+    assert _drive_one_turn(client).status_code == 200
+    assert summarizer["calls"] == 0
+
+
+def test_slid_window_folds_dropped_turns_into_the_summary_row(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the window slides, the dropped turns + prior summary are fed
+    to the summariser and the result persists with an advanced
+    ``covers_through``."""
+
+    from channel.models import ChatSummary
+
+    history = _history(60, chars=8_000)
+    _stub_storage_with_history(monkeypatch, history)
+    monkeypatch.setattr(
+        "channel.api.chats.storage.get_chat_summary",
+        lambda _cid: ChatSummary(
+            chat_id="c1",
+            text="previously established: OKLCH tokens",
+            covers_through="MSG#t0000#m0",
+            updated_at="t",
+        ),
+    )
+
+    range_calls: list[dict[str, Any]] = []
+    dropped = history[1:4]
+
+    def fake_range(chat_id, *, after_sk, before_sk, limit):
+        range_calls.append(
+            {"chat_id": chat_id, "after_sk": after_sk, "before_sk": before_sk, "limit": limit}
+        )
+        return dropped
+
+    monkeypatch.setattr("channel.api.chats.storage.list_messages_unsummarized", fake_range)
+
+    written: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "channel.api.chats.storage.put_chat_summary",
+        lambda **kwargs: written.append(kwargs),
+    )
+    summarizer = _summarizer_capture(monkeypatch, reply="merged gist")
+    monkeypatch.setattr("channel.api.chats.build_agent", _fake_streaming_agent_factory({}))
+
+    assert _drive_one_turn(client).status_code == 200
+
+    assert range_calls[0]["after_sk"] == "MSG#t0000#m0"
+    assert range_calls[0]["before_sk"].startswith("MSG#")
+    assert summarizer["calls"] == 1
+    # Prior summary and the dropped turns are both in the prompt.
+    assert "previously established: OKLCH tokens" in summarizer["prompt"]
+    assert "turn-1" in summarizer["prompt"]
+    assert written == [
+        {
+            "chat_id": "c1",
+            "text": "merged gist",
+            "covers_through": "MSG#t0003#m3",
+        }
+    ]
+
+
+def test_slid_window_with_nothing_new_to_summarize_is_a_no_op(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty dropped range short-circuits before any Bedrock call."""
+
+    _stub_storage_with_history(monkeypatch, _history(60, chars=8_000))
+    monkeypatch.setattr(
+        "channel.api.chats.storage.list_messages_unsummarized",
+        lambda *_a, **_kw: [],
+    )
+    summarizer = _summarizer_capture(monkeypatch)
+
+    def _boom(**_kw):  # pragma: no cover - must never be called
+        raise AssertionError("nothing to persist")
+
+    monkeypatch.setattr("channel.api.chats.storage.put_chat_summary", _boom)
+    monkeypatch.setattr("channel.api.chats.build_agent", _fake_streaming_agent_factory({}))
+
+    assert _drive_one_turn(client).status_code == 200
+    assert summarizer["calls"] == 0
+
+
+def test_head_summary_kill_switch_disables_generation(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``CHANNEL_HEAD_SUMMARY_ENABLED=0`` skips generation even when the
+    window slid."""
+
+    _stub_storage_with_history(monkeypatch, _history(60, chars=8_000))
+    monkeypatch.setenv("CHANNEL_HEAD_SUMMARY_ENABLED", "0")
+
+    def _boom(*_a, **_kw):  # pragma: no cover - must never be called
+        raise AssertionError("summarisation must not run when disabled")
+
+    monkeypatch.setattr("channel.api.chats.storage.list_messages_unsummarized", _boom)
+    monkeypatch.setattr("channel.api.chats.storage.get_chat_summary", _boom)
+    summarizer = _summarizer_capture(monkeypatch)
+    monkeypatch.setattr("channel.api.chats.build_agent", _fake_streaming_agent_factory({}))
+
+    assert _drive_one_turn(client).status_code == 200
+    assert summarizer["calls"] == 0
+
+
+def test_summarizer_failure_counts_and_leaves_covers_through_untouched(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A summariser exception logs + counts ``HeadSummaryFailures``,
+    writes nothing, and does not break the stream (#245 failure mode)."""
+
+    _stub_storage_with_history(monkeypatch, _history(60, chars=8_000))
+    monkeypatch.setattr(
+        "channel.api.chats.storage.list_messages_unsummarized",
+        lambda *_a, **_kw: _history(2),
+    )
+
+    def _boom(**_kw):  # pragma: no cover - must never be called
+        raise AssertionError("covers_through must not advance on failure")
+
+    monkeypatch.setattr("channel.api.chats.storage.put_chat_summary", _boom)
+
+    async def exploding_stream(self, prompt):  # noqa: ANN001, ANN202
+        raise RuntimeError("bedrock down")
+        yield  # pragma: no cover - unreachable, makes this an async generator
+
+    class ExplodingSummarizer:
+        stream_async = exploding_stream
+
+    monkeypatch.setattr("channel.api.chats.build_head_summary_agent", lambda: ExplodingSummarizer())
+
+    outcomes: list[bool] = []
+
+    async def fake_outcome(success: bool) -> None:
+        outcomes.append(success)
+
+    monkeypatch.setattr("channel.api.chats.record_head_summary_outcome", fake_outcome)
+    monkeypatch.setattr("channel.api.chats.build_agent", _fake_streaming_agent_factory({}))
+
+    response = _drive_one_turn(client)
+    assert response.status_code == 200
+    # The user's turn still completed normally.
+    assert '"type": "done"' in response.text
+    assert outcomes == [False]
+
+
+def test_empty_summarizer_output_counts_a_failure_and_writes_nothing(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A summariser that returns only whitespace is a failure, not a
+    successful wipe of the existing summary."""
+
+    _stub_storage_with_history(monkeypatch, _history(60, chars=8_000))
+    monkeypatch.setattr(
+        "channel.api.chats.storage.list_messages_unsummarized",
+        lambda *_a, **_kw: _history(2),
+    )
+
+    def _boom(**_kw):  # pragma: no cover - must never be called
+        raise AssertionError("an empty summary must never persist")
+
+    monkeypatch.setattr("channel.api.chats.storage.put_chat_summary", _boom)
+    _summarizer_capture(monkeypatch, reply="   ")
+
+    outcomes: list[bool] = []
+
+    async def fake_outcome(success: bool) -> None:
+        outcomes.append(success)
+
+    monkeypatch.setattr("channel.api.chats.record_head_summary_outcome", fake_outcome)
+    monkeypatch.setattr("channel.api.chats.build_agent", _fake_streaming_agent_factory({}))
+
+    assert _drive_one_turn(client).status_code == 200
+    assert outcomes == [False]
+
+
+def test_summarizer_max_tokens_uses_the_partial_text(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Strands emits deltas before raising on the token cap, so the
+    partial summary still persists (mirrors the titler)."""
+
+    from strands.types.exceptions import MaxTokensReachedException
+
+    _stub_storage_with_history(monkeypatch, _history(60, chars=8_000))
+    monkeypatch.setattr(
+        "channel.api.chats.storage.list_messages_unsummarized",
+        lambda *_a, **_kw: _history(2),
+    )
+    written: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "channel.api.chats.storage.put_chat_summary",
+        lambda **kwargs: written.append(kwargs),
+    )
+
+    async def capped_stream(self, prompt):  # noqa: ANN001, ANN202
+        yield {"event": {"contentBlockDelta": {"delta": {"text": "partial gist"}}}}
+        raise MaxTokensReachedException("cap")
+
+    class CappedSummarizer:
+        stream_async = capped_stream
+
+    monkeypatch.setattr("channel.api.chats.build_head_summary_agent", lambda: CappedSummarizer())
+    monkeypatch.setattr("channel.api.chats.build_agent", _fake_streaming_agent_factory({}))
+
+    assert _drive_one_turn(client).status_code == 200
+    assert written[0]["text"] == "partial gist"
+
+
+def test_summary_text_is_capped(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A runaway summary is truncated to ``_HEAD_SUMMARY_TEXT_CAP``."""
+
+    from channel.api.chats import _HEAD_SUMMARY_TEXT_CAP
+
+    _stub_storage_with_history(monkeypatch, _history(60, chars=8_000))
+    monkeypatch.setattr(
+        "channel.api.chats.storage.list_messages_unsummarized",
+        lambda *_a, **_kw: _history(2),
+    )
+    written: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        "channel.api.chats.storage.put_chat_summary",
+        lambda **kwargs: written.append(kwargs),
+    )
+    _summarizer_capture(monkeypatch, reply="z" * (_HEAD_SUMMARY_TEXT_CAP + 500))
+    monkeypatch.setattr("channel.api.chats.build_agent", _fake_streaming_agent_factory({}))
+
+    assert _drive_one_turn(client).status_code == 200
+    assert len(written[0]["text"]) == _HEAD_SUMMARY_TEXT_CAP
+
+
+def test_truncated_window_emits_the_observability_counter(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#227's ask: truncation must stop being silent."""
+
+    _stub_storage_with_history(monkeypatch, _history(60, chars=8_000))
+    fired: list[int] = []
+
+    async def fake_counter() -> None:
+        fired.append(1)
+
+    monkeypatch.setattr("channel.api.chats.record_history_window_truncated", fake_counter)
+    monkeypatch.setattr("channel.api.chats.build_agent", _fake_streaming_agent_factory({}))
+
+    assert _drive_one_turn(client).status_code == 200
+    assert fired == [1]
+
+
+def test_in_budget_window_emits_no_truncation_counter(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_storage_with_history(monkeypatch, _history(10))
+    fired: list[int] = []
+
+    async def fake_counter() -> None:  # pragma: no cover - asserted empty
+        fired.append(1)
+
+    monkeypatch.setattr("channel.api.chats.record_history_window_truncated", fake_counter)
+    monkeypatch.setattr("channel.api.chats.build_agent", _fake_streaming_agent_factory({}))
+
+    assert _drive_one_turn(client).status_code == 200
+    assert fired == []
+
+
+def test_apply_history_token_budget_keeps_at_least_one_message() -> None:
+    """A single message larger than the whole budget still loads —
+    an empty window would strip the turn being replied to."""
+
+    from channel.api.chats import _apply_history_token_budget
+
+    huge = Message(
+        chat_id="c1",
+        msg_id="m0",
+        role=MessageRole.USER,
+        text="x" * 400_000,
+        model=None,
+        created_at="t0000",
+    )
+    kept, slid = _apply_history_token_budget([huge])
+    assert kept == [huge]
+    assert slid is False
+
+
+def test_apply_history_token_budget_flags_the_row_cap() -> None:
+    """Hitting ``_HISTORY_MAX_MESSAGES`` counts as a possibly-slid window
+    even when nothing was trimmed by the budget."""
+
+    from channel.api.chats import _HISTORY_MAX_MESSAGES, _apply_history_token_budget
+
+    msgs = [
+        Message(
+            chat_id="c1",
+            msg_id=f"m{i}",
+            role=MessageRole.USER,
+            text="ok",
+            model=None,
+            created_at=f"t{i:04d}",
+        )
+        for i in range(_HISTORY_MAX_MESSAGES)
+    ]
+    kept, slid = _apply_history_token_budget(msgs)
+    assert len(kept) == _HISTORY_MAX_MESSAGES
+    assert slid is True

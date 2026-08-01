@@ -715,3 +715,62 @@ async def test_record_bedrock_turn_end_to_end_does_not_raise():
     await record_bedrock_turn(
         duration_ms=1.0, input_tokens=1, output_tokens=1, error_code="bedrock_throttled"
     )
+
+
+# ----------------------------------------------------------------
+# #245 — rolling head summary + history-window truncation counters
+# ----------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_record_head_summary_outcome_success_emits_success_counter():
+    from channel.metrics import record_head_summary_outcome
+
+    with patch("channel.metrics.emit_metric", new=AsyncMock()) as mock_emit:
+        await record_head_summary_outcome(success=True)
+
+    mock_emit.assert_awaited_once_with("HeadSummarySuccesses")
+
+
+@pytest.mark.asyncio
+async def test_record_head_summary_outcome_failure_emits_failure_counter():
+    from channel.metrics import record_head_summary_outcome
+
+    with patch("channel.metrics.emit_metric", new=AsyncMock()) as mock_emit:
+        await record_head_summary_outcome(success=False)
+
+    mock_emit.assert_awaited_once_with("HeadSummaryFailures")
+
+
+def test_record_head_summary_outcome_signature_locks_out_dimensions():
+    """#245 carries the same cardinality rule as ``MemoryWriteFailures``:
+    the signature accepts only ``success``, so no future caller can slip
+    a per-actor or per-chat dimension through. Chat identity lives in the
+    ``head_summary_failed`` log line."""
+    from channel.metrics import record_head_summary_outcome
+
+    sig = inspect.signature(record_head_summary_outcome)
+    assert list(sig.parameters.keys()) == ["success"]
+    param = sig.parameters["success"]
+    assert param.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+    assert param.annotation == "bool"
+
+
+@pytest.mark.asyncio
+async def test_record_history_window_truncated_emits_counter():
+    from channel.metrics import record_history_window_truncated
+
+    with patch("channel.metrics.emit_metric", new=AsyncMock()) as mock_emit:
+        await record_history_window_truncated()
+
+    mock_emit.assert_awaited_once_with("HistoryWindowTruncated")
+
+
+def test_record_history_window_truncated_signature_locks_out_dimensions():
+    """Counter-only (#245): NO arguments, so a per-chat dimension can't
+    be added later. How deep the window was, and for which chat, live in
+    the ``history_window_truncated`` log line."""
+    from channel.metrics import record_history_window_truncated
+
+    sig = inspect.signature(record_history_window_truncated)
+    assert list(sig.parameters.keys()) == []

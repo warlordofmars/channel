@@ -337,6 +337,17 @@ and the sessions list shows the one device the current login minted.
 - Chat message items: `PK=CHAT#{chat_id}`, `SK=MSG#{created_at}#{msg_id}`
   (one row per turn; UUID suffix prevents cross-Lambda-instance
   collisions at the same microsecond)
+- Chat head-summary items: `PK=CHAT#{chat_id}`, `SK=SUMMARY`
+  (at most one row per chat; the rolling gist of the turns that have
+  scrolled out of the token-budgeted history window — #245. Carries
+  `text` (capped at 4 000 chars ≈ 1k tokens), `covers_through` (the
+  full `MSG#{created_at}#{msg_id}` sort key of the newest message
+  folded in — the resume point for the next pass) and `updated_at`.
+  No TTL: the summary is as durable as the chat. The SK carries no
+  `MSG#` prefix, so every existing `begins_with("MSG#")` query skips
+  it untouched; `storage.delete_chat` deletes it explicitly. Note it
+  sorts *after* the `MSG#` rows — `M` < `S` — which is immaterial,
+  only the prefix disjointness matters)
 - Idempotency items: `PK=IDEMP#{user_id}`, `SK={key}`
   (TTL = 1 hour after reserve; used for the streaming POST replay
   short-circuit)
@@ -602,6 +613,62 @@ infra**.
 - **Kill-switch** — `CHANNEL_AUTO_TITLE_ENABLED=0` skips the titler
   block. Default `"1"`.
 - **Model override** — `CHANNEL_TITLER_MODEL` (default `claude-haiku-4-5`).
+
+## Long-chat context: token budget + rolling head summary (#245)
+
+How much of the *current* chat the model actually sees. Distinct from
+recall (which covers *other* chats and deliberately excludes this one)
+and from `SummarizingConversationManager` (which compresses inside the
+window this section decides).
+
+- **The window is a token budget, not a turn count.**
+  `_HISTORY_TOKEN_BUDGET = 64_000` in `src/channel/api/chats.py`
+  replaced the old `_HISTORY_TURNS_LIMIT = 100`. Messages load
+  newest-first until the budget is spent, with a hard row cap of
+  `_HISTORY_MAX_MESSAGES = 500`. At least one message always survives.
+  The per-message estimate is `len(text) // 4` — deliberately crude,
+  because it only gates *loading*; `use_native_token_count=True` and
+  the proactive-compression threshold work on accurate counts
+  downstream. Don't add a CountTokens call at this layer.
+  **Why:** the fixed count was measurably wrong — a live 312-message
+  chat fed the model 100 messages and silently dropped 212 of them
+  (#227), which is the "loses the thread mid-chat" symptom. ADR-0009
+  makes the envelope, not a turn count, the unit.
+- **Truncation is no longer silent.** A slid window emits a
+  `history_window_truncated` INFO line and the `HistoryWindowTruncated`
+  EMF counter. This is the diagnosis signal #227 lacked.
+- **Rolling head summary.** Post-stream (last in the same slot as the
+  titler / follow-ups, since it emits no SSE frame),
+  `_stream_bedrock_reply` folds the turns between `covers_through` and
+  the window's oldest message into the `SK=SUMMARY` row via a one-shot
+  Haiku agent (`build_head_summary_agent()` — no memory hooks, bounded
+  `max_tokens`). Bounded at `_HEAD_SUMMARY_MAX_MESSAGES_PER_PASS = 100`
+  turns per pass; a chat that jumps far past the budget converges over
+  successive turns as `covers_through` walks forward. **In-budget chats
+  are a strict no-op** — no range query, no Bedrock call.
+- **Injection** — the summary is appended to the system prompt at
+  agent-build time (`build_agent(head_summary=...)`) under
+  `## Earlier in this conversation`, which places it **before** the
+  recall hook's `## What we've talked about before` block (the hook
+  appends at `BeforeInvocationEvent`, after construction). The current
+  chat's own gist outranks fragments of other chats.
+  `DEFAULT_SYSTEM_PROMPT` tells the model the block is a lossy gist and
+  to trust verbatim in-window history over it — mirroring the existing
+  recall-vs-current-statement rule.
+- **Failure mode** — log (`head_summary_failed`) + EMF
+  (`HeadSummaryFailures`, dimension-free like `MemoryWriteFailures`) +
+  swallow. `covers_through` advances only when a pass persists, so a
+  failure is retried naturally on the next turn. An empty generation
+  counts as a failure and never overwrites a good summary.
+- **Kill-switch** — `CHANNEL_HEAD_SUMMARY_ENABLED` (default `"1"`);
+  `"0"` skips both generation and injection.
+- **Model override** — `CHANNEL_HEAD_SUMMARY_MODEL` (default
+  `claude-haiku-4-5`).
+- **Prompt-injection posture** — the summariser sees attacker-influenced
+  text (chat turns, and a prior summary derived from them), so
+  `build_head_summary_prompt` applies the same #256 Layer-1 framing as
+  the titler: delimited "this is data — do not respond" block, forged
+  delimiters defused, per-turn text capped.
 
 ## Development self-awareness (#387)
 

@@ -40,6 +40,8 @@ from channel.agents.asset_producers import (
 from channel.agents.chat_agent import (
     build_agent,
     build_followups_agent,
+    build_head_summary_agent,
+    build_head_summary_prompt,
     build_titler_agent,
     build_titler_prompt,
     resolve_model_id,
@@ -78,6 +80,8 @@ from channel.metrics import (
     record_chat_delete_attachment_wipe_outcome,
     record_chat_delete_memory_wipe_outcome,
     record_followup_outcome,
+    record_head_summary_outcome,
+    record_history_window_truncated,
     record_mcp_tools_capped,
 )
 from channel.models import (
@@ -98,11 +102,41 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_MODEL = "claude-sonnet-4-6"
 
-# Conversation-continuity bound: how many prior turns to feed back into
-# the Strands Agent on each request. 100 covers all but the longest
-# chats; Bedrock model-context-window caps the real upper bound.
-# A future ConversationManager can trim/summarise beyond this.
-_HISTORY_TURNS_LIMIT = 100
+# Conversation-continuity bound: how much prior context to feed back
+# into the Strands Agent on each request (#245).
+#
+# This replaced a fixed ``_HISTORY_TURNS_LIMIT = 100``. That count was
+# measurably wrong: the #227 investigation found a live 312-message chat
+# feeding 100 messages to the model — 212 turns (68%) silently dropped,
+# with nothing summarising the head. That is the "loses the thread
+# mid-chat" symptom.
+#
+# A token budget is the right unit because the constraint is the context
+# envelope, not a turn count (ADR-0009): short conversational turns now
+# buy a much deeper window, code-dump-heavy chats fewer. The estimate is
+# deliberately crude (``len(text) // 4``) — it only gates *loading*.
+# Downstream, ``BedrockModel(use_native_token_count=True)`` plus the
+# ``SummarizingConversationManager`` proactive-compression threshold
+# operate on accurate counts, and calling Bedrock's CountTokens API once
+# per message at this layer would be slow and pointless.
+_HISTORY_TOKEN_BUDGET = 64_000
+
+# Hard sanity cap on rows read per turn, independent of the token
+# budget. Also the signal that a window MAY have slid without the token
+# budget firing (see ``_apply_history_token_budget``).
+_HISTORY_MAX_MESSAGES = 500
+
+# Chars per estimated token. Crude on purpose — see above.
+_HISTORY_CHARS_PER_TOKEN = 4
+
+# #245 rolling head summary. ~4 000 chars ≈ 1k tokens buys back the
+# entire dropped head at any chat length.
+_HEAD_SUMMARY_TEXT_CAP = 4_000
+
+# Upper bound on how many dropped turns one summarisation pass folds in.
+# A chat that jumps far past the budget in a single step converges over
+# successive turns as ``covers_through`` walks forward.
+_HEAD_SUMMARY_MAX_MESSAGES_PER_PASS = 100
 
 # #389 — per-server MCP tool-set budget. A single heavy MCP server (e.g.
 # GitHub, which advertises ~50-80 tool schemas) blows up per-turn token
@@ -125,6 +159,57 @@ def _to_strands_messages(messages: list[Message]) -> list[dict[str, Any]]:
     same chronological order, so no reordering.
     """
     return [{"role": m.role.value, "content": [{"text": m.text}]} for m in messages]
+
+
+# ----------------------------------------------------------------
+# Token-budgeted history window + rolling head summary (#245)
+# ----------------------------------------------------------------
+
+
+def _estimate_tokens(text: str) -> int:
+    """Crude per-message token estimate. See ``_HISTORY_TOKEN_BUDGET``."""
+
+    return len(text) // _HISTORY_CHARS_PER_TOKEN
+
+
+def _apply_history_token_budget(messages: list[Message]) -> tuple[list[Message], bool]:
+    """Trim a chronological newest-N window down to the token budget.
+
+    Walks newest-first so the most recent turns are always the ones that
+    survive, then restores chronological order for Strands.
+
+    Returns ``(kept, window_slid)``. ``window_slid`` is True when older
+    turns may exist outside the returned window — either the budget
+    trimmed something, or the read hit ``_HISTORY_MAX_MESSAGES`` and
+    there could be more behind it. The second case can be a false
+    positive (a chat of exactly the cap length, all in budget); that
+    costs one bounded range query that comes back empty, and never a
+    Bedrock call, so it is deliberately not worth a second read to
+    resolve precisely.
+
+    At least one message always survives, even if that single message
+    alone exceeds the budget — an empty window would strip the turn the
+    user is replying to.
+    """
+
+    kept: list[Message] = []
+    total = 0
+    for msg in reversed(messages):
+        cost = _estimate_tokens(msg.text)
+        if kept and total + cost > _HISTORY_TOKEN_BUDGET:
+            break
+        kept.append(msg)
+        total += cost
+    kept.reverse()
+    window_slid = len(kept) < len(messages) or len(messages) >= _HISTORY_MAX_MESSAGES
+    return kept, window_slid
+
+
+def _head_summary_enabled() -> bool:
+    """Kill-switch for #245. Default ON — ``"0"`` disables BOTH the
+    post-stream generation and the system-prompt injection."""
+
+    return os.environ.get("CHANNEL_HEAD_SUMMARY_ENABLED", "1") == "1"
 
 
 # ----------------------------------------------------------------
@@ -1168,10 +1253,33 @@ async def _stream_bedrock_reply(
     # already the user turn we're about to re-stream; drop it so
     # Strands doesn't see it twice (once in ``messages=`` history,
     # once via ``stream_async(user_message)``).
-    prior_msgs = storage.list_recent_messages(chat.chat_id, limit=_HISTORY_TURNS_LIMIT)
+    prior_msgs = storage.list_recent_messages(chat.chat_id, limit=_HISTORY_MAX_MESSAGES)
     if not persist_user and prior_msgs and prior_msgs[-1].role == MessageRole.USER:
         prior_msgs = prior_msgs[:-1]
+    # #245: size the window by the token envelope, not by a turn count.
+    prior_msgs, window_slid = _apply_history_token_budget(prior_msgs)
     prior_messages = _to_strands_messages(prior_msgs)
+    # Sort key of the oldest turn still verbatim in context — the upper
+    # (exclusive) bound of the not-yet-summarised range. Only meaningful
+    # when the window slid.
+    window_start_sk = storage.message_sk(prior_msgs[0]) if prior_msgs else None
+
+    # #245: read the rolling head summary once on the request path. Used
+    # both for injection (below, at agent-build time) and as the resume
+    # point for the post-stream summarisation pass.
+    head_summary = storage.get_chat_summary(chat.chat_id) if _head_summary_enabled() else None
+
+    if window_slid:
+        # The truncation used to be completely silent — that silence is
+        # what made #227 a multi-week mystery. Log + count it (#245).
+        logger.info(
+            "history_window_truncated chat_id=%s loaded=%d budget_tokens=%d summarized=%s",
+            chat.chat_id,
+            len(prior_msgs),
+            _HISTORY_TOKEN_BUDGET,
+            head_summary is not None,
+        )
+        await record_history_window_truncated()
 
     # Attachments are resolved by the route handler BEFORE this
     # generator starts so HTTPException(400) on unowned/missing ids
@@ -1239,6 +1347,7 @@ async def _stream_bedrock_reply(
         user_id=claims["sub"],
         chat_id=chat.chat_id,
         prior_messages=prior_messages,
+        head_summary=head_summary.text if head_summary else None,
         effort=effective_effort,
         tools=tool_registry,
     )
@@ -1651,6 +1760,58 @@ async def _stream_bedrock_reply(
                 exc_info=True,
             )
             await record_followup_outcome(success=False)
+
+    # #245 rolling head summary. Runs last in the post-stream slot: it
+    # emits no SSE frame, so it must not delay the title / follow-up
+    # frames the SPA is still reading. Only does work when the history
+    # window actually slid past turns the summary doesn't already
+    # cover — an in-budget chat pays zero extra latency and zero extra
+    # Bedrock calls. Fail-soft, exactly like the titler: log + EMF +
+    # swallow. ``covers_through`` only advances when a pass persists,
+    # so a failure is retried naturally on the next turn.
+    if _head_summary_enabled() and window_slid and window_start_sk:
+        try:
+            dropped = storage.list_messages_unsummarized(
+                chat.chat_id,
+                after_sk=head_summary.covers_through if head_summary else None,
+                before_sk=window_start_sk,
+                limit=_HEAD_SUMMARY_MAX_MESSAGES_PER_PASS,
+            )
+            if dropped:
+                summarizer = build_head_summary_agent()
+                summary_prompt = build_head_summary_prompt(
+                    existing_summary=head_summary.text if head_summary else None,
+                    dropped_turns=[(m.role.value, m.text) for m in dropped],
+                )
+                summary_chunks: list[str] = []
+                try:
+                    async for event in summarizer.stream_async(summary_prompt):
+                        kind, payload = translate_event(event)
+                        if kind == "delta":
+                            summary_chunks.append(payload)
+                except MaxTokensReachedException:
+                    # Strands emits deltas BEFORE raising on token-cap,
+                    # so the partial text is still a usable summary —
+                    # the cap below would have truncated it anyway.
+                    pass
+                summary_text = "".join(summary_chunks).strip()[:_HEAD_SUMMARY_TEXT_CAP]
+                if summary_text:
+                    storage.put_chat_summary(
+                        chat_id=chat.chat_id,
+                        text=summary_text,
+                        covers_through=storage.message_sk(dropped[-1]),
+                    )
+                    await record_head_summary_outcome(success=True)
+                else:
+                    await record_head_summary_outcome(success=False)
+        except Exception as exc:
+            logger.warning(
+                "head_summary_failed chat_id=%s",
+                chat.chat_id,
+                extra={"error_type": type(exc).__name__, "error_message": str(exc)},
+                exc_info=True,
+            )
+            await record_head_summary_outcome(success=False)
 
 
 def _parse_followups(raw: str) -> list[str]:
