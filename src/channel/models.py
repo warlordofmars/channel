@@ -452,6 +452,16 @@ class RefreshToken(BaseModel):
 
     ``revoked`` is the live/dead flag; ``revoked_reason`` records why so
     reuse detection can tell a superseded row from a logged-out one.
+
+    ``last_used_at`` equals ``issued_at`` on a live row, and that is
+    correct rather than a dead column: under hard rotation a row is
+    consumed exactly once and dies doing it, so the live row was itself
+    *created* by the device's most recent refresh — its ``issued_at``
+    already is "when this device last talked to us", which is what
+    #293's session list wants. For a dead row, the moment of use is
+    ``revoked_at`` paired with ``revoked_reason == ROTATED``. The column
+    is kept distinct because a future sliding-window rotation (epic
+    #241 Q1's rejected alternative) would make the two diverge.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -482,6 +492,14 @@ class RefreshConsumeResult(BaseModel):
     the ``token`` row describing it. Every other outcome carries neither.
     ``revoked_count`` is non-zero only on the reuse path, where the
     breach response revokes the rest of the device's family.
+
+    .. warning::
+       ``raw_token`` is a real field, so it appears in ``model_dump()``
+       and inside ``ValidationError.errors()['input']``. Never return
+       this object straight out of a route, log it, or log
+       ``exc.errors()`` for it — hand the plaintext to the transport
+       and drop the rest. Relevant to #291 / #292, which are the first
+       callers with a response body.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -489,7 +507,7 @@ class RefreshConsumeResult(BaseModel):
     outcome: RefreshConsumeOutcome
     raw_token: str | None = None
     token: RefreshToken | None = None
-    revoked_count: int = 0
+    revoked_count: int = Field(default=0, ge=0)
 
     @model_validator(mode="after")
     def _payload_matches_outcome(self) -> RefreshConsumeResult:
@@ -499,6 +517,14 @@ class RefreshConsumeResult(BaseModel):
             raise ValueError("RefreshConsumeResult.raw_token and .token must be set together")
         if produced != (self.outcome == RefreshConsumeOutcome.OK):
             raise ValueError("RefreshConsumeResult carries a rotated token iff outcome is 'ok'")
+        # Only the reuse cascade revokes anything, so a non-zero count on
+        # any other outcome means a caller mixed up two code paths — and
+        # #294 reads this field to size the breach signal, so a stray
+        # count would inflate a security metric.
+        if self.revoked_count and self.outcome != RefreshConsumeOutcome.REUSED:
+            raise ValueError(
+                "RefreshConsumeResult.revoked_count is non-zero only when outcome is 'reused'"
+            )
         return self
 
 

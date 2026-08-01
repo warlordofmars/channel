@@ -1731,12 +1731,13 @@ _REFRESH_HASH_PREFIX_LEN = 16
 # log loudly rather than spin.
 _REFRESH_QUERY_MAX_PAGES = 25
 
-# Sweeps the reuse-detection cascade makes over a device's family.
-# ``RefreshByUserIndex`` is eventually consistent (no ConsistentRead on
-# a GSI), so a single pass can miss a row minted moments earlier. Two
-# passes force a concurrent mint to hide inside the propagation window
-# twice; see _revoke_refresh_family for what this does and does not
-# guarantee. Only the breach path pays for the extra Query.
+# Sweeps the adversarial revoke paths make over a family — reuse
+# detection and "sign out everywhere". ``RefreshByUserIndex`` is
+# eventually consistent (no ConsistentRead on a GSI), so a single pass
+# can miss a row minted moments earlier; a second pass usually catches
+# it. See _revoke_refresh_family for what this does and does not
+# guarantee. Ordinary logout keeps one sweep — it doesn't race an
+# adversary.
 _REFRESH_REUSE_SWEEPS = 2
 
 # Revoke only rows that are still live. ``revoked`` is aliased because
@@ -1877,11 +1878,19 @@ def _query_user_refresh_rows(user_id: str, device_id: str | None = None) -> list
     """All refresh rows for a user (optionally one device) via the GSI.
 
     ``device_id`` narrows with a ``FilterExpression`` rather than a
-    sharper key: the epic pins the sort key to ``{issued_at}#{prefix}``
-    so the per-user session list (#293) reads newest-first without a
-    second index. A user's partition holds at most a few hundred rows,
-    so filtering server-side costs a negligible amount of read capacity
-    and keeps the index single-purpose.
+    sharper key: the epic pins the sort key to ``{issued_at}#{prefix}``,
+    which keeps the index ordered by issue time so the per-user session
+    list (#293) can page it without a second index. A user's partition
+    holds at most a few hundred rows, so filtering server-side costs a
+    negligible amount of read capacity and keeps the index
+    single-purpose.
+
+    **Ordering is oldest-first.** This helper does not set
+    ``ScanIndexForward``, so DynamoDB's default ascending order applies
+    — every caller here revokes the whole set, for which order is
+    irrelevant. #293 wants the reverse and must pass
+    ``ScanIndexForward=False`` explicitly; nothing about the index
+    makes newest-first automatic.
 
     **This read is eventually consistent and cannot be made otherwise.**
     DynamoDB rejects ``ConsistentRead=True`` on a global secondary
@@ -1953,16 +1962,18 @@ def _revoke_refresh_family(
     live, because its rotated ancestor is skipped (already revoked) and
     the successor hasn't reached the index yet.
 
-    ``sweeps`` narrows that window for the security-critical caller —
-    a second pass runs after the first pass's writes have completed, so
-    a concurrent mint has to land inside the propagation window *twice*
-    to survive. It does not close the window, and no amount of sweeping
-    would; closing it needs a strongly-consistent family marker read on
-    the consume path, which belongs with the per-device session row
-    #293 introduces. Until then the honest contract is **best-effort
-    with respect to concurrent mints**, and the bound on the damage is
-    that any surviving row still expires at the family's unchanged
-    ``absolute_expires_at``.
+    ``sweeps`` narrows that window for the security-critical callers: a
+    second pass runs after the first pass's writes, so a row that was
+    still propagating during pass 1 is usually caught by pass 2. Be
+    honest about how much that buys — the two passes are milliseconds
+    apart and their outcomes are highly correlated, so this is a
+    meaningful reduction, not two independent trials. It does not close
+    the window, and no amount of sweeping would; closing it needs a
+    strongly-consistent family marker read on the consume path, which
+    belongs with the per-device session row #293 introduces. Until then
+    the honest contract is **best-effort with respect to concurrent
+    mints**, and the bound on the damage is that any surviving row
+    still expires at the family's unchanged ``absolute_expires_at``.
     """
 
     revoked = 0
@@ -2062,10 +2073,7 @@ def consume_refresh_token(raw_token: str) -> RefreshConsumeResult:
         return RefreshConsumeResult(outcome=RefreshConsumeOutcome.EXPIRED_IDLE)
 
     if not _mark_refresh_revoked(token_hash, RefreshRevokeReason.ROTATED):
-        # Lost the race to a concurrent consume of the same token — see
-        # the docstring: indistinguishable from a replay, so it takes
-        # the reuse path.
-        return _refresh_reuse_response(row)
+        return _refresh_race_loss_response(token_hash, row)
 
     new_raw, new_row = mint_refresh_token(
         user_id=row.user_id,
@@ -2077,6 +2085,44 @@ def consume_refresh_token(raw_token: str) -> RefreshConsumeResult:
         raw_token=new_raw,
         token=new_row,
     )
+
+
+def _refresh_race_loss_response(token_hash: str, row: RefreshToken) -> RefreshConsumeResult:
+    """Classify a lost conditional update by re-reading who won.
+
+    Failing ``#revoked = :live`` only says *someone* took the row out of
+    the live state — not who. Two very different things can have done
+    it, and reporting both as reuse would be wrong: a concurrent
+    *consume* is the replay-shaped case that should arm the cascade,
+    but a concurrent *revoke* (logout, or sign-out-everywhere) is the
+    user deliberately ending the session while a refresh was in flight.
+    Treating that second case as a breach would log a false
+    ``refresh.reuse_detected``, inflate #294's breach counter, and
+    overwrite the family's real ``revoked_reason`` — contradicting this
+    module's own rule that an already-dead family does not re-arm the
+    cascade.
+
+    So: re-read strongly-consistently and branch on who got there
+    first. The re-read is one point-read on a path that is already
+    exceptional, so it costs nothing in the normal case.
+    """
+
+    current = _get_refresh_row(token_hash)
+    if current is None:
+        # Swept by TTL between the read and the update. Nothing to
+        # rotate and no family worth cascading over.
+        return RefreshConsumeResult(outcome=RefreshConsumeOutcome.NOT_FOUND)
+    if current.revoked and current.revoked_reason != RefreshRevokeReason.ROTATED:
+        # A deliberate revoke won. The family is already dead for a
+        # known reason; leave that reason intact.
+        return RefreshConsumeResult(outcome=RefreshConsumeOutcome.REVOKED)
+    # A concurrent consume won: indistinguishable at the server from a
+    # replay arriving microseconds later, so it takes the reuse path
+    # (epic #241 Q1 — hard rotation on the server, single-flight in the
+    # SPA). Deliberately also the fallback for the can't-happen case
+    # where the row reads back live, since a token we failed to claim
+    # is not a token we may hand out a successor for.
+    return _refresh_reuse_response(row)
 
 
 def _refresh_reuse_response(row: RefreshToken) -> RefreshConsumeResult:
@@ -2138,12 +2184,21 @@ def revoke_all_user_refresh_tokens(user_id: str) -> int:
     their original reason (and the reuse-detection signal that depends
     on it) survives.
 
-    Subject to the eventually-consistent index window documented on
-    :func:`_revoke_refresh_family`: a device that mints a token in the
-    same instant may not appear in the sweep.
+    Sweeps twice, like the reuse cascade and unlike logout: "sign out
+    everywhere" is the button a user reaches for when they believe
+    they have been compromised, so an attacker actively racing the
+    sweep is a plausible scenario here. The self-inflicted-ordering
+    argument that justifies a single sweep for logout does not
+    transfer. Still subject to the eventually-consistent index window
+    documented on :func:`_revoke_refresh_family`.
     """
 
-    return _revoke_refresh_family(user_id, None, RefreshRevokeReason.USER_REVOKED)
+    return _revoke_refresh_family(
+        user_id,
+        None,
+        RefreshRevokeReason.USER_REVOKED,
+        sweeps=_REFRESH_REUSE_SWEEPS,
+    )
 
 
 # ----------------------------------------------------------------

@@ -25,6 +25,7 @@ table is not cleaned between tests).
 from __future__ import annotations
 
 import uuid
+from decimal import Decimal
 from typing import Any
 
 from boto3.dynamodb.conditions import Key
@@ -56,9 +57,13 @@ def test_mint_writes_a_row_whose_ttl_and_flags_survive_the_round_trip(starter_ta
     # The raw token must appear nowhere in the persisted row.
     assert raw not in str(row)
     assert row["token_hash"] == token.token_hash
-    # DynamoDB hands Numbers back as Decimal; cast so a stringified ttl
-    # (which the TTL service ignores, leaving the row immortal) fails here.
+    # DynamoDB hands Numbers back as Decimal and Strings back as str, so
+    # the type assertion — not the value — is what catches a ttl written
+    # as a string (which the TTL service ignores, leaving the row
+    # immortal). ``int("1234")`` would happily succeed.
+    assert isinstance(row["ttl"], Decimal)
     assert int(row["ttl"]) == int(storage._parse_iso_utc(token.absolute_expires_at).timestamp())
+    assert isinstance(row["revoked"], bool)
     assert row["revoked"] is False
 
 

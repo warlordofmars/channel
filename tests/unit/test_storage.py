@@ -3455,10 +3455,11 @@ def test_revoke_refresh_family_sweeps_the_index_the_requested_number_of_times(
     assert revoked == 2
 
 
-def test_reuse_cascade_double_sweeps_while_logout_and_sign_out_all_do_not(
+def test_adversarial_paths_double_sweep_while_plain_logout_does_not(
     table: FakeTable, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Only the security-critical path pays for the extra Query."""
+    """Reuse detection and "sign out everywhere" both race an adversary,
+    so both pay for the extra Query. Plain logout doesn't."""
     from channel import storage
 
     calls: list[int] = []
@@ -3482,5 +3483,110 @@ def test_reuse_cascade_double_sweeps_while_logout_and_sign_out_all_do_not(
     revoke_refresh_token(raw_logout)
     revoke_all_user_refresh_tokens("u-1")
 
-    assert calls == [storage._REFRESH_REUSE_SWEEPS, 1, 1]
+    assert calls == [storage._REFRESH_REUSE_SWEEPS, 1, storage._REFRESH_REUSE_SWEEPS]
     assert storage._REFRESH_REUSE_SWEEPS == 2
+
+
+def test_refresh_consume_result_rejects_a_revoked_count_outside_the_reuse_path() -> None:
+    """#294 reads ``revoked_count`` to size the breach signal, so a stray
+    count on a non-reuse outcome would inflate a security metric."""
+    with pytest.raises(ValidationError):
+        RefreshConsumeResult(outcome=RefreshConsumeOutcome.REVOKED, revoked_count=3)
+
+
+def test_refresh_consume_result_rejects_a_negative_revoked_count() -> None:
+    with pytest.raises(ValidationError):
+        RefreshConsumeResult(outcome=RefreshConsumeOutcome.REUSED, revoked_count=-1)
+
+
+def test_refresh_consume_result_allows_a_zero_count_on_any_outcome() -> None:
+    for outcome in (
+        RefreshConsumeOutcome.NOT_FOUND,
+        RefreshConsumeOutcome.REVOKED,
+        RefreshConsumeOutcome.EXPIRED_IDLE,
+        RefreshConsumeOutcome.EXPIRED_ABSOLUTE,
+    ):
+        assert RefreshConsumeResult(outcome=outcome).revoked_count == 0
+
+
+def _lose_the_conditional_update(
+    table: FakeTable, monkeypatch: pytest.MonkeyPatch, then: Any
+) -> None:
+    """Make the next ``_mark_refresh_revoked`` lose, applying ``then``
+    to the table first so the re-read observes whoever won."""
+    from channel import storage
+
+    original = storage._mark_refresh_revoked
+    state = {"first": True}
+
+    def flaky(token_hash: str, reason: RefreshRevokeReason) -> bool:
+        if state["first"]:
+            state["first"] = False
+            then(token_hash)
+            return False
+        return original(token_hash, reason)
+
+    monkeypatch.setattr(storage, "_mark_refresh_revoked", flaky)
+
+
+def test_losing_to_a_concurrent_consume_is_reported_as_reuse(
+    table: FakeTable, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The replay-shaped race: another consume rotated the row first."""
+    from channel import storage
+
+    raw, token = mint_refresh_token(user_id="u-1", device_id="d-1")
+
+    def rotate_it(token_hash: str) -> None:
+        row = table.items[(f"REFRESH#{token_hash}", "META")]
+        row.update({"revoked": True, "revoked_reason": "rotated", "revoked_at": _iso(0)})
+
+    _lose_the_conditional_update(table, monkeypatch, rotate_it)
+
+    result = consume_refresh_token(raw)
+
+    assert result.outcome == RefreshConsumeOutcome.REUSED
+    assert storage._get_refresh_row(token.token_hash) is not None
+
+
+def test_losing_to_a_concurrent_logout_is_revoked_not_a_false_breach(
+    table: FakeTable, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A user ending the session while a refresh is in flight is not a
+    breach: it must not log reuse, must not arm the cascade, and must
+    not overwrite the family's real revocation reason (#294 reads that
+    counter)."""
+    from unittest.mock import MagicMock
+
+    raw, token = mint_refresh_token(user_id="u-1", device_id="d-1")
+
+    def log_them_out(token_hash: str) -> None:
+        row = table.items[(f"REFRESH#{token_hash}", "META")]
+        row.update({"revoked": True, "revoked_reason": "logout", "revoked_at": _iso(0)})
+
+    _lose_the_conditional_update(table, monkeypatch, log_them_out)
+    mock_logger = MagicMock()
+    monkeypatch.setattr("channel.storage.logger", mock_logger)
+
+    result = consume_refresh_token(raw)
+
+    assert result.outcome == RefreshConsumeOutcome.REVOKED
+    assert result.revoked_count == 0
+    mock_logger.warning.assert_not_called()
+    stored = table.items[(f"REFRESH#{token.token_hash}", "META")]
+    assert stored["revoked_reason"] == "logout"
+
+
+def test_losing_because_the_row_was_ttl_swept_is_not_found(
+    table: FakeTable, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``attribute_exists(PK)`` can fail because the row vanished — there
+    is nothing to rotate and no family worth cascading over."""
+    raw, token = mint_refresh_token(user_id="u-1", device_id="d-1")
+
+    def sweep_it(token_hash: str) -> None:
+        table.items.pop((f"REFRESH#{token_hash}", "META"))
+
+    _lose_the_conditional_update(table, monkeypatch, sweep_it)
+
+    assert consume_refresh_token(raw).outcome == RefreshConsumeOutcome.NOT_FOUND

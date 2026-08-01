@@ -295,8 +295,10 @@ class ChannelStack(cdk.Stack):
         # ChatByIdIndex, GSI4 to UserEmailIndex, and AssetOwnerIndex
         # deliberately uses semantic ``owner_pk``/``owner_sk`` names
         # instead of a numbered slot (#324), so GSI5 was never taken.
-        # Sort key is ``{issued_at}#{token_hash prefix}`` so the #293
-        # sessions list reads newest-first straight off the index.
+        # Sort key is ``{issued_at}#{token_hash prefix}`` so a user's
+        # rows come back in issue order; the #293 sessions list gets
+        # newest-first by asking for it (``ScanIndexForward=False``)
+        # rather than sorting client-side.
         table.add_global_secondary_index(
             index_name="RefreshByUserIndex",
             partition_key=dynamodb.Attribute(name="GSI5PK", type=dynamodb.AttributeType.STRING),
