@@ -28,6 +28,8 @@ from typing import Any
 
 from jose import JWTError, jwt
 
+from channel.storage import is_jti_denied
+
 JWT_ALGORITHM = "HS256"
 ISSUER = os.environ.get("CHANNEL_ISSUER", "https://channel.example.com")
 
@@ -112,7 +114,16 @@ def decode_jwt(token_str: str) -> dict[str, Any]:
     return jwt.decode(token_str, _jwt_secret(), algorithms=[JWT_ALGORITHM], issuer=ISSUER)
 
 
-MGMT_JWT_TTL_SECONDS = 2_592_000  # 30 days (revocable via the #240 jti denylist)
+# Access-token lifetime. Deliberately short: the long-lived credential
+# is the opaque, server-side, revocable refresh token (#290), and
+# ``POST /auth/refresh`` (#291) silently re-mints this one, so the
+# bearer token that rides on *every* request no longer needs a
+# multi-week window. #240 raised this to 30 days as a stop-gap while no
+# refresh flow existed; epic #241 reverts it now that one does. Shorter
+# TTL also bounds the blast radius of a leaked access token to an hour
+# — the denylist (#240) remains the immediate-revocation path, not the
+# only one.
+MGMT_JWT_TTL_SECONDS = 3600  # 1 hour
 
 
 def issue_mgmt_jwt(user: Any) -> str:
@@ -140,8 +151,8 @@ def issue_mgmt_jwt(user: Any) -> str:
         else user.get("role", "user"),
         "typ": "mgmt",
         # Unique per-token id so an individual session can be revoked
-        # (logout / stolen-laptop) via the DENY#{jti} denylist — the
-        # safety valve the 30-day TTL relies on (#240).
+        # (logout / stolen-laptop) via the DENY#{jti} denylist (#240)
+        # before its ``exp`` — enforced in :func:`decode_mgmt_jwt`.
         "jti": uuid.uuid4().hex,
         "iat": now,
         "exp": now + MGMT_JWT_TTL_SECONDS,
@@ -150,13 +161,42 @@ def issue_mgmt_jwt(user: Any) -> str:
 
 
 def decode_mgmt_jwt(token_str: str) -> dict[str, Any]:
-    """Decode a management JWT and enforce typ=mgmt.
+    """Decode a management JWT, enforce ``typ=mgmt``, and reject revoked jtis.
 
-    Raises JWTError if the token is invalid, expired, or not a management token.
+    Raises ``JWTError`` if the token is invalid, expired, not a
+    management token, or revoked.
+
+    **Revocation is enforced here, not in the caller.** The signature +
+    ``iss`` + ``exp`` + ``typ`` checks are self-contained, but a session
+    the user (or an operator) explicitly ended must also be rejected
+    before its ``exp``, so the token's ``jti`` is checked against the
+    ``DENY#{jti}`` denylist (#240) with a single strongly-consistent
+    point read. Putting that read in the decode function rather than in
+    :func:`channel.api._auth.require_mgmt_user` gives one fail-closed
+    enforcement point: every present and future consumer of a mgmt JWT
+    inherits revocation-awareness without having to remember the second
+    call. #240 shipped the check in ``require_mgmt_user`` (the only
+    consumer at the time); #291 moves it down here — same behaviour,
+    same 401, same single read, one fewer way to get it wrong.
+
+    Two deliberate non-behaviours:
+
+    - **A token with no ``jti`` skips the read entirely.** Tokens minted
+      before #240 have no ``jti``, and there is nothing to look up; they
+      remain valid until they expire on their own.
+    - **A denylist read *failure* propagates** rather than being
+      swallowed into "not revoked". Failing open on a storage error
+      would make revocation bypassable by inducing DynamoDB errors;
+      ``require_mgmt_user`` catches only ``JWTError``, so a
+      ``ClientError`` here surfaces as a 500 like every other
+      DDB-backed path.
     """
     claims = jwt.decode(token_str, _jwt_secret(), algorithms=[JWT_ALGORITHM], issuer=ISSUER)
     if claims.get("typ") != "mgmt":
         raise JWTError("Not a management token")
+    jti = claims.get("jti")
+    if jti and is_jti_denied(jti):
+        raise JWTError("Token revoked")
     return claims
 
 

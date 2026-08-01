@@ -242,12 +242,14 @@ def test_second_request_with_revoked_token_is_401(
 
     Drives the real ``require_mgmt_user`` + real ``mgmt_logout`` through a
     shared in-memory denylist so the wiring (logout writes → next request
-    reads) is proven without DynamoDB.
+    reads) is proven without DynamoDB. The read side moved into
+    ``decode_mgmt_jwt`` in #291, so that is where the seam is patched;
+    the property under test is unchanged.
     """
 
     revoked: set[str] = set()
     monkeypatch.setattr("channel.auth.logout.deny_jti", lambda jti, _exp: revoked.add(jti))
-    monkeypatch.setattr("channel.api._auth.is_jti_denied", lambda jti: jti in revoked)
+    monkeypatch.setattr("channel.auth.tokens.is_jti_denied", lambda jti: jti in revoked)
 
     headers = _auth_headers()
     first = _client.post("/auth/logout", headers=headers)

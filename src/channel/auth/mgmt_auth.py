@@ -107,7 +107,18 @@ def _html_redirect(jwt_token: str) -> HTMLResponse:
     return HTMLResponse(content=body)
 
 
-def _make_user(email: str, display_name: str) -> dict[str, Any]:
+def make_mgmt_user(email: str, display_name: str) -> dict[str, Any]:
+    """Build the user dict :func:`issue_mgmt_jwt` turns into claims.
+
+    Public (not ``_``-prefixed) because ``POST /auth/refresh`` (#291)
+    re-mints access tokens outside the login flow and must produce the
+    *same* claim shape — a second, drifting copy of this mapping in
+    ``auth/refresh.py`` is exactly the bug that would let a refreshed
+    session carry a different ``role`` rule than a freshly logged-in
+    one. ``role`` is recomputed from the allowlist on every call, so an
+    admin grant or revocation takes effect on the next refresh rather
+    than at the next full sign-in.
+    """
     return {
         "user_id": email,
         "email": email,
@@ -134,7 +145,7 @@ async def mgmt_login(request: Request) -> RedirectResponse:
     """
     test_email = request.query_params.get("test_email")
     if _BYPASS and test_email:
-        user = _make_user(test_email, test_email.split("@")[0])
+        user = make_mgmt_user(test_email, test_email.split("@")[0])
         token = issue_mgmt_jwt(user)
         return _html_redirect(token)  # type: ignore[return-value]
 
@@ -162,7 +173,7 @@ async def mgmt_login(request: Request) -> RedirectResponse:
         if _BYPASS and dev_email:
             from urllib.parse import urlencode
 
-            user = _make_user(dev_email, dev_email.split("@")[0])
+            user = make_mgmt_user(dev_email, dev_email.split("@")[0])
             token = issue_mgmt_jwt(user)
             qs = urlencode({"token": token, "state": caller_state})
             return RedirectResponse(f"{validated}?{qs}", status_code=302)
@@ -213,7 +224,7 @@ async def mgmt_callback(
         raise HTTPException(status_code=403, detail="Email not authorised")
 
     display_name: str = claims.get("name", email.split("@")[0])
-    user = _make_user(email, display_name)
+    user = make_mgmt_user(email, display_name)
     token = issue_mgmt_jwt(user)
     logger.info("Management login: %s (role=%s)", email, user["role"])
 
