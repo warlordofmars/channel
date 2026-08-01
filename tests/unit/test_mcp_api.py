@@ -139,7 +139,7 @@ def test_register_server_runs_dcr_and_returns_auth_url(
     monkeypatch.setattr(storage, "create_mcp_server", fake_create)
 
     monkeypatch.setenv(
-        "STARTER_MCP_REDIRECT_URI",
+        "CHANNEL_MCP_REDIRECT_URI",
         "https://channel.example.com/auth/mcp/callback",
     )
 
@@ -518,7 +518,7 @@ def test_register_rejects_link_local_metadata_ip(
     """Block the AWS IMDS at 169.254.169.254 — the SSRF threat that the
     URL validator exists to prevent."""
     monkeypatch.setenv(
-        "STARTER_MCP_REDIRECT_URI",
+        "CHANNEL_MCP_REDIRECT_URI",
         "https://channel.example.com/auth/mcp/callback",
     )
     resp = client.post(
@@ -533,7 +533,7 @@ def test_register_rejects_loopback_when_carve_out_disabled(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("STARTER_MCP_ALLOW_LOCALHOST", raising=False)
+    monkeypatch.delenv("CHANNEL_MCP_ALLOW_LOCALHOST", raising=False)
     resp = client.post(
         "/api/mcp/servers",
         json={"name": "X", "url": "http://localhost:9000/mcp"},
@@ -556,7 +556,7 @@ def test_register_rejects_when_dns_resolves_to_private(
 
     monkeypatch.setattr(_socket, "getaddrinfo", fake_getaddrinfo)
     monkeypatch.setenv(
-        "STARTER_MCP_REDIRECT_URI",
+        "CHANNEL_MCP_REDIRECT_URI",
         "https://channel.example.com/auth/mcp/callback",
     )
     resp = client.post(
@@ -571,10 +571,10 @@ def test_register_allows_localhost_carve_out_when_flag_set(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Local dev still works behind the explicit STARTER_MCP_ALLOW_LOCALHOST=1."""
+    """Local dev still works behind the explicit CHANNEL_MCP_ALLOW_LOCALHOST=1."""
     from channel.mcp.url_guard import validate_mcp_server_url as _validate_mcp_server_url
 
-    monkeypatch.setenv("STARTER_MCP_ALLOW_LOCALHOST", "1")
+    monkeypatch.setenv("CHANNEL_MCP_ALLOW_LOCALHOST", "1")
     # Direct call; the carve-out only suppresses HTTPException — no fetch.
     _validate_mcp_server_url("http://localhost:9000/mcp")
 
@@ -720,7 +720,7 @@ def test_validate_rejects_when_hostname_does_not_resolve(
 
     monkeypatch.setattr(_socket, "getaddrinfo", fake_gai)
     monkeypatch.setenv(
-        "STARTER_MCP_REDIRECT_URI",
+        "CHANNEL_MCP_REDIRECT_URI",
         "https://channel.example.com/auth/mcp/callback",
     )
     resp = client.post(
@@ -734,7 +734,7 @@ def test_validate_rejects_when_hostname_does_not_resolve(
 def test_register_503_when_redirect_uri_unset(
     client: TestClient, monkeypatch: pytest.MonkeyPatch, public_dns: None
 ) -> None:
-    monkeypatch.delenv("STARTER_MCP_REDIRECT_URI", raising=False)
+    monkeypatch.delenv("CHANNEL_MCP_REDIRECT_URI", raising=False)
     resp = client.post(
         "/api/mcp/servers",
         json={"name": "X", "url": "https://hive.example.com/mcp"},
@@ -816,7 +816,7 @@ def test_tool_prefix_fallback_to_host(
 
     monkeypatch.setattr(_storage, "create_mcp_server", fake_create)
     monkeypatch.setenv(
-        "STARTER_MCP_REDIRECT_URI",
+        "CHANNEL_MCP_REDIRECT_URI",
         "https://channel.example.com/auth/mcp/callback",
     )
     # Send an empty tool_prefix — the route should fallback to "hive".
@@ -865,7 +865,7 @@ def test_register_no_dcr_endpoint_returns_distinguishable_code(
         ),
     )
     monkeypatch.setenv(
-        "STARTER_MCP_REDIRECT_URI",
+        "CHANNEL_MCP_REDIRECT_URI",
         "https://channel.example.com/auth/mcp/callback",
     )
     resp = client.post(
@@ -890,7 +890,7 @@ def test_register_502_when_discovery_raises(
 
     monkeypatch.setattr(_mcp_auth, "discover_resource_metadata", boom)
     monkeypatch.setenv(
-        "STARTER_MCP_REDIRECT_URI",
+        "CHANNEL_MCP_REDIRECT_URI",
         "https://channel.example.com/auth/mcp/callback",
     )
     resp = client.post(
@@ -950,7 +950,7 @@ def test_register_502_when_dcr_returns_no_client_id(
         ),
     )
     monkeypatch.setenv(
-        "STARTER_MCP_REDIRECT_URI",
+        "CHANNEL_MCP_REDIRECT_URI",
         "https://channel.example.com/auth/mcp/callback",
     )
     resp = client.post(
@@ -1235,7 +1235,7 @@ def test_reauth_happy_path(
         lambda *_a, **_k: None,
     )
     monkeypatch.setenv(
-        "STARTER_MCP_REDIRECT_URI",
+        "CHANNEL_MCP_REDIRECT_URI",
         "https://channel.example.com/auth/mcp/callback",
     )
     resp = client.post("/api/mcp/servers/srv-1/reauth")
@@ -1259,7 +1259,7 @@ def test_reauth_502_on_discovery_failure(
 
     monkeypatch.setattr(_mcp_auth, "discover_resource_metadata", boom)
     monkeypatch.setenv(
-        "STARTER_MCP_REDIRECT_URI",
+        "CHANNEL_MCP_REDIRECT_URI",
         "https://channel.example.com/auth/mcp/callback",
     )
     resp = client.post("/api/mcp/servers/srv-1/reauth")
@@ -1516,14 +1516,14 @@ def test_normalize_tool_prefix_truncates_host_fallback() -> None:
 def test_main_mount_kill_switch_skipped_when_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When STARTER_MCP_REGISTRY_ENABLED != '1' the FastAPI app does
+    """When CHANNEL_MCP_REGISTRY_ENABLED != '1' the FastAPI app does
     NOT include the MCP routers — /api/mcp/servers + /auth/mcp/callback
     return 404. The test reloads ``channel.api.main`` so the
     module-import-time gate runs again with the new env value."""
     import importlib
     import sys
 
-    monkeypatch.setenv("STARTER_MCP_REGISTRY_ENABLED", "0")
+    monkeypatch.setenv("CHANNEL_MCP_REGISTRY_ENABLED", "0")
     # Force re-import of main so the gated mount runs again. Modules
     # that may reference the previous app instance get reloaded too.
     sys.modules.pop("channel.api.main", None)

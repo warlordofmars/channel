@@ -19,10 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   moderation is Bedrock's built-in Stability RAI filter (a blocked
   prompt surfaces over SSE as a `tool_error` with
   `error_type="content_filtered"`); there is no cost gating (billing
-  deferred), only the `STARTER_IMAGE_GEN_ENABLED` kill-switch and the
+  deferred), only the `CHANNEL_IMAGE_GEN_ENABLED` kill-switch and the
   `ImageGenInvocations` / `ImageGenFailures` EMF counters. The API
   Lambda's IAM role gains `bedrock:InvokeModel` on the Stability
-  image-generation foundation model; `STARTER_IMAGE_GEN_MODEL` can flip
+  image-generation foundation model; `CHANNEL_IMAGE_GEN_MODEL` can flip
   to Stable Image Ultra or SD3.5 Large with no code change (all three
   share one request/response contract).
 - Asset producers + `asset_created` SSE (#326, epic #321). Chats now
@@ -30,7 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ASSET rows at message-send (same S3 object, no byte copy), code-exec
   output images persist to S3 under `assets/chat/{chat_id}/{asset_id}`
   as `origin=tool_output`, and — behind the
-  `STARTER_ASSET_EXTRACTION_ENABLED` kill-switch — fenced code blocks
+  `CHANNEL_ASSET_EXTRACTION_ENABLED` kill-switch — fenced code blocks
   of 15+ lines (mermaid excluded) in the settled assistant text become
   `kind=code` assets with `source.fence_index` for a deterministic
   fence → card swap. New `asset_created` / `asset_updated` SSE frames
@@ -52,7 +52,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   loopback/link-local/private/reserved address). (#207, #184 spike,
   epic #128 part D)
 - Code execution via Lambda sandbox: `code_exec` tool registered on the
-  chassis behind `STARTER_CODE_EXEC_ENABLED` (default on in deployed envs;
+  chassis behind `CHANNEL_CODE_EXEC_ENABLED` (default on in deployed envs;
   kill switch only). A separate `CodeExecLambda` CDK construct runs user
   Python in a subprocess on a least-privilege IAM role (no DDB / S3 /
   Bedrock / Secrets / SSM — pure compute), with SnapStart on Python 3.13,
@@ -69,7 +69,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   inline images, meta line with exit/duration/truncation/timeout flags).
   Closes epic #128 part C (#183).
 - Web search via Exa: `web_search` tool registered on the chassis behind
-  `STARTER_WEB_SEARCH_ENABLED` (default on in all envs; kill switch only,
+  `CHANNEL_WEB_SEARCH_ENABLED` (default on in all envs; kill switch only,
   not progressive rollout). The model writes replies with inline markdown
   links (`[claim](url)`) as the citation channel — no SSE protocol change,
   no new SPA renderer. Rate limit deferred for v1; the chassis chain-cap
@@ -83,7 +83,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `sse_tool_error`), a collapsible step list in the Conversation view
   (default collapsed, expandable, distinct chain-cap affordance), the
   `ToolResultBlock` seed component, and the `current_time` smoke-test
-  tool behind `STARTER_CLOCK_TOOL_ENABLED` (default on in jc/dev, off
+  tool behind `CHANNEL_CLOCK_TOOL_ENABLED` (default on in jc/dev, off
   in prod per strategy spec policy P2). EMF counters
   `ToolCallSuccesses` / `ToolCallFailures` land alongside (#181, epic
   #128).
@@ -104,7 +104,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   composer for editing (no auto-send). Backend emits a new
   `follow_ups_suggested` SSE event powered by a Haiku one-shot
   Strands Agent that runs after the auto-title block, behind the
-  `STARTER_FOLLOWUPS_ENABLED` (default on) and `STARTER_FOLLOWUPS_MODEL`
+  `CHANNEL_FOLLOWUPS_ENABLED` (default on) and `CHANNEL_FOLLOWUPS_MODEL`
   (default `claude-haiku-4-5`) env knobs. Generation failures log +
   emit a `FollowupGenFailures` CloudWatch counter and are swallowed —
   no visible regression to the chat reply. Part of #113.
@@ -127,8 +127,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with a 5-turn cache; injection is a Markdown addendum on the
   system prompt. Auto-title uses a Haiku one-shot Strands Agent
   emitted inline as a new `title_suggested` SSE event. Both
-  features fail-soft and ship behind `STARTER_RECALL_ENABLED` and
-  `STARTER_AUTO_TITLE_ENABLED` kill-switches. NOTE: AgentCore's
+  features fail-soft and ship behind `CHANNEL_RECALL_ENABLED` and
+  `CHANNEL_AUTO_TITLE_ENABLED` kill-switches. NOTE: AgentCore's
   `SemanticMemoryStrategy` is asynchronous — newly-written events
   take minutes to appear as queryable recall records.
 - Phase 7c — agent now persists every chat turn to Bedrock AgentCore
@@ -137,7 +137,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with EMF + structured-log surfacing, and recall stays disabled —
   that's Phase 7d. Dev environments gain a debug endpoint
   (`GET /api/_debug/memory/events`) for inspecting writes, gated by
-  `STARTER_ENABLE_DEBUG_ENDPOINTS=1` with a CDK assertion test that
+  `CHANNEL_ENABLE_DEBUG_ENDPOINTS=1` with a CDK assertion test that
   blocks the flag from leaking to prod.
 - Real Bedrock streaming via Strands Agents — replaces the canned reply
   that 7a shipped. Three models served: Sonnet 4.6, Haiku 4.5, Opus 4.6.
@@ -223,6 +223,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Meta
 
+- Renamed every production environment variable from the legacy
+  `STARTER_*` prefix (a leftover from the `agentcore-starter` fork) to
+  `CHANNEL_*` across the CDK Lambda env block
+  (`infra/stacks/channel_stack.py`), every `src/channel/` reader,
+  `tasks.py`, the CI integration/smoke-test env, and the test suite —
+  a single atomic hard-cut (CDK writes the env block and the readers
+  ship in the same Lambda zip, so there is no window where old code
+  reads a new name or vice versa). Pure mechanical rename, zero
+  behaviour change; the SSM parameter *paths* held as `*_PARAM` values
+  are untouched (#259, part of #258). Documentation of the new names in
+  the READMEs and `CLAUDE.md` follows in #5 and #6.
 - Public docs-site operations pages now cite the correct module paths:
   the stale `src/starter/*` references in
   `docs-site/operations/security.md` and

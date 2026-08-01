@@ -3,7 +3,7 @@
 
 OAuth bearer tokens are small (<= 1 KB typically). Direct KMS
 ``encrypt``/``decrypt`` is sufficient — no envelope-encryption dance.
-The KMS key ARN comes from ``STARTER_MCP_TOKEN_KMS_KEY_ID``; the CDK
+The KMS key ARN comes from ``CHANNEL_MCP_TOKEN_KMS_KEY_ID``; the CDK
 stack creates a dedicated CMK with rotation enabled and grants the API
 Lambda's role ``kms:Encrypt`` + ``kms:Decrypt`` on it.
 """
@@ -22,7 +22,7 @@ def _get_kms_client() -> Any:  # pragma: no cover - patched in tests
     return boto3.client("kms", region_name=os.environ.get("AWS_DEFAULT_REGION", "us-east-1"))
 
 
-# Local-dev sentinel: when STARTER_MCP_TOKEN_KMS_KEY_ID is the literal
+# Local-dev sentinel: when CHANNEL_MCP_TOKEN_KMS_KEY_ID is the literal
 # ``"local"`` string, encrypt/decrypt short-circuit to a passthrough
 # wrapping. This lets ``inv dev`` run the MCP flows against DynamoDB
 # Local without touching AWS KMS. Production envs must never set this
@@ -32,10 +32,10 @@ _LOCAL_DEV_SENTINEL = "local"
 
 
 def _key_id() -> str:
-    key_id = os.environ.get("STARTER_MCP_TOKEN_KMS_KEY_ID")
+    key_id = os.environ.get("CHANNEL_MCP_TOKEN_KMS_KEY_ID")
     if not key_id:
         raise RuntimeError(
-            "STARTER_MCP_TOKEN_KMS_KEY_ID is unset; MCP token storage requires "
+            "CHANNEL_MCP_TOKEN_KMS_KEY_ID is unset; MCP token storage requires "
             "a KMS key for application-layer encryption."
         )
     return key_id

@@ -87,17 +87,17 @@ def _normalize_tool_prefix(value: str | None, fallback_url: str) -> str:
 
 
 def _redirect_uri() -> str:
-    uri = os.environ.get("STARTER_MCP_REDIRECT_URI")
+    uri = os.environ.get("CHANNEL_MCP_REDIRECT_URI")
     if not uri:
         raise HTTPException(
             status_code=503,
-            detail="MCP registry is not configured (STARTER_MCP_REDIRECT_URI unset)",
+            detail="MCP registry is not configured (CHANNEL_MCP_REDIRECT_URI unset)",
         )
     return uri
 
 
 def _spa_base_url() -> str:
-    return os.environ.get("STARTER_SPA_BASE_URL", "http://localhost:5173")
+    return os.environ.get("CHANNEL_SPA_BASE_URL", "http://localhost:5173")
 
 
 def _customize_redirect(**params: str) -> str:

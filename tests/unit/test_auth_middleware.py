@@ -6,7 +6,7 @@ import os
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 
-os.environ.setdefault("STARTER_JWT_SECRET", "test-secret-for-unit-tests")
+os.environ.setdefault("CHANNEL_JWT_SECRET", "test-secret-for-unit-tests")
 
 from channel.api._auth import require_admin, require_mgmt_user  # noqa: E402
 from channel.auth.tokens import issue_mgmt_jwt  # noqa: E402

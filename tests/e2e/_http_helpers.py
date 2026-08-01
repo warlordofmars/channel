@@ -54,7 +54,7 @@ def _mint_jwt_via_bypass(api_url: str, email: str) -> str:
         timeout=15.0,
     )
     if resp.status_code in (301, 302, 307, 308):
-        pytest.skip("Google OAuth redirect — STARTER_BYPASS_GOOGLE_AUTH not enabled")
+        pytest.skip("Google OAuth redirect — CHANNEL_BYPASS_GOOGLE_AUTH not enabled")
     resp.raise_for_status()
     m = re.search(
         r"localStorage\.setItem\('starter_mgmt_token',\s*'([^']+)'\)",

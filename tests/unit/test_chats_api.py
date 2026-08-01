@@ -661,14 +661,14 @@ def test_post_message_falls_back_to_prefs_effort_when_payload_omits_it(
 # envs (kill-switch on default-on); ``code_exec`` ships "1" in all
 # deployed envs (kill-switch on default-on); ``generate_image`` (Stable
 # Image Core, #279) ships "1" in all deployed envs (kill-switch on
-# default-on). ``web_fetch`` rides ``STARTER_WEB_SEARCH_ENABLED`` rather
+# default-on). ``web_fetch`` rides ``CHANNEL_WEB_SEARCH_ENABLED`` rather
 # than its own flag — both tools are backed by the same Exa API key, so
 # one availability signal covers the discover/deep-read pair (#232).
 _TOOL_FLAGS: list[tuple[str, list[str]]] = [
-    ("STARTER_CLOCK_TOOL_ENABLED", ["current_time"]),
-    ("STARTER_WEB_SEARCH_ENABLED", ["web_search", "web_fetch"]),
-    ("STARTER_CODE_EXEC_ENABLED", ["code_exec"]),
-    ("STARTER_IMAGE_GEN_ENABLED", ["generate_image"]),
+    ("CHANNEL_CLOCK_TOOL_ENABLED", ["current_time"]),
+    ("CHANNEL_WEB_SEARCH_ENABLED", ["web_search", "web_fetch"]),
+    ("CHANNEL_CODE_EXEC_ENABLED", ["code_exec"]),
+    ("CHANNEL_IMAGE_GEN_ENABLED", ["generate_image"]),
 ]
 
 
@@ -713,8 +713,8 @@ def test_post_message_omits_tools_when_all_flags_off(
 ) -> None:
     """When every flag in ``_TOOL_FLAGS`` is cleared, ``tools`` is empty.
 
-    This is NOT the prod default — prod has ``STARTER_WEB_SEARCH_ENABLED=1``
-    (and ``STARTER_CLOCK_TOOL_ENABLED=0``); the test just exercises the
+    This is NOT the prod default — prod has ``CHANNEL_WEB_SEARCH_ENABLED=1``
+    (and ``CHANNEL_CLOCK_TOOL_ENABLED=0``); the test just exercises the
     no-tools-registered branch of ``chats.py`` directly. Pre-parametrize,
     this was two tests (``..._omits_clock_tool_when_flag_off`` +
     ``..._omits_web_search_tool_when_flag_off``) doing the same
@@ -755,7 +755,7 @@ def test_post_message_wires_native_and_capped_mcp_tools(
     _stub_storage_for_one_turn(monkeypatch)
     for flag, _ in _TOOL_FLAGS:
         monkeypatch.delenv(flag, raising=False)
-    monkeypatch.setenv("STARTER_CLOCK_TOOL_ENABLED", "1")  # one native tool
+    monkeypatch.setenv("CHANNEL_CLOCK_TOOL_ENABLED", "1")  # one native tool
 
     mcp_a = object()
     mcp_b = object()
@@ -784,12 +784,12 @@ def test_post_message_wires_native_and_capped_mcp_tools(
 def test_tool_registry_includes_code_exec_when_flag_on(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``STARTER_CODE_EXEC_ENABLED=1`` → ``code_exec`` registered."""
+    """``CHANNEL_CODE_EXEC_ENABLED=1`` → ``code_exec`` registered."""
     from channel.agents.tools.code_exec import code_exec
 
-    monkeypatch.setenv("STARTER_CODE_EXEC_ENABLED", "1")
-    monkeypatch.delenv("STARTER_CLOCK_TOOL_ENABLED", raising=False)
-    monkeypatch.delenv("STARTER_WEB_SEARCH_ENABLED", raising=False)
+    monkeypatch.setenv("CHANNEL_CODE_EXEC_ENABLED", "1")
+    monkeypatch.delenv("CHANNEL_CLOCK_TOOL_ENABLED", raising=False)
+    monkeypatch.delenv("CHANNEL_WEB_SEARCH_ENABLED", raising=False)
 
     from channel.api.chats import _build_tool_registry
 
@@ -800,12 +800,12 @@ def test_tool_registry_includes_code_exec_when_flag_on(
 def test_tool_registry_excludes_code_exec_when_flag_off(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``STARTER_CODE_EXEC_ENABLED`` unset → ``code_exec`` NOT registered."""
+    """``CHANNEL_CODE_EXEC_ENABLED`` unset → ``code_exec`` NOT registered."""
     from channel.agents.tools.code_exec import code_exec
 
-    monkeypatch.delenv("STARTER_CODE_EXEC_ENABLED", raising=False)
-    monkeypatch.delenv("STARTER_CLOCK_TOOL_ENABLED", raising=False)
-    monkeypatch.delenv("STARTER_WEB_SEARCH_ENABLED", raising=False)
+    monkeypatch.delenv("CHANNEL_CODE_EXEC_ENABLED", raising=False)
+    monkeypatch.delenv("CHANNEL_CLOCK_TOOL_ENABLED", raising=False)
+    monkeypatch.delenv("CHANNEL_WEB_SEARCH_ENABLED", raising=False)
 
     from channel.api.chats import _build_tool_registry
 
@@ -816,14 +816,14 @@ def test_tool_registry_excludes_code_exec_when_flag_off(
 def test_tool_registry_includes_web_fetch_when_web_search_flag_on(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``STARTER_WEB_SEARCH_ENABLED=1`` registers ``web_fetch`` alongside
+    """``CHANNEL_WEB_SEARCH_ENABLED=1`` registers ``web_fetch`` alongside
     ``web_search`` — the pair shares one flag because both are backed by
     the same Exa API key (#232)."""
     from channel.agents.tools.web_fetch import web_fetch
 
-    monkeypatch.setenv("STARTER_WEB_SEARCH_ENABLED", "1")
-    monkeypatch.delenv("STARTER_CLOCK_TOOL_ENABLED", raising=False)
-    monkeypatch.delenv("STARTER_CODE_EXEC_ENABLED", raising=False)
+    monkeypatch.setenv("CHANNEL_WEB_SEARCH_ENABLED", "1")
+    monkeypatch.delenv("CHANNEL_CLOCK_TOOL_ENABLED", raising=False)
+    monkeypatch.delenv("CHANNEL_CODE_EXEC_ENABLED", raising=False)
 
     from channel.api.chats import _build_tool_registry
 
@@ -834,12 +834,12 @@ def test_tool_registry_includes_web_fetch_when_web_search_flag_on(
 def test_tool_registry_excludes_web_fetch_when_flag_off(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``STARTER_WEB_SEARCH_ENABLED`` unset → ``web_fetch`` NOT registered."""
+    """``CHANNEL_WEB_SEARCH_ENABLED`` unset → ``web_fetch`` NOT registered."""
     from channel.agents.tools.web_fetch import web_fetch
 
-    monkeypatch.delenv("STARTER_WEB_SEARCH_ENABLED", raising=False)
-    monkeypatch.delenv("STARTER_CLOCK_TOOL_ENABLED", raising=False)
-    monkeypatch.delenv("STARTER_CODE_EXEC_ENABLED", raising=False)
+    monkeypatch.delenv("CHANNEL_WEB_SEARCH_ENABLED", raising=False)
+    monkeypatch.delenv("CHANNEL_CLOCK_TOOL_ENABLED", raising=False)
+    monkeypatch.delenv("CHANNEL_CODE_EXEC_ENABLED", raising=False)
 
     from channel.api.chats import _build_tool_registry
 
@@ -850,13 +850,13 @@ def test_tool_registry_excludes_web_fetch_when_flag_off(
 def test_tool_registry_includes_generate_image_when_flag_on(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``STARTER_IMAGE_GEN_ENABLED=1`` → ``generate_image`` registered (#279)."""
+    """``CHANNEL_IMAGE_GEN_ENABLED=1`` → ``generate_image`` registered (#279)."""
     from channel.agents.tools.generate_image import generate_image
 
-    monkeypatch.setenv("STARTER_IMAGE_GEN_ENABLED", "1")
-    monkeypatch.delenv("STARTER_CLOCK_TOOL_ENABLED", raising=False)
-    monkeypatch.delenv("STARTER_WEB_SEARCH_ENABLED", raising=False)
-    monkeypatch.delenv("STARTER_CODE_EXEC_ENABLED", raising=False)
+    monkeypatch.setenv("CHANNEL_IMAGE_GEN_ENABLED", "1")
+    monkeypatch.delenv("CHANNEL_CLOCK_TOOL_ENABLED", raising=False)
+    monkeypatch.delenv("CHANNEL_WEB_SEARCH_ENABLED", raising=False)
+    monkeypatch.delenv("CHANNEL_CODE_EXEC_ENABLED", raising=False)
 
     from channel.api.chats import _build_tool_registry
 
@@ -867,13 +867,13 @@ def test_tool_registry_includes_generate_image_when_flag_on(
 def test_tool_registry_excludes_generate_image_when_flag_off(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``STARTER_IMAGE_GEN_ENABLED`` unset → ``generate_image`` NOT registered."""
+    """``CHANNEL_IMAGE_GEN_ENABLED`` unset → ``generate_image`` NOT registered."""
     from channel.agents.tools.generate_image import generate_image
 
-    monkeypatch.delenv("STARTER_IMAGE_GEN_ENABLED", raising=False)
-    monkeypatch.delenv("STARTER_CLOCK_TOOL_ENABLED", raising=False)
-    monkeypatch.delenv("STARTER_WEB_SEARCH_ENABLED", raising=False)
-    monkeypatch.delenv("STARTER_CODE_EXEC_ENABLED", raising=False)
+    monkeypatch.delenv("CHANNEL_IMAGE_GEN_ENABLED", raising=False)
+    monkeypatch.delenv("CHANNEL_CLOCK_TOOL_ENABLED", raising=False)
+    monkeypatch.delenv("CHANNEL_WEB_SEARCH_ENABLED", raising=False)
+    monkeypatch.delenv("CHANNEL_CODE_EXEC_ENABLED", raising=False)
 
     from channel.api.chats import _build_tool_registry
 
@@ -891,7 +891,7 @@ def test_post_message_persists_and_emits_generated_images(
     from channel.models import Asset
 
     _stub_storage_for_one_turn(monkeypatch)
-    monkeypatch.setenv("STARTER_FOLLOWUPS_ENABLED", "0")
+    monkeypatch.setenv("CHANNEL_FOLLOWUPS_ENABLED", "0")
 
     sink = [{"tool_use_id": "tu-1", "b64": "QUJD", "mime": "image/png", "title": "a red bicycle"}]
 
@@ -953,7 +953,7 @@ def test_post_message_no_generated_images_when_sink_absent(
     """A turn where ``generate_image`` never fired leaves no sink attribute;
     the producer is still called with an empty list (default) (#279)."""
     _stub_storage_for_one_turn(monkeypatch)
-    monkeypatch.setenv("STARTER_FOLLOWUPS_ENABLED", "0")
+    monkeypatch.setenv("CHANNEL_FOLLOWUPS_ENABLED", "0")
 
     captured: dict[str, Any] = {}
     monkeypatch.setattr(
@@ -1184,7 +1184,7 @@ def test_post_message_emits_tool_sse_events_and_dedupes_started(
     _stub_storage_for_one_turn(monkeypatch)
     # Suppress the follow-ups Haiku call so the stream stays focused on
     # the tool events under test (default Prefs has suggest_followups=True).
-    monkeypatch.setenv("STARTER_FOLLOWUPS_ENABLED", "0")
+    monkeypatch.setenv("CHANNEL_FOLLOWUPS_ENABLED", "0")
 
     async def fake_stream(self, prompt):
         # Two ToolUseStreamEvents for the same tool_use_id — the
@@ -1267,7 +1267,7 @@ def test_post_message_emits_tool_finished_from_tool_result_message_event(
     code_exec). Mixed success/error results are split per-frame."""
 
     _stub_storage_for_one_turn(monkeypatch)
-    monkeypatch.setenv("STARTER_FOLLOWUPS_ENABLED", "0")
+    monkeypatch.setenv("CHANNEL_FOLLOWUPS_ENABLED", "0")
 
     async def fake_stream(self, prompt):
         # Two tool calls in one cycle: one succeeds (code_exec shape), one errors.
@@ -1357,7 +1357,7 @@ def test_post_message_emits_tool_error_on_failed_result(
     """A ``tool_result`` with ``status="error"`` surfaces as ``tool_error``."""
 
     _stub_storage_for_one_turn(monkeypatch)
-    monkeypatch.setenv("STARTER_FOLLOWUPS_ENABLED", "0")
+    monkeypatch.setenv("CHANNEL_FOLLOWUPS_ENABLED", "0")
 
     async def fake_stream(self, prompt):
         yield {
@@ -1394,7 +1394,7 @@ def test_post_message_tool_error_partial_result_count_counts_prior_finished(
     preceded the error, not the translator's hardcoded 0."""
 
     _stub_storage_for_one_turn(monkeypatch)
-    monkeypatch.setenv("STARTER_FOLLOWUPS_ENABLED", "0")
+    monkeypatch.setenv("CHANNEL_FOLLOWUPS_ENABLED", "0")
 
     async def fake_stream(self, prompt):
         # Two successful tools complete before the third errors.
@@ -1450,7 +1450,7 @@ def test_post_message_tool_error_partial_result_count_increments_across_errors(
     ``partial_result_count=1`` then ``=2``."""
 
     _stub_storage_for_one_turn(monkeypatch)
-    monkeypatch.setenv("STARTER_FOLLOWUPS_ENABLED", "0")
+    monkeypatch.setenv("CHANNEL_FOLLOWUPS_ENABLED", "0")
 
     async def fake_stream(self, prompt):
         yield {
@@ -1512,7 +1512,7 @@ def test_post_message_skips_tool_started_when_use_id_missing(
     swallow the resulting non-tool event without emitting SSE."""
 
     _stub_storage_for_one_turn(monkeypatch)
-    monkeypatch.setenv("STARTER_FOLLOWUPS_ENABLED", "0")
+    monkeypatch.setenv("CHANNEL_FOLLOWUPS_ENABLED", "0")
 
     async def fake_stream(self, prompt):
         # Missing toolUseId — translate_event falls through and the
@@ -1557,7 +1557,7 @@ def test_stream_clears_stale_cancel_signal_at_entry(
     from channel.api.chats import _stream_bedrock_reply
 
     _stub_storage_for_one_turn(monkeypatch)
-    monkeypatch.setenv("STARTER_FOLLOWUPS_ENABLED", "0")
+    monkeypatch.setenv("CHANNEL_FOLLOWUPS_ENABLED", "0")
 
     async def fake_stream(self, prompt):
         yield {"event": {"contentBlockDelta": {"delta": {"text": "ok"}}}}
@@ -1625,7 +1625,7 @@ def test_stream_sets_cancel_signal_on_client_disconnect_and_persists(
     from channel.api.chats import _stream_bedrock_reply
 
     _stub_storage_for_one_turn(monkeypatch)
-    monkeypatch.setenv("STARTER_FOLLOWUPS_ENABLED", "0")
+    monkeypatch.setenv("CHANNEL_FOLLOWUPS_ENABLED", "0")
 
     async def fake_stream(self, prompt):
         yield {"event": {"contentBlockDelta": {"delta": {"text": "partial"}}}}
@@ -1691,7 +1691,7 @@ def test_stream_entry_clear_removes_stale_signal_from_previous_turn(
     from channel.api.chats import _stream_bedrock_reply
 
     _stub_storage_for_one_turn(monkeypatch)
-    monkeypatch.setenv("STARTER_FOLLOWUPS_ENABLED", "0")
+    monkeypatch.setenv("CHANNEL_FOLLOWUPS_ENABLED", "0")
 
     # Simulate the leftover state from a prior disconnected turn.
     chat_id = "cancel-cross-turn"
@@ -1925,7 +1925,7 @@ def test_post_message_titler_failure_is_swallowed_and_stream_completes(
 def test_post_message_respects_auto_title_kill_switch(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("STARTER_AUTO_TITLE_ENABLED", "0")
+    monkeypatch.setenv("CHANNEL_AUTO_TITLE_ENABLED", "0")
     _stub_first_round_trip_chat(monkeypatch)
 
     titler_built: list[bool] = []
@@ -2111,8 +2111,8 @@ def test_post_message_skips_follow_ups_when_pref_off(
 def test_post_message_follow_ups_respects_kill_switch_env(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """STARTER_FOLLOWUPS_ENABLED=0 → skip even when pref is on."""
-    monkeypatch.setenv("STARTER_FOLLOWUPS_ENABLED", "0")
+    """CHANNEL_FOLLOWUPS_ENABLED=0 → skip even when pref is on."""
+    monkeypatch.setenv("CHANNEL_FOLLOWUPS_ENABLED", "0")
     _stub_existing_chat(monkeypatch)
     monkeypatch.setattr(
         "channel.api.chats.storage.get_prefs",
@@ -2895,7 +2895,7 @@ def test_agentcore_client_and_memory_id_helpers(monkeypatch: pytest.MonkeyPatch)
     mock_boto.assert_called_once_with("bedrock-agentcore")
     assert result is fake_boto_client
 
-    monkeypatch.setenv("STARTER_ENV", "test-env")
+    monkeypatch.setenv("CHANNEL_ENV", "test-env")
     monkeypatch.setattr("channel.api.chats.get_or_create_memory", lambda env: f"mem-{env}")
     mem_id = chats_mod._memory_id_for_env()
     assert mem_id == "mem-test-env"
@@ -4295,7 +4295,7 @@ def test_stream_keepalive_interval_defaults_when_unset(
         _stream_keepalive_interval,
     )
 
-    monkeypatch.delenv("STARTER_STREAM_KEEPALIVE_INTERVAL", raising=False)
+    monkeypatch.delenv("CHANNEL_STREAM_KEEPALIVE_INTERVAL", raising=False)
     assert _stream_keepalive_interval() == _DEFAULT_STREAM_KEEPALIVE_INTERVAL
 
 
@@ -4308,7 +4308,7 @@ def test_stream_keepalive_interval_falls_back_on_non_numeric(
     )
 
     # A bad env string must not crash the stream.
-    monkeypatch.setenv("STARTER_STREAM_KEEPALIVE_INTERVAL", "soon")
+    monkeypatch.setenv("CHANNEL_STREAM_KEEPALIVE_INTERVAL", "soon")
     assert _stream_keepalive_interval() == _DEFAULT_STREAM_KEEPALIVE_INTERVAL
 
 
@@ -4324,7 +4324,7 @@ def test_stream_keepalive_interval_rejects_non_finite(
         _stream_keepalive_interval,
     )
 
-    monkeypatch.setenv("STARTER_STREAM_KEEPALIVE_INTERVAL", bad)
+    monkeypatch.setenv("CHANNEL_STREAM_KEEPALIVE_INTERVAL", bad)
     assert _stream_keepalive_interval() == _DEFAULT_STREAM_KEEPALIVE_INTERVAL
 
 
@@ -4337,8 +4337,8 @@ def test_post_message_emits_keepalive_before_first_delta(
     to the reducer (a ``:``-prefixed comment, no ``data:`` payload)."""
 
     _stub_storage_capturing_persistence(monkeypatch)
-    monkeypatch.setenv("STARTER_FOLLOWUPS_ENABLED", "0")
-    monkeypatch.setenv("STARTER_STREAM_KEEPALIVE_INTERVAL", "0.01")
+    monkeypatch.setenv("CHANNEL_FOLLOWUPS_ENABLED", "0")
+    monkeypatch.setenv("CHANNEL_STREAM_KEEPALIVE_INTERVAL", "0.01")
 
     import asyncio
 
@@ -4378,8 +4378,8 @@ def test_post_message_emits_keepalive_before_throttle_error(
     silent connection close."""
 
     _stub_storage_capturing_persistence(monkeypatch)
-    monkeypatch.setenv("STARTER_FOLLOWUPS_ENABLED", "0")
-    monkeypatch.setenv("STARTER_STREAM_KEEPALIVE_INTERVAL", "0.01")
+    monkeypatch.setenv("CHANNEL_FOLLOWUPS_ENABLED", "0")
+    monkeypatch.setenv("CHANNEL_STREAM_KEEPALIVE_INTERVAL", "0.01")
 
     import asyncio
 
@@ -4416,12 +4416,12 @@ def test_post_message_emits_keepalive_before_throttle_error(
 def test_post_message_no_keepalive_when_interval_disabled(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A non-positive ``STARTER_STREAM_KEEPALIVE_INTERVAL`` disables the
+    """A non-positive ``CHANNEL_STREAM_KEEPALIVE_INTERVAL`` disables the
     keepalive entirely (escape hatch); the stream still completes."""
 
     _stub_storage_capturing_persistence(monkeypatch)
-    monkeypatch.setenv("STARTER_FOLLOWUPS_ENABLED", "0")
-    monkeypatch.setenv("STARTER_STREAM_KEEPALIVE_INTERVAL", "0")
+    monkeypatch.setenv("CHANNEL_FOLLOWUPS_ENABLED", "0")
+    monkeypatch.setenv("CHANNEL_STREAM_KEEPALIVE_INTERVAL", "0")
 
     import asyncio
 
@@ -4456,8 +4456,8 @@ def test_post_message_emits_keepalive_during_mid_stream_tool_gap(
     no message row)."""
 
     _stub_storage_capturing_persistence(monkeypatch)
-    monkeypatch.setenv("STARTER_FOLLOWUPS_ENABLED", "0")
-    monkeypatch.setenv("STARTER_STREAM_KEEPALIVE_INTERVAL", "0.01")
+    monkeypatch.setenv("CHANNEL_FOLLOWUPS_ENABLED", "0")
+    monkeypatch.setenv("CHANNEL_STREAM_KEEPALIVE_INTERVAL", "0.01")
 
     import asyncio
 
@@ -4556,7 +4556,7 @@ def test_post_message_stream_heartbeat_logs_when_enabled(
     workaround as ``test_tool_hooks``)."""
     from unittest.mock import MagicMock  # noqa: PLC0415
 
-    monkeypatch.setenv("STARTER_STREAM_HEARTBEAT_ENABLED", "1")
+    monkeypatch.setenv("CHANNEL_STREAM_HEARTBEAT_ENABLED", "1")
     _stub_storage_capturing_persistence(monkeypatch)
 
     mock_logger = MagicMock()
@@ -4810,7 +4810,7 @@ def test_post_message_extracts_fence_asset_and_emits_asset_created(
     persists as a ``kind=code`` asset and announces itself via an
     ``asset_created`` frame AFTER ``done`` (the post-stream slot),
     while the persisted message text keeps the fence verbatim."""
-    monkeypatch.delenv("STARTER_ASSET_EXTRACTION_ENABLED", raising=False)
+    monkeypatch.delenv("CHANNEL_ASSET_EXTRACTION_ENABLED", raising=False)
     captured_assets, persisted = _stub_turn_with_asset_capture(
         monkeypatch, reply_text=_FENCED_REPLY
     )
@@ -4843,7 +4843,7 @@ def test_post_message_extracts_fence_asset_and_emits_asset_created(
 def test_post_message_fence_kill_switch_off_emits_no_asset_frames(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("STARTER_ASSET_EXTRACTION_ENABLED", "0")
+    monkeypatch.setenv("CHANNEL_ASSET_EXTRACTION_ENABLED", "0")
     captured_assets, persisted = _stub_turn_with_asset_capture(
         monkeypatch, reply_text=_FENCED_REPLY
     )
@@ -4865,7 +4865,7 @@ def test_post_message_persists_code_exec_images_as_assets_after_done(
     ``origin=tool_output`` assets in the post-stream slot, keyed to the
     assistant msg_id, without disturbing the live base64-over-SSE
     rendering in ``tool_finished``."""
-    monkeypatch.delenv("STARTER_ASSET_EXTRACTION_ENABLED", raising=False)
+    monkeypatch.delenv("CHANNEL_ASSET_EXTRACTION_ENABLED", raising=False)
     png_bytes = b"\x89PNG-fake"
     b64 = base64.b64encode(png_bytes).decode()
     code_exec_payload = json.dumps(
@@ -5084,7 +5084,7 @@ def test_post_message_stream_error_persists_no_generated_assets(
     persist, so no generated asset is written and no ``asset_created``
     frame is emitted — even though fence-shaped text was already
     accumulated."""
-    monkeypatch.delenv("STARTER_ASSET_EXTRACTION_ENABLED", raising=False)
+    monkeypatch.delenv("CHANNEL_ASSET_EXTRACTION_ENABLED", raising=False)
     captured_assets, persisted = _stub_turn_with_asset_capture(
         monkeypatch, reply_text=_FENCED_REPLY
     )

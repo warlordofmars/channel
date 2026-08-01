@@ -297,7 +297,7 @@ async def test_web_search_returns_missing_key_when_resolve_fails(monkeypatch):
 
     _resolve_exa_api_key.cache_clear()
     monkeypatch.delenv("EXA_API_KEY", raising=False)
-    monkeypatch.delenv("STARTER_EXA_API_KEY_PARAM", raising=False)
+    monkeypatch.delenv("CHANNEL_EXA_API_KEY_PARAM", raising=False)
 
     result = await web_search(query="anything")
 

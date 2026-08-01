@@ -1,7 +1,7 @@
 # Copyright (c) 2026 John Carter. All rights reserved.
 """E2e smoke test against the real Hive MCP server (#207).
 
-Skipped unless ``STARTER_E2E_HIVE_ENABLED=1`` AND Playwright is installed
+Skipped unless ``CHANNEL_E2E_HIVE_ENABLED=1`` AND Playwright is installed
 — OAuth flow against the real Hive requires a real browser. CI does not
 run this; humans run it on demand before merging the MCP work.
 
@@ -24,8 +24,8 @@ import os
 import pytest
 
 pytestmark = pytest.mark.skipif(
-    os.environ.get("STARTER_E2E_HIVE_ENABLED") != "1",
-    reason="Hive e2e smoke requires STARTER_E2E_HIVE_ENABLED=1 + a Playwright install",
+    os.environ.get("CHANNEL_E2E_HIVE_ENABLED") != "1",
+    reason="Hive e2e smoke requires CHANNEL_E2E_HIVE_ENABLED=1 + a Playwright install",
 )
 
 

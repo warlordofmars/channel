@@ -11,10 +11,10 @@ Requirements:
 - ``inv dev`` running in another terminal (DDB Local + FastAPI on
   :8001 against real Bedrock + real AgentCore in the developer's
   personal AWS env, Vite on :5173).
-- ``STARTER_ENABLE_DEBUG_ENDPOINTS=1`` (``inv dev`` sets this).
+- ``CHANNEL_ENABLE_DEBUG_ENDPOINTS=1`` (``inv dev`` sets this).
 - Personal AWS credentials with Bedrock + AgentCore permissions.
-- ``inv e2e-local`` passes ``STARTER_UI_URL`` (the Vite URL) and
-  ``STARTER_API_URL`` (the API URL) through to the test process.
+- ``inv e2e-local`` passes ``CHANNEL_UI_URL`` (the Vite URL) and
+  ``CHANNEL_API_URL`` (the API URL) through to the test process.
 
 Run:
 
@@ -43,10 +43,10 @@ async def test_memory_writes_land_per_turn_and_isolate_per_actor() -> None:
     """Drive two distinct users through the UI, send messages, verify
     AgentCore captured the writes scoped to each actor + session."""
 
-    ui_url = os.environ.get("STARTER_UI_URL")
-    api_url = os.environ.get("STARTER_API_URL", "http://localhost:8001")
+    ui_url = os.environ.get("CHANNEL_UI_URL")
+    api_url = os.environ.get("CHANNEL_API_URL", "http://localhost:8001")
     if not ui_url:
-        pytest.skip("STARTER_UI_URL not set — run via `inv e2e-local`")
+        pytest.skip("CHANNEL_UI_URL not set — run via `inv e2e-local`")
 
     tag = f"e2e-7c-{int(time.time())}-{uuid.uuid4().hex[:6]}"
     email_a = f"{tag}-a@example.com"

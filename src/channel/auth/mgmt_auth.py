@@ -40,7 +40,7 @@ from channel.logging_config import get_logger
 router = APIRouter(tags=["mgmt-auth"])
 logger = get_logger(__name__)
 
-_BYPASS = bool(os.environ.get("STARTER_BYPASS_GOOGLE_AUTH"))
+_BYPASS = bool(os.environ.get("CHANNEL_BYPASS_GOOGLE_AUTH"))
 _STATE_TTL_SECONDS = 600  # 10 minutes
 
 _DESKTOP_STATE_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
@@ -114,7 +114,7 @@ def _make_user(email: str, display_name: str) -> dict[str, Any]:
 async def mgmt_login(request: Request) -> RedirectResponse:
     """Redirect the management UI user to Google for authentication.
 
-    In STARTER_BYPASS_GOOGLE_AUTH mode (non-prod), issue a synthetic JWT directly
+    In CHANNEL_BYPASS_GOOGLE_AUTH mode (non-prod), issue a synthetic JWT directly
     when a test_email query parameter is provided, so e2e tests can run without
     a real Google account.
 
@@ -143,15 +143,15 @@ async def mgmt_login(request: Request) -> RedirectResponse:
         # without involving Google or DynamoDB. Saves devs from configuring
         # a separate Google OAuth flow for local Electron iteration.
         #
-        # Requires BOTH _BYPASS (= STARTER_BYPASS_GOOGLE_AUTH=1) AND
-        # STARTER_DESKTOP_DEV_EMAIL explicitly set. Deployed dev sets only
+        # Requires BOTH _BYPASS (= CHANNEL_BYPASS_GOOGLE_AUTH=1) AND
+        # CHANNEL_DESKTOP_DEV_EMAIL explicitly set. Deployed dev sets only
         # _BYPASS (for the ?test_email= e2e shortcut) and NOT dev_email, so
         # real desktop sign-in on deployed dev still goes through Google.
         # Only `inv desktop-dev` (which sets both) gets the short-circuit.
         # Without the dev_email gate, every desktop sign-in on the deployed
         # dev environment would silently auto-log-in as the placeholder
         # account — the bug fixed here.
-        dev_email = os.environ.get("STARTER_DESKTOP_DEV_EMAIL")
+        dev_email = os.environ.get("CHANNEL_DESKTOP_DEV_EMAIL")
         if _BYPASS and dev_email:
             from urllib.parse import urlencode
 

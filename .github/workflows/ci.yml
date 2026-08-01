@@ -185,8 +185,8 @@ jobs:
           AWS_ACCESS_KEY_ID: local
           AWS_SECRET_ACCESS_KEY: local
           AWS_DEFAULT_REGION: us-east-1
-          STARTER_JWT_SECRET: test-secret
-          STARTER_TABLE_NAME: starter-integration
+          CHANNEL_JWT_SECRET: test-secret
+          CHANNEL_TABLE_NAME: channel-integration
         run: uv run pytest tests/unit tests/integration -v --cov=src/channel --cov-report=xml:coverage-combined.xml --cov-fail-under=100
 
       - name: Write coverage summary
@@ -1100,7 +1100,7 @@ jobs:
           # forwards to the API origin, so /health is reachable through
           # the edge. Hitting through CloudFront also validates the full
           # edge path the way real traffic flows.
-          STARTER_PUBLIC_URL: ${{ needs.deploy-dev.outputs.public_url }}
+          CHANNEL_PUBLIC_URL: ${{ needs.deploy-dev.outputs.public_url }}
         run: |
           # /health must return JSON with .status == 'ok' on a healthy
           # Lambda. AWSLWA returns HTTP 200 even on init failure (the
@@ -1112,7 +1112,7 @@ jobs:
           # -sS surfaces curl-side errors (DNS/TLS/connectivity) instead
           # of silently hiding them; --connect-timeout / --max-time
           # prevent indefinite hangs.
-          RESPONSE=$(curl -sS --connect-timeout 5 --max-time 15 -w "\nHTTP_CODE:%{http_code}" "${STARTER_PUBLIC_URL%/}/health")
+          RESPONSE=$(curl -sS --connect-timeout 5 --max-time 15 -w "\nHTTP_CODE:%{http_code}" "${CHANNEL_PUBLIC_URL%/}/health")
           STATUS=$(printf '%s\n' "$RESPONSE" | tail -n 1 | sed 's/^HTTP_CODE://')
           BODY=$(printf '%s\n' "$RESPONSE" | sed '$d')
           echo "Health check status: $STATUS"
@@ -1350,7 +1350,7 @@ jobs:
       - name: Install dependencies
         run: uv sync --all-extras
 
-      # All e2e tests require STARTER_BYPASS_GOOGLE_AUTH which is dev-only.
+      # All e2e tests require CHANNEL_BYPASS_GOOGLE_AUTH which is dev-only.
       # Run a lightweight smoke test instead — just verify the prod API is up.
       - name: Smoke test prod API
         env:
@@ -1361,7 +1361,7 @@ jobs:
           # forwards to the API origin, so /health is reachable through
           # the edge. Hitting through CloudFront also validates the full
           # edge path the way real traffic flows.
-          STARTER_PUBLIC_URL: ${{ needs.deploy-prod.outputs.public_url }}
+          CHANNEL_PUBLIC_URL: ${{ needs.deploy-prod.outputs.public_url }}
         run: |
           # /health must return JSON with .status == 'ok' on a healthy
           # Lambda. AWSLWA returns HTTP 200 even on init failure (the
@@ -1373,7 +1373,7 @@ jobs:
           # -sS surfaces curl-side errors (DNS/TLS/connectivity) instead
           # of silently hiding them; --connect-timeout / --max-time
           # prevent indefinite hangs.
-          RESPONSE=$(curl -sS --connect-timeout 5 --max-time 15 -w "\nHTTP_CODE:%{http_code}" "${STARTER_PUBLIC_URL%/}/health")
+          RESPONSE=$(curl -sS --connect-timeout 5 --max-time 15 -w "\nHTTP_CODE:%{http_code}" "${CHANNEL_PUBLIC_URL%/}/health")
           STATUS=$(printf '%s\n' "$RESPONSE" | tail -n 1 | sed 's/^HTTP_CODE://')
           BODY=$(printf '%s\n' "$RESPONSE" | sed '$d')
           echo "Health check status: $STATUS"

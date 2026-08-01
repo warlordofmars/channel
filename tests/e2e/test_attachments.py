@@ -7,11 +7,11 @@ assistant reply references the attached content. Each test uses a
 fresh chat so the assertions stay independent.
 
 Required env vars (mirrors the other suites in this directory):
-- ``STARTER_UI_URL`` — Vite / SPA base URL
-- ``STARTER_API_URL`` — FastAPI base URL
-- ``STARTER_BYPASS_GOOGLE_AUTH=1`` on the API side
+- ``CHANNEL_UI_URL`` — Vite / SPA base URL
+- ``CHANNEL_API_URL`` — FastAPI base URL
+- ``CHANNEL_BYPASS_GOOGLE_AUTH=1`` on the API side
 
-If S3 / boto3 credentials are present (``STARTER_ATTACHMENTS_BUCKET``
+If S3 / boto3 credentials are present (``CHANNEL_ATTACHMENTS_BUCKET``
 + default AWS creds chain) the cleanup test additionally verifies
 that ``DELETE /api/chats/{id}`` cascade-removes the uploaded S3
 object. Without creds it falls back to asserting the chat row is
@@ -47,10 +47,10 @@ _ASSISTANT_TIMEOUT_MS = 180_000  # Vision/PDF replies can take longer than text.
 
 
 def _skip_if_unconfigured() -> tuple[str, str]:
-    ui_url = os.environ.get("STARTER_UI_URL")
-    api_url = os.environ.get("STARTER_API_URL", "http://localhost:8001")
+    ui_url = os.environ.get("CHANNEL_UI_URL")
+    api_url = os.environ.get("CHANNEL_API_URL", "http://localhost:8001")
     if not ui_url:
-        pytest.skip("STARTER_UI_URL not set — run via `inv e2e` or `inv e2e-local`")
+        pytest.skip("CHANNEL_UI_URL not set — run via `inv e2e` or `inv e2e-local`")
     return ui_url, api_url
 
 
@@ -261,7 +261,7 @@ async def test_chat_delete_cascades_attachment() -> None:
     _, email = _tag("cleanup")
     jwt = _mint_jwt_via_bypass(api_url, email)
 
-    bucket = os.environ.get("STARTER_ATTACHMENTS_BUCKET")
+    bucket = os.environ.get("CHANNEL_ATTACHMENTS_BUCKET")
     s3_client = None
     if bucket:
         try:

@@ -71,7 +71,7 @@ def get_or_create_memory(env: str) -> str:
     re-deploys against an existing Memory will create duplicates.
 
     Override the default ``channel_{env}`` naming via
-    ``STARTER_AGENTCORE_MEMORY_NAME`` — useful for pointing a personal
+    ``CHANNEL_AGENTCORE_MEMORY_NAME`` — useful for pointing a personal
     dev environment at a pre-existing Memory resource. AgentCore
     requires names to match ``[a-zA-Z][a-zA-Z0-9_]{0,47}`` — letters,
     digits, underscores only; hyphens are rejected at the service
@@ -80,7 +80,7 @@ def get_or_create_memory(env: str) -> str:
     if env in _memory_id_cache:
         return _memory_id_cache[env]
 
-    name = os.environ.get("STARTER_AGENTCORE_MEMORY_NAME") or f"channel_{env}"
+    name = os.environ.get("CHANNEL_AGENTCORE_MEMORY_NAME") or f"channel_{env}"
     control = boto3.client("bedrock-agentcore-control")
 
     # AgentCore's ``ListMemories`` returns ``memories`` (NOT

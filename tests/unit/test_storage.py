@@ -862,7 +862,7 @@ def test_put_audit_event_sets_ttl_from_retention_default(
 ) -> None:
     from channel import storage
 
-    monkeypatch.delenv("STARTER_AUDIT_RETENTION_DAYS", raising=False)
+    monkeypatch.delenv("CHANNEL_AUDIT_RETENTION_DAYS", raising=False)
     item = storage.put_audit_event(event_type="auth.logout", actor_id="u-1")
     # SK encodes the issuance timestamp; ttl - created_ts should equal
     # 365 * 86400 seconds (the default retention window).
@@ -875,7 +875,7 @@ def test_put_audit_event_honours_retention_override(
 ) -> None:
     from channel import storage
 
-    monkeypatch.setenv("STARTER_AUDIT_RETENTION_DAYS", "7")
+    monkeypatch.setenv("CHANNEL_AUDIT_RETENTION_DAYS", "7")
     item = storage.put_audit_event(event_type="auth.logout", actor_id="u-1")
     created_ts = int(item["SK"].split("#", 1)[0])
     assert item["ttl"] - created_ts == 7 * 86400
@@ -2800,7 +2800,7 @@ def test_put_asset_bytes_writes_kms_encrypted_object_and_returns_coords(
             return {}
 
     monkeypatch.setattr("channel.storage._get_s3_client", lambda: _PutOnlyS3())
-    monkeypatch.setenv("STARTER_ATTACHMENTS_BUCKET", "channel-attachments-test")
+    monkeypatch.setenv("CHANNEL_ATTACHMENTS_BUCKET", "channel-attachments-test")
 
     bucket, key = storage.put_asset_bytes(
         chat_id="c-1", asset_id="a-1", data=b"\x89PNG", mime="image/png"

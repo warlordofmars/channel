@@ -45,7 +45,7 @@ def test_origin_verify_middleware_rejects_missing_header(monkeypatch):
     from channel.auth import tokens
 
     tokens._origin_verify_secret.cache_clear()
-    monkeypatch.setenv("STARTER_ORIGIN_VERIFY_SECRET", "super-secret")
+    monkeypatch.setenv("CHANNEL_ORIGIN_VERIFY_SECRET", "super-secret")
     resp = client.get("/health")
     assert resp.status_code == 403
     tokens._origin_verify_secret.cache_clear()
@@ -55,7 +55,7 @@ def test_origin_verify_middleware_accepts_matching_header(monkeypatch):
     from channel.auth import tokens
 
     tokens._origin_verify_secret.cache_clear()
-    monkeypatch.setenv("STARTER_ORIGIN_VERIFY_SECRET", "super-secret")
+    monkeypatch.setenv("CHANNEL_ORIGIN_VERIFY_SECRET", "super-secret")
     resp = client.get("/health", headers={"x-origin-verify": "super-secret"})
     assert resp.status_code == 200
     tokens._origin_verify_secret.cache_clear()
