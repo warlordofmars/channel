@@ -1510,11 +1510,17 @@ html.is-electron-mac .sb-top {
      against the safe-area edge; additive keeps the layout's own spacing on
      top of the inset, which is what every other rule in this file assumes.
 
-     `env(safe-area-inset-*)` resolves to 0 in an ordinary browser tab and on
-     every non-notched device, so each `calc()` collapses to exactly the bare
-     pixel value already set above — in-browser mobile rendering is unchanged,
-     and the whole block is behind the 640px media query so desktop never sees
-     it. ----- */
+     `env(safe-area-inset-*)` resolves to 0 on every non-notched device and in
+     every desktop browser, so each `calc()` reduces to exactly the bare pixel
+     value already set above and that rendering is unchanged; the whole block
+     is additionally behind the 640px media query, so desktop never even
+     evaluates it.
+
+     On a notched iOS device the insets can be non-zero in an ordinary Safari
+     tab too, not just in standalone — `viewport-fit=cover` is set
+     unconditionally, so the page extends edge-to-edge there as well. That is
+     intended: content should clear the notch in a landscape Safari tab for
+     the same reason it should in standalone. ----- */
   .mobile-topbar {
     height: calc(52px + env(safe-area-inset-top));
     padding-top: env(safe-area-inset-top);
@@ -1563,9 +1569,13 @@ html.is-electron-mac .sb-top {
    bottom inset for the home indicator, so they benefit too.
 
    Same additive form and same collapse property as the mobile block:
-   `env(safe-area-inset-*)` is 0 in every browser tab and on every
-   non-notched device, so each `calc()` reduces to exactly the base
-   pixel value and a desktop browser computes byte-identical padding.
+   `env(safe-area-inset-*)` is 0 on every non-notched device and in every
+   desktop browser, so each `calc()` reduces to exactly the base pixel
+   value and desktop computes byte-identical padding. On a notched iOS
+   device the insets can be non-zero in a Safari tab as well as in
+   standalone, which is the intended behaviour — landscape is exactly the
+   case this block exists for.
+
    Vertical top inset is deliberately omitted: iOS reports 0 at the top
    in landscape (the notch is a side inset there), and no ≥641px device
    reports a top inset in portrait.
