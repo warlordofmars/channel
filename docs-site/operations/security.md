@@ -496,7 +496,7 @@ gating the route on one would deadlock the flow.
 | --- | --- |
 | Web transport | `channel_refresh` cookie — `HttpOnly`, `Secure`, `SameSite=Strict`, `Path=/auth/refresh`, `Max-Age` = the family's `absolute_expires_at` |
 | Desktop/mobile transport | request body `{"refresh_token": ...}`; successor returned in the JSON body |
-| CSRF control | `X-Channel-Refresh` header required (presence only); missing → HTTP 403, checked before the token is consumed |
+| CSRF control | non-empty `X-Channel-Refresh` header required, value never inspected (empty is treated as absent); missing → HTTP 403, checked before the token is consumed |
 | Rotation | hard — every use revokes the presented row and mints a successor; replaying a consumed token revokes the whole device family (RFC 9700 §4.14.2) |
 | Failure response | uniform HTTP 401 `Invalid or expired refresh token`; the specific reason is logged, never returned |
 | Cookie hygiene | a rejected cookie-transport request also clears the cookie, so a browser cannot replay a dead token |

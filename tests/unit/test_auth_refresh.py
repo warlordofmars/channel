@@ -114,8 +114,8 @@ def test_missing_csrf_header_is_rejected(consumed):
     assert seen == []
 
 
-def test_csrf_header_value_is_irrelevant(consumed):
-    """Presence is the signal; the value carries no meaning."""
+def test_csrf_header_content_is_never_inspected(consumed):
+    """Any non-empty value passes — the gate never reads what's in it."""
     resp = _client.post(
         "/auth/refresh",
         json={"refresh_token": "t"},
@@ -124,7 +124,14 @@ def test_csrf_header_value_is_irrelevant(consumed):
     assert resp.status_code == 200
 
 
-def test_empty_csrf_header_is_rejected(consumed):
+def test_empty_csrf_header_is_treated_as_absent(consumed):
+    """Empty is rejected, not accepted — the deliberate stricter reading.
+
+    Proxies and client stacks routinely strip empty headers, so an empty
+    value is indistinguishable from an absent one by the time it reaches
+    us. Honouring it would make a CSRF control's behaviour depend on
+    whatever intermediary is in front of the app.
+    """
     seen, _ = consumed
     resp = _client.post(
         "/auth/refresh", json={"refresh_token": "t"}, headers={"X-Channel-Refresh": ""}

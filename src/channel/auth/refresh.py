@@ -36,8 +36,16 @@ and this is the only ambient-cookie-reachable endpoint in the app. The
 required ``X-Channel-Refresh`` header is the second layer: a
 cross-origin attacker cannot set a custom header without a CORS
 preflight this API will not grant, so a forged form/image POST is
-rejected before any token is consumed. The header's *value* is
-irrelevant — its presence is what a forged request cannot fake.
+rejected before any token is consumed.
+
+The exact contract is **a non-empty value is required, and its content
+is never inspected** — send any non-empty string. Requiring non-empty
+rather than bare presence is deliberate: an empty header is
+indistinguishable from an absent one in most proxy and client stacks
+(several strip empty headers outright), so accepting it would make the
+gate's behaviour depend on intermediaries rather than on our own rule.
+It is also the stricter of the two readings, which is the right default
+for a CSRF control.
 
 Not in scope here
 -----------------
@@ -235,9 +243,11 @@ async def refresh_session(request: Request, body: RefreshRequest | None = None) 
     """
 
     if not request.headers.get(REFRESH_CSRF_HEADER):
-        # Rejected before the token is even read: a request that cannot
-        # prove it was made by our own JavaScript must not be allowed to
-        # burn a rotation, which would log the real client out.
+        # Non-empty required; the value itself is never inspected (see
+        # the module docstring's CSRF section for why empty is treated as
+        # absent). Rejected before the token is even read: a request that
+        # cannot prove it was made by our own JavaScript must not be
+        # allowed to burn a rotation, which would log the real client out.
         raise HTTPException(status_code=403, detail="Missing X-Channel-Refresh header")
 
     body_token = (body.refresh_token or "").strip() if body else ""

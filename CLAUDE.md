@@ -171,8 +171,11 @@ the access JWT it renews has usually already expired.
   `Set-Cookie` — never in the response body. Desktop/mobile: the token
   arrives as `{"refresh_token": ...}` and the successor comes back in
   the JSON body. A body token wins over a stray cookie.
-- **CSRF**: the `X-Channel-Refresh` header is required (presence only —
-  the value is meaningless). A cross-origin forgery cannot set a custom
+- **CSRF**: a **non-empty** `X-Channel-Refresh` header is required; its
+  content is never inspected, so send any non-empty string. (Empty is
+  treated as absent — proxies and client stacks routinely strip empty
+  headers, so accepting one would put the gate at the mercy of
+  intermediaries.) A cross-origin forgery cannot set a custom
   header without a preflight this API won't grant. Missing header → 403,
   checked *before* the token is consumed so a forged request can't burn
   a rotation.
