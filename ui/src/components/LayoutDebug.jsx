@@ -225,7 +225,16 @@ export function disarmLayoutDebug() {
   if (isLayoutDebugParamRequested()) {
     const url = new URL(window.location.href);
     url.searchParams.delete(LAYOUT_DEBUG_PARAM);
-    window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+    // Carry the existing history state through: React Router v6 keeps
+    // its own `{ usr, key, idx }` there, so replacing it with `{}`
+    // would drop the state `useLocation()` exposes and the index the
+    // router tracks its position with. That matters doubly here — the
+    // popstate below asks the router to re-read exactly this.
+    window.history.replaceState(
+      window.history.state,
+      "",
+      `${url.pathname}${url.search}${url.hash}`,
+    );
     // `replaceState` doesn't notify React Router, so its own location
     // snapshot would keep the parameter — and any view that derives its
     // next URL from that snapshot would put it straight back. Artifacts'

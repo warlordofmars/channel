@@ -534,6 +534,21 @@ describe("disarmLayoutDebug", () => {
     expect(window.location.hash).toBe("#frag");
   });
 
+  it("preserves the router's own history state while stripping it", () => {
+    // React Router v6 stores `{ usr, key, idx }` in `history.state`.
+    // Replacing it with `{}` would drop the state `useLocation()`
+    // exposes and the index the router tracks its position with — and
+    // the popstate below tells the router to re-read exactly that
+    // (Copilot, PR #505).
+    const routerState = { usr: { from: "/app/artifacts" }, key: "abc123", idx: 3 };
+    window.history.pushState(routerState, "", `/app?${LAYOUT_DEBUG_PARAM}=1`);
+
+    disarmLayoutDebug();
+
+    expect(window.history.state).toEqual(routerState);
+    expect(isLayoutDebugParamRequested()).toBe(false);
+  });
+
   it("tells React Router the URL moved, so no view can put it back", () => {
     // `replaceState` is invisible to the router, whose location snapshot
     // would keep the parameter. Views that build their next URL from
