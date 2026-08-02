@@ -246,6 +246,28 @@ class Message(BaseModel):
         return self
 
 
+class ChatSummary(BaseModel):
+    """Rolling summary of a chat's truncated head (#245).
+
+    Single row per chat at ``PK=CHAT#{chat_id}, SK=SUMMARY``. Written
+    post-stream whenever the token-budgeted history window slides past
+    turns that are not yet summarised, and injected back into the
+    system prompt as ``## Earlier in this conversation`` so the model
+    keeps a gist of the whole chat at any length.
+
+    ``covers_through`` is the FULL message sort key
+    (``MSG#{created_at}#{msg_id}``) of the newest message folded into
+    ``text``. It is the resume point for the next summarisation pass —
+    it only advances when a pass actually persists, so a failed pass
+    is retried naturally on the next turn.
+    """
+
+    chat_id: str
+    text: str
+    covers_through: str
+    updated_at: str
+
+
 class ChatCreate(BaseModel):
     """Request body for POST /api/chats."""
 

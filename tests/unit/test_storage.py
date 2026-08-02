@@ -20,6 +20,7 @@ from boto3.dynamodb.conditions import (
     And,
     AttributeNotExists,
     BeginsWith,
+    Between,
     ConditionBase,
     Equals,
     GreaterThanEquals,
@@ -46,6 +47,7 @@ from channel.storage import (
     deny_jti,
     derive_users_from_chat_index,
     get_chat_by_id,
+    get_chat_summary,
     get_user_meta,
     is_jti_denied,
     list_audit_events_for_actor,
@@ -53,9 +55,12 @@ from channel.storage import (
     list_live_refresh_tokens,
     list_messages,
     list_messages_page,
+    list_messages_unsummarized,
     list_recent_messages,
+    message_sk,
     mint_refresh_token,
     patch_chat,
+    put_chat_summary,
     put_message,
     revoke_all_user_refresh_tokens,
     revoke_device_refresh_tokens,
@@ -86,6 +91,12 @@ def _extract_conditions(expr: ConditionBase) -> dict[str, tuple[str, Any]]:
         elif isinstance(node, BeginsWith):
             attr, value = node._values
             result[attr.name] = ("begins_with", value)
+        elif isinstance(node, Between):
+            # ``Key(...).between(lo, hi)`` — inclusive on BOTH ends, same
+            # as real DynamoDB. Used by ``list_messages_unsummarized``
+            # (#245), which then drops the boundary rows itself.
+            attr, low, high = node._values
+            result[attr.name] = ("between", (low, high))
 
     walk(expr)
     return result
@@ -162,6 +173,10 @@ class FakeTable:
                     isinstance(actual, str) and actual.startswith(value)
                 ):
                     return False
+                if op == "between":
+                    low, high = value
+                    if not (isinstance(actual, str) and low <= actual <= high):
+                        return False
             return True
 
         # Sort by SK for main-table queries; the GSI lookup is single-row
@@ -3770,3 +3785,240 @@ def test_revoke_device_refresh_tokens_is_zero_for_an_already_dead_family(
 
     assert revoke_device_refresh_tokens("u-1", "d-1") == 1
     assert revoke_device_refresh_tokens("u-1", "d-1") == 0
+
+
+# ----------------------------------------------------------------
+# #245 — rolling head summary row (PK=CHAT#{id}, SK=SUMMARY)
+# ----------------------------------------------------------------
+
+
+def test_chat_summary_round_trips(table: FakeTable) -> None:
+    chat = create_chat(user_id="u-1", title=None, model_default="m")
+
+    assert get_chat_summary(chat.chat_id) is None
+
+    written = put_chat_summary(
+        chat_id=chat.chat_id,
+        text="They settled on OKLCH tokens and a single-table design.",
+        covers_through="MSG#2026-08-01T00:00:00Z#abc",
+    )
+    loaded = get_chat_summary(chat.chat_id)
+
+    assert loaded is not None
+    assert loaded.chat_id == chat.chat_id
+    assert loaded.text == written.text
+    assert loaded.covers_through == "MSG#2026-08-01T00:00:00Z#abc"
+    assert loaded.updated_at == written.updated_at
+
+
+def test_chat_summary_row_uses_the_documented_keys(table: FakeTable) -> None:
+    chat = create_chat(user_id="u-1", title=None, model_default="m")
+    put_chat_summary(chat_id=chat.chat_id, text="gist", covers_through="MSG#t#m")
+
+    item = table.items[(f"CHAT#{chat.chat_id}", "SUMMARY")]
+    assert item["PK"] == f"CHAT#{chat.chat_id}"
+    assert item["SK"] == "SUMMARY"
+
+
+def test_chat_summary_overwrites_rather_than_appending(table: FakeTable) -> None:
+    """Each pass regenerates the whole text, so the row is a full
+    overwrite — never a second row."""
+
+    chat = create_chat(user_id="u-1", title=None, model_default="m")
+    put_chat_summary(chat_id=chat.chat_id, text="first", covers_through="MSG#t0001#a")
+    put_chat_summary(chat_id=chat.chat_id, text="second", covers_through="MSG#t0002#b")
+
+    summary_rows = [
+        i
+        for i in table.items.values()
+        if i["PK"] == f"CHAT#{chat.chat_id}" and i["SK"] == "SUMMARY"
+    ]
+    assert len(summary_rows) == 1
+    loaded = get_chat_summary(chat.chat_id)
+    assert loaded is not None
+    assert loaded.text == "second"
+    assert loaded.covers_through == "MSG#t0002#b"
+
+
+def test_summary_row_is_invisible_to_message_queries(table: FakeTable) -> None:
+    """The acceptance criterion: every existing ``begins_with("MSG#")``
+    read must skip the SUMMARY row without modification."""
+
+    chat = create_chat(user_id="u-1", title=None, model_default="m")
+    put_message(chat_id=chat.chat_id, role=MessageRole.USER, text="one", model=None)
+    put_message(chat_id=chat.chat_id, role=MessageRole.ASSISTANT, text="two", model="m")
+    put_chat_summary(chat_id=chat.chat_id, text="gist", covers_through="MSG#t#m")
+
+    msgs, _ = list_messages(chat.chat_id, limit=50, cursor=None)
+    assert [m.text for m in msgs] == ["one", "two"]
+
+    page, _ = list_messages_page(chat.chat_id, limit=50)
+    assert [m.text for m in page] == ["one", "two"]
+
+    assert [m.text for m in list_recent_messages(chat.chat_id, limit=50)] == ["one", "two"]
+
+
+def test_delete_chat_removes_the_summary_row(table: FakeTable) -> None:
+    from channel import storage
+
+    chat = create_chat(user_id="u-1", title=None, model_default="m")
+    put_message(chat_id=chat.chat_id, role=MessageRole.USER, text="one", model=None)
+    put_chat_summary(chat_id=chat.chat_id, text="gist", covers_through="MSG#t#m")
+    assert get_chat_summary(chat.chat_id) is not None
+
+    storage.delete_chat(user_id="u-1", chat=chat)
+
+    assert get_chat_summary(chat.chat_id) is None
+    assert (f"CHAT#{chat.chat_id}", "SUMMARY") not in table.items
+
+
+def test_delete_chat_without_a_summary_row_is_still_idempotent(table: FakeTable) -> None:
+    """DeleteItem on a missing key is a no-op — a chat that never grew
+    past the budget must not error on delete."""
+
+    from channel import storage
+
+    chat = create_chat(user_id="u-1", title=None, model_default="m")
+    storage.delete_chat(user_id="u-1", chat=chat)
+    storage.delete_chat(user_id="u-1", chat=chat)
+    assert get_chat_summary(chat.chat_id) is None
+
+
+def test_message_sk_matches_the_key_put_message_writes(table: FakeTable) -> None:
+    """``message_sk`` is the resume-point derivation; if it drifts from
+    ``put_message``'s key format the summary never advances."""
+
+    chat = create_chat(user_id="u-1", title=None, model_default="m")
+    msg = put_message(chat_id=chat.chat_id, role=MessageRole.USER, text="hi", model=None)
+
+    assert (f"CHAT#{chat.chat_id}", message_sk(msg)) in table.items
+
+
+def test_list_messages_unsummarized_returns_the_open_range(table: FakeTable) -> None:
+    chat = create_chat(user_id="u-1", title=None, model_default="m")
+    msgs = [
+        put_message(chat_id=chat.chat_id, role=MessageRole.USER, text=f"m{i}", model=None)
+        for i in range(6)
+    ]
+
+    got = list_messages_unsummarized(
+        chat.chat_id,
+        after_sk=message_sk(msgs[1]),
+        before_sk=message_sk(msgs[4]),
+        limit=50,
+    )
+
+    # Open at both ends: m1 (already summarised) and m4 (still in the
+    # loaded window) are excluded.
+    assert [m.text for m in got] == ["m2", "m3"]
+
+
+def test_list_messages_unsummarized_starts_at_the_chat_head_when_no_summary(
+    table: FakeTable,
+) -> None:
+    chat = create_chat(user_id="u-1", title=None, model_default="m")
+    msgs = [
+        put_message(chat_id=chat.chat_id, role=MessageRole.USER, text=f"m{i}", model=None)
+        for i in range(4)
+    ]
+
+    got = list_messages_unsummarized(
+        chat.chat_id, after_sk=None, before_sk=message_sk(msgs[2]), limit=50
+    )
+
+    assert [m.text for m in got] == ["m0", "m1"]
+
+
+def test_list_messages_unsummarized_excludes_the_summary_row(table: FakeTable) -> None:
+    """``SUMMARY`` sorts AFTER ``MSG#`` (``M`` < ``S``), so a naive range
+    scan bounded above by a message key can't reach it — but assert it
+    explicitly so a future key change can't silently hydrate it as a
+    message."""
+
+    chat = create_chat(user_id="u-1", title=None, model_default="m")
+    msgs = [
+        put_message(chat_id=chat.chat_id, role=MessageRole.USER, text=f"m{i}", model=None)
+        for i in range(3)
+    ]
+    put_chat_summary(chat_id=chat.chat_id, text="gist", covers_through=message_sk(msgs[0]))
+
+    got = list_messages_unsummarized(
+        chat.chat_id, after_sk=None, before_sk=message_sk(msgs[2]), limit=50
+    )
+    assert [m.text for m in got] == ["m0", "m1"]
+
+
+def test_list_messages_unsummarized_returns_empty_for_an_inverted_range(
+    table: FakeTable,
+) -> None:
+    """When ``covers_through`` has already caught up to (or passed) the
+    window start there is nothing to fold in — short-circuit without a
+    query."""
+
+    chat = create_chat(user_id="u-1", title=None, model_default="m")
+    msgs = [
+        put_message(chat_id=chat.chat_id, role=MessageRole.USER, text=f"m{i}", model=None)
+        for i in range(3)
+    ]
+
+    assert (
+        list_messages_unsummarized(
+            chat.chat_id,
+            after_sk=message_sk(msgs[2]),
+            before_sk=message_sk(msgs[1]),
+            limit=50,
+        )
+        == []
+    )
+    assert (
+        list_messages_unsummarized(
+            chat.chat_id,
+            after_sk=message_sk(msgs[1]),
+            before_sk=message_sk(msgs[1]),
+            limit=50,
+        )
+        == []
+    )
+
+
+def test_list_messages_unsummarized_respects_the_limit(table: FakeTable) -> None:
+    chat = create_chat(user_id="u-1", title=None, model_default="m")
+    msgs = [
+        put_message(chat_id=chat.chat_id, role=MessageRole.USER, text=f"m{i}", model=None)
+        for i in range(10)
+    ]
+
+    got = list_messages_unsummarized(
+        chat.chat_id, after_sk=None, before_sk=message_sk(msgs[9]), limit=3
+    )
+
+    # Oldest-first and bounded — successive passes walk covers_through
+    # forward until the backlog is drained.
+    assert [m.text for m in got] == ["m0", "m1", "m2"]
+
+
+def test_list_messages_unsummarized_limit_is_exact_despite_boundary_rows(
+    table: FakeTable,
+) -> None:
+    """``limit`` counts rows the CALLER gets.
+
+    DynamoDB applies ``Limit`` before the inclusive ``between`` boundary
+    rows are stripped, so a naive pass-through would return ``limit - 1``
+    whenever ``after_sk`` is a real message key (the normal case once a
+    summary exists). The query over-fetches by two and slices back down.
+    """
+
+    chat = create_chat(user_id="u-1", title=None, model_default="m")
+    msgs = [
+        put_message(chat_id=chat.chat_id, role=MessageRole.USER, text=f"m{i}", model=None)
+        for i in range(10)
+    ]
+
+    got = list_messages_unsummarized(
+        chat.chat_id,
+        after_sk=message_sk(msgs[0]),  # a REAL row — consumes a Limit slot
+        before_sk=message_sk(msgs[9]),
+        limit=3,
+    )
+
+    assert [m.text for m in got] == ["m1", "m2", "m3"]

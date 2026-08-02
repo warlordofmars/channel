@@ -166,6 +166,44 @@ async def record_auto_title_outcome(success: bool) -> None:
     await emit_metric(metric)
 
 
+async def record_head_summary_outcome(success: bool) -> None:
+    """Emit a CloudWatch counter for one rolling head-summary pass (#245).
+
+    Fires only on turns where the token-budgeted history window actually
+    slid past unsummarised turns — in-budget chats emit nothing, so the
+    counter doubles as a "how many chats are long enough to need this"
+    signal. ``success=False`` covers both a summariser exception and an
+    empty generation (the summary row is left untouched in both cases,
+    so ``covers_through`` doesn't advance and the next turn retries).
+
+    Counter-only — same cardinality-risk rationale as
+    :func:`record_memory_write_outcome`. No per-actor or per-chat
+    dimensions; chat identity belongs in the structured
+    ``head_summary_failed`` log line, not a metric dimension.
+    """
+    metric = "HeadSummarySuccesses" if success else "HeadSummaryFailures"
+    await emit_metric(metric)
+
+
+async def record_history_window_truncated() -> None:
+    """Emit a CloudWatch counter for one turn whose history window was
+    truncated by the token budget (#245, prompted by #227).
+
+    Before #245 the truncation was completely silent: a 312-message chat
+    fed 100 messages to the model with nothing recording the loss, and
+    the resulting "forgets the thread mid-chat" symptom took weeks to
+    diagnose. This counter makes the condition a one-glance dashboard
+    signal.
+
+    Counter-only — deliberately accepts NO arguments, mirroring the
+    signature-lock discipline of :func:`record_memory_write_outcome`.
+    *Which* chat truncated, and by how much, live in the structured
+    ``history_window_truncated`` log line, queryable via CloudWatch Logs
+    Insights without a per-chat metric dimension.
+    """
+    await emit_metric("HistoryWindowTruncated")
+
+
 async def record_chat_delete_memory_wipe_outcome(success: bool) -> None:
     """Emit a CloudWatch counter for one AgentCore Memory wipe attempt on chat delete.
 

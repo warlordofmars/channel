@@ -43,6 +43,7 @@ from channel.models import (
     Chat,
     ChatMCPMode,
     ChatMCPSettings,
+    ChatSummary,
     Feedback,
     FeedbackKind,
     MCPServer,
@@ -104,6 +105,19 @@ def _get_s3_client() -> Any:
 
 def _chat_index_sk(created_at: str, chat_id: str) -> str:
     return f"CHAT#{created_at}#{chat_id}"
+
+
+def message_sk(msg: Message) -> str:
+    """Return the DDB sort key of a persisted message row.
+
+    ``put_message`` derives ``SK`` from ``created_at`` + ``msg_id``;
+    ``Message`` doesn't carry the key itself. The rolling head-summary
+    bookkeeping (#245) needs to name a specific message as a range
+    boundary, so the derivation is exposed here rather than duplicated
+    at the call site.
+    """
+
+    return f"MSG#{msg.created_at}#{msg.msg_id}"
 
 
 def _chat_index_item(chat: Chat) -> dict[str, Any]:
@@ -306,6 +320,114 @@ def list_recent_messages(chat_id: str, *, limit: int) -> list[Message]:
     return msgs
 
 
+# ----------------------------------------------------------------
+# Rolling head summary (#245) — one row per chat holding a gist of the
+# turns that have scrolled out of the token-budgeted history window.
+# ----------------------------------------------------------------
+
+# ``SK="SUMMARY"`` shares the ``CHAT#{chat_id}`` partition with the
+# ``MSG#`` / ``ASSET#`` / ``MCPSERVERS#META`` rows. It carries no
+# ``MSG#`` prefix, so every existing ``begins_with("MSG#")`` query
+# (list_messages, list_messages_page, the delete sweep) skips it
+# without modification — asserted by a unit test. Note the issue body
+# claimed ``SUMMARY`` sorts BEFORE ``MSG#``; it actually sorts after
+# (``M`` < ``S``). Only the prefix disjointness matters, so the
+# conclusion holds either way.
+_SUMMARY_SK = "SUMMARY"
+
+# Lower bound for the "not yet summarised" range scan when no summary
+# exists yet. Sorts before every real ``MSG#{created_at}#{msg_id}`` key
+# and is itself excluded from the result (the range is open at both
+# ends), so it can never be mistaken for a message row.
+_MESSAGE_SK_FLOOR = "MSG#"
+
+
+def get_chat_summary(chat_id: str) -> ChatSummary | None:
+    """Point-read the chat's rolling head summary, or ``None``."""
+
+    item = _get_table().get_item(Key={"PK": f"CHAT#{chat_id}", "SK": _SUMMARY_SK}).get("Item")
+    if not item:
+        return None
+    return ChatSummary(
+        chat_id=item["chat_id"],
+        text=item["text"],
+        covers_through=item["covers_through"],
+        updated_at=item["updated_at"],
+    )
+
+
+def put_chat_summary(*, chat_id: str, text: str, covers_through: str) -> ChatSummary:
+    """Overwrite the chat's rolling head summary. Returns the new model.
+
+    Full overwrite rather than an update expression: the summariser
+    regenerates the whole text from (previous summary + newly dropped
+    turns) each pass, so there is nothing to merge server-side.
+    """
+
+    summary = ChatSummary(
+        chat_id=chat_id,
+        text=text,
+        covers_through=covers_through,
+        updated_at=_now_iso(),
+    )
+    _get_table().put_item(
+        Item={
+            "PK": f"CHAT#{chat_id}",
+            "SK": _SUMMARY_SK,
+            "chat_id": summary.chat_id,
+            "text": summary.text,
+            "covers_through": summary.covers_through,
+            "updated_at": summary.updated_at,
+        }
+    )
+    return summary
+
+
+def list_messages_unsummarized(
+    chat_id: str, *, after_sk: str | None, before_sk: str, limit: int
+) -> list[Message]:
+    """Return messages in the OPEN range ``(after_sk, before_sk)``, oldest first.
+
+    This is the set of turns that have fallen out of the loaded history
+    window but are not yet folded into the rolling summary:
+    ``after_sk`` is the summary's ``covers_through`` (exclusive — that
+    message is already summarised) and ``before_sk`` is the sort key of
+    the oldest message still inside the window (exclusive — that one is
+    still verbatim in context).
+
+    ``after_sk=None`` (no summary row yet) means "from the start of the
+    chat". Bounded by ``limit``: an oversized backlog is folded in over
+    successive turns as ``covers_through`` walks forward, so a chat that
+    jumps far past the budget in one step still converges.
+
+    ``limit`` counts rows the CALLER gets. DynamoDB applies ``Limit``
+    before this function strips the two inclusive ``between`` boundary
+    rows, so the query over-fetches by exactly those two and the result
+    is sliced back down — otherwise a pass asking for 100 could return
+    98 and the bound would silently under-deliver.
+    """
+
+    lower = after_sk or _MESSAGE_SK_FLOOR
+    if lower >= before_sk:
+        return []
+    result = _get_table().query(
+        KeyConditionExpression=(
+            Key("PK").eq(f"CHAT#{chat_id}") & Key("SK").between(lower, before_sk)
+        ),
+        Limit=limit + 2,
+        ScanIndexForward=True,
+    )
+    # ``between`` is inclusive on both ends; the range we want is open,
+    # so drop the boundary rows themselves, then honour the caller's
+    # bound exactly.
+    kept = [
+        _message_from_item(item)
+        for item in (result.get("Items") or [])
+        if item["SK"] != lower and item["SK"] != before_sk
+    ]
+    return kept[:limit]
+
+
 def update_chat_index(
     *,
     user_id: str,
@@ -361,11 +483,13 @@ def patch_chat(
 
 
 def delete_chat(*, user_id: str, chat: Chat) -> None:
-    """Permanently delete a chat: all its message rows + the chat-index row.
+    """Permanently delete a chat: message rows + head summary + chat-index row.
 
     Message rows live at ``PK=CHAT#{chat_id}, SK begins_with MSG#`` and
     are paginated + batch-deleted in chunks of 25 (DDB batch-write
-    limit). The chat-index row lives at
+    limit). The rolling head-summary row (#245) shares that partition at
+    ``SK=SUMMARY`` but carries no ``MSG#`` prefix, so the sweep above
+    never sees it — it is deleted explicitly. The chat-index row lives at
     ``PK=USER#{user_id}, SK=CHAT#{created_at}#{chat_id}`` and is a
     single delete.
 
@@ -398,7 +522,12 @@ def delete_chat(*, user_id: str, chat: Chat) -> None:
         if not last_evaluated_key:
             break
 
-    # 2. Delete the chat-index row.
+    # 2. Delete the rolling head-summary row (#245). Unconditional —
+    #    DeleteItem on a missing key is a no-op, so chats that never
+    #    grew past the history budget cost one idempotent delete.
+    table.delete_item(Key={"PK": f"CHAT#{chat.chat_id}", "SK": _SUMMARY_SK})
+
+    # 3. Delete the chat-index row.
     table.delete_item(
         Key={
             "PK": f"USER#{user_id}",
