@@ -1511,6 +1511,29 @@ describe("silent refresh", () => {
     expect(storage[TOKEN_KEY]).toBeDefined();
   });
 
+  it("does NOT sign out on a 429 — a rate limit is not a credential verdict", async () => {
+    // #294 is about to add rate limiting to /auth/refresh. A 429 arrives
+    // in bursts by definition, so reading any 4xx as "signed out" would
+    // turn throttling into a mass logout. Only 401 is a verdict.
+    const token = jwt(-60);
+    storeSession(token, -60_000);
+    route({ ok: false, status: 429, json: () => Promise.resolve({}) });
+    const api = await freshApi();
+    await api.listModels();
+
+    expect(assign).not.toHaveBeenCalled();
+    expect(JSON.parse(storage[TOKEN_KEY]).access_token).toBe(token);
+  });
+
+  it("does NOT sign out on a 403 — that means our CSRF header was missing", async () => {
+    const token = jwt(-60);
+    storeSession(token, -60_000);
+    route({ ok: false, status: 403, json: () => Promise.resolve({}) });
+    const api = await freshApi();
+    await api.listModels();
+    expect(assign).not.toHaveBeenCalled();
+  });
+
   it("keeps local state when the refresh endpoint cannot be reached", async () => {
     // A transient blip that happens to straddle expiry must not destroy a
     // session whose refresh cookie is still perfectly good.

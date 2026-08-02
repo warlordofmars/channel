@@ -63,8 +63,15 @@ const NO_SESSION = { access_token: "", expires_at: 0 };
  * Both alphabets are admitted (`+/=` as well as `-_`) because a JWT is
  * base64url but test fixtures and some encoders emit padded standard
  * base64, and rejecting those would fail closed on well-formed input.
+ *
+ * The `-` is written FIRST in each character class, where it is
+ * unambiguously a literal. A trailing `-` is equally literal and was the
+ * original spelling, but it read as a truncated range to a reviewer —
+ * and a false negative here rejects every real base64url token and locks
+ * everyone out, so the class is spelled to be unmisreadable. The
+ * `accepts real base64url tokens` test pins the behaviour either way.
  */
-const JWT_SHAPE = /^[A-Za-z0-9+/_=-]+\.[A-Za-z0-9+/_=-]+\.[A-Za-z0-9+/_=-]+$/;
+const JWT_SHAPE = /^[-A-Za-z0-9+/_=]+\.[-A-Za-z0-9+/_=]+\.[-A-Za-z0-9+/_=]+$/;
 
 export function parseToken(token) {
   if (!token) return null;

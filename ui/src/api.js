@@ -115,17 +115,24 @@ async function performRefresh() {
  * Arm the cooldown and report "no new token" to every awaiting caller.
  *
  * Records *why* it failed, because the two reasons deserve opposite
- * treatment. A refusal (the server answered 4xx) is an authoritative
- * "this credential is no good" and, once the access token is also dead,
- * ends the session. Anything else — offline, DNS, TLS, a 5xx, a
- * malformed body — says nothing about the credential, and destroying a
- * recoverable session over a transient blip that happened to straddle
- * expiry is precisely the class of spurious logout this whole change
- * exists to remove.
+ * treatment. Only **401** is an authoritative "this credential is no
+ * good" and, once the access token is also dead, ends the session.
+ * Everything else — offline, DNS, TLS, 5xx, a malformed body — says
+ * nothing about the credential, and destroying a recoverable session
+ * over a transient blip that happened to straddle expiry is precisely
+ * the class of spurious logout this whole change exists to remove.
+ *
+ * Deliberately `=== 401` rather than "any 4xx". `refresh_session`
+ * documents exactly two client errors, and neither of the others is a
+ * verdict on the credential: 403 means the CSRF header was missing (our
+ * bug), and #294 is about to add **429** to this very endpoint — a rate
+ * limit is the one response most likely to arrive in a burst, and
+ * reading it as "you are signed out" would turn throttling into a mass
+ * logout. The narrow test is what keeps that from landing silently.
  */
 function onRefreshRejected(error) {
   refreshBlockedUntil = Date.now() + REFRESH_COOLDOWN_MS;
-  refreshRefused = error instanceof ApiError && error.status >= 400 && error.status < 500;
+  refreshRefused = error instanceof ApiError && error.status === 401;
   return "";
 }
 
@@ -390,8 +397,16 @@ export async function getAssetContent(chatId, assetId) {
 //  2. Rotating a token family one instant before revoking it is pure
 //     waste, and it would burn a rotation for nothing.
 //
-// An expired token here is fine: the endpoint's job is the revoke, and a
-// dead access token cannot be made deader.
+// NOTE: an expired token here does NOT still revoke. `/auth/logout` is
+// `Depends(require_mgmt_user)` and `decode_mgmt_jwt` enforces `exp`, so
+// an expired token 401s before the handler body runs — no jti denylist
+// write, no family revoke, no cookie clear — and `Sidebar.signOut`
+// swallows that with `.catch(() => {})`. Signing out of a tab left idle
+// past the 1h mark therefore leaves the refresh family live server-side.
+// Pre-existing (the old sync `authHeader()` sent the same stored token),
+// and silent refresh makes an expired token at sign-out much rarer, but
+// closing it properly needs a server change: accept the refresh cookie
+// alone as authority for logout. Tracked as a follow-up, not fixed here.
 
 export async function logout() {
   const token = readToken();

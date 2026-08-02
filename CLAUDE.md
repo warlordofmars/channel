@@ -265,12 +265,15 @@ the access JWT it renews has usually already expired.
   sessions) — the latter is the epic's migration path. The still-valid
   access token is used, with a 30s cooldown before retrying. The session
   ends (`endSession()` — clear storage, route to `/app/login`) only when
-  the access token is unusable **and** the refresh was *refused* (a 4xx).
-  Anything else — offline, DNS, 5xx, malformed body — says nothing about
-  the credential, so local state survives and a later attempt can still
-  recover; destroying a good session over a blip that happened to
-  straddle expiry is the same spurious logout this change exists to
-  remove.
+  the access token is unusable **and** the refresh was refused with a
+  **401**. Anything else — offline, DNS, 5xx, a malformed body, and
+  notably the **429** #294 is about to add to this endpoint — says
+  nothing about the credential, so local state survives and a later
+  attempt can recover; reading any 4xx as a verdict would turn
+  throttling into a mass logout. This protection covers the
+  non-streaming wrappers: `useChatStream`'s send path still ends the
+  session on a 401 from the messages endpoint itself, which is the API's
+  own verdict on the token rather than a failed renewal.
 
 Storage lives in `ui/src/lib/auth.js`: a JSON `{access_token,
 expires_at}` envelope under `channel_mgmt_token`, renewed when
@@ -287,15 +290,30 @@ nothing writes the legacy key, so `MGMT_TOKEN_STORAGE_KEY` in
 `mgmt_auth.py` and `TOKEN_KEY` in `lib/auth.js` must move together.
 Dropping the legacy fallback is a follow-up, one release out.
 
-**Two known gaps, both deliberate.** (1) Renewal fires only from
-`authHeader()`, i.e. on an API call — so `AuthGate` still bounces a
-*cold load* carrying an expired token to `/app/login` without trying the
-cookie. A session that stays open is kept alive indefinitely; one
-reopened after the access token died still re-authenticates. (2)
-Single-flight is per-document: two tabs share a cookie jar but not the
-in-flight promise, so a simultaneous multi-tab renewal can still trip
-#290's reuse detection. `navigator.locks` is the fix. Neither is a
-regression against the no-refresh-at-all status quo.
+**Two known gaps, both deliberate — but they differ in kind.**
+
+1. Renewal fires only from `authHeader()`, i.e. on an API call — so
+   `AuthGate` still bounces a *cold load* carrying an expired token to
+   `/app/login` without trying the cookie. A session left open is kept
+   alive indefinitely; one reopened after the access token died still
+   re-authenticates. This one **is** status-quo-neutral — a no-op
+   against a world with no refresh at all.
+2. Single-flight is per-document: two tabs share a cookie jar but not
+   the in-flight promise, so a simultaneous multi-tab renewal can trip
+   #290's reuse detection and revoke the whole family — signing the user
+   out *everywhere*. `consume_refresh_token`'s own docstring names
+   "single-flight in the SPA" as the mitigation for exactly this, so the
+   server relies on a guarantee the SPA currently provides only per-tab.
+   Unlike gap 1 this is **not** status-quo-neutral: it introduces a
+   failure mode that cannot occur today. The race is narrow — both tabs
+   must cross the skew window within one round trip — which is why it
+   ships, but `navigator.locks.request` should close it soon.
+
+Server-side companion gap: `/auth/logout` is `Depends(require_mgmt_user)`
+and `decode_mgmt_jwt` enforces `exp`, so signing out of a tab left idle
+past the 1h mark 401s before the family revoke runs and leaves the
+refresh family live. Closing it means letting the refresh cookie alone
+authorise a logout.
 
 ### `/api/me/sessions` (#293)
 

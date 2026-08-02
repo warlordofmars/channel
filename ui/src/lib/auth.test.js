@@ -153,12 +153,31 @@ describe("session storage", () => {
     expect(storage[LEGACY_TOKEN_KEY]).toBeUndefined();
   });
 
+  it("accepts real base64url tokens, including `-` and `_` in every segment", () => {
+    // Regression guard: base64url's alphabet is `A-Za-z0-9-_`, so a class
+    // that dropped `-` would reject most real signatures and lock every
+    // user out. Padded standard base64 (`+/=`) is accepted too, because
+    // btoa-based fixtures and some encoders emit it.
+    const real =
+      "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9" +
+      ".eyJzdWIiOiJqb2huQGV4LmNvbSIsImV4cCI6MTc2NzIyNTYwMH0" +
+      ".q-3xY_9zAbC-dEfG_hIjKlMnOpQrStUvWxYz012";
+    for (const token of [real, "ab-cd_ef.gh-ij_kl.mn-op_qr", "a-b.c-d.e-f", "a+b.c/d.e=f"]) {
+      expect(() => saveSession(token)).not.toThrow();
+      expect(readToken()).toBe(token);
+    }
+  });
+
   it("refuses to store anything that isn't structurally a JWT", () => {
     // `saveSession`'s inputs come from off-device: a /auth/refresh
     // response body and the desktop loopback. Writing an unvalidated
     // value here would persist it as a credential replayed on every
     // later request, so the write is guarded rather than the callers.
-    for (const bad of ["", "not-a-jwt", "two.segments", "<script>alert(1)</script>", null, undefined, 42, { access_token: "x" }]) {
+    const rejected = [
+      "", "not-a-jwt", "two.segments", "a..b", "abc.def.gh i", 'abc.def.gh"i',
+      "<script>alert(1)</script>", null, undefined, 42, { access_token: "x" },
+    ];
+    for (const bad of rejected) {
       expect(() => saveSession(bad)).toThrow(TypeError);
     }
     expect(storage[TOKEN_KEY]).toBeUndefined();
