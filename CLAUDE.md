@@ -541,7 +541,11 @@ auto-titling of fresh chats via a Haiku one-shot Agent (Phase 7d).
   AgentCore Memory events for the chat's session (`ListEvents` +
   `DeleteEvent`). Failure is logged + counted
   (`ChatDeleteMemoryWipeFailures`) but does not fail the user-visible
-  delete — DDB is the source of truth for chat existence.
+  delete — DDB is the source of truth for chat existence. The wipe
+  targets the **current** `actorId`, so events written before the #474
+  derivation change are not reached by it and persist until the 90-day
+  `eventExpiryDuration` — an accepted consequence of the accept-the-loss
+  migration above, not an oversight.
 
 Dev-only `GET /api/_debug/memory/events?chat_id=...&limit=...` and
 `DELETE /api/_debug/memory/events?chat_id=...&event_id=...`
