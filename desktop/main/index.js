@@ -1,10 +1,11 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
-import { app } from "electron";
+import { app, safeStorage } from "electron";
 import { resolve } from "node:path";
 import { registerAppScheme, registerAppHandler } from "./protocol.js";
 import { createMainWindow } from "./window.js";
 import { registerIpc } from "./ipc.js";
 import { login } from "./auth.js";
+import { AUTH_FILE_NAME, createTokenStorage } from "./token-storage.js";
 import { init as initUpdater, relaunchToUpdate } from "./updater.js";
 
 // esbuild CJS bundle: __dirname at runtime is <app>/dist-main/main/.
@@ -28,12 +29,30 @@ app.whenReady().then(() => {
 
   const win = createMainWindow({ preloadPath: PRELOAD, isQuitting: () => isQuitting });
 
+  // Built here rather than at module scope: app.getPath("userData") is
+  // only meaningful once the app is ready, and safeStorage is unusable
+  // before then on Linux.
+  const tokenStorage = createTokenStorage({
+    filePath: resolve(app.getPath("userData"), AUTH_FILE_NAME),
+    safeStorage,
+    // The terminal is the only main-process log sink this app has, and a
+    // clear-text credential file is exactly the kind of thing that must
+    // not be silent.
+    warn: (message) => console.warn(message),
+  });
+
   registerIpc({
     mainWindowId: win.webContents.id,
     handlers: {
       login: () => login({ authBaseUrl: AUTH_BASE }),
-      logout: () => {},                          // renderer clears localStorage itself
+      // The renderer owns local session state: it clears localStorage and
+      // calls tokenStorage.clear() through the bridge, so there is
+      // nothing left for this handler to do.
+      logout: () => {},
       getVersion: () => app.getVersion(),
+      tokenRead: () => tokenStorage.read(),
+      tokenWrite: (session) => tokenStorage.write(session),
+      tokenClear: () => tokenStorage.clear(),
       // Electron's autoUpdater.quitAndInstall closes all windows before
       // calling app.quit() — but window.js's close handler hides (rather
       // than closes) until isQuitting flips, and isQuitting only flips on

@@ -258,7 +258,8 @@ app.include_router(assets_router, prefix="/api")
 # Memory read surface — GET /api/memory/records (#475). Requires a valid
 # mgmt JWT; every route is scoped to the caller's own AgentCore actor AND
 # per-session ownership-verified against the raw JWT sub (see the module
-# docstring's §Scoping — the sanitized actorId alone is not injective, #474).
+# docstring's §Scoping — the actor partition alone is not the boundary; a
+# read gate must not depend on a derivation's properties, #474/#485).
 app.include_router(memory_router, prefix="/api")
 
 # Admin user list + detail — requires mgmt JWT with role=admin (#235)

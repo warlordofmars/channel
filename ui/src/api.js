@@ -4,7 +4,15 @@
  * Token is read from localStorage via `lib/auth.js`.
  */
 
-import { clearSession, isTokenValid, loadSession, readToken, saveSession } from "./lib/auth.js";
+import {
+  clearSession,
+  isTokenValid,
+  loadSession,
+  readRefreshToken,
+  readToken,
+  saveRefreshToken,
+  saveSession,
+} from "./lib/auth.js";
 
 const BASE = import.meta.env.VITE_API_BASE ?? "";
 
@@ -29,13 +37,14 @@ const REFRESH_SKEW_MS = 5 * 60 * 1000;
 /**
  * How long to stop trying after a refresh is refused.
  *
- * Two clients legitimately have no refresh credential to present: the
- * desktop app until #297 wires `safeStorage` persistence, and any
+ * Some clients legitimately have no refresh credential to present: any
  * session minted by a bypass login (which deliberately mints no refresh
- * family). Both spend the last `REFRESH_SKEW_MS` of every access token
- * in the renew branch, and without a cooldown each would POST
- * `/auth/refresh` once per API call for those five minutes — straight
- * into #294's rate limiter, to no purpose.
+ * family), a desktop session signed in before #297 persisted one, and a
+ * Linux desktop whose keychain file could not be read. All of them spend
+ * the last `REFRESH_SKEW_MS` of every access token in the renew branch,
+ * and without a cooldown each would POST `/auth/refresh` once per API
+ * call for those five minutes — straight into #294's rate limiter, to no
+ * purpose.
  */
 const REFRESH_COOLDOWN_MS = 30 * 1000;
 
@@ -59,6 +68,16 @@ const LOGIN_ROUTE = "/app/login";
  * token and the rest would present the now-revoked predecessor — logging
  * the user out on the exact path built to keep them signed in. Collapsing
  * them onto one promise makes that unrepresentable.
+ *
+ * **Per-document, which is why #495 is open.** Two browser tabs share a
+ * cookie jar but not this promise. Desktop (#297) does *not* widen that
+ * hole in the way it first appears: every sign-in mints its own
+ * `device_id` and therefore its own token family
+ * (`_mint_session_refresh_token`), so an Electron window and a browser
+ * tab hold different families and cannot revoke each other. The desktop
+ * analogue of the multi-tab race needs two renderers sharing one
+ * `userData` directory — a second app window or a second instance, of
+ * which the app currently runs neither.
  */
 let refreshInFlight = null;
 
@@ -77,26 +96,44 @@ let refreshRefused = false;
 /**
  * Perform the actual rotation.
  *
- * No request body: the web transport presents the `channel_refresh`
- * HttpOnly cookie, which JavaScript cannot read and therefore cannot
- * send explicitly. `credentials: "include"` is what attaches it when
- * `VITE_API_BASE` points the SPA at another origin; same-origin
- * deployments (CloudFront in prod, the Vite proxy in dev) would send it
- * either way.
+ * **Two transports, one function.** The web SPA presents the
+ * `channel_refresh` HttpOnly cookie, which JavaScript cannot read and
+ * therefore cannot send explicitly — `credentials: "include"` is what
+ * attaches it when `VITE_API_BASE` points the SPA at another origin
+ * (same-origin deployments, CloudFront in prod and the Vite proxy in
+ * dev, would send it either way). Electron has no cookie to present, so
+ * it sends the token the OS keychain is holding in the request body and
+ * gets the rotated successor back in the JSON body (#297). The server
+ * accepts both and prefers the body (`refresh_session`).
+ *
+ * The branch is `readRefreshToken()` answering non-empty, not a desktop
+ * feature test: a desktop session predating #297, or one minted by a
+ * bypass login that deliberately mints no refresh family, has nothing to
+ * send and correctly takes the bodyless path.
  */
 async function performRefresh() {
+  const refreshToken = await readRefreshToken();
+  const headers = { [REFRESH_CSRF_HEADER]: "1" };
+  if (refreshToken) headers["Content-Type"] = "application/json";
   const response = await fetch(`${BASE}/auth/refresh`, {
     method: "POST",
-    headers: { [REFRESH_CSRF_HEADER]: "1" },
+    headers,
     credentials: "include",
     cache: "no-store",
+    body: refreshToken ? JSON.stringify({ refresh_token: refreshToken }) : undefined,
   });
   if (!response.ok) throw new ApiError("refreshSession", response.status);
   const body = await response.json();
+  // Persist the rotated refresh token BEFORE the access token. #290 hard-
+  // rotates: the token just presented is already revoked server-side, so
+  // the successor in this body is the session's only remaining long-lived
+  // credential. `saveSession` throws on a malformed access token, and
+  // doing it first would let that throw strand a session whose successor
+  // was never written anywhere. No-op on the web, where the successor
+  // came back as a `Set-Cookie` the browser has already stored and
+  // `body.refresh_token` is absent by design.
+  await saveRefreshToken(body.refresh_token);
   // `expires_in` is seconds from now; store an absolute local deadline.
-  // A body `refresh_token` (the desktop transport) is deliberately NOT
-  // persisted here — see the note in lib/auth.js on why localStorage
-  // never holds one. #297 owns the desktop side.
   //
   // `saveSession` is the single validator for what may be persisted: it
   // throws on a missing or malformed `access_token` rather than writing
@@ -172,8 +209,9 @@ export function endSession() {
  * answers 401 both for a dead token and for a client that has no
  * refresh credential at all, and that second case is the epic's
  * migration path rather than an error (see `refresh_session`'s
- * docstring): desktop until #297, bypass logins, and any session minted
- * before #292 all live there. Treating it as a sign-out would evict
+ * docstring): bypass logins, desktop sessions signed in before #297, and
+ * any session minted before #292 all live there. Treating it as a
+ * sign-out would evict
  * exactly those users five minutes *earlier* than the status quo. So
  * the still-valid token is used, and the session only ends once it is
  * genuinely unusable.

@@ -9,13 +9,16 @@
  * *before* the access token dies rather than after a request has
  * already 401'd.
  *
- * **The refresh token is deliberately absent from this module.** On the
- * web it lives in the `channel_refresh` HttpOnly cookie
+ * **The refresh token never enters localStorage.** On the web it lives
+ * in the `channel_refresh` HttpOnly cookie
  * (`src/channel/auth/refresh.py`), which JavaScript cannot read — that
- * is the entire point of the transport. Desktop carries its own copy
- * through the loopback redirect and will persist it in the OS keychain
- * via `safeStorage` (#297). Neither belongs in localStorage, so
- * `saveSession` takes an access token and nothing else.
+ * is the entire point of the transport. Desktop has no cookie: it
+ * carries its own copy through the loopback redirect (#292) and hands it
+ * to the OS keychain via `safeStorage` (#297), reached through
+ * `window.channelDesktop.tokenStorage`. So `saveSession` still takes an
+ * access token and nothing else, and the refresh token is read and
+ * written only by {@link readRefreshToken} / {@link saveRefreshToken},
+ * which are no-ops in a browser.
  *
  * Key migration (#260, folded into #295)
  * --------------------------------------
@@ -215,4 +218,129 @@ export function saveSession(accessToken, expiresAt = 0) {
 export function clearSession() {
   localStorage.removeItem(TOKEN_KEY);
   localStorage.removeItem(LEGACY_TOKEN_KEY);
+  // Desktop's refresh token lives outside the browser jar, so clearing
+  // localStorage alone would leave a 30-day credential on disk after a
+  // sign-out. Fire-and-forget: `ipcRenderer.invoke` posts to the main
+  // process synchronously and only the *reply* is async, so the delete
+  // is already on its way even though `Sidebar.signOut` navigates in the
+  // same tick. Errors are swallowed for the same reason every other
+  // teardown step here is unconditional — a failed delete must not
+  // prevent the visible sign-out.
+  //
+  // Not awaited, and safe not to be: `dropStoredRefreshToken` neither
+  // throws nor rejects, so there is nothing here that could abort a
+  // sign-out that must always complete.
+  const bridge = keychain();
+  if (bridge) void dropStoredRefreshToken(bridge);
+}
+
+// ---- Desktop keychain (#297) ----------------------------------------------
+
+/**
+ * The Electron main process's keychain bridge, or `null` in a browser.
+ *
+ * Read through `globalThis` rather than `window` so this module makes no
+ * assumption about a DOM global existing; in a browser or an Electron
+ * renderer the two are the same object anyway. `null` — not `undefined`
+ * — for both the no-Electron case and the older-preload case (a bridge
+ * without `tokenStorage`), so callers have exactly one absent value to
+ * test.
+ */
+function keychain() {
+  return globalThis.channelDesktop?.tokenStorage ?? null;
+}
+
+/**
+ * Named so the swallowed rejection is legible in a stack trace and
+ * countable by the coverage gate (see the UI conventions note on
+ * anonymous inline functions).
+ */
+function ignoreKeychainFailure() {
+  // Nothing actionable. A keychain that cannot be reached or written
+  // costs the user a re-login at the access token's next expiry, which
+  // is exactly where they were before this existed — whereas letting the
+  // rejection escape turns it into an unhandled promise rejection during
+  // sign-out or refresh.
+}
+
+/**
+ * Best-effort delete of the stored refresh token. **Never throws and
+ * never rejects**, so callers may `await` it or not, as suits them.
+ *
+ * Both failure shapes are absorbed here rather than at each call site: a
+ * bridge that cannot reach the file *rejects*, while one whose `clear`
+ * is missing or is not a function (a mismatched preload/renderer
+ * surface) throws *synchronously*, before there is a promise to attach a
+ * handler to. Inside an `async` function the synchronous throw becomes a
+ * rejection this `try` catches, which is what collapses the two.
+ */
+async function dropStoredRefreshToken(bridge) {
+  try {
+    await bridge.clear();
+  } catch {
+    ignoreKeychainFailure();
+  }
+}
+
+/**
+ * The desktop refresh token, or `""` when there isn't one.
+ *
+ * `""` covers every "nothing to present" case: a browser (no bridge), a
+ * desktop session that predates this change, a bypass login that minted
+ * no refresh family, and an unreadable or corrupt keychain file. All of
+ * them mean the same thing to `performRefresh` — send no body and let
+ * the cookie transport (or the resulting 401) decide.
+ */
+export async function readRefreshToken() {
+  const bridge = keychain();
+  if (!bridge) return "";
+  try {
+    const stored = await bridge.read();
+    return typeof stored?.refresh_token === "string" ? stored.refresh_token : "";
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Persist the desktop refresh token, or drop it when there is none.
+ *
+ * An empty or non-string token clears the file rather than storing a
+ * placeholder: the only way to reach that state is a rotation that came
+ * back without a successor, and the predecessor is already dead
+ * server-side, so keeping it would leave a credential that can never
+ * work again.
+ *
+ * **A failed write also clears**, which is the non-obvious half. What is
+ * still on disk at that point is the *predecessor* — and #290 hard-
+ * rotates, so the server has already consumed it. Leaving it there means
+ * the next refresh re-presents a spent token, which RFC 9700 §4.14.2
+ * reuse detection reads as a breach and answers by revoking the whole
+ * device family: a disk-full blip would sign the user out everywhere and
+ * look like an attack in the audit trail. At login the stale value may
+ * belong to a *different account* on a shared machine, in which case the
+ * next refresh would quietly swap this session for theirs. Dropping it
+ * degrades to access-token-only and a clean re-login — strictly the
+ * better failure in both cases.
+ *
+ * **Never throws.** The caller has just consumed a refresh token whose
+ * successor this is; a rejection propagating out of `performRefresh`
+ * would discard a perfectly good access token that was already saved and
+ * arm the refresh cooldown for no reason. Returns whether the successor
+ * was stored, so the failure is still observable to a test.
+ */
+export async function saveRefreshToken(refreshToken) {
+  const bridge = keychain();
+  if (!bridge) return false;
+  if (typeof refreshToken !== "string" || refreshToken === "") {
+    await dropStoredRefreshToken(bridge);
+    return false;
+  }
+  try {
+    await bridge.write({ refresh_token: refreshToken });
+    return true;
+  } catch {
+    await dropStoredRefreshToken(bridge);
+    return false;
+  }
 }

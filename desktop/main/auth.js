@@ -62,6 +62,15 @@ export function startLoopback({ state, onResult }) {
       }
       const got = url.searchParams.get("state") ?? "";
       const tok = url.searchParams.get("token");
+      // #292 added `refresh_token` to this redirect — the desktop
+      // equivalent of the web flow's HttpOnly cookie, which Electron
+      // cannot use. Optional on purpose: minting is fail-soft
+      // server-side (`_mint_session_refresh_token`), and the desktop-dev
+      // and `?test_email=` bypasses deliberately mint none, so a login
+      // that arrives without one is a valid access-token-only session
+      // rather than an error. It re-auths hourly, exactly as every
+      // desktop login did before #297.
+      const refresh = url.searchParams.get("refresh_token") ?? "";
       if (!statesEqual(got, state)) {
         res.writeHead(400); res.end("state mismatch");
         return onResult({ ok: false, code: "STATE_MISMATCH" });
@@ -72,7 +81,7 @@ export function startLoopback({ state, onResult }) {
       }
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       res.end(CLOSE_PAGE_HTML);
-      onResult({ ok: true, token: tok });
+      onResult({ ok: true, token: tok, refreshToken: refresh });
     });
 
     server.listen(0, "127.0.0.1", () => {
@@ -113,7 +122,12 @@ export function loginWithDeps({ authBaseUrl, openExternal, onAppQuit, startLoopb
     startFn({
       state,
       onResult: (r) => {
-        if (r.ok) settle(resolve, r.token);
+        // Resolves to `{token, refreshToken}` rather than a bare token
+        // string (#297): the renderer needs both — the access token for
+        // `saveSession`, the refresh token to hand to the keychain — and
+        // the two must be persisted by the same caller so neither can be
+        // stored without the other.
+        if (r.ok) settle(resolve, { token: r.token, refreshToken: r.refreshToken });
         else settle(reject, new Error(r.code));
       },
     }).then((s) => {

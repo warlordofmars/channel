@@ -27,6 +27,9 @@ describe("registerIpc", () => {
       "desktop:logout",
       "desktop:version",
       "desktop:relaunch-to-update",
+      "desktop:token-read",
+      "desktop:token-write",
+      "desktop:token-clear",
     ]);
   });
 
@@ -66,6 +69,49 @@ describe("registerIpc", () => {
     const handler = ipcMain.handle.mock.calls.find(([ch]) => ch === "desktop:version")[1];
     expect(await handler(makeEvent(7))).toBe("9.9.9");
   });
+
+  // #297 — the keychain channels. Each is checked for its own routing
+  // AND for the sender guard, because these are the three that hand back
+  // (or overwrite) a 30-day credential.
+  it("forwards token-read to its handler and returns the stored session", async () => {
+    const { ipcMain } = await import("electron");
+    const tokenRead = vi.fn().mockResolvedValue({ refresh_token: "rt" });
+    registerIpc({ mainWindowId: 7, handlers: { tokenRead } });
+    const handler = ipcMain.handle.mock.calls.find(([ch]) => ch === "desktop:token-read")[1];
+    expect(await handler(makeEvent(7))).toEqual({ refresh_token: "rt" });
+  });
+
+  it("forwards token-write to its handler, passing the session through", async () => {
+    const { ipcMain } = await import("electron");
+    const tokenWrite = vi.fn().mockResolvedValue(undefined);
+    registerIpc({ mainWindowId: 7, handlers: { tokenWrite } });
+    const handler = ipcMain.handle.mock.calls.find(([ch]) => ch === "desktop:token-write")[1];
+    await handler(makeEvent(7), { refresh_token: "rt" });
+    expect(tokenWrite).toHaveBeenCalledWith({ refresh_token: "rt" });
+  });
+
+  it("forwards token-clear to its handler", async () => {
+    const { ipcMain } = await import("electron");
+    const tokenClear = vi.fn().mockResolvedValue(undefined);
+    registerIpc({ mainWindowId: 7, handlers: { tokenClear } });
+    const handler = ipcMain.handle.mock.calls.find(([ch]) => ch === "desktop:token-clear")[1];
+    await handler(makeEvent(7));
+    expect(tokenClear).toHaveBeenCalled();
+  });
+
+  it.each(["desktop:token-read", "desktop:token-write", "desktop:token-clear"])(
+    "rejects %s from any sender but the main window",
+    async (channel) => {
+      const { ipcMain } = await import("electron");
+      const handlers = { tokenRead: vi.fn(), tokenWrite: vi.fn(), tokenClear: vi.fn() };
+      registerIpc({ mainWindowId: 7, handlers });
+      const handler = ipcMain.handle.mock.calls.find(([ch]) => ch === channel)[1];
+      await expect(handler(makeEvent(99))).rejects.toThrow("SENDER_FORBIDDEN");
+      expect(handlers.tokenRead).not.toHaveBeenCalled();
+      expect(handlers.tokenWrite).not.toHaveBeenCalled();
+      expect(handlers.tokenClear).not.toHaveBeenCalled();
+    },
+  );
 
   it("registers desktop:relaunch-to-update and forwards to the relaunchToUpdate handler", async () => {
     const { ipcMain } = await import("electron");
