@@ -27,6 +27,7 @@ from channel.api.models import router as models_router
 from channel.api.prefs import router as prefs_router
 from channel.auth.logout import router as logout_router
 from channel.auth.mgmt_auth import router as mgmt_auth_router
+from channel.auth.refresh import router as refresh_router
 from channel.logging_config import (
     configure_logging,
     get_logger,
@@ -141,6 +142,14 @@ app.include_router(mgmt_auth_router)
 # verb sits alongside /auth/login + /auth/callback in the auth namespace
 # so the SPA can hit /auth/logout symmetrically.
 app.include_router(logout_router)
+
+# Refresh-token exchange — POST /auth/refresh (#291). Deliberately
+# UNauthenticated: the refresh token is itself the credential, and the
+# access JWT it renews has usually already expired by the time a client
+# calls this. CSRF is covered by the required X-Channel-Refresh header
+# plus the SameSite=Strict/HttpOnly cookie the web transport uses. No
+# /api prefix — it belongs in the /auth namespace beside login/logout.
+app.include_router(refresh_router)
 
 # CSP report receiver — unauthenticated by design
 app.include_router(csp_router, prefix="/api")

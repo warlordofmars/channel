@@ -1,12 +1,48 @@
 # Copyright (c) 2026 John Carter. All rights reserved.
-# Scheduled DynamoDB PITR restore test — validates that prod backups are recoverable.
-# Runs weekly and on workflow_dispatch.
+# DynamoDB PITR restore test — validates that prod backups are recoverable.
 # On failure, opens or updates a GitHub issue labelled 'reliability'.
+#
+# ---------------------------------------------------------------------------
+# THE WEEKLY SCHEDULE IS DELIBERATELY DISABLED (see issue #49).
+# ---------------------------------------------------------------------------
+# This check validates a PITR restore of the *production* table. Production
+# does not exist yet, so every scheduled run was guaranteed to fail — it never
+# passed once across its entire history, and each failure appended a "still
+# failing" comment to issue #49. That is false signal, not safety: an alarm
+# that has never been capable of going green trains everyone to ignore it.
+#
+# Three independent preconditions are unmet today:
+#
+#   1. `secrets.AWS_DEPLOY_ROLE_ARN` (the prod OIDC deploy role) is not
+#      configured — not at repo scope, not at environment scope. The empty
+#      value made `role-to-assume` vanish from the action's inputs, so the
+#      run died with a cryptic "Could not load credentials from any
+#      providers" after 12 retries.
+#   2. The `production` GitHub environment does not exist. The deploy role's
+#      trust policy pins the OIDC `sub` claim to
+#      `repo:warlordofmars/channel:environment:production`
+#      (infra/stacks/channel_stack.py), so a job without `environment:` could
+#      not assume the role even once the secret is set. Fixed below.
+#   3. There is no PITR-enabled table to restore from. PITR is prod-only —
+#      `point_in_time_recovery_enabled=is_prod` in channel_stack.py — so
+#      `channel-dev` and `channel-jc` both report PITR DISABLED, and the prod
+#      `channel` table has never been created.
+#
+# RE-ENABLE CONDITION — turn the schedule back on as part of the prod
+# cutover, once all three hold: the `channel` table exists with PITR enabled,
+# the `production` GitHub environment exists, and `AWS_DEPLOY_ROLE_ARN` is
+# wired. Uncomment the `schedule:` block below. Tracked as the follow-up
+# issue linked from #49.
+#
+# Until then the workflow remains runnable on demand via workflow_dispatch,
+# and its preflight fails fast with an actionable message instead of a
+# cryptic credentials error.
 name: Backup Restore Test
 
 on:
-  schedule:
-    - cron: "0 3 * * 0"  # every Sunday at 03:00 UTC
+  # Re-enable at prod cutover — see the header comment above and issue #49.
+  # schedule:
+  #   - cron: "0 3 * * 0"  # every Sunday at 03:00 UTC
   workflow_dispatch:
 
 permissions:
@@ -18,26 +54,77 @@ jobs:
   backup-restore-test:
     name: DynamoDB PITR Restore Test
     runs-on: ubuntu-latest
+    # Required: the prod deploy role's OIDC trust policy pins the token's
+    # `sub` claim to `repo:<owner>/<repo>:environment:production`. Without
+    # this key the AssumeRoleWithWebIdentity call is rejected outright.
+    environment: production
     env:
       RESTORE_TABLE: channel-backup-test-${{ github.run_id }}
       SOURCE_TABLE: channel
       AWS_REGION: us-east-1
 
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+      # Fail fast, before any checkout or dependency install, when the prod
+      # deploy role is not configured. Without this the run burns ~70s and
+      # then reports "Could not load credentials from any providers", which
+      # says nothing about the actual cause.
+      - name: Preflight — prod deploy role configured
+        id: preflight_role
+        env:
+          DEPLOY_ROLE_ARN: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+        run: |
+          if [ -z "$DEPLOY_ROLE_ARN" ]; then
+            echo "::error::AWS_DEPLOY_ROLE_ARN is not configured; prod backup validation cannot run."
+            echo "The prod OIDC deploy role secret is unset at both repo and environment scope."
+            echo "This is expected until the prod cutover — see issue #459."
+            echo "To resolve: deploy the prod stack, then set AWS_DEPLOY_ROLE_ARN to the"
+            echo "GitHubActionsDeployRole ARN emitted by the ChannelStack prod deployment."
+            exit 1
+          fi
+          echo "Prod deploy role secret is configured."
 
-      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
-        with:
-          version: "latest"
-
-      - name: Install dependencies
-        run: uv sync --all-extras
+      # No `actions/checkout` step: every step below is an inline script or
+      # an inline `github-script` block, so nothing reads a repo file.
 
       - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
         with:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           aws-region: us-east-1
+
+      # Verify there is actually something restorable before kicking off a
+      # restore that would otherwise fail deep inside the AWS call with a
+      # less obvious error.
+      - name: Preflight — source table exists with PITR enabled
+        run: |
+          # Capture stderr so a missing table can be distinguished from
+          # AccessDenied / expired credentials / throttling. Collapsing all of
+          # those into "table does not exist" would be its own legibility bug.
+          if ! DESCRIBE_ERR=$(aws dynamodb describe-table --table-name "$SOURCE_TABLE" 2>&1 >/dev/null); then
+            case "$DESCRIBE_ERR" in
+              *ResourceNotFoundException*)
+                echo "::error::Source table '$SOURCE_TABLE' does not exist in $AWS_REGION; there is nothing to restore."
+                echo "The prod table is created by the prod ChannelStack deployment — see issue #459."
+                ;;
+              *)
+                echo "::error::Could not describe source table '$SOURCE_TABLE' — this is NOT a 'table missing' result, so treat it as a live failure."
+                echo "$DESCRIBE_ERR"
+                ;;
+            esac
+            exit 1
+          fi
+
+          PITR_STATUS=$(aws dynamodb describe-continuous-backups \
+            --table-name "$SOURCE_TABLE" \
+            --query 'ContinuousBackupsDescription.PointInTimeRecoveryDescription.PointInTimeRecoveryStatus' \
+            --output text)
+          echo "PITR status on $SOURCE_TABLE: $PITR_STATUS"
+          if [ "$PITR_STATUS" != "ENABLED" ]; then
+            echo "::error::PITR is $PITR_STATUS on '$SOURCE_TABLE' — no restorable backup exists."
+            echo "PITR is enabled only for prod (point_in_time_recovery_enabled=is_prod in channel_stack.py)."
+            exit 1
+          fi
+          echo "Preflight passed: $SOURCE_TABLE exists with PITR ENABLED."
 
       - name: Restore DynamoDB table from PITR
         id: restore
@@ -72,28 +159,101 @@ jobs:
       - name: Validate restored table
         id: validate
         run: |
-          # Verify the table has items (row count > 0)
+          # 1. Data check — the restore must contain items.
           COUNT=$(aws dynamodb scan \
             --table-name "$RESTORE_TABLE" \
             --select COUNT \
             --query 'Count' \
             --output text)
           echo "Restored table item count: $COUNT"
+          # Reject a non-numeric count before comparing. Under `bash -e` a
+          # non-numeric or empty value makes `[ "$COUNT" -lt 1 ]` exit 2, and
+          # because `if` conditions are exempt from `set -e` the step would
+          # sail past and report "passed: None items found" — the same
+          # vacuous-pass hole the GSI guard below closes.
+          case "$COUNT" in
+            ''|*[!0-9]*)
+              echo "::error::Could not read a numeric item count from '$RESTORE_TABLE' (got: '$COUNT')."
+              exit 1
+              ;;
+          esac
           if [ "$COUNT" -lt 1 ]; then
-            echo "ERROR: Restored table is empty — backup may be corrupt or PITR not enabled."
+            echo "::error::Restored table is empty — backup may be corrupt or PITR not enabled."
             exit 1
           fi
-          echo "Validation passed: $COUNT items found."
+          echo "Item count check passed: $COUNT items found."
 
+          # 2. Schema check — every GSI on the source must come back on the
+          # restore. A restore that silently drops an index would leave the
+          # app unable to serve the query paths that depend on it (e.g.
+          # RefreshByUserIndex powers per-device refresh-token family revoke),
+          # which an item-count check alone cannot detect.
+          # The `|| `[]`` guard matters: on a table with no GSIs the
+          # GlobalSecondaryIndexes key is absent entirely, and an unguarded
+          # `sort(Table.GlobalSecondaryIndexes[].IndexName)` aborts with
+          # "In function sort(), invalid type for value: None" — a cryptic
+          # failure of exactly the kind this workflow's preflights exist to
+          # eliminate. The guard yields an empty list instead.
+          SOURCE_GSIS=$(aws dynamodb describe-table \
+            --table-name "$SOURCE_TABLE" \
+            --query 'sort((Table.GlobalSecondaryIndexes || `[]`)[].IndexName)' \
+            --output text)
+          RESTORED_GSIS=$(aws dynamodb describe-table \
+            --table-name "$RESTORE_TABLE" \
+            --query 'sort((Table.GlobalSecondaryIndexes || `[]`)[].IndexName)' \
+            --output text)
+          echo "Source GSIs:   $SOURCE_GSIS"
+          echo "Restored GSIs: $RESTORED_GSIS"
+
+          # Guard against a vacuous pass: the Channel schema always defines
+          # GSIs, so an empty source list means describe-table returned
+          # something unexpected and the parity comparison below would
+          # succeed without asserting anything.
+          # `None` is belt-and-braces: the `|| `[]`` guard above already makes
+          # an absent key yield an empty string rather than the literal "None"
+          # the AWS CLI prints for a null result. Matching both means removing
+          # that guard later can't silently reintroduce a vacuous `None ==
+          # None` pass. (No Channel index is named "None".)
+          case "$SOURCE_GSIS" in
+            ''|None)
+              echo "::error::Source table '$SOURCE_TABLE' reports no GSIs — the Channel schema always defines several, so this is not a valid baseline to compare against."
+              exit 1
+              ;;
+          esac
+
+          if [ "$SOURCE_GSIS" != "$RESTORED_GSIS" ]; then
+            echo "::error::GSI parity check failed — the restored table's indexes do not match the source."
+            echo "Expected: $SOURCE_GSIS"
+            echo "Actual:   $RESTORED_GSIS"
+            exit 1
+          fi
+          echo "GSI parity check passed."
+
+          echo "Validation passed: $COUNT items, GSIs match ($SOURCE_GSIS)."
+
+      # Skipped when the restore step never ran (e.g. a preflight failed), so
+      # cleanup can't burn the credential-provider chain deleting a table that
+      # was never created.
       - name: Delete temporary restore table
-        if: always()
+        if: always() && steps.restore.outcome != 'skipped'
         run: |
           echo "Cleaning up temporary table $RESTORE_TABLE..."
           aws dynamodb delete-table --table-name "$RESTORE_TABLE" || true
           echo "Cleanup complete."
 
+      # Suppressed when the run failed *only* because the prod deploy role
+      # isn't configured yet — that is the documented, expected pre-cutover
+      # state (issue #459), not a backup-chain problem. Filing a bug for it on
+      # every manual dispatch would recreate the exact false signal this
+      # workflow's schedule was disabled to stop: #49 is closed, and #459's
+      # title doesn't match the predicate below, so each run would open a
+      # brand-new reliability bug.
+      #
+      # Deliberately narrower than "suppress unless restore/validate failed":
+      # a credentials failure, a missing source table, or PITR switched off
+      # ARE genuine alarms once prod exists, and must still file.
       - name: Open or update issue on failure
-        if: failure()
+        if: failure() && steps.preflight_role.outcome != 'failure'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
@@ -110,7 +270,7 @@ jobs:
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 title: 'DynamoDB backup restore test failing',
-                body: `## Backup Restore Failure\n\nThe weekly DynamoDB PITR restore test failed, indicating a potential issue with the prod backup chain.\n\nSee the [workflow run](${run_url}) for details.\n\n**Action required:** Verify PITR is enabled on the \`channel\` table and investigate the restore failure.`,
+                body: `## Backup Restore Failure\n\nThe DynamoDB PITR restore test failed, indicating a potential issue with the prod backup chain.\n\nSee the [workflow run](${run_url}) for details — the preflight steps report which precondition was not met.\n\n**Action required:** Verify PITR is enabled on the \`channel\` table and investigate the restore failure.`,
                 labels: ['reliability', 'bug'],
               });
             } else {

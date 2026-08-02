@@ -24,13 +24,12 @@ recurring slip more than three times: hardcoded colours, missing
 co-located tests, emoji-as-icon, anonymous handlers that miss the
 v8 counter, and fake-timers that block the initial render.
 
-**Channel's UI code uses no Tailwind and no shadcn/ui, and does not
-import `lucide-react`** (the dependency still lingers in
-`ui/package.json`, but nothing under `ui/src/` imports it — use
-`Icon.jsx` instead). Styling is CSS-variable tokens plus semantic
-class names; icons come from a hand-rolled stroke set. If you are
-porting a snippet from another project, strip its utility classes
-and icon imports first.
+**Channel's UI code uses no Tailwind and no shadcn/ui, and ships no
+icon package** — `lucide-react` was removed from `ui/package.json` in
+#445 / PR #447; use `Icon.jsx` instead. Styling is CSS-variable
+tokens plus semantic class names; icons come from a hand-rolled
+stroke set. If you are porting a snippet from another project,
+strip its utility classes and icon imports first.
 
 ## 1. Components and primitives
 

@@ -1,6 +1,6 @@
 # Introduction
 
-Channel is a production-ready template for building AWS-native AI agent backend services.
+Channel is an AI agent chat backend on AWS.
 
 ## What's included
 
@@ -8,7 +8,7 @@ Channel is a production-ready template for building AWS-native AI agent backend 
 - **AWS Lambda** + Function URL hosting
 - **DynamoDB** single-table storage
 - **CloudFront** + S3 CDN for the management UI
-- **React** management SPA (Vite + shadcn/ui)
+- **React** management SPA (Vite + hand-rolled CSS-variable design system)
 - **AWS CDK** (Python) infrastructure as code
 
 ## Next steps
