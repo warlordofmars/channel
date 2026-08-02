@@ -361,10 +361,18 @@ async def mgmt_callback(
             params["refresh_token"] = minted[0]
         qs = urlencode(params)
         # ``None`` even though minting succeeded: the loopback query
-        # string is this transport's carrier, and the browser running the
-        # OAuth dance may still hold a *web* session's cookie for a
-        # different account. Clearing keeps the two transports from
-        # crossing.
+        # string is this transport's carrier, so there is no cookie to
+        # set. Clearing rather than simply not-setting is what keeps the
+        # set-or-clear rule *total* — a rule with an exception is one a
+        # future login path can quietly fall outside of.
+        #
+        # This is the one arm where no cross-identity leak is possible
+        # anyway: the desktop redirect writes nothing to the browser's
+        # localStorage, so it cannot create the token/cookie mismatch the
+        # other three arms can. The cost is real but small — after #295,
+        # signing into the desktop app ends silent refresh for a web tab
+        # in the same default browser, which re-logins at its next 1h
+        # expiry. Clearing is the safe direction, so it wins the tie.
         return _finish_login(RedirectResponse(f"{desktop_callback}?{qs}", status_code=302), None)
 
     return _finish_login(_html_redirect(token), minted)

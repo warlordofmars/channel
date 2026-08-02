@@ -170,6 +170,21 @@ deployed non-prod stack, and the decision was to keep a bypass
 credential's blast radius at 1 hour rather than extend it to a 30-day
 family. Bypass logins therefore re-auth hourly.
 
+**Invariant — every login-completing response must SET or CLEAR the
+refresh cookie, never leave it untouched.** Route new login paths
+through `_finish_login` in `mgmt_auth.py`; nothing mechanical catches a
+path that skips it. `POST /auth/refresh` is unauthenticated by design,
+so identity comes entirely from `row.user_id` of whichever cookie is
+presented — the cookie *is* the session. A login that leaves a previous
+account's cookie in the jar therefore hands the new user the old user's
+session on the next refresh. That was live in review: sign in as A
+through Google, then hit `/auth/login?test_email=b@example.com` on any
+stack with the bypass enabled — localStorage holds B's access token
+while the cookie still holds A's 30-day family. The redirect *to* Google
+is deliberately exempt: it is not a login completion, and clearing there
+would let an abandoned sign-in sign the user out of the session they
+already have.
+
 **`POST /auth/logout` revokes both credentials.** It denies the access
 token's `jti` (#240) *and* calls `revoke_refresh_token` on the presented
 refresh token, which kills the whole device family — not just the one
