@@ -1285,11 +1285,16 @@ uv run inv dev
 
 ### Running UI e2e tests locally
 
-> **Note:** `tests/e2e/` currently contains the Phase 7c memory-write
-> suite (`test_memory_writes.py`) and the Phase 7d recall + auto-titling
-> suite (`test_memory_recall_and_titling.py`). The chats CRUD, auth, CSP,
-> regenerate, and idempotency suites have not yet been authored — those
-> flows are exercised only by unit + integration tests today.
+> **Note:** `tests/e2e/` covers memory writes (`test_memory_writes.py`),
+> recall + auto-titling (`test_memory_recall_and_titling.py`), chat
+> management (`test_chat_management.py`), attachments
+> (`test_attachments.py`), assets (`test_assets.py`), and the tool
+> smokes (`test_tool_use_smoke.py`, `test_code_exec.py`,
+> `test_web_search_smoke.py`, `test_mcp_hive_smoke.py`). Auth, CSP,
+> regenerate, and follow-up-chip suites have not yet been authored —
+> those flows are exercised only by unit + integration tests today.
+> Re-check this list against `ls tests/e2e/` before relying on it to
+> justify skipping a local e2e run; it has drifted before.
 
 ```bash
 # Auto-detects the Vite port — no env vars to set manually
