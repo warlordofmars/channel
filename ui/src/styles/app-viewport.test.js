@@ -236,18 +236,45 @@ describe("mobile home layout — greeting top, composer bottom (#467)", () => {
     expect(mobileHomeComposerRule()).toMatch(/margin-top:\s*auto/);
   });
 
+  /**
+   * Selector prelude of the rule containing character offset `i` — the
+   * text between the previous brace of either kind and the `{` that opens
+   * the rule.
+   *
+   * Walking back to the nearest brace (rather than regex-matching a whole
+   * rule) is what keeps this correct for a rule nested in an at-rule: for
+   * the FIRST rule inside `@media ... {` the preceding brace is the media
+   * block's own `{`, so the slice is still just the selector. A
+   * `([^{}]*)\{` style match instead swallows the at-rule prelude and
+   * loses the selector entirely.
+   */
+  function selectorOfRuleAt(i) {
+    const open = css.lastIndexOf("{", i);
+    const prev = Math.max(
+      css.lastIndexOf("{", open - 1),
+      css.lastIndexOf("}", open - 1),
+    );
+    return css.slice(prev + 1, open);
+  }
+
   it("scopes the bottom anchor to .home so the chat view is untouched", () => {
     // `.bottom-composer .composer-wrap` is already bottom-anchored by its
     // own container; an unscoped `.composer-wrap { margin-top: auto }`
     // would reach it (and ProjectDetail's composer) and push those around
-    // too. Every `.composer-wrap` rule carrying the auto margin must name
-    // `.home` in its selector.
-    const unscoped = [
-      ...css.matchAll(/([^{}]*\.composer-wrap[^{}]*)\{([^}]*)\}/g),
-    ].filter(
-      (m) => /margin-top:\s*auto/.test(m[2]) && !m[1].includes(".home"),
-    );
-    expect(unscoped.map((m) => m[1].trim())).toEqual([]);
+    // too. Every selector carrying the auto margin must name `.home`.
+    //
+    // The prelude is split on commas and each compound selector judged on
+    // its own, so a grouped rule (`.home .greet, .composer-wrap { ... }`)
+    // cannot borrow the `.home` from a sibling in the list to pass — that
+    // masking vector is real and was verified by hand against the earlier
+    // whole-prelude form of this check. (A comment mentioning `.home` is
+    // not a vector: `css` is comment-stripped at the top of the file.)
+    const unscoped = [...css.matchAll(/margin-top:\s*auto/g)]
+      .map((m) => selectorOfRuleAt(m.index))
+      .flatMap((selectorList) => selectorList.split(","))
+      .map((selector) => selector.trim())
+      .filter((s) => s.includes(".composer-wrap") && !s.includes(".home"));
+    expect(unscoped).toEqual([]);
   });
 
   it("keeps the home-indicator clearance beneath the bottomed composer", () => {
