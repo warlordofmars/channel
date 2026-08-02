@@ -62,9 +62,13 @@ three deliberately-public routes, which are the expected baseline:
 - the CSP violation report receiver (`api/csp.py`) — browsers post these unauthenticated
 - `GET /auth/mcp/callback` (`api/mcp.py`) — an OAuth callback, authenticated by its `state` parameter, not a bearer token
 
-Everything under `src/channel/auth/` is also public by design (that is
-where a caller goes to *obtain* credentials); audit those against §"Token
-issuance" instead.
+Three routes under `src/channel/auth/` are also public by design — that
+is where a caller goes to *obtain* credentials — and should be audited
+against §"Token issuance" instead: `GET /auth/login` and `GET
+/auth/callback` (`auth/mgmt_auth.py`) and `POST /auth/refresh`
+(`auth/refresh.py`). That is **not** the whole directory: `POST
+/auth/logout` (`auth/logout.py`) carries `Depends(require_mgmt_user)`,
+so a diff dropping that dependency is a finding like any other.
 
 Any other endpoint missing an auth dependency → **Critical**.
 
