@@ -18,6 +18,9 @@ vi.mock("../../api.js", () => ({
   enableFeaturedServer: vi.fn(() =>
     Promise.resolve({ server_id: "srv-feat", auth_start_url: null }),
   ),
+  listSessions: vi.fn(() => Promise.resolve([])),
+  revokeSession: vi.fn(() => Promise.resolve()),
+  revokeAllSessions: vi.fn(() => Promise.resolve()),
 }));
 
 import * as api from "../../api.js";

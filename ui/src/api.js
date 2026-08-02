@@ -788,3 +788,29 @@ export async function getAsset(chatId, assetId) {
   if (!response.ok) throw new ApiError("getAsset", response.status);
   return response.json();
 }
+
+// ---- Sessions (#296) -------------------------------------------------------
+
+export async function listSessions() {
+  const response = await fetch(`${BASE}/api/me/sessions`, {
+    headers: await authHeader(),
+  });
+  if (!response.ok) throw new ApiError("listSessions", response.status);
+  return response.json();
+}
+
+export async function revokeSession(deviceId) {
+  const response = await fetch(`${BASE}/api/me/sessions/${encodeURIComponent(deviceId)}`, {
+    method: "DELETE",
+    headers: await authHeader(),
+  });
+  if (!response.ok) throw new ApiError("revokeSession", response.status);
+}
+
+export async function revokeAllSessions() {
+  const response = await fetch(`${BASE}/api/me/sessions`, {
+    method: "DELETE",
+    headers: await authHeader(),
+  });
+  if (!response.ok) throw new ApiError("revokeAllSessions", response.status);
+}

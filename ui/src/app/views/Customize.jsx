@@ -12,6 +12,7 @@ import { useChannelPrefs } from "../../hooks/useChannelPrefs.js";
 import AddMCPServerModal from "../AddMCPServerModal.jsx";
 import FeaturedMCPServers from "../FeaturedMCPServers.jsx";
 import { EFFORTS, cachedModels, loadModels, mergeWithDisplayMeta } from "../data.js";
+import Sessions from "./Sessions.jsx";
 
 // Five accent hues. Co-located here because nothing else in the app reads
 // them; the spec mock-data list doesn't include ACCENTS. Lifted verbatim
@@ -425,6 +426,7 @@ export default function Customize() {
           onClose={() => setShowAddMCP(false)}
           onRegistered={() => refreshMCP()}
         />
+        <Sessions />
       </div>
     </div>
   );
