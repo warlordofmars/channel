@@ -161,14 +161,7 @@ def test_to_dict_shape():
     }
 
 
-# ── actor id + ownership (#474 defence) ───────────────────────────────────
-
-
-def test_sanitize_actor_id_is_not_injective():
-    # This is #474, asserted rather than assumed: it is the entire reason
-    # ``resolve_owned_chats`` exists. If this ever starts failing, #474 has
-    # been fixed and the docstrings referencing it need revisiting.
-    assert mr.sanitize_actor_id("jc+work@x.com") == mr.sanitize_actor_id("jc_work@x.com")
+# ── ownership verification (the read-boundary gate) ───────────────────────
 
 
 def test_resolve_owned_chats_keeps_only_the_callers_chats(monkeypatch: pytest.MonkeyPatch):
@@ -198,8 +191,14 @@ def test_resolve_owned_chats_dedupes_point_reads(monkeypatch: pytest.MonkeyPatch
 
 
 def test_resolve_owned_chats_compares_the_raw_sub(monkeypatch: pytest.MonkeyPatch):
-    # The colliding sub from #474 must NOT unlock the other user's chat,
-    # even though both derive the same AgentCore actorId.
+    """Only the chat row's true owner passes, on the RAW sub.
+
+    Deliberately makes no claim about how ``actorId`` is derived — that is
+    the point of the gate. The pair below is #474's documented collision
+    (``jc+work@x.com`` / ``jc_work@x.com``), which #485 makes injective;
+    this assertion holds either way, because the comparison never touches a
+    derived value.
+    """
     monkeypatch.setattr(
         "channel.storage.get_chat_by_id", lambda _c: _chat("c", user_id="jc+work@x.com")
     )

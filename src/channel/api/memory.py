@@ -40,7 +40,8 @@ endpoints (#476 / #477 / #479) inherit one definition of a record.
   ``recall_window.enabled`` is false the hook injects nothing, so every
   ``used_in_recall`` is false too — the flag and the envelope can never
   contradict each other.
-- ``withheld_record_count`` — see §Scoping.
+- ``withheld_record_count`` — a **lower bound**, not an exact total; see
+  §Scoping.
 - ``next_cursor`` — opaque; page on it, never on ``len(groups)``.
 
 **Rendering contract:** record and summary ``text`` is data. Render it as
@@ -50,23 +51,39 @@ the same forgery surface on the system-prompt side). Epic #129 decision 11.
 
 ## Scoping
 
-Two independent gates, because one is known to be leaky:
+Two independent gates, deliberately not relying on each other:
 
-1. ``actorId = sanitize_actor_id(claims["sub"])`` — no actor / user /
+1. ``actorId = _sanitize_actor_id(claims["sub"])`` — no actor / user /
    workspace parameter exists on this endpoint, per the standing "agents
    swap tokens to switch context" product decision. When #283 makes
    ``actorId`` ``{workspace_id}/{user_id}``, no signature changes.
-2. **Per-session ownership verification against the raw JWT sub.** #474
-   proved ``_sanitize_actor_id`` is not injective — ``jc+work@x.com`` and
-   ``jc_work@x.com`` derive the same ``actorId`` — so an endpoint scoped
-   only by gate 1 would hand one user another user's private memory
-   whenever two subs collide. Every session on the page is checked with
+2. **Per-session ownership verification against the raw JWT sub.** Gate 1
+   scopes the *partition*; gate 2 guards the *read*, comparing the chat
+   row's own ``user_id`` to ``claims["sub"]`` — the raw sub, never a
+   derived value. Every session on the page goes through
    ``resolve_owned_chats`` (``sessionId`` *is* a ``chat_id``, so
-   ``get_chat_by_id(...).user_id == claims["sub"]`` is decisive on the raw
-   sub the sanitizer never touches), and anything unverified is dropped
-   before the response is built. ``withheld_record_count`` reports how many
-   records that removed, which makes this endpoint a live detector for
-   #474 rather than a silent inheritor of it.
+   ``get_chat_by_id(...).user_id == claims["sub"]`` is decisive), and
+   anything unverified is dropped before the response is built.
+
+   Gate 2 exists because a read boundary must not depend on a derivation's
+   properties. #474 is the demonstration: the actor-id derivation was not
+   injective (``jc+work@x.com`` and ``jc_work@x.com`` collided), so gate 1
+   alone would have handed one user another user's private memory. #485
+   makes that derivation injective — which repairs gate 1 but does not
+   make gate 2 redundant, because gate 2 is what keeps this endpoint from
+   inheriting the *next* such bug. ``withheld_record_count`` is the
+   standing canary: once #485 lands it should read 0 in normal operation,
+   and a non-zero value means either a partition anomaly or an orphaned
+   session left by a failed chat-delete wipe. Both are worth knowing.
+
+   **Read that count as "at least this many", never as an exact total.**
+   ``count_session_records`` deliberately counts only the first
+   ``MAX_EVENTS_PER_SESSION`` events of a withheld session, so a withheld
+   session larger than the cap undercounts. That is the right trade: the
+   count exists to raise an alarm ("a foreign session is in this actor's
+   partition"), and paging deeper through another user's memory to make the
+   number exact would be the opposite of the point. Alert on ``> 0``, not
+   on the magnitude.
 
 A supplied ``chat_id`` goes through ``_load_owned_chat``, so a miss is a
 404 — never a 403 — matching the rest of the chat surface so chat existence
@@ -91,7 +108,7 @@ import boto3
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from channel import storage
-from channel.agents.memory import get_or_create_memory
+from channel.agents.memory import _sanitize_actor_id, get_or_create_memory
 from channel.agents.memory_records import (
     count_session_records,
     group_created_at,
@@ -100,7 +117,6 @@ from channel.agents.memory_records import (
     recall_window,
     recall_window_session_ids,
     resolve_owned_chats,
-    sanitize_actor_id,
 )
 from channel.api._auth import require_mgmt_user
 from channel.api.chats import _load_owned_chat
@@ -224,7 +240,7 @@ async def list_memory_records(
     nothing to page through.
     """
     user_id = claims["sub"]
-    actor_id = sanitize_actor_id(user_id)
+    actor_id = _sanitize_actor_id(user_id)
     # Validated before any AgentCore call, so a malformed or foreign cursor
     # is a locally-decided 400 rather than a vendor ValidationException (500).
     next_token = _decode_cursor(cursor, actor_id) if cursor else None
@@ -312,11 +328,11 @@ async def list_memory_records(
         )
 
     if withheld_sessions:
-        # The #474 detector. A non-zero count here means this actor
-        # partition holds sessions belonging to a chat this caller does not
-        # own — i.e. two JWT subs collided under ``_sanitize_actor_id``, or
-        # a chat-delete wipe left an orphan. Either way it is worth an
-        # alert; the raw sub is an email, so it is fingerprinted.
+        # The read-boundary canary. A non-zero count means this actor
+        # partition holds a session whose chat this caller does not own —
+        # an actor-id collision (#474, repaired by #485) or an orphan left
+        # by a failed chat-delete wipe. Either way it is worth an alert;
+        # the raw sub is an email, so it is fingerprinted.
         logger.warning(
             "memory.records_withheld user_hash=%s sessions=%d records=%d",
             fingerprint_id(user_id),

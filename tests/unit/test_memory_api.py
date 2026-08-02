@@ -8,10 +8,11 @@ Auth is driven through the REAL ``require_mgmt_user`` with real mgmt JWTs
 production enforces.
 
 This endpoint returns private memory content, so the ownership tests are
-the point of this file. #474 proved ``_sanitize_actor_id`` is not
-injective, which means an AgentCore actor partition can legitimately
-contain two Channel users' sessions — the tests below pin that such a
-session is withheld, counted, and never leaks a byte of its text.
+the point of this file. They pin the read boundary itself: a session whose
+chat the caller does not own is withheld, counted, and never leaks a byte
+of its text — asserted without any claim about how ``actorId`` is derived,
+since not depending on that derivation is precisely what the gate is for
+(#474 was the demonstration; #485 repairs the derivation).
 """
 
 from __future__ import annotations
@@ -284,8 +285,8 @@ def test_a_chat_with_only_a_summary_still_surfaces_it():
 
 
 def test_records_from_a_session_the_caller_does_not_own_are_withheld():
-    # The #474 shape: two JWT subs collide under _sanitize_actor_id, so one
-    # actor partition holds both users' sessions.
+    # A foreign session sitting in this caller's actor partition — an
+    # actor-id collision (#474) or a chat-delete wipe that left an orphan.
     fake = _agentcore(
         ["mine", "theirs"],
         {
@@ -357,8 +358,9 @@ def test_endpoint_takes_no_actor_or_user_parameter():
 
     _call(fake, {"mine": _chat("mine")}, params={"actor_id": INTRUDER, "user_id": INTRUDER})
 
+    expected = memory_api._sanitize_actor_id(OWNER)
     for call in fake.list_sessions.call_args_list:
-        assert call.kwargs["actorId"] == "owner_test_com"
+        assert call.kwargs["actorId"] == expected
 
 
 # ── chat_id filter ────────────────────────────────────────────────────────

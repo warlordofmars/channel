@@ -48,7 +48,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from channel import storage
-from channel.agents.memory import _META_PREFIX, _sanitize_actor_id
+from channel.agents.memory import _META_PREFIX
 from channel.agents.recall import (
     _EPOCH,
     _RECALL_EVENT_TEXT_TRUNCATE,
@@ -75,7 +75,6 @@ __all__ = [
     "recall_window",
     "recall_window_session_ids",
     "resolve_owned_chats",
-    "sanitize_actor_id",
 ]
 
 # ── Provenance classes ────────────────────────────────────────────────────
@@ -225,19 +224,7 @@ class MemoryRecord:
         }
 
 
-def sanitize_actor_id(jwt_sub: str) -> str:
-    """Public alias for the AgentCore ``actorId`` derivation.
-
-    Re-exported so API-layer callers don't reach into ``memory``'s private
-    name. **Not injective** (#474): ``jc+work@x.com`` and ``jc_work@x.com``
-    both sanitize to ``jc_work_x_com``, so one AgentCore actor partition can
-    hold two Channel users' memory. Never scope a response by this value
-    alone — pair it with :func:`resolve_owned_chats`.
-    """
-    return _sanitize_actor_id(jwt_sub)
-
-
-# ── Ownership verification (#474 defence) ─────────────────────────────────
+# ── Ownership verification (the read-boundary gate) ───────────────────────
 
 
 def resolve_owned_chats(session_ids: Iterable[str], *, user_id: str) -> dict[str, Chat]:
@@ -245,15 +232,19 @@ def resolve_owned_chats(session_ids: Iterable[str], *, user_id: str) -> dict[str
 
     ``sessionId == chat_id`` by design (CLAUDE.md §AgentCore Memory), so a
     memory session is verifiable against the chat-index row it came from.
-    ``user_id`` is the **raw** JWT ``sub`` — the value
-    :func:`sanitize_actor_id` never touches — which is what makes this a
+    ``user_id`` is the **raw** JWT ``sub``, compared against the chat row's
+    own ``user_id`` — never a derived actor id. That is what makes this a
     real boundary rather than a restatement of the actor scope.
 
-    Why it exists: #474 proved ``_sanitize_actor_id`` is not injective, so
-    scoping a memory read by ``actorId`` alone can hand one user another
-    user's records whenever two subs collide. Sessions that fail
-    verification are dropped by the caller and counted, which doubles as a
-    live detector for that collision.
+    Why it exists: **a read boundary must not depend on a derivation's
+    properties.** #474 is the demonstration — the actor-id derivation was
+    not injective (``jc+work@x.com`` and ``jc_work@x.com`` collided), so an
+    endpoint scoped by ``actorId`` alone would hand one user another user's
+    private memory. #485 makes the derivation injective, which fixes the
+    *partitioning*; this function guards the *read*, and the two are
+    complementary rather than redundant. Sessions that fail verification are
+    dropped by the caller and counted, so the count stays a standing canary
+    on the partition regardless of how the actor id is derived.
 
     A session with **no** chat row is also unverifiable and is therefore
     withheld, not shown with a null title. That is the conservative call
