@@ -931,6 +931,58 @@ sign-in on deployed dev routes through Google like any other browser flow.
 Gating the short-circuit on the bypass flag alone would silently
 auto-log-in every deployed-dev desktop user as the placeholder account.
 
+### Navigation boundary (#472)
+
+**The app window never leaves the app's own origin, and the
+`window.channelDesktop` bridge never attaches anywhere else.** Both
+halves live in `desktop/main/window.js` + `desktop/preload/index.js`.
+
+- **The app origin** is `${protocol}//${host}` of the URL the window
+  loads: `app://-` packaged, `http://localhost:5173` under
+  `inv desktop-dev`. Computed by `originOf()` — deliberately **not**
+  `URL.origin`, which returns the string `"null"` for any non-special
+  scheme in Node and would therefore collapse `app://-` and every other
+  custom-scheme URL into one bucket.
+- **`will-navigate` / `will-redirect`** `preventDefault()` anything
+  off-origin and hand it to the system browser. Neither fires for the
+  main process's own `loadURL`, nor for `history.pushState`, so the
+  initial load and React Router are untouched.
+- **`setWindowOpenHandler`** always returns `{ action: "deny" }` —
+  `target="_blank"` and `window.open` (the MCP OAuth starts in
+  `AddMCPServerModal` / `FeaturedMCPServers` / `Customize`) open in the
+  system browser instead of an Electron window.
+- **Only `http:` / `https:` may reach `shell.openExternal` *on a
+  renderer-supplied URL*.** `shell.openExternal` delegates to the OS
+  handler, so passing `file:`, `javascript:`, `smb:` or a custom scheme
+  through would trade the stranded-window bug for a launch-anything
+  bug. Allowlist, never denylist. Everything the guards hand over goes
+  via `openExternalIfSafe`, which is the only path to
+  `shell.openExternal` in `window.js`. The one call site *outside* that
+  funnel is `auth.js`, which builds its URL in the main process from
+  `CHANNEL_API_BASE` and never touches renderer input — if you add a
+  second such call site, either route it through `openExternalIfSafe`
+  or be equally sure the URL can't be attacker-influenced.
+- **The preload fails closed.** `window.js` passes the one permitted
+  origin via `webPreferences.additionalArguments`, which lands in the
+  renderer's `process.argv`; the preload exposes the bridge only when
+  `location.origin` matches. No flag, *more than one* flag, an origin
+  mismatch, or an opaque `"null"` origin all yield no bridge. This is
+  defence in depth — the navigation guards are the primary control.
+  (`additionalArguments` is preferred over `process.env`, which a
+  sandboxed preload *can* read, because it is scoped per window and
+  keeps the origin computed once, next to the `loadURL` that
+  establishes it.)
+- **Artifact downloads are unaffected.** `triggerBlobDownload` in
+  `ArtifactPanel.jsx` clicks a transient `<a download href="blob:…">`;
+  Chromium routes that to the download manager without firing
+  `will-navigate`, so the guard never sees it (verified against a live
+  Electron). Don't add `blob:` to the `shell.openExternal` allowlist to
+  "fix" a problem that doesn't exist — it would be a hole.
+- **The OAuth loopback is unaffected.** `auth.js` calls
+  `shell.openExternal` from the *main* process, which the guards never
+  intercept, and the callback is served to the system browser by the
+  loopback HTTP server — the app window never navigates during login.
+
 ### Why these decisions
 
 The design and rationale live in
