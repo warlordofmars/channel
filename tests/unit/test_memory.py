@@ -278,17 +278,21 @@ def test_legacy_lossy_derivation_collapses_the_documented_pairs():
     ],
 )
 def test_derive_actor_id_golden_vectors(raw: str, expected: str):
+    """Also THE cross-process stability check: the right-hand sides are
+    literals authored in a different interpreter than the one asserting
+    them, so a derivation carrying any per-process input (a salt, the
+    builtin ``hash()``'s `PYTHONHASHSEED`, a clock) cannot pass."""
     assert derive_actor_id(raw) == expected
 
 
-def test_derive_actor_id_is_a_pure_function_of_the_input_bytes():
-    """Stable across processes: no salt, no clock, no per-process state."""
+def test_derive_actor_id_suffix_is_the_sha256_of_the_input_bytes():
+    """The suffix is exactly the first 32 hex chars of the UTF-8 SHA-256 —
+    recomputed here independently of the implementation, so the golden
+    vectors above are anchored to a named construction rather than to
+    whatever the function happened to emit on the day they were captured."""
     sub = "alice@example.com"
-    assert derive_actor_id(sub) == derive_actor_id(sub)
-
-    # Recompute independently — the suffix is exactly the first 32 hex chars
-    # of the UTF-8 SHA-256, so any hidden per-process input would show up.
     expected_digest = hashlib.sha256(sub.encode("utf-8")).hexdigest()[:32]
+
     assert derive_actor_id(sub).endswith(f"-{expected_digest}")
 
 
