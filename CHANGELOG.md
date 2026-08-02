@@ -218,6 +218,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Security:** the AgentCore `actorId` derivation is now injective, so
+  two distinct users can no longer share a memory partition (#474). The
+  old mapping replaced every disallowed character with `_`, which
+  collapsed everyday address shapes onto one id — `jc+work@x.com` and
+  `jc_work@x.com` both became `jc_work_x_com`, as did `a.b@x.com` and
+  `a@b.x.com`. Since one AgentCore Memory resource serves an entire
+  environment and `actorId` is its only partition, a collision meant
+  one person's chat content could surface in another's system prompt
+  via the recall hook. `derive_actor_id` now appends a 128-bit SHA-256
+  suffix to a (still readable) label prefix, and every call site —
+  memory hook, recall hook, memory tools, chat-delete session wipe,
+  debug endpoints — derives through that one function. Memories written
+  under the old ids are deliberately orphaned rather than dual-read: a
+  fallback read of the lossy partition would be the very disclosure
+  being fixed. See CLAUDE.md §AgentCore Memory for the full migration
+  reasoning.
 - Auto-titler now salvages partial output when the Haiku titler trips
   `MaxTokensReachedException`. Previously the whole title was
   discarded and the chat stayed on "New chat" in the sidebar. The

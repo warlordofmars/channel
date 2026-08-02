@@ -25,7 +25,7 @@ confused-deputy surface #299 guards, and is own-data only — no
 cross-owner content ever reaches these tools.
 
 Scoping follows the existing convention: ``actorId =
-_sanitize_actor_id(jwt.sub)`` (issue #273 Q3 — follow, don't pre-empt
+derive_actor_id(jwt.sub)`` (issue #273 Q3 — follow, don't pre-empt
 the future ``{workspace_id}/{user_id}`` scheme).
 
 **Known v1 limitation:** the ``SemanticMemoryStrategy`` was retired in
@@ -46,7 +46,7 @@ from typing import Any
 
 from strands import tool
 
-from channel.agents.memory import _sanitize_actor_id
+from channel.agents.memory import derive_actor_id
 from channel.agents.recall import _iso_date
 from channel.metrics import (
     record_memory_tool_recall_outcome,
@@ -201,12 +201,12 @@ def build_memory_tools(
     The stateless module-level ``@tool`` pattern used by ``clock`` /
     ``web_search`` can't carry ``memory_id`` / ``actor_id`` /
     ``session_id``, so these tools are built by a factory closure per
-    turn. ``actor_id`` is sanitized at the boundary (same as the memory
+    turn. ``actor_id`` is derived at the boundary (same as the memory
     hooks) so callers can pass the raw JWT ``sub`` (email-form or
     otherwise). ``client`` is injectable for unit tests; production
     resolves the boto3 AgentCore client lazily on first invocation.
     """
-    sanitized_actor = _sanitize_actor_id(actor_id)
+    derived_actor = derive_actor_id(actor_id)
 
     def _client() -> Any:
         return client if client is not None else _default_client()
@@ -235,7 +235,7 @@ def build_memory_tools(
             await asyncio.to_thread(
                 _client().create_event,
                 memoryId=memory_id,
-                actorId=sanitized_actor,
+                actorId=derived_actor,
                 sessionId=session_id,
                 eventTimestamp=datetime.now(timezone.utc),
                 payload=[{"conversational": {"role": "ASSISTANT", "content": {"text": text}}}],
@@ -243,7 +243,7 @@ def build_memory_tools(
         except Exception as exc:
             logger.warning(
                 "memory_tool.remember_failed actor_id=%s session_id=%s",
-                sanitized_actor,
+                derived_actor,
                 session_id,
                 extra={"error_type": type(exc).__name__, "error_message": str(exc)},
                 exc_info=True,
@@ -270,12 +270,12 @@ def build_memory_tools(
         """
         try:
             candidates = await asyncio.to_thread(
-                _collect_candidates, _client(), memory_id, sanitized_actor
+                _collect_candidates, _client(), memory_id, derived_actor
             )
         except Exception as exc:
             logger.warning(
                 "memory_tool.recall_failed actor_id=%s",
-                sanitized_actor,
+                derived_actor,
                 extra={"error_type": type(exc).__name__, "error_message": str(exc)},
                 exc_info=True,
             )

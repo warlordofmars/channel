@@ -15,6 +15,7 @@ so this module talks to AgentCore directly via boto3.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import re
@@ -40,23 +41,106 @@ _ROLE_MAP: dict[str, str] = {"user": "USER", "assistant": "ASSISTANT"}
 _META_PREFIX = "[meta]"
 
 # AgentCore validates ``actorId`` against
-# ``[a-zA-Z0-9][a-zA-Z0-9-_/]*(?::[a-zA-Z0-9-_/]+)*[a-zA-Z0-9-_/]*`` —
-# letters, digits, hyphens, underscores, slashes, colons. Our JWT
-# ``sub`` is the user's email (Google OAuth path) or arbitrary string
-# (other paths); the email form contains ``@`` and ``.`` which fail
-# the regex. Sanitize by replacing each disallowed char with ``_``.
+# ``[a-zA-Z0-9][a-zA-Z0-9-_/]*(?::[a-zA-Z0-9-_/]+)*[a-zA-Z0-9-_/]*`` with
+# ``min=1``/``max=255`` (botocore ``bedrock-agentcore`` ``ActorId`` shape) —
+# letters, digits, hyphens, underscores, slashes, colons, and a
+# LEADING character that must be alphanumeric. Our JWT ``sub`` is the
+# user's email (Google OAuth path) or an arbitrary string (other
+# paths); the email form contains ``@`` and ``.`` which fail the regex.
 _ACTOR_ID_DISALLOWED_RE = re.compile(r"[^a-zA-Z0-9_/-]")
+# The leading char must be ``[a-zA-Z0-9]``; strip any run of non-alphanumerics
+# the substitution above may have left at the front (``.foo`` → ``_foo``).
+_ACTOR_ID_LEADING_NON_ALNUM_RE = re.compile(r"^[^a-zA-Z0-9]+")
+
+# Readability budget for the human-legible label prefix. Lossy by
+# design — the digest below is what carries identity.
+_ACTOR_ID_LABEL_MAX_CHARS = 48
+# 32 hex chars = 128 bits of SHA-256. Birthday-bound ~2**64 distinct
+# subs before a collision becomes probable; the realistic user set is
+# many orders of magnitude below that, and JWT subs are issued by the
+# IdP rather than chosen by the caller, so there is no grinding attack
+# against the truncation. Fixed-width, which is what makes the suffix
+# unambiguously recoverable (see the injectivity argument below).
+_ACTOR_ID_DIGEST_HEX_CHARS = 32
 
 
-def _sanitize_actor_id(jwt_sub: str) -> str:
-    """Convert ``jwt_sub`` to a valid AgentCore ``actorId``.
+def derive_actor_id(jwt_sub: str) -> str:
+    """Derive a stable, **injective** AgentCore ``actorId`` from ``jwt_sub``.
 
-    Replaces disallowed characters (anything outside
-    ``[a-zA-Z0-9_/-]``) with ``_``. Stable: the same ``jwt_sub``
-    always produces the same actorId. **Theoretically collision-prone**
-    for inputs differing only in disallowed chars (``a@b.com`` and
-    ``a.b@com`` both map to ``a_b_com``); revisit if user volume grows
-    or weird email shapes appear.
+    THE single derivation for the whole codebase — the recall hook, the
+    memory tools, the chat-delete session wipe, and the debug endpoints
+    all import this function rather than re-deriving. One AgentCore
+    Memory resource serves an entire environment and ``actorId`` is its
+    ONLY partition, so two users mapping to one ``actorId`` means two
+    users sharing a memory store: A's turns get written under B's actor
+    and ``AgentCoreRecallHook`` replays them into B's system prompt.
+    Injectivity is therefore a cross-user isolation boundary, not
+    hygiene (issue #474).
+
+    Shape: ``{label}-{sha256(jwt_sub)[:32]}``, or the bare digest when
+    the label is empty.
+
+    - **The digest carries identity.** ``label`` is a lossy, purely
+      cosmetic slug so an operator can recognise an actor in the
+      AgentCore console; distinct subs may share a label, never a
+      digest.
+    - **Injective.** The digest is fixed-width and always occupies the
+      final 32 characters, so the split point is unambiguous: equal
+      outputs imply equal digests, and equal digests imply equal inputs
+      up to SHA-256 collision resistance. A bare-digest output (exactly
+      32 chars, no label) can never equal a labelled one (≥ 34 chars).
+    - **Stable forever.** Pure function of the input bytes — no salt, no
+      clock, no per-process state. Pinned by golden vectors in
+      ``tests/unit/test_memory.py``.
+    - **Charset-safe.** Label chars are drawn from ``[a-zA-Z0-9_/-]``
+      with an alphanumeric lead; the digest is lowercase hex. Max length
+      is ``48 + 1 + 32 = 81`` — comfortably inside AgentCore's 255.
+      An empty ``jwt_sub`` still yields a valid (bare-digest) id rather
+      than the empty string AgentCore's ``min=1`` would reject.
+
+    Why hash-suffix rather than the alternatives: a bare
+    ``sha256`` (issue #474's option 1) is injective but makes every
+    actor opaque in the console, and base32/base64url of the raw sub
+    (option 2) is reversible but equally unreadable and unbounded in
+    length. Keeping a readable prefix preserves exactly the operability
+    the previous scheme had — the sub is already legible in AgentCore
+    today, so this is no new disclosure — while the suffix supplies the
+    injectivity it lacked. Recovering the sub from an id is a
+    hash-and-compare against known subs, not a decode, which is
+    sufficient for the one real ops question ("whose partition is
+    this?").
+
+    Forward-compatible with per-workspace partitioning ("workspaces are
+    the tenancy root"): ``derive_actor_id(f"{workspace_id}/{user_id}")``
+    keeps the whole composite key inside the digest.
+    """
+    digest = hashlib.sha256(jwt_sub.encode("utf-8")).hexdigest()[:_ACTOR_ID_DIGEST_HEX_CHARS]
+    label = _ACTOR_ID_LEADING_NON_ALNUM_RE.sub(
+        "",
+        _ACTOR_ID_DISALLOWED_RE.sub("_", jwt_sub)[:_ACTOR_ID_LABEL_MAX_CHARS],
+    )
+    return f"{label}-{digest}" if label else digest
+
+
+def _legacy_lossy_actor_id(jwt_sub: str) -> str:
+    """The pre-#474 derivation: every disallowed char replaced by ``_``.
+
+    **Not called by any read or write path** — ``derive_actor_id`` is.
+    Retained deliberately, for two reasons:
+
+    1. It is the regression oracle for the injectivity property test:
+       the test asserts this function collapses the known collision
+       pairs (``jc+work@x.com`` / ``jc_work@x.com``,
+       ``a.b@x.com`` / ``a@b.x.com``) and that ``derive_actor_id`` does
+       not. Keeping the broken mapping executable is what stops the
+       fix from silently regressing into a comment.
+    2. It keeps the abandoned partitions *addressable*. Events written
+       before #474 live under these ids, and the migration decision was
+       to strand them rather than dual-read (a fallback read of a lossy
+       partition is the very cross-user disclosure the fix exists to
+       close). An offline cleanup or copy-forward tool needs to compute
+       the old id from a sub; this is that computation. See the PR for
+       #474 and CLAUDE.md §AgentCore Memory.
     """
     return _ACTOR_ID_DISALLOWED_RE.sub("_", jwt_sub)
 
@@ -173,10 +257,11 @@ class AgentCoreMemoryHook:
         client: Any | None = None,
     ) -> None:
         self._memory_id = memory_id
-        # actor_id is sanitized at the hook boundary so callers can pass
+        # actor_id is derived at the hook boundary so callers can pass
         # the raw JWT sub (email-form or otherwise) without worrying
-        # about AgentCore's regex constraints.
-        self._actor_id = _sanitize_actor_id(actor_id)
+        # about AgentCore's regex constraints — or about the injectivity
+        # of the mapping (#474).
+        self._actor_id = derive_actor_id(actor_id)
         self._session_id = session_id
         self._client = client if client is not None else boto3.client("bedrock-agentcore")
         # Strong refs to in-flight writes — prevents Python's GC from
