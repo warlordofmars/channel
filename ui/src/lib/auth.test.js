@@ -346,5 +346,17 @@ describe("desktop refresh-token keychain", () => {
       // unhandled rejection in a later test.
       await b.clear.mock.results[0].value.catch(() => {});
     });
+
+    it("still completes sign-out when the bridge has no usable clear()", () => {
+      // A preload/renderer surface mismatch: `tokenStorage` is present
+      // but `clear` is missing or not a function, so the call throws
+      // synchronously — before there is a promise to `.catch`. Sign-out
+      // is best-effort and must finish regardless.
+      vi.stubGlobal("channelDesktop", { isDesktop: true, tokenStorage: { read: vi.fn() } });
+      storage[TOKEN_KEY] = JSON.stringify({ access_token: makeToken(), expires_at: 1 });
+      expect(() => clearSession()).not.toThrow();
+      expect(storage[TOKEN_KEY]).toBeUndefined();
+      expect(readToken()).toBe("");
+    });
   });
 });

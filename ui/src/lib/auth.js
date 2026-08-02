@@ -226,7 +226,19 @@ export function clearSession() {
   // same tick. Errors are swallowed for the same reason every other
   // teardown step here is unconditional — a failed delete must not
   // prevent the visible sign-out.
-  keychain()?.clear().catch(ignoreKeychainFailure);
+  //
+  // Wrapped as well as `.catch`-ed because the two failure shapes are
+  // different: a bridge whose `clear` is missing or is not a function
+  // throws *synchronously*, before there is a promise to attach a
+  // handler to, so `.catch` alone would let it escape and abort a
+  // sign-out that must always complete. `readRefreshToken` /
+  // `saveRefreshToken` already cover both shapes with their own `try`;
+  // this makes the third call site consistent with them.
+  try {
+    keychain()?.clear().catch(ignoreKeychainFailure);
+  } catch {
+    ignoreKeychainFailure();
+  }
 }
 
 // ---- Desktop keychain (#297) ----------------------------------------------
