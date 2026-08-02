@@ -2204,6 +2204,131 @@ def test_post_message_follow_ups_respects_kill_switch_env(
     assert built == []
 
 
+def _stub_regenerable_chat(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A chat whose tail is an assistant turn, ready for ``/regenerate``.
+
+    ``message_count`` is non-zero so the (first-round-trip-only)
+    auto-titler block stays out of the way, leaving the follow-ups
+    block as the only post-stream model call under test.
+    """
+    chat = Chat(
+        chat_id="c1",
+        user_id="u-1",
+        title="Existing chat",
+        created_at="t",
+        last_message_at="t",
+        model_default="claude-sonnet-4-6",
+        message_count=4,
+    )
+    monkeypatch.setattr("channel.api.chats.storage.get_chat_by_id", lambda _: chat)
+    monkeypatch.setattr(
+        "channel.api.chats.storage.list_recent_messages",
+        lambda *_a, **_kw: [
+            Message(
+                chat_id="c1",
+                msg_id="u-1",
+                role=MessageRole.USER,
+                text="redo",
+                created_at="t",
+            ),
+            Message(
+                chat_id="c1",
+                msg_id="a-1",
+                role=MessageRole.ASSISTANT,
+                text="old reply",
+                model="m",
+                created_at="t2",
+            ),
+        ],
+    )
+    monkeypatch.setattr("channel.api.chats.storage.delete_last_assistant_message", lambda _c: None)
+    monkeypatch.setattr(
+        "channel.api.chats.storage.put_message",
+        lambda **kwargs: Message(
+            chat_id=kwargs["chat_id"],
+            msg_id="m-asst",
+            role=kwargs["role"],
+            text=kwargs["text"],
+            model=kwargs.get("model"),
+            created_at="t",
+        ),
+    )
+    monkeypatch.setattr("channel.api.chats.storage.update_chat_index", lambda **_: None)
+
+
+def _stub_regenerate_main_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_main(self, prompt):
+        yield {"event": {"contentBlockDelta": {"delta": {"text": "again"}}}}
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+
+    class FakeAgent:
+        stream_async = fake_main
+
+    monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
+
+
+def test_regenerate_skips_follow_ups_when_pref_off(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#469 — ``/regenerate`` is the OTHER route into the shared stream
+    generator. With ``suggest_followups=False`` it must not build the
+    follow-ups Agent at all — the point of the pref is saving the
+    Bedrock call, not merely hiding the chips."""
+    _stub_regenerable_chat(monkeypatch)
+    _stub_regenerate_main_agent(monkeypatch)
+    monkeypatch.setattr(
+        "channel.api.chats.storage.get_prefs",
+        lambda _u: Prefs(suggest_followups=False),
+    )
+
+    built: list[bool] = []
+    monkeypatch.setattr(
+        "channel.api.chats.build_followups_agent",
+        lambda: built.append(True) or object(),
+    )
+
+    response = client.post("/api/chats/c1/regenerate", json={})
+    assert response.status_code == 200
+    assert "again" in response.text
+    assert '"type": "follow_ups_suggested"' not in response.text
+    assert built == []
+
+
+def test_regenerate_emits_follow_ups_when_pref_on(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Positive control for the test above: the same harness DOES
+    observe the Agent being built when the pref is on, so ``built == []``
+    there is a real signal rather than a stub that never fires."""
+    _stub_regenerable_chat(monkeypatch)
+    _stub_regenerate_main_agent(monkeypatch)
+    monkeypatch.setattr(
+        "channel.api.chats.storage.get_prefs",
+        lambda _u: Prefs(suggest_followups=True),
+    )
+
+    async def fake_followups(self, prompt):
+        yield {"event": {"contentBlockDelta": {"delta": {"text": "What about X?"}}}}
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+
+    class FakeFollowups:
+        stream_async = fake_followups
+
+    built: list[bool] = []
+
+    def _build() -> FakeFollowups:
+        built.append(True)
+        return FakeFollowups()
+
+    monkeypatch.setattr("channel.api.chats.build_followups_agent", _build)
+
+    response = client.post("/api/chats/c1/regenerate", json={})
+    assert response.status_code == 200
+    assert '"type": "follow_ups_suggested"' in response.text
+    assert '"What about X?"' in response.text
+    assert built == [True]
+
+
 def test_post_message_follow_ups_failure_is_swallowed(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
