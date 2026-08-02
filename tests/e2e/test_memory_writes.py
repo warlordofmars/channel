@@ -112,7 +112,7 @@ async def _drive_chat_as_user(
     # Seed the JWT BEFORE first navigation so AuthGate doesn't redirect.
     await page.goto(f"{ui_url}/app")
     await page.evaluate(
-        "(token) => window.localStorage.setItem('starter_mgmt_token', token)",
+        "(token) => window.localStorage.setItem('channel_mgmt_token', token)",
         jwt,
     )
     await page.goto(f"{ui_url}/app")

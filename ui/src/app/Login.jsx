@@ -4,6 +4,7 @@ import { useNavigate } from "react-router-dom";
 import ChannelMark from "../components/ChannelMark.jsx";
 import GoogleG from "./GoogleG.jsx";
 import { useChannelPrefs } from "../hooks/useChannelPrefs.js";
+import { saveSession } from "../lib/auth.js";
 
 /**
  * Centered Google sign-in card. The prototype simulates auth with a 1.2s
@@ -42,7 +43,11 @@ export default function Login() {
     setError(null);
     try {
       const token = await desktop.login();
-      localStorage.setItem("starter_mgmt_token", token);
+      // The desktop loopback hands back the access token only; its
+      // expiry comes from the token's own `exp` claim. Persisting the
+      // refresh token that rides the same redirect is #297's job (OS
+      // keychain via `safeStorage`), never localStorage.
+      saveSession(token);
       navigate("/app");
     } catch (err) {
       const code = err?.message;

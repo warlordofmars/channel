@@ -42,7 +42,7 @@ import pytest
 def _mint_jwt_via_bypass(api_url: str, email: str) -> str:
     """Hit ``/auth/login?test_email=...`` and parse the JWT from the HTML.
 
-    The bypass-login page sets ``localStorage.starter_mgmt_token`` and
+    The bypass-login page sets ``localStorage.channel_mgmt_token`` and
     then redirects. We don't follow the redirect — we just parse the
     embedded token so we have it as a string for the Authorization
     header. ``pytest.skip`` if the bypass isn't enabled on the server.
@@ -57,7 +57,7 @@ def _mint_jwt_via_bypass(api_url: str, email: str) -> str:
         pytest.skip("Google OAuth redirect — CHANNEL_BYPASS_GOOGLE_AUTH not enabled")
     resp.raise_for_status()
     m = re.search(
-        r"localStorage\.setItem\('starter_mgmt_token',\s*'([^']+)'\)",
+        r"localStorage\.setItem\('channel_mgmt_token',\s*'([^']+)'\)",
         resp.text,
     )
     if not m:

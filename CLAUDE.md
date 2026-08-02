@@ -59,7 +59,7 @@ channel/
 │   │   │   ├── site.css       # Marketing site layout (nav, footer, hero, tiers)
 │   │   │   └── app.css        # Chat-app layout (sidebar, composer, popovers, greet)
 │   │   ├── lib/
-│   │   │   ├── auth.js        # parseToken, isTokenValid, TOKEN_KEY
+│   │   │   ├── auth.js        # session storage: load/save/clearSession, readToken, TOKEN_KEY
 │   │   │   └── utils.js       # cn (class-name join via clsx)
 │   │   ├── hooks/
 │   │   │   ├── useAssetContent.js   # Auth-fetched asset payload → blob object-URL or text; shared render hook
@@ -138,8 +138,13 @@ management **access** JWT (`typ=mgmt`, `role=admin|user`, **1-hour
 TTL**, revocable via the `DENY#{jti}` denylist — #240) signed with
 HS256 using a secret resolved from SSM
 (`/channel/{env}/jwt-secret`). All `/api/*` endpoints
-require a valid Bearer mgmt JWT. The token is stored client-side in
-`localStorage` under the `starter_mgmt_token` key.
+require a valid Bearer mgmt JWT. The session is stored client-side in
+`localStorage` under the `channel_mgmt_token` key. The value is normally
+a JSON `{access_token, expires_at}` envelope, but is a **bare JWT**
+between a web login and the first SPA save — the login-completion page
+writes the token directly rather than restating the envelope's shape in
+a Python string template. Readers accept both and derive the deadline
+from the `exp` claim for the bare form. See §"Silent refresh (SPA)".
 
 `decode_mgmt_jwt` (`src/channel/auth/tokens.py`) is the single
 validation point: it enforces the signature, `iss`, `exp`, and
@@ -238,6 +243,82 @@ the access JWT it renews has usually already expired.
 - Response: `{access_token, token_type: "bearer", expires_in}` plus
   `refresh_token` on the body transport only.
 
+### Silent refresh (SPA) (#295)
+
+`ui/src/api.js` renews the access token before it expires, so #291's
+1-hour TTL is invisible to the user. Three rules are load-bearing:
+
+- **One seam.** Every authenticated wrapper builds its headers through
+  `authHeader()`, which is `async` and renews first. Adding a new
+  endpoint wrapper inherits refresh automatically; a raw `fetch` with a
+  hand-rolled `Authorization` header does not. **`logout()` is the one
+  deliberate exception** — it reads the token synchronously, because
+  `Sidebar.signOut` navigates away in the same tick and an awaited
+  refresh would let the navigation win, silently losing the family
+  revoke and the `jti` denylist write. Rotating a family an instant
+  before revoking it is waste besides.
+- **Single-flight is correctness, not optimisation.** #290 hard-rotates
+  on every use and reads a re-presented token as an OAuth 2.1 reuse
+  breach that revokes the whole device family. A page load fires several
+  API calls at once, so concurrent renewals would present the
+  just-revoked predecessor and sign the user out on the exact path meant
+  to keep them in. All callers share one in-flight promise.
+- **A refused refresh is not automatically a sign-out.** `/auth/refresh`
+  answers 401 both for a dead token and for a client with no refresh
+  credential at all (desktop until #297, bypass logins, pre-#292
+  sessions) — the latter is the epic's migration path. The still-valid
+  access token is used, with a 30s cooldown before retrying. The session
+  ends (`endSession()` — clear storage, route to `/app/login`) only when
+  the access token is unusable **and** the refresh was refused with a
+  **401**. Anything else — offline, DNS, 5xx, a malformed body, and
+  notably the **429** #294 is about to add to this endpoint — says
+  nothing about the credential, so local state survives and a later
+  attempt can recover; reading any 4xx as a verdict would turn
+  throttling into a mass logout. This protection covers the
+  non-streaming wrappers: `useChatStream`'s send path still ends the
+  session on a 401 from the messages endpoint itself, which is the API's
+  own verdict on the token rather than a failed renewal.
+
+Storage lives in `ui/src/lib/auth.js`: a JSON `{access_token,
+expires_at}` envelope under `channel_mgmt_token`, renewed when
+`expires_at` is within 5 minutes. **A refresh token never enters
+localStorage** — web uses the HttpOnly cookie, desktop will use the OS
+keychain (#297). `saveSession` refuses (throws) anything that is not
+structurally a JWT rather than writing an unvalidated `/auth/refresh`
+response body into browser storage; both callers already treat a throw
+as an ordinary failure. Reads accept the pre-rename `starter_mgmt_token` key
+and a bare-JWT value (the shape `/auth/callback`'s login page writes),
+deriving the deadline from the `exp` claim; every write goes to the new
+key and deletes the legacy one. That read order is only safe while
+nothing writes the legacy key, so `MGMT_TOKEN_STORAGE_KEY` in
+`mgmt_auth.py` and `TOKEN_KEY` in `lib/auth.js` must move together.
+Dropping the legacy fallback is a follow-up, one release out.
+
+**Two known gaps, both deliberate — but they differ in kind.**
+
+1. Renewal fires only from `authHeader()`, i.e. on an API call — so
+   `AuthGate` still bounces a *cold load* carrying an expired token to
+   `/app/login` without trying the cookie. A session left open is kept
+   alive indefinitely; one reopened after the access token died still
+   re-authenticates. This one **is** status-quo-neutral — a no-op
+   against a world with no refresh at all.
+2. Single-flight is per-document: two tabs share a cookie jar but not
+   the in-flight promise, so a simultaneous multi-tab renewal can trip
+   #290's reuse detection and revoke the whole family — signing the user
+   out *everywhere*. `consume_refresh_token`'s own docstring names
+   "single-flight in the SPA" as the mitigation for exactly this, so the
+   server relies on a guarantee the SPA currently provides only per-tab.
+   Unlike gap 1 this is **not** status-quo-neutral: it introduces a
+   failure mode that cannot occur today. The race is narrow — both tabs
+   must cross the skew window within one round trip — which is why it
+   ships, but `navigator.locks.request` should close it soon.
+
+Server-side companion gap: `/auth/logout` is `Depends(require_mgmt_user)`
+and `decode_mgmt_jwt` enforces `exp`, so signing out of a tab left idle
+past the 1h mark 401s before the family revoke runs and leaves the
+refresh family live. Closing it means letting the refresh cookie alone
+authorise a logout. No issue filed for this yet — it needs one.
+
 ### `/api/me/sessions` (#293)
 
 `GET` lists the caller's live sessions — one entry per `device_id`,
@@ -271,12 +352,11 @@ revoke routes write an audit event (`auth.session_revoke` /
 eventually-consistent index cannot promise (see the refresh-token entry
 under §DynamoDB single table design).
 
-Still to land in epic #241: rate limiting + EMF counters (#294), the
-SPA's silent-refresh wrapper (#295), and desktop `safeStorage`
-persistence (#297). **Until #295 lands the SPA does not call
-`/auth/refresh`**, so a web session still ends at the 1h access-token
-expiry even though the refresh token it needs is now issued (#292) —
-and the sessions list shows the one device the current login minted.
+Still to land in epic #241: rate limiting + EMF counters (#294) and
+desktop `safeStorage` persistence (#297). The SPA's silent-refresh
+wrapper landed in #295 — see §"Silent refresh (SPA)" below. Until #297,
+the desktop app still has no refresh credential to present and re-auths
+at the 1h access-token expiry.
 
 ## DynamoDB single table design
 
@@ -489,12 +569,43 @@ auto-titling of fresh chats via a Haiku one-shot Agent (Phase 7d).
 - **`CHANNEL_AGENTCORE_MEMORY_NAME`** overrides the default name —
   useful for pointing a personal dev environment at a pre-existing
   Memory resource.
-- **`actorId = sanitize(jwt.sub)`** — one actor per Channel user.
-  Disallowed characters (anything outside `[a-zA-Z0-9_/-]`) are
-  replaced with `_` so email-form JWT subs (containing `@` and `.`)
-  satisfy AgentCore's regex. Per-workspace partitioning (per the
-  "workspaces are the tenancy root" product decision) will eventually
-  become `actorId = f"{workspace_id}/{user_id}"`.
+- **`actorId = derive_actor_id(jwt.sub)`** — one actor per Channel
+  user, and **the only partition this Memory resource has**, so the
+  derivation being injective is a cross-user isolation boundary, not
+  hygiene. Shape: `{label}-{sha256(jwt_sub)[:32]}` — a lossy,
+  human-legible label (disallowed chars → `_`, capped at 48, leading
+  non-alphanumerics stripped) for console readability, plus a
+  fixed-width digest that carries identity. Equal outputs imply equal
+  digests imply equal inputs; distinct users can never share a
+  partition. `src/channel/agents/memory.py` owns the ONE
+  implementation — `recall.py`, `tools/memory_tools.py`, `api/chats.py`
+  (session wipe) and `api/_debug.py` all import it, pinned by
+  `test_one_shared_derivation_across_every_call_site`. Values are
+  storage keys: golden vectors in `tests/unit/test_memory.py` pin them
+  permanently, and changing one orphans that user's stored memories.
+  Per-workspace partitioning (per the "workspaces are the tenancy root"
+  product decision) becomes
+  `derive_actor_id(f"{workspace_id}/{user_id}")` — the composite key
+  goes through the same function, never around it.
+  - **History (#474).** Until this landed, the derivation was a bare
+    `re.sub(r"[^a-zA-Z0-9_/-]", "_", jwt_sub)`, which is **not
+    injective**: `jc+work@x.com` and `jc_work@x.com` both yielded
+    `jc_work_x_com`, as did `a.b@x.com` / `a@b.x.com`. Colliding users
+    shared one memory store, so `AgentCoreRecallHook` would replay one
+    person's chat content into another's system prompt.
+  - **Migration: accept the loss, deliberately.** Memories written
+    under the old ids are orphaned rather than dual-read. A dual-read
+    fallback would have to *read the lossy partition*, which is exactly
+    the cross-user disclosure being fixed — it would keep the hole open
+    for the length of the fallback window. The loss is bounded (sign-in
+    is `ALLOWED_EMAILS`-gated, so the user set is tiny) and
+    self-clearing (`eventExpiryDuration=90` days), and it costs no chat
+    content: DynamoDB remains the source of truth and the current
+    chat's history is fed from there. What degrades is cross-chat
+    recall, until new events accumulate. Reversible if that turns out
+    wrong: `_legacy_lossy_actor_id` (same module) still computes the
+    old id, so an offline tool can find and copy-forward a legacy
+    partition after checking it isn't shared.
 - **`sessionId = chat_id`** — one AgentCore session per Channel chat.
   Chat ids are UUIDs so no sanitization needed.
 - **Failure mode**: log + EMF counter (`MemoryWriteFailures`) +
@@ -510,7 +621,11 @@ auto-titling of fresh chats via a Haiku one-shot Agent (Phase 7d).
   AgentCore Memory events for the chat's session (`ListEvents` +
   `DeleteEvent`). Failure is logged + counted
   (`ChatDeleteMemoryWipeFailures`) but does not fail the user-visible
-  delete — DDB is the source of truth for chat existence.
+  delete — DDB is the source of truth for chat existence. The wipe
+  targets the **current** `actorId`, so events written before the #474
+  derivation change are not reached by it and persist until the 90-day
+  `eventExpiryDuration` — an accepted consequence of the accept-the-loss
+  migration above, not an oversight.
 
 Dev-only `GET /api/_debug/memory/events?chat_id=...&limit=...` and
 `DELETE /api/_debug/memory/events?chat_id=...&event_id=...`
@@ -571,7 +686,7 @@ infra**.
   `memory_id` / `actor_id` / `session_id`. Appended to the tools list
   **inside `build_agent`** (not `chats._build_tool_registry`) where
   that context exists. Scoping reuses `actorId =
-  _sanitize_actor_id(jwt.sub)` — follows, does not pre-empt, the future
+  derive_actor_id(jwt.sub)` — follows, does not pre-empt, the future
   `{workspace_id}/{user_id}` scheme.
 - **Kill-switch** — `CHANNEL_MEMORY_TOOLS_ENABLED` (default `"1"`, same
   memory-family convention as `CHANNEL_RECALL_ENABLED` /
@@ -817,7 +932,7 @@ alarm for a metric you have not wired up now fails at `inv pre-push`.
 - React SPA (Vite), runs on port 5173 in dev
 - Marketing routes at `/`, app routes at `/app/*`
 - Communicates with FastAPI management API on port 8001
-- Auth: Google OAuth via `/auth/login`; token stored in localStorage as `starter_mgmt_token`
+- Auth: Google OAuth via `/auth/login`; session stored in localStorage as `channel_mgmt_token`
 - Web SPA AND Electron desktop app ship from the same `ui/` SPA source. The
   desktop wrapper lives in `desktop/` (Electron main + preload) and bundles
   the SPA build. See `## Desktop app` below.
@@ -895,6 +1010,58 @@ deliberately never sets `CHANNEL_DESKTOP_DEV_EMAIL`, so real desktop
 sign-in on deployed dev routes through Google like any other browser flow.
 Gating the short-circuit on the bypass flag alone would silently
 auto-log-in every deployed-dev desktop user as the placeholder account.
+
+### Navigation boundary (#472)
+
+**The app window never leaves the app's own origin, and the
+`window.channelDesktop` bridge never attaches anywhere else.** Both
+halves live in `desktop/main/window.js` + `desktop/preload/index.js`.
+
+- **The app origin** is `${protocol}//${host}` of the URL the window
+  loads: `app://-` packaged, `http://localhost:5173` under
+  `inv desktop-dev`. Computed by `originOf()` — deliberately **not**
+  `URL.origin`, which returns the string `"null"` for any non-special
+  scheme in Node and would therefore collapse `app://-` and every other
+  custom-scheme URL into one bucket.
+- **`will-navigate` / `will-redirect`** `preventDefault()` anything
+  off-origin and hand it to the system browser. Neither fires for the
+  main process's own `loadURL`, nor for `history.pushState`, so the
+  initial load and React Router are untouched.
+- **`setWindowOpenHandler`** always returns `{ action: "deny" }` —
+  `target="_blank"` and `window.open` (the MCP OAuth starts in
+  `AddMCPServerModal` / `FeaturedMCPServers` / `Customize`) open in the
+  system browser instead of an Electron window.
+- **Only `http:` / `https:` may reach `shell.openExternal` *on a
+  renderer-supplied URL*.** `shell.openExternal` delegates to the OS
+  handler, so passing `file:`, `javascript:`, `smb:` or a custom scheme
+  through would trade the stranded-window bug for a launch-anything
+  bug. Allowlist, never denylist. Everything the guards hand over goes
+  via `openExternalIfSafe`, which is the only path to
+  `shell.openExternal` in `window.js`. The one call site *outside* that
+  funnel is `auth.js`, which builds its URL in the main process from
+  `CHANNEL_API_BASE` and never touches renderer input — if you add a
+  second such call site, either route it through `openExternalIfSafe`
+  or be equally sure the URL can't be attacker-influenced.
+- **The preload fails closed.** `window.js` passes the one permitted
+  origin via `webPreferences.additionalArguments`, which lands in the
+  renderer's `process.argv`; the preload exposes the bridge only when
+  `location.origin` matches. No flag, *more than one* flag, an origin
+  mismatch, or an opaque `"null"` origin all yield no bridge. This is
+  defence in depth — the navigation guards are the primary control.
+  (`additionalArguments` is preferred over `process.env`, which a
+  sandboxed preload *can* read, because it is scoped per window and
+  keeps the origin computed once, next to the `loadURL` that
+  establishes it.)
+- **Artifact downloads are unaffected.** `triggerBlobDownload` in
+  `ArtifactPanel.jsx` clicks a transient `<a download href="blob:…">`;
+  Chromium routes that to the download manager without firing
+  `will-navigate`, so the guard never sees it (verified against a live
+  Electron). Don't add `blob:` to the `shell.openExternal` allowlist to
+  "fix" a problem that doesn't exist — it would be a hole.
+- **The OAuth loopback is unaffected.** `auth.js` calls
+  `shell.openExternal` from the *main* process, which the guards never
+  intercept, and the callback is served to the system browser by the
+  loopback HTTP server — the app window never navigates during login.
 
 ### Why these decisions
 
@@ -1072,9 +1239,11 @@ re-derive these during design review — cite them.
   use `Modal.jsx` (`ui/src/components/Modal.jsx`) for backdrop + Esc
   dismissal. Don't reinvent the modal shell.
 - **User identity from JWT** — chat-app components that need the user's
-  email or display name read the mgmt JWT from `localStorage[TOKEN_KEY]`
-  via `parseToken` from `lib/auth.js`. Display name = email's local-part
-  unless we later add a `name` claim.
+  email or display name read the mgmt JWT via `readToken()` from
+  `lib/auth.js` (never `localStorage.getItem` directly — the stored value
+  is an envelope, and there is a legacy key to fall back to), then
+  `parseToken`. Display name = the `display_name` claim, falling back to
+  the email's local-part.
 
 ## Copyright headers
 

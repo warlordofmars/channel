@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from channel.agents.memory import derive_actor_id
 from channel.agents.tools import memory_tools as mt
 from channel.agents.tools.memory_tools import (
     _RECALL_TOOL_MAX_RESULTS,
@@ -196,8 +197,8 @@ async def test_remember_writes_create_event_and_counts_success(fake_metrics):
     fake_client.create_event.assert_called_once()
     kwargs = fake_client.create_event.call_args.kwargs
     assert kwargs["memoryId"] == "mem-1"
-    # actorId is sanitized at the factory boundary (email → underscores).
-    assert kwargs["actorId"] == "u_x_com"
+    # actorId is derived at the factory boundary (email → label + digest).
+    assert kwargs["actorId"] == derive_actor_id("u@x.com")
     assert kwargs["sessionId"] == "sess-1"
     assert isinstance(kwargs["eventTimestamp"], datetime)
     conv = kwargs["payload"][0]["conversational"]

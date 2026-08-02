@@ -7,6 +7,10 @@ vi.mock("../api.js", () => ({
   streamMessage: vi.fn(),
   regenerate: vi.fn(),
   listChatAssets: vi.fn(() => Promise.resolve({ items: [] })),
+  // The hook delegates giving up on a session to api.endSession (#295);
+  // that helper's own behaviour (clear both keys + redirect) is covered
+  // in api.test.js, so here we only assert the delegation.
+  endSession: vi.fn(),
 }));
 
 import * as api from "../api.js";
@@ -1467,29 +1471,27 @@ describe("useChatStream", () => {
       });
     });
 
-    it("401 surfaces session-expired, clears the mgmt token, and redirects to login", async () => {
-      const assignSpy = vi.fn();
-      vi.stubGlobal("location", { ...globalThis.location, assign: assignSpy });
+    it("401 surfaces session-expired and ends the session", async () => {
+      // A 401 here is terminal rather than routine now that api.js renews
+      // the access token ahead of expiry (#295): reaching this branch means
+      // the silent refresh could not be completed either.
       localStorage.setItem(TOKEN_KEY, "tok-abc");
       const { view } = await sendRefused(401, "Not authenticated");
       expect(view.result.current.turns.at(-1).streamError).toMatchObject({
         code: "session_expired",
         message: "Your session expired. Please sign in again.",
       });
-      expect(localStorage.getItem(TOKEN_KEY)).toBeNull();
-      expect(assignSpy).toHaveBeenCalledWith("/app/login");
+      expect(api.endSession).toHaveBeenCalled();
     });
 
     it("403 surfaces session-expired but does NOT log out", async () => {
-      const assignSpy = vi.fn();
-      vi.stubGlobal("location", { ...globalThis.location, assign: assignSpy });
       localStorage.setItem(TOKEN_KEY, "tok-abc");
       const { view } = await sendRefused(403, "Forbidden");
       expect(view.result.current.turns.at(-1).streamError).toMatchObject({
         code: "session_expired",
       });
       expect(localStorage.getItem(TOKEN_KEY)).toBe("tok-abc");
-      expect(assignSpy).not.toHaveBeenCalled();
+      expect(api.endSession).not.toHaveBeenCalled();
     });
 
     // #428: a send into a chat owned by a different sign-in (or one that
@@ -1518,15 +1520,13 @@ describe("useChatStream", () => {
     it("404 does NOT clear the mgmt token or redirect to login", async () => {
       // Contrast with 401: the session is fine, only this chat is out of
       // reach — signing the user out would be wrong and destructive.
-      const assignSpy = vi.fn();
-      vi.stubGlobal("location", { ...globalThis.location, assign: assignSpy });
       localStorage.setItem(TOKEN_KEY, "tok-abc");
       const { view } = await sendRefused(404, "Chat not found");
       expect(view.result.current.turns.at(-1).streamError).toMatchObject({
         code: "chat_unavailable",
       });
       expect(localStorage.getItem(TOKEN_KEY)).toBe("tok-abc");
-      expect(assignSpy).not.toHaveBeenCalled();
+      expect(api.endSession).not.toHaveBeenCalled();
     });
 
     it("maps a 500 to the generic chip", async () => {

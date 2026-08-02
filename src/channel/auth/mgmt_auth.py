@@ -124,13 +124,35 @@ def _consume_pending_state(state: str) -> bool:
     return state_store.consume_state(state) is not None
 
 
+# localStorage key the SPA reads its access token from. Renamed from
+# ``starter_mgmt_token`` in #260 (folded into #295) as part of the
+# template de-branding.
+#
+# This is the ONLY writer of the key outside the SPA, which is what makes
+# the SPA's read-both migration safe: ``ui/src/lib/auth.js`` prefers the
+# new key and falls back to the legacy one, and every SPA write deletes
+# the legacy key. That preference order is only correct while nothing
+# writes the legacy key any more — a fresh login landing under the legacy
+# key while a stale value sat under the new one would resolve to the
+# stale session. So this constant and the SPA's ``TOKEN_KEY`` must move
+# together, and they did.
+MGMT_TOKEN_STORAGE_KEY = "channel_mgmt_token"
+
+
 def _html_redirect(jwt_token: str) -> HTMLResponse:
-    """Return a minimal HTML page that writes the JWT to localStorage and redirects."""
+    """Return a minimal HTML page that writes the JWT to localStorage and redirects.
+
+    Writes the bare JWT, not the SPA's ``{access_token, expires_at}``
+    envelope: the deadline is already inside the token, and duplicating
+    the envelope's shape into a Python string template would put two
+    languages in charge of one format. ``loadSession`` accepts either
+    form and derives the expiry from the ``exp`` claim for this one.
+    """
     safe_token = html.escape(jwt_token, quote=True)
     body = (
         "<!DOCTYPE html><html><head><title>Logging in…</title></head><body>"
         "<script>"
-        f"localStorage.setItem('starter_mgmt_token', '{safe_token}');"
+        f"localStorage.setItem('{MGMT_TOKEN_STORAGE_KEY}', '{safe_token}');"
         f"location.replace('{_UI_ROOT}');"
         "</script>"
         "<noscript>JavaScript is required to complete login.</noscript>"

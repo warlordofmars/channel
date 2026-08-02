@@ -46,7 +46,7 @@ async def test_rename_and_delete_chat_from_sidebar() -> None:
             page = await context.new_page()
             await page.goto(f"{ui_url}/app")
             await page.evaluate(
-                "(t) => window.localStorage.setItem('starter_mgmt_token', t)",
+                "(t) => window.localStorage.setItem('channel_mgmt_token', t)",
                 jwt,
             )
             await page.goto(f"{ui_url}/app")

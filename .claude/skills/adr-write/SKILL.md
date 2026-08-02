@@ -373,7 +373,9 @@ Across the existing six ADRs, the voice is:
   prescriptive.
 - **Past tense for Context** when describing how the
   situation arose — "AgentCore Starter needed a standard
-  interface..." (ADR-0001 §Context).
+  interface..." (ADR-0001 §Context — quoted verbatim; that ADR
+  predates the fork rename, so it names the template rather than
+  Channel. New ADRs say "Channel").
 - **Code blocks are language-tagged** — `python`, `text`,
   `markdown`, `yaml`. Existing ADRs that contain code
   fences (ADR-0004 uses `text`, ADR-0006 uses `yaml` and
