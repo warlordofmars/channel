@@ -1,7 +1,7 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
 import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { parseToken, TOKEN_KEY } from "../lib/auth.js";
+import { parseToken, readToken } from "../lib/auth.js";
 import ChannelMark from "../components/ChannelMark.jsx";
 import Icon from "../components/Icon.jsx";
 import { useChannelPrefs } from "../hooks/useChannelPrefs.js";
@@ -26,7 +26,7 @@ import {
 export default function ChatHome() {
   const prefs = useChannelPrefs();
   const { createChat } = useChats();
-  const token = localStorage.getItem(TOKEN_KEY) ?? "";
+  const token = readToken();
   const claims = parseToken(token) ?? {};
   // Prefer the Google display_name's first word ("John Carter" → "John");
   // fall back to the email's local-part, then to a generic "You".

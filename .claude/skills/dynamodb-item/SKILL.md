@@ -105,7 +105,7 @@ aren't yet documented in CLAUDE.md; keep the two in sync):
 | PK pattern | SK pattern | Purpose | TTL | Notes |
 | --- | --- | --- | --- | --- |
 | `LOG#{date}#{hour}` | `{timestamp}#{event_id}` | Activity log | no | Hour-sharded (§4). |
-| `AUDIT#{date}#{hour}` | `{timestamp}#{event_id}` | Immutable compliance audit trail | yes | Hour-sharded (§4). TTL via `STARTER_AUDIT_RETENTION_DAYS` (default 365). |
+| `AUDIT#{date}#{hour}` | `{timestamp}#{event_id}` | Immutable compliance audit trail | yes | Hour-sharded (§4). TTL via `CHANNEL_AUDIT_RETENTION_DAYS` (default 365). |
 | `USER#{user_id}` | `META` | User record | no | Would surface on `UserEmailIndex` via `GSI4PK=EMAIL#{email}`, but no current `src/channel/` code sets `GSI4PK` (the index is provisioned, not yet written). |
 | `MGMT_STATE#{state}` | `META` | Google OAuth state parameter | yes | Short single-use TTL. |
 | `DENY#{jti}` | `META` | JWT revocation denylist | yes | Point-read by the mgmt JWT's `jti`; written on `/auth/logout`; `ttl` = the denied token's own `exp` so the row self-prunes (#240). |
@@ -174,12 +174,12 @@ Items whose retention is configurable (audit logs are the current
 example) read the retention window from a per-item env var:
 
 ```python
-retention_days = int(os.environ.get("STARTER_AUDIT_RETENTION_DAYS", "365"))
+retention_days = int(os.environ.get("CHANNEL_AUDIT_RETENTION_DAYS", "365"))
 ttl_value = int(time.time()) + retention_days * 86400
 ```
 
 When introducing a new retention-tunable item type, follow the
-same `STARTER_<ITEM>_RETENTION_DAYS` env-var naming and document
+same `CHANNEL_<ITEM>_RETENTION_DAYS` env-var naming and document
 the default in CLAUDE.md alongside the family entry.
 
 ## 4. Hour-shard pattern for log items
@@ -314,7 +314,7 @@ Conventions:
 ## 6. Table name source
 
 Storage code reads the table name from the environment. The
-project-specific env var is `STARTER_TABLE_NAME` (the `STARTER_*`
+project-specific env var is `CHANNEL_TABLE_NAME` (the `CHANNEL_*`
 prefix scopes config across the codebase). `_get_table()` in
 `src/channel/storage.py` reads it as a **required** variable — no
 silent default; an unset value is a `KeyError` at first use:
@@ -325,7 +325,7 @@ import os
 import boto3
 
 def _get_table():
-    table_name = os.environ["STARTER_TABLE_NAME"]      # required
+    table_name = os.environ["CHANNEL_TABLE_NAME"]      # required
     endpoint = os.environ.get("DYNAMODB_ENDPOINT")      # set for DynamoDB Local
     region = os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
     ddb = boto3.resource("dynamodb", region_name=region, endpoint_url=endpoint)
@@ -335,18 +335,18 @@ def _get_table():
 Wired across the project at:
 
 - `infra/stacks/channel_stack.py` — Lambda environment sets
-  `STARTER_TABLE_NAME` to the per-env table name
+  `CHANNEL_TABLE_NAME` to the per-env table name
 - `tests/integration/conftest.py` — sets the var before importing
   storage (provisions `channel-test` via `channel._table_schema`)
 - `scripts/reset_dev_table.py` — recreates the local `channel`
   table (`TABLE = "channel"`) after each `inv dev` restart
 
 Never hardcode the table name — `code-reviewer` check 8 enforces
-this. The runtime contract is `STARTER_TABLE_NAME`. Some older docs
-(including `code-reviewer.md`) still refer to a bare `TABLE_NAME`,
-but that name is **not** set by the CDK stack or the test fixtures —
-production code and tests must read `STARTER_TABLE_NAME`, and code
-that reads only `TABLE_NAME` will fail at runtime.
+this. The runtime contract is `CHANNEL_TABLE_NAME`. Older docs
+predating the `STARTER_*` → `CHANNEL_*` rename (#259) may still
+show `STARTER_TABLE_NAME` or a bare `TABLE_NAME`; neither is set by
+the CDK stack or the test fixtures, so code reading either will
+fail at runtime.
 
 The endpoint URL is also env-driven (`DYNAMODB_ENDPOINT`) so tests
 point at DynamoDB Local without code changes. `_get_table()`

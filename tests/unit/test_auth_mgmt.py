@@ -154,7 +154,7 @@ def test_html_redirect_sets_token_in_localstorage():
     body = resp.body.decode()
     assert "my.jwt.token" in body
     assert "localStorage.setItem" in body
-    assert "starter_mgmt_token" in body
+    assert "channel_mgmt_token" in body
 
 
 def test_html_redirect_targets_app_not_marketing_root():
@@ -184,7 +184,7 @@ def test_mgmt_login_bypass_issues_html_with_token(monkeypatch):
     with patch("channel.auth.mgmt_auth._BYPASS", True):
         resp = _client.get("/auth/login?test_email=e2e@test.com")
     assert resp.status_code == 200
-    assert "starter_mgmt_token" in resp.text
+    assert "channel_mgmt_token" in resp.text
 
 
 def test_mgmt_login_no_bypass_redirects_to_google(monkeypatch):
@@ -231,7 +231,7 @@ def test_mgmt_callback_success(monkeypatch):
     ):
         resp = _client.get(f"/auth/callback?code=authcode&state={state}")
     assert resp.status_code == 200
-    assert "starter_mgmt_token" in resp.text
+    assert "channel_mgmt_token" in resp.text
 
 
 def test_mgmt_callback_unlisted_email_with_populated_allowlist_returns_403(monkeypatch):
@@ -256,7 +256,7 @@ def test_mgmt_callback_unlisted_email_with_populated_allowlist_returns_403(monke
     ):
         resp = _client.get(f"/auth/callback?code=authcode&state={state}")
     assert resp.status_code == 403
-    assert "starter_mgmt_token" not in resp.text
+    assert "channel_mgmt_token" not in resp.text
 
 
 def test_mgmt_callback_unlisted_email_with_empty_allowlist_returns_403(monkeypatch):
@@ -286,7 +286,7 @@ def test_mgmt_callback_unlisted_email_with_empty_allowlist_returns_403(monkeypat
     ):
         resp = _client.get(f"/auth/callback?code=authcode&state={state}")
     assert resp.status_code == 403
-    assert "starter_mgmt_token" not in resp.text
+    assert "channel_mgmt_token" not in resp.text
 
 
 def test_mgmt_callback_listed_admin_email_returns_admin_role(monkeypatch):
@@ -722,7 +722,7 @@ def test_login_with_test_email_still_works_when_flag_is_one(bypass_env, monkeypa
     resp = _client.get("/auth/login?test_email=e2e@test.com")
 
     assert resp.status_code == 200
-    assert "starter_mgmt_token" in resp.text
+    assert "channel_mgmt_token" in resp.text
 
 
 # ----------------------------------------------------------------

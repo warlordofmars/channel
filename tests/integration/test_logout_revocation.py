@@ -111,7 +111,7 @@ def _login(
     assert landed.status_code == 200
     # The page hands the access token to the SPA via localStorage; the
     # refresh token never appears in it (HttpOnly cookie only).
-    return landed.text.split("setItem('starter_mgmt_token', '")[1].split("'")[0]
+    return landed.text.split("setItem('channel_mgmt_token', '")[1].split("'")[0]
 
 
 def test_login_mints_a_real_refresh_row_and_sets_the_cookie(client, monkeypatch) -> None:  # type: ignore[no-untyped-def]

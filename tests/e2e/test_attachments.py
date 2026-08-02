@@ -65,7 +65,7 @@ async def _open_app(page: Page, ui_url: str, jwt: str) -> None:
     """Land on /app with the bypass JWT pre-injected into localStorage."""
 
     await page.goto(f"{ui_url}/app")
-    await page.evaluate("(t) => window.localStorage.setItem('starter_mgmt_token', t)", jwt)
+    await page.evaluate("(t) => window.localStorage.setItem('channel_mgmt_token', t)", jwt)
     await page.goto(f"{ui_url}/app")
     await page.wait_for_url(lambda url: "/app" in url, timeout=10_000)
 

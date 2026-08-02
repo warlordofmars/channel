@@ -44,7 +44,7 @@ async def live_admin_token() -> str:
         if resp.status_code in (301, 302, 307, 308):
             pytest.skip("Google OAuth redirect — CHANNEL_BYPASS_GOOGLE_AUTH not enabled")
         resp.raise_for_status()
-        m = re.search(r"localStorage\.setItem\('starter_mgmt_token',\s*'([^']+)'\)", resp.text)
+        m = re.search(r"localStorage\.setItem\('channel_mgmt_token',\s*'([^']+)'\)", resp.text)
         if not m:
             pytest.fail("Could not extract mgmt token from bypass login response")
         return html_lib.unescape(m.group(1))

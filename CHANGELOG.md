@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Memory read model + `GET /api/memory/records` (#475, epic #129). The
+  first honest answer to "what does Channel remember about me": the new
+  endpoint enumerates the caller's AgentCore Memory grouped by chat,
+  labels every record's provenance (`conversation` / `remembered` /
+  `meta`, derived from the `[remember]` / `[meta]` text prefixes and
+  applied only to ASSISTANT turns so a user message can't masquerade),
+  and — critically — flags which records are actually reaching the model
+  via `used_in_recall`, alongside a `recall_window` block read straight
+  from `recall.py`'s cap constants. Showing stored records alone implies
+  Channel uses far more than it does; showing only the recalled slice
+  implies it has forgotten far more than it has (#227). The #245 rolling
+  head summaries ride along read-only, because they are injected into
+  their chat's system prompt every single turn. Enumeration lives in a
+  new shared `agents/memory_records.py` so the later forget / edit /
+  export surfaces inherit one definition of a record; `_debug` is
+  untouched. **Security:** the actor-id derivation was not injective
+  when this landed (#474 — `jc+work@x.com` and `jc_work@x.com` derived
+  the same `actorId`), so scoping by actor alone could expose a
+  colliding user's memory; every session is therefore additionally
+  verified against its chat row's owner using the raw JWT sub, and
+  anything unverified is dropped and counted in
+  `withheld_record_count`. #474 itself is fixed below, but the gate
+  stays: a read boundary must not depend on a derivation's properties,
+  and the count is now a standing canary that should read 0. Record
+  text is returned in full and is **data**: render it as plain text,
+  never as Markdown (#465).
 - Image generation via the `generate_image` tool (#279, epic #321).
   Channel can now draw: a single narrow `generate_image(prompt,
   aspect_ratio)` Strands tool calls Stability AI Stable Image Core
@@ -194,6 +220,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Security:** the AgentCore `actorId` derivation is now injective, so
+  two distinct users can no longer share a memory partition (#474). The
+  old mapping replaced every disallowed character with `_`, which
+  collapsed everyday address shapes onto one id — `jc+work@x.com` and
+  `jc_work@x.com` both became `jc_work_x_com`, as did `a.b@x.com` and
+  `a@b.x.com`. Since one AgentCore Memory resource serves an entire
+  environment and `actorId` is its only partition, a collision meant
+  one person's chat content could surface in another's system prompt
+  via the recall hook. `derive_actor_id` now appends a 128-bit SHA-256
+  suffix to a (still readable) label prefix, and every call site —
+  memory hook, recall hook, memory tools, chat-delete session wipe,
+  debug endpoints — derives through that one function. Memories written
+  under the old ids are deliberately orphaned rather than dual-read: a
+  fallback read of the lossy partition would be the very disclosure
+  being fixed. See CLAUDE.md §AgentCore Memory for the full migration
+  reasoning.
 - Auto-titler now salvages partial output when the Haiku titler trips
   `MaxTokensReachedException`. Previously the whole title was
   discarded and the chat stayed on "New chat" in the sidebar. The
@@ -223,6 +265,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Meta
 
+- Cleared the last pockets of `agentcore-starter` template residue from
+  the developer-facing surfaces the earlier sweeps missed (#453,
+  following #262/#263/#264). `ui/README.md` carried a local-API command
+  that could not run — `STARTER_JWT_SECRET=dev-secret uv run uvicorn
+  starter.api.main:app` names an env var renamed in #259 *and* a Python
+  module that has been `channel.api.main` since the fork — so anyone
+  following the README hit an import error; the corrected command is
+  now verified to boot and serve `/health`. The same file's project
+  tree, feature list, script table and CloudFront path list were all
+  describing a SPA that no longer exists, and have been rewritten
+  against the live source. Five `.claude/skills/` and eight
+  `.claude/agents/` files were repointed the same way: `STARTER_*`
+  env-var names became their real `CHANNEL_*` counterparts (checked
+  against the definition site, not mechanically prefixed — the drift in
+  #259 was not a uniform rename, e.g. `STARTER_JWT_ISSUER` is really
+  `CHANNEL_ISSUER`), and dead `src/starter/**` paths were repointed at
+  modules that exist. Two agent checks were not merely misnamed but
+  contradicted current architecture — `code-reviewer`'s "session
+  namespace (inline agent)" check and `security-auditor`'s matching
+  section both demanded the pre-Strands `f"{user_id}:{session_id}"`
+  Bedrock sessionId prefix, which the chat-index ownership check
+  replaced — so both now describe `_load_owned_chat` and its 404-not-403
+  rule. Deliberately left alone: `onboarding.md` (its job is onboarding
+  the *template*, so its `agentcore-starter` references are correct),
+  the `Starter*` CloudFormation logical IDs in
+  `infra/stacks/channel_stack.py` (renaming forces a table / CloudFront
+  policy / dashboard replace), the still-live `starter_mgmt_token`
+  localStorage key (#295), and the frozen `docs/adr/`, `docs/retros/`
+  and `docs/superpowers/` trees.
 - Brought the automated review instructions back in line with the UI
   conventions they are supposed to enforce (#449). PR #447 removed
   `lucide-react`, but `.claude/agents/code-reviewer.md` still issued a
