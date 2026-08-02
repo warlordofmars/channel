@@ -3,7 +3,7 @@ import React, { useEffect } from "react";
 import { BrowserRouter, Outlet, Route, Routes } from "react-router-dom";
 import AuthGate from "./components/AuthGate.jsx";
 import ErrorBoundary from "./components/ErrorBoundary.jsx";
-import LayoutDebug, { isLayoutDebugRequested } from "./components/LayoutDebug.jsx";
+import LayoutDebug, { useLayoutDebugRequested } from "./components/LayoutDebug.jsx";
 import { startAppViewportSync } from "./lib/appViewport.js";
 import { useChannelPrefs } from "./hooks/useChannelPrefs.js";
 import { ChatsProvider } from "./hooks/ChatsContext.jsx";
@@ -53,6 +53,9 @@ function AppLayout() {
 
 export default function App() {
   useChannelPrefs();
+  // Both gates for the temporary #467 readout, as reactive state — see
+  // the mount at the bottom of this component.
+  const layoutDebugRequested = useLayoutDebugRequested();
   // Corrects the app layer's height when iOS reports a layout viewport
   // shorter than the window the installed PWA actually fills (#467).
   // A no-op wherever the two agree, which is every desktop engine — see
@@ -97,11 +100,14 @@ export default function App() {
         </Routes>
       </BrowserRouter>
       {/* TEMPORARY (#467): on-device layout readout, gated here rather
-          than inside the component so that without `?__layout-debug=1`
-          it never mounts — no state, no listeners, no measuring. Removal
-          is tracked by #503, which lists this mount among the files to
-          strip once the fix is confirmed on a real installed iOS PWA. */}
-      {isLayoutDebugRequested() && <LayoutDebug />}
+          than inside the component so that until it is armed it never
+          mounts — no state, no listeners, no measuring. Armed by
+          `?__layout-debug=1` in a desktop browser, or by five taps on
+          the mobile top bar's brand mark in the installed PWA, where a
+          query parameter is unreachable (#504). Removal is tracked by
+          #503, which lists this mount among the files to strip once the
+          fix is confirmed on a real installed iOS PWA. */}
+      {layoutDebugRequested && <LayoutDebug />}
     </ErrorBoundary>
   );
 }

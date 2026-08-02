@@ -1512,7 +1512,16 @@ html.is-electron-mac .sb-top {
     border-bottom: 1px solid var(--border-soft);
   }
   .mobile-menu-btn { width: 40px; height: 40px; }
-  .mobile-topbar-brand { display: inline-flex; align-items: center; }
+  /* `touch-action: manipulation` opts the brand mark out of iOS
+     double-tap-to-zoom (the viewport meta allows zoom), so the temporary
+     five-tap gesture that arms the #467 layout readout doesn't fight the
+     gesture recogniser. Purely a touch behaviour — no visual change, and
+     the mark is still not a control. Removal tracked by #503. */
+  .mobile-topbar-brand {
+    display: inline-flex;
+    align-items: center;
+    touch-action: manipulation;
+  }
   /* On mobile the hamburger owns nav-reveal; the desktop-collapse
      "show sidebar" expand bar is redundant, so hide it. */
   .main-top { display: none; }
@@ -1800,6 +1809,7 @@ html[data-app-vh] .stage { height: var(--app-vh); }
   border-bottom: 1px solid var(--border);
 }
 .layout-debug-title { color: var(--accent); font-weight: 700; letter-spacing: 0.04em; }
+.layout-debug-actions { display: flex; flex-shrink: 0; gap: 6px; }
 .layout-debug-refresh {
   flex-shrink: 0;
   min-height: 28px;
