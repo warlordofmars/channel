@@ -64,10 +64,17 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+      # `check_branch_protection_drift.py` is stdlib + `gh` only, so this job
+      # needs an interpreter, not a package manager — and a job that installs
+      # no packages has no install to harden (#441). This replaced `uv run`,
+      # which was implicitly syncing the whole project environment just to run
+      # a stdlib script. `python-version-file` keeps the interpreter pinned to
+      # the project's own .python-version, which is what the `uv run` form was
+      # there for.
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         if: steps.gate.outputs.skip == 'false'
         with:
-          version: "latest"
+          python-version-file: .python-version
 
       - name: Run drift check
         if: steps.gate.outputs.skip == 'false'
@@ -77,14 +84,6 @@ jobs:
           GH_TOKEN: ${{ secrets.BRANCH_PROTECTION_TOKEN }}
         run: |
           set -euo pipefail
-          # Use uv run so the script picks up the project's Python version
-          # (from .python-version). The script has no third-party deps —
-          # stdlib + `gh` only.
-          #
-          # --no-project means uv installs nothing at all: without it, uv
-          # would sync the whole project environment just to run a stdlib
-          # script. --no-build then holds trivially, since there is no
-          # distribution to build (#441).
-          uv run --no-project --no-build python scripts/check_branch_protection_drift.py \
+          python scripts/check_branch_protection_drift.py \
             --owner "${GITHUB_REPOSITORY%%/*}" \
             --repo  "${GITHUB_REPOSITORY##*/}"
