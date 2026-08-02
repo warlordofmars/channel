@@ -19,16 +19,16 @@ Collect everything that should potentially be documented:
 
 ```bash
 # FastAPI routes — endpoint paths and HTTP methods
-grep -rn "@router\." src/starter/api/ --include="*.py" | grep -E "@router\.(get|post|put|delete|patch)"
+grep -rn "@router\." src/channel/api/ --include="*.py" | grep -E "@router\.(get|post|put|delete|patch)"
 
 # Public agent functions (non-private, exported from modules)
-grep -n "^def [^_]" src/starter/agents/bedrock.py src/starter/agents/inline_agent.py
+grep -rn "^def [^_]" src/channel/agents/ --include="*.py"
 
 # Environment variables referenced in source (these may need documenting)
-grep -rn 'os\.environ' src/starter/ --include="*.py" | grep -v test | grep -v '\.pyc'
+grep -rn 'os\.environ' src/channel/ --include="*.py" | grep -v test | grep -v '\.pyc'
 
 # Request/response Pydantic models (these define the API contract)
-grep -rn "class.*BaseModel" src/starter/ --include="*.py"
+grep -rn "class.*BaseModel" src/channel/ --include="*.py"
 ```
 
 ---
@@ -53,7 +53,7 @@ Read each existing docs page. Note what endpoints, functions, env vars, and file
 
 Cross-reference the source inventory against the docs inventory:
 
-- A FastAPI route in `src/starter/api/agents.py` that isn't mentioned in `docs-site/agents/overview.md` → gap
+- A FastAPI route in `src/channel/api/` that isn't mentioned in `docs-site/operations/endpoints.md` or `docs-site/agents/overview.md` → gap
 - A new module with substantial public API → gap
 - An env var that affects runtime behaviour, not yet in any docs page → gap
 

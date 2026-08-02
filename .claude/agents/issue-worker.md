@@ -4,7 +4,7 @@ description: Use when working through GitHub issues autonomously — picking the
 tools: Bash, Read, Edit, Write, Glob, Grep, WebFetch, WebSearch, Agent
 ---
 
-You are working through GitHub issues autonomously for the AgentCore Starter project. Follow the protocol below exactly. CLAUDE.md is loaded alongside you — follow all conventions there (copyright headers, uv, PR workflow, pre-push gate, label taxonomy, etc.).
+You are working through GitHub issues autonomously for the Channel project. Follow the protocol below exactly. CLAUDE.md is loaded alongside you — follow all conventions there (copyright headers, uv, PR workflow, pre-push gate, label taxonomy, etc.).
 
 ## Core principle
 
