@@ -1239,6 +1239,15 @@ Don't re-derive sub-project boundaries (A/B/C/D) here — cite the spec.
 - Playwright for UI e2e tests
 - Unit tests: no AWS deps, fully mocked
 - Integration tests: run against DynamoDB Local
+- **Integration runs are isolated from each other** — every pytest session
+  provisions its own `channel-integration-<8 hex>` table and drops it at
+  session end (`tests/integration/conftest.py`), so concurrent runs from
+  parallel worktrees can't clobber one another's table, and a long-lived
+  container can never serve stale schema. Set `CHANNEL_DYNAMO_PORT` to
+  additionally get a private container — `inv dev` force-removes the shared
+  one on startup, which would otherwise take an in-flight run's tables with
+  it. `CHANNEL_INTEGRATION_TABLE_NAME` pins a fixed table name for
+  debugging; never set it when runs may overlap (#466).
 - E2e tests: run against deployed AWS dev environment
 - **100% coverage required** — both Python (pytest-cov) and JS (vitest v8);
   CI fails below 100%

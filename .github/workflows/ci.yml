@@ -237,7 +237,10 @@ jobs:
           AWS_SECRET_ACCESS_KEY: local
           AWS_DEFAULT_REGION: us-east-1
           CHANNEL_JWT_SECRET: test-secret
-          CHANNEL_TABLE_NAME: channel-integration
+          # CHANNEL_TABLE_NAME is deliberately NOT set: tests/integration/
+          # conftest.py assigns a per-session table name and would override
+          # anything set here, so a value would read as authoritative while
+          # having no effect (#466).
         run: uv run --locked --no-sync --no-build pytest tests/unit tests/integration -v --cov=src/channel --cov-report=xml:coverage-combined.xml --cov-fail-under=100
 
       - name: Write coverage summary

@@ -40,8 +40,59 @@ UI = ROOT / "ui"
 DESKTOP = ROOT / "desktop"
 INFRA = ROOT / "infra"
 REGION = "us-east-1"
-DYNAMO_CONTAINER = "channel-dynamo-local"
-DYNAMO_PORT = 8000
+# DynamoDB Local always listens on 8000 *inside* the container — only the
+# host side of the mapping is configurable, so it is always <host>:8000.
+DYNAMO_LOCAL_PORT = 8000
+
+
+def _resolve_dynamo_port(raw: str | None) -> int:
+    """Host port for DynamoDB Local, from ``CHANNEL_DYNAMO_PORT`` (#466).
+
+    Concurrent runs are isolated at the *table* level by
+    ``tests/integration/conftest.py``, which is enough for the common
+    case. This knob covers the coarser contention: ``inv dev`` force-
+    removes the shared container on startup, taking an in-flight
+    integration run's tables down with it. A worker that exports
+    ``CHANNEL_DYNAMO_PORT`` gets its own container (named for the port)
+    and stops sharing that fate.
+
+    An unparseable value raises rather than falling back to the default:
+    a silent fallback would put the caller back on the shared container
+    while they believe they are isolated — the exact confusion #466 is
+    about. Note this resolves at **import** time, so a typo'd value
+    fails every invoke task (``inv --list`` included), not just the
+    DynamoDB ones. That blast radius is accepted deliberately: the
+    variable is opt-in, so a malformed one is always a mistake worth
+    surfacing immediately, and the message names the variable.
+    """
+    value = (raw or "").strip()
+    if not value:
+        return DYNAMO_LOCAL_PORT
+    # ``isascii()`` matters: ``str.isdigit()`` alone accepts non-ASCII
+    # numerals, and ``int()`` happily converts them — so "٥" (Arabic-Indic
+    # five) and "８１２３" (fullwidth) would sail through as ports 5 and
+    # 8123. ``isdecimal()`` is not enough either; it accepts both. A port
+    # is ASCII digits or it is not a port.
+    if not (value.isascii() and value.isdigit()) or not 1 <= int(value) <= 65535:
+        raise ValueError(f"CHANNEL_DYNAMO_PORT must be a TCP port number, got {raw!r}")
+    return int(value)
+
+
+def _dynamo_container_name(port: int) -> str:
+    """Container name for a DynamoDB Local host ``port`` (#466).
+
+    The default port keeps the historical name, so existing containers
+    and every ``docker rm -f channel-dynamo-local`` in muscle memory
+    still resolve. A non-default port gets its own name — two containers
+    cannot share one, and the name is what ``inv dev`` force-removes.
+    """
+    if port == DYNAMO_LOCAL_PORT:
+        return "channel-dynamo-local"
+    return f"channel-dynamo-local-{port}"
+
+
+DYNAMO_PORT = _resolve_dynamo_port(os.environ.get("CHANNEL_DYNAMO_PORT"))
+DYNAMO_CONTAINER = _dynamo_container_name(DYNAMO_PORT)
 API_PORT = 8001
 UI_PORT = 5173
 
@@ -370,7 +421,9 @@ def test_combined_coverage(ctx):
         "AWS_SECRET_ACCESS_KEY": "local",
         "AWS_DEFAULT_REGION": "us-east-1",
         "CHANNEL_JWT_SECRET": "test-secret",
-        "CHANNEL_TABLE_NAME": "channel-integration",
+        # CHANNEL_TABLE_NAME is deliberately NOT set here: a fixed name is
+        # shared state between concurrent runs, which is what #466 removes.
+        # tests/integration/conftest.py assigns a per-session table name.
     }
     ctx.run(
         "uv run pytest tests/unit tests/integration "
@@ -561,7 +614,7 @@ def worktree_setup(ctx):
 def dynamo_start(ctx):
     """Start DynamoDB Local in Docker (detached)"""
     ctx.run(
-        f"docker run -d --name {DYNAMO_CONTAINER} -p {DYNAMO_PORT}:{DYNAMO_PORT}"
+        f"docker run -d --name {DYNAMO_CONTAINER} -p {DYNAMO_PORT}:{DYNAMO_LOCAL_PORT}"
         " amazon/dynamodb-local:latest",
         warn=True,
         hide=True,
@@ -687,7 +740,7 @@ def dev(ctx, seed=False):
             "--name",
             DYNAMO_CONTAINER,
             "-p",
-            f"{DYNAMO_PORT}:{DYNAMO_PORT}",
+            f"{DYNAMO_PORT}:{DYNAMO_LOCAL_PORT}",
             "amazon/dynamodb-local:latest",
         ],
         stdout=subprocess.DEVNULL,

@@ -16,6 +16,8 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent.parent
 TASKS_PATH = ROOT / "tasks.py"
 
@@ -176,3 +178,65 @@ def test_worktree_setup_uses_npm_install_not_ci():
     node_cmds = [c for c in ctx.commands if "npm" in c]
     assert len(node_cmds) == 2
     assert all("npm install" in c and "npm ci" not in c for c in node_cmds)
+
+
+# ── per-run DynamoDB Local port knob (#466) ──────────────────────────────────
+
+_resolve_dynamo_port = channel_tasks._resolve_dynamo_port
+_dynamo_container_name = channel_tasks._dynamo_container_name
+
+
+@pytest.mark.parametrize("raw", [None, "", "   "])
+def test_dynamo_port_defaults_when_unset(raw):
+    """Unset/blank CHANNEL_DYNAMO_PORT keeps the historical 8000."""
+    assert _resolve_dynamo_port(raw) == channel_tasks.DYNAMO_LOCAL_PORT == 8000
+
+
+def test_dynamo_port_honours_explicit_override():
+    assert _resolve_dynamo_port("8123") == 8123
+
+
+def test_dynamo_port_tolerates_surrounding_whitespace():
+    assert _resolve_dynamo_port("  8123  ") == 8123
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "eight-thousand",
+        "80.80",
+        "-1",
+        "0",
+        "65536",
+        # Non-ASCII numerals. str.isdigit() accepts all three and int()
+        # converts the latter two, so a naive check would silently yield
+        # ports 5 and 8123. str.isdecimal() also accepts them — only an
+        # ASCII check rejects them.
+        "²",  # superscript two
+        "٥",  # Arabic-Indic five
+        "８１２３",  # fullwidth 8123
+    ],
+)
+def test_dynamo_port_rejects_non_port_values(raw):
+    """A typo'd port must raise, never silently fall back.
+
+    Falling back would drop the caller onto the shared container while
+    they believe they are isolated — the #466 confusion, reintroduced.
+    """
+    with pytest.raises(ValueError, match="CHANNEL_DYNAMO_PORT"):
+        _resolve_dynamo_port(raw)
+
+
+def test_default_port_keeps_the_historical_container_name():
+    assert _dynamo_container_name(8000) == "channel-dynamo-local"
+
+
+def test_non_default_port_gets_its_own_container_name():
+    """Two ports must never contend over one container name."""
+    assert _dynamo_container_name(8123) == "channel-dynamo-local-8123"
+    assert _dynamo_container_name(8123) != _dynamo_container_name(8000)
+
+
+def test_module_constants_wire_the_helpers_together():
+    """DYNAMO_CONTAINER is derived from DYNAMO_PORT, not hardcoded."""
+    assert _dynamo_container_name(channel_tasks.DYNAMO_PORT) == channel_tasks.DYNAMO_CONTAINER

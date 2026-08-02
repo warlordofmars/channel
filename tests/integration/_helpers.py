@@ -12,9 +12,73 @@ pattern for plain helpers.
 
 from __future__ import annotations
 
+import re
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from channel.models import Asset
+
+# ── Per-run integration table naming (#466) ──────────────────────────────────
+#
+# Lives here rather than in ``conftest.py`` so the predicate guarding the
+# suite's only destructive operation can be unit-tested directly, without
+# importing a conftest (and its module-level environment mutation) into
+# the unit suite. ``tests/integration/conftest.py`` is outside
+# ``--cov=src/channel``, so the 100% gate would otherwise never see this
+# logic.
+RUN_TABLE_PREFIX = "channel-integration"
+
+# Matches ONLY the names this suite generates. The DynamoDB Local
+# container is long-lived and shared — in practice with other projects
+# entirely (``hive-*`` tables) as well as legacy Channel tables
+# (``channel-test``, ``starter-integration``) and, before this change,
+# a bare ``channel-integration``. None of those may ever be swept, so
+# the 8-hex suffix is required, not optional.
+_RUN_TABLE_RE = re.compile(rf"^{re.escape(RUN_TABLE_PREFIX)}-[0-9a-f]{{8}}$")
+
+# A suite run takes ~20s. The cutoff is deliberately ~4000x that, not a
+# tight fit: the age is computed by comparing the *host's* clock against
+# a ``CreationDateTime`` reported by the *container's* clock, and Docker
+# VM clocks are known to drift behind the host after a sleep/resume. Any
+# such skew inflates the apparent age, and an over-estimate past the
+# cutoff would sweep a live peer's table — reintroducing #466 through
+# the very mechanism meant to prevent it. A day of headroom makes that
+# implausible while still bounding table accumulation.
+ABANDONED_TABLE_MAX_AGE = timedelta(hours=24)
+
+
+def is_run_table_name(name: str) -> bool:
+    """Does ``name`` have the shape this suite generates?
+
+    Split out from :func:`is_abandoned_run_table` so the sweep can gate
+    its loop on the name alone. ``ListTables`` already returned the
+    name, but reading a table's ``creation_date_time`` costs a
+    ``DescribeTable`` — and Python evaluates call arguments eagerly, so
+    passing it straight to the full predicate would describe *every*
+    table in a shared container rather than only the candidates.
+    """
+    return bool(_RUN_TABLE_RE.match(name))
+
+
+def is_abandoned_run_table(name: str, created: datetime, now: datetime) -> bool:
+    """Is ``name`` a per-run table left behind by a dead session?
+
+    True only when the name matches the generated
+    ``channel-integration-<8 hex>`` shape *and* the table predates
+    ``now - ABANDONED_TABLE_MAX_AGE``. Both conditions are required:
+    the shape check keeps foreign and legacy tables out of reach
+    entirely, and the age check keeps a concurrently running peer's
+    table out of reach.
+
+    A naive ``created`` is assumed UTC — some DynamoDB Local builds omit
+    the offset, and a naive/aware comparison would raise inside the
+    sweep's suppression and silently disable cleanup.
+    """
+    if not is_run_table_name(name):
+        return False
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    return created < now - ABANDONED_TABLE_MAX_AGE
 
 
 class FakeS3:
