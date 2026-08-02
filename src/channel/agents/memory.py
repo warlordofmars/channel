@@ -31,6 +31,14 @@ logger = logging.getLogger(__name__)
 
 _ROLE_MAP: dict[str, str] = {"user": "USER", "assistant": "ASSISTANT"}
 
+# Tool-use META facts are written as synthetic ASSISTANT events tagged
+# with this prefix (see :meth:`AgentCoreMemoryHook.write_meta_event`).
+# Module-level so downstream readers — ``agents/memory_records.py``'s
+# provenance classifier (#475) — import it rather than re-literalling
+# ``"[meta]"``; three copies of the same magic string would drift.
+# Parallels ``_REMEMBER_PREFIX`` in ``agents/tools/memory_tools.py``.
+_META_PREFIX = "[meta]"
+
 # AgentCore validates ``actorId`` against
 # ``[a-zA-Z0-9][a-zA-Z0-9-_/]*(?::[a-zA-Z0-9-_/]+)*[a-zA-Z0-9-_/]*`` —
 # letters, digits, hyphens, underscores, slashes, colons. Our JWT
@@ -298,7 +306,7 @@ class AgentCoreMemoryHook:
                     {
                         "conversational": {
                             "role": "ASSISTANT",
-                            "content": {"text": f"[meta] {text}"},
+                            "content": {"text": f"{_META_PREFIX} {text}"},
                         }
                     }
                 ],

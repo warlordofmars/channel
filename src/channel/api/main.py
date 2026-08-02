@@ -23,6 +23,7 @@ from channel.api.assets import router as assets_router
 from channel.api.attachments import router as attachments_router
 from channel.api.chats import router as chats_router
 from channel.api.csp import router as csp_router
+from channel.api.memory import router as memory_router
 from channel.api.models import router as models_router
 from channel.api.prefs import router as prefs_router
 from channel.api.sessions import router as sessions_router
@@ -253,6 +254,12 @@ app.include_router(attachments_router, prefix="/api")
 # Asset REST surface — per-chat list/get/content/delete + cross-chat
 # browse; every route requires a valid mgmt JWT (#325)
 app.include_router(assets_router, prefix="/api")
+
+# Memory read surface — GET /api/memory/records (#475). Requires a valid
+# mgmt JWT; every route is scoped to the caller's own AgentCore actor AND
+# per-session ownership-verified against the raw JWT sub (see the module
+# docstring's §Scoping — the sanitized actorId alone is not injective, #474).
+app.include_router(memory_router, prefix="/api")
 
 # Admin user list + detail — requires mgmt JWT with role=admin (#235)
 app.include_router(admin_router, prefix="/api")

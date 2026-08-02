@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Memory read model + `GET /api/memory/records` (#475, epic #129). The
+  first honest answer to "what does Channel remember about me": the new
+  endpoint enumerates the caller's AgentCore Memory grouped by chat,
+  labels every record's provenance (`conversation` / `remembered` /
+  `meta`, derived from the `[remember]` / `[meta]` text prefixes and
+  applied only to ASSISTANT turns so a user message can't masquerade),
+  and — critically — flags which records are actually reaching the model
+  via `used_in_recall`, alongside a `recall_window` block read straight
+  from `recall.py`'s cap constants. Showing stored records alone implies
+  Channel uses far more than it does; showing only the recalled slice
+  implies it has forgotten far more than it has (#227). The #245 rolling
+  head summaries ride along read-only, because they are injected into
+  their chat's system prompt every single turn. Enumeration lives in a
+  new shared `agents/memory_records.py` so the later forget / edit /
+  export surfaces inherit one definition of a record; `_debug` is
+  untouched. **Security:** because `_sanitize_actor_id` is not injective
+  (#474 — `jc+work@x.com` and `jc_work@x.com` derive the same
+  `actorId`), scoping by actor alone can expose a colliding user's
+  memory, so every session is additionally verified against its chat
+  row's owner using the raw JWT sub and anything unverified is dropped
+  and counted in `withheld_record_count` — which makes the endpoint a
+  live detector for #474 rather than a silent inheritor of it. Record
+  text is returned in full and is **data**: render it as plain text,
+  never as Markdown (#465).
 - Image generation via the `generate_image` tool (#279, epic #321).
   Channel can now draw: a single narrow `generate_image(prompt,
   aspect_ratio)` Strands tool calls Stability AI Stable Image Core
