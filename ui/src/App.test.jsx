@@ -1,5 +1,5 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
-import { act, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App.jsx";
 import { TOKEN_KEY } from "./lib/auth.js";
@@ -213,5 +213,44 @@ describe("App routing", () => {
     __resetChannelPrefsForTest();
     await act(async () => render(<App />));
     expect(document.documentElement.getAttribute("data-theme")).toBe("light");
+  });
+
+  it("corrects the app-layer height when the layout viewport is short (#467)", async () => {
+    // The installed-iOS-PWA shape: the window is taller than the layout
+    // viewport `inset: 0` / `100dvh` resolve against, so `.stage` needs
+    // the measured height published to it.
+    //
+    // `Object.defineProperty` replaces jsdom's `innerHeight` accessor with
+    // a value property that no vitest cleanup undoes, so the original
+    // descriptor is captured and restored — otherwise the override
+    // outlives this test and every later one mounts against a 852px
+    // window, silently re-pinning `--app-vh` on <html>.
+    const originalInnerHeight = Object.getOwnPropertyDescriptor(window, "innerHeight");
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 852 });
+    Object.defineProperty(document.documentElement, "clientHeight", {
+      configurable: true,
+      value: 756,
+    });
+    try {
+      await act(async () => render(<App />));
+
+      expect(document.documentElement.style.getPropertyValue("--app-vh")).toBe("852px");
+      expect(document.documentElement.hasAttribute("data-app-vh")).toBe(true);
+    } finally {
+      document.documentElement.style.removeProperty("--app-vh");
+      document.documentElement.removeAttribute("data-app-vh");
+      delete document.documentElement.clientHeight;
+      Object.defineProperty(window, "innerHeight", originalInnerHeight);
+    }
+  });
+
+  it("mounts the temporary layout readout only for ?__layout-debug=1 (#467)", async () => {
+    await act(async () => render(<App />));
+    expect(screen.queryByRole("region", { name: /layout debug/i })).toBeNull();
+    cleanup();
+
+    window.history.pushState({}, "", "/?__layout-debug=1");
+    await act(async () => render(<App />));
+    expect(screen.getByRole("region", { name: /layout debug/i })).toBeTruthy();
   });
 });
