@@ -98,8 +98,9 @@ export default function App() {
       </BrowserRouter>
       {/* TEMPORARY (#467): on-device layout readout, gated here rather
           than inside the component so that without `?__layout-debug=1`
-          it never mounts — no state, no listeners, no measuring. Remove
-          with the component once the fix is confirmed on device. */}
+          it never mounts — no state, no listeners, no measuring. Removal
+          is tracked by #503, which lists this mount among the files to
+          strip once the fix is confirmed on a real installed iOS PWA. */}
       {isLayoutDebugRequested() && <LayoutDebug />}
     </ErrorBoundary>
   );

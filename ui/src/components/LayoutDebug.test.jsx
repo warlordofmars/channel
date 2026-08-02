@@ -32,10 +32,10 @@ function mountComposerFixture() {
 }
 
 /**
- * jsdom's own `innerHeight` accessor. `Object.defineProperty` replaces it
- * with a value property that no vitest cleanup undoes, so the original
- * descriptor is captured here and put back in `afterEach` — see the same
- * note in `lib/appViewport.test.js`.
+ * jsdom's own `innerHeight` property descriptor. No vitest cleanup
+ * undoes an `Object.defineProperty` write, so the original is captured
+ * here and put back in `afterEach` — see the fuller note in
+ * `lib/appViewport.test.js`.
  */
 const ORIGINAL_INNER_HEIGHT = Object.getOwnPropertyDescriptor(window, "innerHeight");
 

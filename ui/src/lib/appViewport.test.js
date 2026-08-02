@@ -10,12 +10,17 @@ import {
 } from "./appViewport.js";
 
 /**
- * jsdom's own `innerHeight` accessor, captured before any test replaces
- * it. `Object.defineProperty` overwrites the accessor with a plain value
- * property, and neither `vi.unstubAllGlobals` nor `vi.restoreAllMocks`
- * undoes that — so without restoring the original descriptor the
- * override outlives the suite and any later test that spies on the
- * getter would silently see a value property instead.
+ * jsdom's own `innerHeight` property descriptor, captured before any
+ * test replaces it.
+ *
+ * Neither `vi.unstubAllGlobals` nor `vi.restoreAllMocks` undoes an
+ * `Object.defineProperty` write, so without putting the original back
+ * the override outlives the suite and every later test runs against
+ * whatever height the last one happened to set. Restoring the captured
+ * descriptor — rather than `delete`-ing the key — is what makes this
+ * exact: in the pinned jsdom, `innerHeight` is an own *data* property
+ * (`value: 768`), not an accessor, so there is no prototype getter for
+ * a delete to fall back to.
  */
 const ORIGINAL_INNER_HEIGHT = Object.getOwnPropertyDescriptor(window, "innerHeight");
 
