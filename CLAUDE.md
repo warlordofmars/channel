@@ -265,8 +265,9 @@ the access JWT it renews has usually already expired.
   to keep them in. All callers share one in-flight promise.
 - **A refused refresh is not automatically a sign-out.** `/auth/refresh`
   answers 401 both for a dead token and for a client with no refresh
-  credential at all (desktop until #297, bypass logins, pre-#292
-  sessions) — the latter is the epic's migration path. The still-valid
+  credential at all (bypass logins, desktop sessions signed in before
+  #297, pre-#292 sessions) — the latter is the epic's migration path.
+  The still-valid
   access token is used, with a 30s cooldown before retrying. The session
   ends (`endSession()` — clear storage, route to `/app/login`) only when
   the access token is unusable **and** the refresh was refused with a
@@ -282,8 +283,9 @@ the access JWT it renews has usually already expired.
 Storage lives in `ui/src/lib/auth.js`: a JSON `{access_token,
 expires_at}` envelope under `channel_mgmt_token`, renewed when
 `expires_at` is within 5 minutes. **A refresh token never enters
-localStorage** — web uses the HttpOnly cookie, desktop will use the OS
-keychain (#297). `saveSession` refuses (throws) anything that is not
+localStorage** — web uses the HttpOnly cookie, desktop the OS keychain
+(#297, via `readRefreshToken` / `saveRefreshToken` in the same module,
+both no-ops in a browser). `saveSession` refuses (throws) anything that is not
 structurally a JWT rather than writing an unvalidated `/auth/refresh`
 response body into browser storage; both callers already treat a throw
 as an ordinary failure. Reads accept the pre-rename `starter_mgmt_token` key
@@ -311,7 +313,16 @@ Dropping the legacy fallback is a follow-up, one release out.
    Unlike gap 1 this is **not** status-quo-neutral: it introduces a
    failure mode that cannot occur today. The race is narrow — both tabs
    must cross the skew window within one round trip — which is why it
-   ships, but `navigator.locks.request` should close it soon.
+   ships, but `navigator.locks.request` should close it soon (#495).
+   **Desktop (#297) does not widen it in the obvious way**: every
+   sign-in mints its own `device_id` and therefore its own token family
+   (`_mint_session_refresh_token`), so an Electron window and a browser
+   tab hold *different* families and cannot revoke each other. The
+   desktop analogue needs two renderers sharing one `userData`
+   directory — a second app window or a second app instance, of which
+   the app currently creates neither. Adding either (or a
+   `requestSingleInstanceLock`-less multi-instance mode) puts desktop
+   squarely inside #495, and the fix is the same cross-context lock.
 
 Server-side companion gap: `/auth/logout` is `Depends(require_mgmt_user)`
 and `decode_mgmt_jwt` enforces `exp`, so signing out of a tab left idle
@@ -352,11 +363,11 @@ revoke routes write an audit event (`auth.session_revoke` /
 eventually-consistent index cannot promise (see the refresh-token entry
 under §DynamoDB single table design).
 
-Still to land in epic #241: rate limiting + EMF counters (#294) and
-desktop `safeStorage` persistence (#297). The SPA's silent-refresh
-wrapper landed in #295 — see §"Silent refresh (SPA)" below. Until #297,
-the desktop app still has no refresh credential to present and re-auths
-at the 1h access-token expiry.
+Still to land in epic #241: rate limiting + EMF counters (#294). The
+SPA's silent-refresh wrapper landed in #295 (see §"Silent refresh
+(SPA)") and desktop `safeStorage` persistence in #297 (see §"Token
+persistence + refresh transport" under §Desktop app), so both clients
+now renew rather than re-authing hourly.
 
 ## DynamoDB single table design
 
@@ -947,7 +958,7 @@ Electron wrapper around the SPA. Built from `desktop/` with its own
 ### Layout
 
 - `desktop/main/` — Node main-process modules (protocol handler, window
-  factory, IPC registry, OAuth loopback)
+  factory, IPC registry, OAuth loopback, `safeStorage` token store)
 - `desktop/preload/` — sandboxed bridge exposing `window.channelDesktop`
 - `desktop/test/` — vitest with `environment: "node"`; 100% coverage gate
 - `desktop/dist-main/`, `desktop/dist-renderer/`, `desktop/release/` —
@@ -990,11 +1001,14 @@ app uses external-browser + loopback instead:
 3. FastAPI's `/auth/login` validates `desktop_callback` is a loopback URL
    and stores it (along with the caller-supplied `state`) in the
    `MGMT_STATE` DynamoDB record.
-4. Google → `/auth/callback` exchanges the code, mints the mgmt JWT, and
-   redirects to the loopback URL with `?token=&state=`.
-5. The main process verifies state (timing-safe), hands the JWT to the
-   renderer via IPC, closes the loopback server, and serves the browser
-   a "you can close this window" HTML page.
+4. Google → `/auth/callback` exchanges the code, mints the mgmt JWT plus
+   the session's first refresh token (#292), and redirects to the
+   loopback URL with `?token=&refresh_token=&state=`.
+5. The main process verifies state (timing-safe), hands
+   `{token, refreshToken}` to the renderer via IPC, closes the loopback
+   server, and serves the browser a "you can close this window" HTML
+   page. The renderer stores the access token in localStorage and the
+   refresh token in the OS keychain (#297, below).
 
 In `inv desktop-dev`, the dev FastAPI runs with **both**
 `CHANNEL_BYPASS_GOOGLE_AUTH=1` and `CHANNEL_DESKTOP_DEV_EMAIL`
@@ -1011,6 +1025,72 @@ deliberately never sets `CHANNEL_DESKTOP_DEV_EMAIL`, so real desktop
 sign-in on deployed dev routes through Google like any other browser flow.
 Gating the short-circuit on the bypass flag alone would silently
 auto-log-in every deployed-dev desktop user as the placeholder account.
+
+### Token persistence + refresh transport (#297)
+
+**The desktop refresh token lives in the OS keychain, never in
+localStorage.** Electron cannot use the web flow's `channel_refresh`
+HttpOnly cookie, so without this the desktop app had no refresh
+credential at all and hard-expired at every 1h access-token deadline —
+visible as the window blanking, flashing unstyled HTML, and stealing
+focus roughly hourly.
+
+- **`desktop/main/token-storage.js`** wraps `safeStorage` over
+  `userData/auth.bin`, written `0600`. File format is one tag byte then
+  the payload: `0x01` + ciphertext, or `0x00` + UTF-8 JSON, with any
+  other leading byte refused (warn + `null`) rather than guessed at as
+  plaintext. The tag is load-bearing — `isEncryptionAvailable()`
+  describes the *machine*, not the file, so a reader cannot infer the
+  payload's form from its own environment. It also makes the clear-text
+  → encrypted upgrade free: `write` re-decides every call, and desktop
+  rotates hourly.
+- **`isEncryptionAvailable() === false`** (Linux with no libsecret
+  provider) falls back to clear text with a loud `console.warn` naming
+  the path. Refusing to persist instead would restore the hourly
+  sign-out — the exact bug this fixes — and the file is `0600` either
+  way. Both branches are covered by
+  `desktop/test/token-storage.test.js`.
+- **`read()` answers `null` for every unusable state** (absent,
+  truncated, undecryptable, not JSON, valid JSON that isn't an object):
+  they all mean "sign in again". **`write()` deliberately propagates**
+  I/O errors — its caller has just been handed a rotated token whose
+  predecessor is already dead server-side.
+- **IPC**: three channels on the fixed `CHANNELS` allowlist in
+  `main/ipc.js` — `desktop:token-read` / `-write` / `-clear` — exposed
+  as `window.channelDesktop.tokenStorage = {read, write, clear}`. No
+  path, key or namespace argument, so what the renderer can reach is a
+  property of `preload/index.js` rather than of anything it passes.
+  Inherits both the `event.sender.id` guard in `registerIpc` and the
+  #484 origin guard in `installBridge` — a foreign origin gets no
+  bridge at all, so it gets no `tokenStorage`.
+- **The SPA seam is `lib/auth.js`'s `readRefreshToken` /
+  `saveRefreshToken`**, both no-ops in a browser, both non-throwing.
+  `api.js`'s `performRefresh` sends `{"refresh_token": ...}` in the
+  body when the keychain has one and takes the bodyless cookie path
+  when it doesn't — the branch is "is there a token to send", not a
+  desktop feature test, so a pre-#297 or bypass session degrades
+  correctly. It persists the **rotated successor before** the access
+  token, since `saveSession` throws on a malformed token and the
+  predecessor is already dead by then. **A failed write clears the file
+  too**: what survives a failed write is the spent predecessor, and
+  re-presenting that trips #290's reuse detection and revokes the whole
+  device family (at login it may even be a different account's token on
+  a shared machine). `clearSession()` deletes the keychain file as well
+  as the localStorage keys.
+- **`login()` resolves `{token, refreshToken}`**, not a bare token
+  string: `main/auth.js` reads `refresh_token` off the loopback
+  redirect (#292) and `Login.jsx` persists both. `refreshToken` is `""`
+  when the server minted no family (fail-soft mint, or the
+  desktop-dev / `?test_email=` bypasses, which mint none by design).
+- **Known gap — sign-out does not revoke the family server-side.**
+  `api.logout()` sends `credentials: "include"`, which carries nothing
+  on desktop, and it deliberately reads state synchronously so
+  `Sidebar.signOut` can navigate in the same tick (see §Silent
+  refresh). The local credential *is* deleted. This is unchanged from
+  before #297 — a desktop login has always left its family live until
+  the 30-day ceiling — but it is now a credential the client actually
+  held. Closing it means either letting the refresh token alone
+  authorise `/auth/logout` or making sign-out await the keychain read.
 
 ### Navigation boundary (#472)
 

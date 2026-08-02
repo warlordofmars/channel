@@ -133,6 +133,50 @@ describe(".stage viewport height (#467)", () => {
   });
 });
 
+describe("standalone viewport correction (#467, reopened)", () => {
+  /**
+   * The one rule that consumes `--app-vh`. Kept as a named helper for the
+   * same reason as `stageRule()` — a rename should read as "the rule
+   * vanished", not as a null dereference three assertions later.
+   */
+  function correctionRule() {
+    const match = css.match(/html\[data-app-vh\]\s+\.stage\s*\{([^}]*)\}/);
+    if (!match) {
+      throw new Error(
+        "no `html[data-app-vh] .stage { ... }` rule in app.css — the #467 " +
+          "standalone correction was renamed or removed; see ui/src/lib/appViewport.js",
+      );
+    }
+    return match[1];
+  }
+
+  it("overrides .stage's height from the measured custom property", () => {
+    expect(correctionRule()).toMatch(/height:\s*var\(--app-vh\)/);
+  });
+
+  it("gates the override on the attribute, never on the property alone", () => {
+    // A rule reading `var(--app-vh)` unconditionally would apply on every
+    // browser — falling back to `auto` where the property is unset, which
+    // collapses the fixed layer. The attribute selector is what keeps an
+    // untouched document on the original `100vh` / `100dvh` cascade, so it
+    // is the load-bearing half of the desktop-unchanged guarantee.
+    expect(css).not.toMatch(/(?<!html\[data-app-vh\]\s)\.stage\s*\{[^}]*var\(--app-vh\)/);
+  });
+
+  it("changes only the height, so position and insets stay with .stage", () => {
+    expect(correctionRule()).not.toMatch(/position:/);
+    expect(correctionRule()).not.toMatch(/inset:/);
+    expect(correctionRule()).not.toMatch(/width:/);
+  });
+
+  it("is not trapped inside a width media query", () => {
+    // An installed PWA on an iPad renders the ≥641px layout and is
+    // equally affected; the correct gate is the measured shortfall in
+    // appViewport.js, not the viewport width.
+    expect(mobileBlock()).not.toMatch(/var\(--app-vh\)/);
+  });
+});
+
 describe("safe-area insets survive the viewport change (#425 / #437)", () => {
   it("keeps the mobile block's safe-area padding", () => {
     const mobile = mobileBlock();

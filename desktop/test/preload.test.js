@@ -175,7 +175,7 @@ describe("preload — origin guard (#472)", () => {
     expect(expose).not.toHaveBeenCalled();
   });
 
-  it("builds the seven-key bridge (five methods + two values) and nothing more", async () => {
+  it("builds the eight-key bridge (five methods + tokenStorage + two values) and nothing more", async () => {
     const { createBridge } = await import("../preload/index.js");
     expect(Object.keys(createBridge()).sort()).toEqual([
       "getVersion",
@@ -185,7 +185,61 @@ describe("preload — origin guard (#472)", () => {
       "onUpdateStatus",
       "platform",
       "relaunchToUpdate",
+      "tokenStorage",
     ]);
+  });
+
+  // #297 — the keychain surface is the highest-value thing on the bridge,
+  // so it must be covered by the same origin guard as everything else.
+  it("withholds tokenStorage from a foreign origin along with the rest of the bridge", async () => {
+    const { installBridge } = await import("../preload/index.js");
+    const expose = vi.fn();
+    expect(
+      installBridge({ argv: [ORIGIN_FLAG], documentOrigin: "https://attacker.example", expose }),
+    ).toBe(false);
+    expect(expose).not.toHaveBeenCalled();
+  });
+
+  it("exposes tokenStorage on the app's own origin", async () => {
+    const { installBridge } = await import("../preload/index.js");
+    const expose = vi.fn();
+    installBridge({ argv: [ORIGIN_FLAG], documentOrigin: APP_ORIGIN, expose });
+    const [, api] = expose.mock.calls[0];
+    expect(Object.keys(api.tokenStorage).sort()).toEqual(["clear", "read", "write"]);
+  });
+});
+
+describe("preload — tokenStorage bridge (#297)", () => {
+  async function bridge() {
+    await import("../preload/index.js");
+    const { contextBridge } = await import("electron");
+    return contextBridge.exposeInMainWorld.mock.calls.find(
+      ([name]) => name === "channelDesktop",
+    )[1];
+  }
+
+  it("read() invokes 'desktop:token-read' and returns the stored session", async () => {
+    const api = await bridge();
+    const { ipcRenderer } = await import("electron");
+    ipcRenderer.invoke.mockResolvedValue({ refresh_token: "rt" });
+    expect(await api.tokenStorage.read()).toEqual({ refresh_token: "rt" });
+    expect(ipcRenderer.invoke).toHaveBeenCalledWith("desktop:token-read");
+  });
+
+  it("write() forwards the session on 'desktop:token-write'", async () => {
+    const api = await bridge();
+    const { ipcRenderer } = await import("electron");
+    await api.tokenStorage.write({ refresh_token: "rt" });
+    expect(ipcRenderer.invoke).toHaveBeenCalledWith("desktop:token-write", {
+      refresh_token: "rt",
+    });
+  });
+
+  it("clear() invokes 'desktop:token-clear'", async () => {
+    const api = await bridge();
+    const { ipcRenderer } = await import("electron");
+    await api.tokenStorage.clear();
+    expect(ipcRenderer.invoke).toHaveBeenCalledWith("desktop:token-clear");
   });
 });
 

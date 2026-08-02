@@ -64,13 +64,41 @@ async function getHtml(port, path) {
 describe("startLoopback — success path", () => {
   it("resolves onResult with the token when state matches", async () => {
     const state = generateState();
-    let resolved;
-    const onResult = vi.fn((v) => { resolved = v; });
+    const onResult = vi.fn();
     const { port, close } = await startLoopback({ state, onResult });
     const res = await getHtml(port, `/callback?token=THE_JWT&state=${state}`);
     expect(res.status).toBe(200);
     expect(res.body).toMatch(/close this window/i);
-    expect(onResult).toHaveBeenCalledWith({ ok: true, token: "THE_JWT" });
+    // No refresh_token on the redirect: a bypass login, or a fail-soft
+    // mint. Still a valid access-token-only session (#297).
+    expect(onResult).toHaveBeenCalledWith({ ok: true, token: "THE_JWT", refreshToken: "" });
+    await close();
+  });
+
+  it("carries the refresh_token off the redirect when the server minted one", async () => {
+    const state = generateState();
+    const onResult = vi.fn();
+    const { port, close } = await startLoopback({ state, onResult });
+    const res = await getHtml(
+      port,
+      `/callback?token=THE_JWT&refresh_token=THE_REFRESH&state=${state}`,
+    );
+    expect(res.status).toBe(200);
+    expect(onResult).toHaveBeenCalledWith({
+      ok: true,
+      token: "THE_JWT",
+      refreshToken: "THE_REFRESH",
+    });
+    await close();
+  });
+
+  it("never surfaces a refresh token on a state mismatch", async () => {
+    // The state check gates the whole callback, so a forged loopback hit
+    // cannot get a refresh token stored even if it guesses the port.
+    const onResult = vi.fn();
+    const { port, close } = await startLoopback({ state: "right-state", onResult });
+    await getHtml(port, `/callback?token=tok&refresh_token=leak&state=wrong-state`);
+    expect(onResult).toHaveBeenCalledWith({ ok: false, code: "STATE_MISMATCH" });
     await close();
   });
 
@@ -132,7 +160,7 @@ describe("login()", () => {
     const openExternal = vi.fn().mockResolvedValue(undefined);
     const appOnce = vi.fn();
     let captureOnResult;
-    const fakeStartLoopback = vi.fn(({ state, onResult }) => {
+    const fakeStartLoopback = vi.fn(({ onResult }) => {
       captureOnResult = onResult;
       return Promise.resolve({ port: 51234, close: vi.fn().mockResolvedValue() });
     });
@@ -146,8 +174,9 @@ describe("login()", () => {
       timeoutMs: 1000,
     });
     // Resolve from the loopback side
-    queueMicrotask(() => captureOnResult({ ok: true, token: "JWT123" }));
-    expect(await promise).toBe("JWT123");
+    queueMicrotask(() => captureOnResult({ ok: true, token: "JWT123", refreshToken: "RT123" }));
+    // #297: resolves the pair, so the renderer can persist both together.
+    expect(await promise).toEqual({ token: "JWT123", refreshToken: "RT123" });
 
     expect(openExternal).toHaveBeenCalledTimes(1);
     const url = new URL(openExternal.mock.calls[0][0]);
@@ -198,10 +227,10 @@ describe("login()", () => {
     };
     const p1 = loginWithDeps(deps);
     const p2 = loginWithDeps(deps);
-    queueMicrotask(() => captureOnResult({ ok: true, token: "T" }));
+    queueMicrotask(() => captureOnResult({ ok: true, token: "T", refreshToken: "RT" }));
     const [a, b] = await Promise.all([p1, p2]);
-    expect(a).toBe("T");
-    expect(b).toBe("T");
+    expect(a).toEqual({ token: "T", refreshToken: "RT" });
+    expect(b).toEqual({ token: "T", refreshToken: "RT" });
     expect(startLoopback).toHaveBeenCalledTimes(1);
   });
 
@@ -250,10 +279,10 @@ describe("login()", () => {
     });
     // Fire onResult twice — second call should be a no-op (settled guard)
     queueMicrotask(() => {
-      captureOnResult({ ok: true, token: "X" });
+      captureOnResult({ ok: true, token: "X", refreshToken: "RTX" });
       captureOnResult({ ok: false, code: "USER_CANCELLED" }); // should be ignored
     });
-    expect(await promise).toBe("X");
+    expect(await promise).toEqual({ token: "X", refreshToken: "RTX" });
   });
 
   it("onAppQuit fires before server is set (server still null)", async () => {
@@ -277,8 +306,8 @@ describe("login()", () => {
     });
     // Fire quit before server resolves (captured before .then callback)
     // Then resolve normally
-    queueMicrotask(() => captureOnResult({ ok: true, token: "Y" }));
-    expect(await promise).toBe("Y");
+    queueMicrotask(() => captureOnResult({ ok: true, token: "Y", refreshToken: "RTY" }));
+    expect(await promise).toEqual({ token: "Y", refreshToken: "RTY" });
   });
 });
 

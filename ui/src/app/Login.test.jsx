@@ -107,6 +107,7 @@ describe("Login", () => {
 
 describe("Login (desktop mode)", () => {
   let storage;
+  let keychain;
 
   beforeEach(() => {
     navigateSpy.mockClear();
@@ -121,7 +122,17 @@ describe("Login (desktop mode)", () => {
     }));
     document.documentElement.removeAttribute("data-theme");
     __resetChannelPrefsForTest();
-    window.channelDesktop = { isDesktop: true, login: vi.fn().mockResolvedValue(DESKTOP_JWT) };
+    keychain = {
+      read: vi.fn().mockResolvedValue(null),
+      write: vi.fn().mockResolvedValue(undefined),
+      clear: vi.fn().mockResolvedValue(undefined),
+    };
+    window.channelDesktop = {
+      isDesktop: true,
+      // #297: the loopback resolves the pair, not a bare token string.
+      login: vi.fn().mockResolvedValue({ token: DESKTOP_JWT, refreshToken: "rt-1" }),
+      tokenStorage: keychain,
+    };
   });
 
   afterEach(() => {
@@ -143,10 +154,28 @@ describe("Login (desktop mode)", () => {
     expect(JSON.parse(localStorage.getItem(TOKEN_KEY)).access_token).toBe(DESKTOP_JWT);
     expect(navigateSpy).toHaveBeenCalledWith("/app");
   });
+
+  it("hands the refresh token to the OS keychain, never to localStorage", async () => {
+    render(<MemoryRouter><Login /></MemoryRouter>);
+    await userEvent.click(screen.getByRole("button", { name: /sign in with google/i }));
+    expect(keychain.write).toHaveBeenCalledWith({ refresh_token: "rt-1" });
+    expect(JSON.stringify(storage)).not.toContain("rt-1");
+  });
+
+  it("clears any stale keychain entry when the login minted no refresh token", async () => {
+    // The desktop-dev and ?test_email= bypasses deliberately mint none.
+    window.channelDesktop.login.mockResolvedValue({ token: DESKTOP_JWT, refreshToken: "" });
+    render(<MemoryRouter><Login /></MemoryRouter>);
+    await userEvent.click(screen.getByRole("button", { name: /sign in with google/i }));
+    expect(keychain.clear).toHaveBeenCalled();
+    expect(keychain.write).not.toHaveBeenCalled();
+    expect(navigateSpy).toHaveBeenCalledWith("/app");
+  });
 });
 
 describe("Login (desktop mode — malformed token)", () => {
   let storage;
+  let keychain;
 
   beforeEach(() => {
     navigateSpy.mockClear();
@@ -161,7 +190,16 @@ describe("Login (desktop mode — malformed token)", () => {
     }));
     document.documentElement.removeAttribute("data-theme");
     __resetChannelPrefsForTest();
-    window.channelDesktop = { isDesktop: true, login: vi.fn().mockResolvedValue("not-a-jwt") };
+    keychain = {
+      read: vi.fn().mockResolvedValue(null),
+      write: vi.fn().mockResolvedValue(undefined),
+      clear: vi.fn().mockResolvedValue(undefined),
+    };
+    window.channelDesktop = {
+      isDesktop: true,
+      login: vi.fn().mockResolvedValue({ token: "not-a-jwt", refreshToken: "rt-1" }),
+      tokenStorage: keychain,
+    };
   });
 
   afterEach(() => {
@@ -175,6 +213,9 @@ describe("Login (desktop mode — malformed token)", () => {
     expect(await screen.findByText(/login failed/i)).toBeInTheDocument();
     expect(localStorage.getItem(TOKEN_KEY)).toBeNull();
     expect(navigateSpy).not.toHaveBeenCalled();
+    // saveSession throws first, so no refresh credential is stored for a
+    // session that never started.
+    expect(keychain.write).not.toHaveBeenCalled();
   });
 });
 
