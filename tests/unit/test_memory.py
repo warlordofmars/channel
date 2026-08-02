@@ -332,8 +332,15 @@ def test_one_shared_derivation_across_every_call_site():
     from channel.agents.tools import memory_tools as memory_tools_module
     from channel.api import _debug as debug_module
     from channel.api import chats as chats_module
+    from channel.api import memory as memory_api_module
 
-    for module in (recall_module, memory_tools_module, chats_module, debug_module):
+    for module in (
+        recall_module,
+        memory_tools_module,
+        chats_module,
+        debug_module,
+        memory_api_module,
+    ):
         assert module.derive_actor_id is derive_actor_id, module.__name__
 
 
