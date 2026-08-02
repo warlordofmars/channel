@@ -163,6 +163,21 @@ describe("Dashboard", () => {
     getAdminMetricsTimeseries.mockResolvedValue(tsFixture());
   });
 
+  // #468 — both grids are multi-column and neither collapsed at 390px, which
+  // sliced the "7 days" card and the "Tool calls" chart off the right edge.
+  // The className is the only handle app.css's ≤640px block has on an inline
+  // style; the inline templates below are what desktop still renders from.
+  it("marks both multi-column grids for the mobile single-column collapse", async () => {
+    await act(async () => render(<Dashboard />));
+
+    const rollups = screen.getByTestId("rollup-grid");
+    const charts = screen.getByTestId("charts-grid");
+    expect(rollups.className).toBe("admin-grid");
+    expect(charts.className).toBe("admin-grid");
+    expect(rollups.style.gridTemplateColumns).toBe("repeat(3, 1fr)");
+    expect(charts.style.gridTemplateColumns).toBe("repeat(2, 1fr)");
+  });
+
   it("renders the three rollup cards with active users and a derived recall rate", async () => {
     await act(async () => render(<Dashboard />));
 

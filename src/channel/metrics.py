@@ -312,6 +312,62 @@ async def record_tool_call_outcome(success: bool) -> None:
     await emit_metric(metric)
 
 
+async def record_refresh_outcome(success: bool, reason: str | None = None) -> None:
+    """Emit the refresh-token SLIs for one ``POST /auth/refresh`` (#294).
+
+    Exactly one of ``RefreshSuccess`` / ``RefreshFailure`` is emitted per
+    request that reaches the route — including the requests rejected
+    before a token is ever read (missing CSRF header, no credential
+    presented, rate-limited). That invariant is what makes
+    ``RefreshFailure / (RefreshSuccess + RefreshFailure)`` a real ratio
+    rather than a count against an unknown denominator.
+
+    Two subset counters ride alongside a failure, mirroring how
+    ``BedrockThrottles`` is a named subset of ``BedrockErrors`` in
+    :func:`record_bedrock_turn`:
+
+    * ``RefreshReuseDetected`` — the OAuth 2.1 breach signal (RFC 9700
+      §4.14.2): a rotated token was presented again, so
+      ``consume_refresh_token`` revoked the whole device family. This is
+      the one counter here worth alarming on. It is deliberately NOT
+      folded into the general failure counter's noise, where a routine
+      expiry would drown it.
+    * ``RefreshRateLimited`` — the in-process limiter rejected the call.
+      Without this the limiter is invisible: a threshold set too low
+      would look exactly like clients that stopped refreshing, and the
+      "did my rate limit just sign everyone out?" question would have no
+      answer. Emitting it is what makes the limit tunable from evidence.
+
+    Cardinality
+    -----------
+    One dimension set, ``{Environment}`` — no per-user, per-device, or
+    per-IP dimensions, which is the same blowup guard every counter in
+    this module applies, and matters more here than anywhere else in the
+    module: this endpoint's natural dimension candidates (``user_id``,
+    ``device_id``, client IP) are precisely the unbounded ones, and one
+    of them is PII.
+
+    ``reason`` is a **branch selector, not a dimension** — it picks which
+    subset counter (if any) increments and never reaches CloudWatch, so
+    callers may pass the full
+    :class:`~channel.models.RefreshConsumeOutcome` taxonomy
+    (``not_found`` / ``revoked`` / ``expired_idle`` / ...) without
+    multiplying metrics. The per-reason breakdown stays in the
+    ``auth.refresh rejected`` log line, queryable via Logs Insights. The
+    signature accepts no ``**dimensions`` so a future caller cannot slip
+    one alongside it.
+    """
+    metrics: list[tuple[str, float, str]] = [
+        ("RefreshSuccess" if success else "RefreshFailure", 1.0, "Count")
+    ]
+    if not success:
+        if reason == "reused":
+            metrics.append(("RefreshReuseDetected", 1.0, "Count"))
+        elif reason == "rate_limited":
+            metrics.append(("RefreshRateLimited", 1.0, "Count"))
+    await _emit_batch(metrics, [{"Environment": ENVIRONMENT}])
+
+
 async def record_mcp_tools_capped() -> None:
     """Emit a CloudWatch counter for one MCP server whose advertised tool
     set exceeded the per-server budget and was truncated (#389).

@@ -73,6 +73,11 @@ const CHARTS = [
 
 const MUTED_STYLE = { fontSize: 13.5, color: "var(--ink-soft)" };
 
+// The two multi-column grids below also carry `className="admin-grid"`, which
+// exists solely so the ≤640px block in app.css can collapse them to one column
+// (#468) — an inline style is otherwise unreachable from a media query. The
+// inline objects stay the desktop source of truth, so wide viewports are
+// untouched by that rule.
 const ROLLUP_GRID_STYLE = {
   display: "grid",
   gridTemplateColumns: "repeat(3, 1fr)",
@@ -321,7 +326,7 @@ function SummarySection() {
   if (degraded) return <DegradedPanel label="Usage rollups" />;
   if (summary === null) return <p style={MUTED_STYLE}>Loading metrics…</p>;
   return (
-    <div style={ROLLUP_GRID_STYLE}>
+    <div className="admin-grid" style={ROLLUP_GRID_STYLE} data-testid="rollup-grid">
       {ROLLUPS.map((r) => (
         <RollupCard key={r.key} id={r.key} label={r.label} section={summary[r.key]} />
       ))}
@@ -445,7 +450,7 @@ export default function Dashboard() {
           <p>Usage rollups and trends across the Channel deployment.</p>
         </div>
         <SummarySection />
-        <div style={CHARTS_GRID_STYLE}>
+        <div className="admin-grid" style={CHARTS_GRID_STYLE} data-testid="charts-grid">
           {CHARTS.map((c) => (
             <MetricChart
               key={c.metric}
