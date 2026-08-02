@@ -2,13 +2,15 @@
 """Unit tests for JWT token helpers."""
 
 import os
+import time
 
 import pytest
-from jose import JWTError
+from jose import JWTError, jwt
 
 os.environ.setdefault("CHANNEL_JWT_SECRET", "test-secret-for-unit-tests")
 
 from channel.auth.tokens import (  # noqa: E402
+    MGMT_JWT_TTL_SECONDS,
     Token,
     decode_jwt,
     decode_mgmt_jwt,
@@ -74,11 +76,84 @@ def test_issue_mgmt_jwt_jti_is_unique_per_token():
     assert a != b
 
 
-def test_issue_mgmt_jwt_ttl_is_30_days():
-    """TTL bumped from 8h to 30 days for Slack-like multi-week sessions (#240)."""
+def test_issue_mgmt_jwt_ttl_is_one_hour():
+    """Access-token TTL reverted from 30 days to 1h now that refresh exists (#291).
+
+    #240 raised this to 30 days as a stop-gap while there was no refresh
+    flow. With ``POST /auth/refresh`` in place the long-lived credential
+    is the opaque, revocable refresh token, so the bearer token that
+    rides on every request goes back to a short window.
+    """
     user = {"user_id": "u1", "email": "a@b.com", "display_name": "Alice", "role": "user"}
     claims = decode_mgmt_jwt(issue_mgmt_jwt(user))
-    assert claims["exp"] - claims["iat"] == 2_592_000
+    assert claims["exp"] - claims["iat"] == 3600
+    assert MGMT_JWT_TTL_SECONDS == 3600
+
+
+def _mgmt_token_without_jti() -> str:
+    """A pre-#240 mgmt JWT: correctly signed, no ``jti`` claim."""
+    from channel.auth import tokens
+
+    now = int(time.time())
+    return jwt.encode(
+        {
+            "iss": tokens.ISSUER,
+            "sub": "legacy@example.com",
+            "email": "legacy@example.com",
+            "role": "user",
+            "typ": "mgmt",
+            "iat": now,
+            "exp": now + 3600,
+        },
+        tokens._jwt_secret(),
+        algorithm=tokens.JWT_ALGORITHM,
+    )
+
+
+def test_decode_mgmt_jwt_rejects_denied_jti(monkeypatch):
+    """A revoked jti fails the decode itself, not just one caller (#291)."""
+    monkeypatch.setattr("channel.auth.tokens.is_jti_denied", lambda _jti: True)
+    user = {"user_id": "u1", "email": "a@b.com", "display_name": "Alice", "role": "user"}
+    with pytest.raises(JWTError, match="Token revoked"):
+        decode_mgmt_jwt(issue_mgmt_jwt(user))
+
+
+def test_decode_mgmt_jwt_checks_the_tokens_own_jti(monkeypatch):
+    """The denylist read is keyed by the presented token's jti, not a constant."""
+    seen: list[str] = []
+
+    def _record(jti: str) -> bool:
+        seen.append(jti)
+        return False
+
+    monkeypatch.setattr("channel.auth.tokens.is_jti_denied", _record)
+    user = {"user_id": "u1", "email": "a@b.com", "display_name": "Alice", "role": "user"}
+    encoded = issue_mgmt_jwt(user)
+    claims = decode_mgmt_jwt(encoded)
+    assert seen == [claims["jti"]]
+
+
+def test_decode_mgmt_jwt_skips_denylist_when_no_jti(monkeypatch):
+    """A legacy token without a jti has nothing to look up, so no read happens (#240)."""
+
+    def _boom(_jti: str) -> bool:
+        raise AssertionError("is_jti_denied must not be called when jti is absent")
+
+    monkeypatch.setattr("channel.auth.tokens.is_jti_denied", _boom)
+    claims = decode_mgmt_jwt(_mgmt_token_without_jti())
+    assert claims["email"] == "legacy@example.com"
+
+
+def test_decode_mgmt_jwt_propagates_denylist_read_failure(monkeypatch):
+    """A storage failure must not degrade to 'not revoked' (#291)."""
+
+    def _boom(_jti: str) -> bool:
+        raise RuntimeError("dynamodb unavailable")
+
+    monkeypatch.setattr("channel.auth.tokens.is_jti_denied", _boom)
+    user = {"user_id": "u1", "email": "a@b.com", "display_name": "Alice", "role": "user"}
+    with pytest.raises(RuntimeError, match="dynamodb unavailable"):
+        decode_mgmt_jwt(issue_mgmt_jwt(user))
 
 
 def test_token_dataclass_is_valid():

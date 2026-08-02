@@ -3,6 +3,7 @@
 
 import os
 
+import pytest
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 
@@ -71,22 +72,29 @@ def test_require_admin_rejects_non_admin():
 
 
 def test_require_mgmt_user_rejects_revoked_jti(monkeypatch):
-    """A token whose jti was revoked at logout is rejected with 401 (#240)."""
-    monkeypatch.setattr("channel.api._auth.is_jti_denied", lambda _jti: True, raising=False)
+    """A token whose jti was revoked at logout is rejected with 401 (#240).
+
+    The denylist read itself lives in ``decode_mgmt_jwt`` since #291, so
+    the seam is patched there; what this test pins is the *dependency's*
+    contract — revocation surfaces as a 401, not a 500 or a pass.
+    """
+    monkeypatch.setattr("channel.auth.tokens.is_jti_denied", lambda _jti: True)
     resp = _client.get("/me", headers={"Authorization": f"Bearer {_user_token()}"})
     assert resp.status_code == 401
+    assert resp.json()["detail"] == "Token revoked"
 
 
-def test_require_mgmt_user_skips_denylist_when_no_jti(monkeypatch):
-    """A (legacy) token without a jti claim never triggers the denylist read (#240)."""
+def test_require_mgmt_user_propagates_denylist_read_failure(monkeypatch):
+    """A denylist read error is not a JWTError, so it must not become a 401 (#291).
 
-    def _no_jti_claims(_token: str) -> dict:
-        return {"sub": "u3", "email": "x@y.com", "role": "user", "typ": "mgmt"}
+    Failing open (or degrading to "invalid token") would make revocation
+    bypassable by inducing DynamoDB errors; the storage failure surfaces
+    like any other DDB-backed endpoint's would.
+    """
 
     def _boom(_jti: str) -> bool:
-        raise AssertionError("is_jti_denied must not be called when jti is absent")
+        raise RuntimeError("dynamodb unavailable")
 
-    monkeypatch.setattr("channel.api._auth.decode_mgmt_jwt", _no_jti_claims)
-    monkeypatch.setattr("channel.api._auth.is_jti_denied", _boom, raising=False)
-    resp = _client.get("/me", headers={"Authorization": "Bearer x"})
-    assert resp.status_code == 200
+    monkeypatch.setattr("channel.auth.tokens.is_jti_denied", _boom)
+    with pytest.raises(RuntimeError, match="dynamodb unavailable"):
+        _client.get("/me", headers={"Authorization": f"Bearer {_user_token()}"})

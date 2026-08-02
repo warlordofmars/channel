@@ -26,8 +26,8 @@ from channel.auth.mgmt_auth import (  # noqa: E402
     _consume_pending_state,
     _create_pending_state,
     _html_redirect,
-    _make_user,
     _mgmt_callback_uri,
+    make_mgmt_user,
 )
 
 _client = TestClient(app, follow_redirects=False)
@@ -113,7 +113,7 @@ def test_html_redirect_targets_app_not_marketing_root():
 
 def test_make_user_role_user(monkeypatch):
     monkeypatch.setenv("ALLOWED_EMAILS", "[]")
-    user = _make_user("user@example.com", "Alice")
+    user = make_mgmt_user("user@example.com", "Alice")
     assert user["email"] == "user@example.com"
     assert user["display_name"] == "Alice"
     assert user["role"] == "user"
@@ -121,7 +121,7 @@ def test_make_user_role_user(monkeypatch):
 
 def test_make_user_role_admin(monkeypatch):
     monkeypatch.setenv("ALLOWED_EMAILS", '["admin@example.com"]')
-    user = _make_user("admin@example.com", "Admin")
+    user = make_mgmt_user("admin@example.com", "Admin")
     assert user["role"] == "admin"
 
 
