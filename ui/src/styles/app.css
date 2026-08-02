@@ -1633,3 +1633,106 @@ html.is-electron-mac .sb-top {
     padding-right: calc(24px + env(safe-area-inset-right));
   }
 }
+
+/* ============================================================
+   STANDALONE VIEWPORT CORRECTION (#467, reopened)
+
+   `.stage` at the top of this file sizes itself three ways —
+   `position: fixed; inset: 0`, `height: 100vh`, `height: 100dvh` — and
+   all three resolve against the SAME box: the layout viewport. A fixed
+   element's containing block *is* the layout viewport, and the viewport
+   units resolve against it too. So when iOS reports a layout viewport
+   shorter than the window the installed PWA actually fills, every one of
+   those declarations is short by the same amount. That is why removing
+   the height (pre-#467) and adding `100dvh` (#471) produced the
+   identical dead strip below the composer: they are two spellings of one
+   measurement, and the measurement is what is wrong.
+
+   `ui/src/lib/appViewport.js` measures the disagreement
+   (`window.innerHeight` vs `documentElement.clientHeight` — see that
+   module for why `innerHeight` is the trustworthy one on iOS) and
+   publishes the true height as `--app-vh` ONLY when the layout viewport
+   is measurably shorter. The rule below is what consumes it.
+
+   Deliberately NOT inside a width media query: an installed PWA on an
+   iPad renders the ≥641px layout and would be equally affected. The
+   width gate would be the wrong axis — the correct gate is the measured
+   shortfall, which is where it lives.
+
+   Desktop and mobile-Safari rendering are untouched by construction, not
+   by promise. The attribute selector is what makes that true: on any
+   browser where the two heights agree (every desktop engine) nothing is
+   published, `html[data-app-vh]` never matches, and `.stage` keeps the
+   original `100vh` / `100dvh` cascade byte-for-byte. In mobile Safari
+   `innerHeight` is the *smaller* visual viewport, so the grow-only
+   comparison in appViewport.js declines to publish there as well.
+   ============================================================ */
+
+html[data-app-vh] .stage { height: var(--app-vh); }
+
+/* ---------- TEMPORARY: on-device layout readout (#467) ----------
+
+   Rendered by `ui/src/components/LayoutDebug.jsx` only when the URL
+   carries `?__layout-debug=1`; without it the component never mounts, so
+   none of these rules ever match a node. Remove this block together with
+   the component once the dead strip is confirmed fixed on a real
+   installed iOS PWA — tracked by the follow-up issue linked from #467.
+
+   Sized for a ~390px screen: 10px monospace, wrapping, and scrollable,
+   because the chain readout is longer than any phone viewport. Fills the
+   screen deliberately — one screenshot then carries every number. */
+.layout-debug {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 9999;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: calc(8px + env(safe-area-inset-top)) calc(8px + env(safe-area-inset-right))
+    calc(8px + env(safe-area-inset-bottom)) calc(8px + env(safe-area-inset-left));
+  background: var(--canvas);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.layout-debug-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+}
+.layout-debug-title { color: var(--accent); font-weight: 700; letter-spacing: 0.04em; }
+.layout-debug-refresh {
+  flex-shrink: 0;
+  min-height: 28px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--raised);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  cursor: pointer;
+}
+.layout-debug-rows { margin: 0 0 10px; }
+.layout-debug-row { display: flex; gap: 8px; justify-content: space-between; }
+.layout-debug-row dt { color: var(--ink-soft); }
+.layout-debug-row dd { margin: 0; color: var(--ink); text-align: right; }
+.layout-debug-chain-head {
+  color: var(--accent);
+  font-weight: 700;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+}
+.layout-debug-chain { margin: 4px 0 0; padding: 0 0 0 18px; }
+.layout-debug-node { margin-bottom: 8px; }
+.layout-debug-node-label { display: block; color: var(--accent); }
+.layout-debug-node-rect { display: block; color: var(--ink); }
+.layout-debug-node-styles { display: block; color: var(--ink-soft); }

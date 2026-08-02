@@ -1,8 +1,10 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
-import React from "react";
+import React, { useEffect } from "react";
 import { BrowserRouter, Outlet, Route, Routes } from "react-router-dom";
 import AuthGate from "./components/AuthGate.jsx";
 import ErrorBoundary from "./components/ErrorBoundary.jsx";
+import LayoutDebug, { isLayoutDebugRequested } from "./components/LayoutDebug.jsx";
+import { startAppViewportSync } from "./lib/appViewport.js";
 import { useChannelPrefs } from "./hooks/useChannelPrefs.js";
 import { ChatsProvider } from "./hooks/ChatsContext.jsx";
 import AdminHome from "./app/admin/AdminHome.jsx";
@@ -51,6 +53,11 @@ function AppLayout() {
 
 export default function App() {
   useChannelPrefs();
+  // Corrects the app layer's height when iOS reports a layout viewport
+  // shorter than the window the installed PWA actually fills (#467).
+  // A no-op wherever the two agree, which is every desktop engine — see
+  // `lib/appViewport.js`. Returns its own teardown.
+  useEffect(startAppViewportSync, []);
   return (
     <ErrorBoundary>
       <BrowserRouter>
@@ -89,6 +96,11 @@ export default function App() {
           <Route path="*" element={<NotFound />} />
         </Routes>
       </BrowserRouter>
+      {/* TEMPORARY (#467): on-device layout readout, gated here rather
+          than inside the component so that without `?__layout-debug=1`
+          it never mounts — no state, no listeners, no measuring. Remove
+          with the component once the fix is confirmed on device. */}
+      {isLayoutDebugRequested() && <LayoutDebug />}
     </ErrorBoundary>
   );
 }
