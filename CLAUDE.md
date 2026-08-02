@@ -561,6 +561,21 @@ request (one middleware, one clock — a second one would time the request
 twice for no new signal). It emits `RequestCount`, `RequestLatencyMs`,
 and `Request4xxCount` / `Request5xxCount` via `record_request_outcome`.
 
+- **`_log_requests` is registered LAST on purpose**, which makes it the
+  *outermost* user middleware (Starlette runs the most recently added
+  wrapper first). From out there it observes every response the app
+  produces — including `_verify_origin_secret`'s 403, which an inner
+  layer never sees.
+- **Unhandled exceptions are metered as a synthetic 500, then re-raised.**
+  `ServerErrorMiddleware` — which turns an escaped exception into the 500
+  the client receives — sits outside the *user* middleware stack
+  entirely, so without the explicit `try/except` in `_log_requests` the
+  most alarm-worthy failure class (a route raising) would produce neither
+  a log line nor a `Request5xxCount` datapoint, and `ApiRequestErrorRate`
+  would stay flat through a real outage. The catch is `except Exception`,
+  not `BaseException`, so a client disconnect (`CancelledError`) is never
+  miscounted as a 500.
+
 - **`duration_ms` is time to response *start*, not last byte.** Starlette's
   `BaseHTTPMiddleware` returns from `call_next` once `http.response.start`
   arrives, so an SSE chat turn contributes its time-to-first-byte, not its

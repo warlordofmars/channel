@@ -28,6 +28,7 @@ from fastapi.testclient import TestClient
 
 os.environ.setdefault("CHANNEL_JWT_SECRET", "test-secret-for-unit-tests")
 
+from channel.api._auth import require_mgmt_user  # noqa: E402
 from channel.auth.tokens import issue_mgmt_jwt  # noqa: E402
 from channel.logging_config import fingerprint_id  # noqa: E402
 from channel.metrics import REQUEST_ROUTE_FALLBACK  # noqa: E402
@@ -98,6 +99,57 @@ def test_status_code_is_forwarded_for_client_errors(client: TestClient, record_s
 
     assert response.status_code in (401, 403)
     assert _recorded(record_stub)["status_code"] == response.status_code
+
+
+def test_unhandled_exception_is_metered_as_a_synthetic_500(
+    client: TestClient, main_mod: ModuleType, record_stub
+) -> None:
+    """The alarm-worthiest case, and the one the middleware stack hides.
+
+    ``ServerErrorMiddleware`` — which converts an escaped exception into
+    the 500 the client receives — sits OUTSIDE the user middleware stack,
+    so a route that raises would otherwise produce neither a log line nor
+    a ``Request5xxCount`` datapoint, leaving ``ApiRequestErrorRate`` flat
+    through a real outage. The exception must still propagate untouched.
+    """
+
+    def _boom() -> dict:
+        raise RuntimeError("route exploded")
+
+    main_mod.app.dependency_overrides[require_mgmt_user] = _boom
+    try:
+        with pytest.raises(RuntimeError, match="route exploded"):
+            client.get("/api/models")
+    finally:
+        main_mod.app.dependency_overrides.clear()
+
+    call = _recorded(record_stub)
+    assert call["status_code"] == 500
+    assert call["route"] == "/api/models"
+
+
+def test_origin_verify_rejection_is_metered(
+    client: TestClient, record_stub, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``_log_requests`` is registered last and is therefore the outermost
+    user middleware, so it observes the origin-verify 403 that an inner
+    layer would never see."""
+    from channel.auth import tokens
+
+    # The resolver is lru_cache'd; clear on both sides so neither a prior
+    # test's value leaks in nor this one's leaks out.
+    tokens._origin_verify_secret.cache_clear()
+    monkeypatch.setenv("CHANNEL_ORIGIN_VERIFY_SECRET", "expected-secret")
+    try:
+        response = client.get("/health")
+    finally:
+        tokens._origin_verify_secret.cache_clear()
+
+    assert response.status_code == 403
+    call = _recorded(record_stub)
+    assert call["status_code"] == 403
+    # Rejected before routing, so no route matched.
+    assert call["route"] == REQUEST_ROUTE_FALLBACK
 
 
 def test_metric_emission_failure_never_breaks_the_request(

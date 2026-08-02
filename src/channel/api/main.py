@@ -100,29 +100,15 @@ def _route_template(request: Request) -> str:
     return path if isinstance(path, str) else REQUEST_ROUTE_FALLBACK
 
 
-@app.middleware("http")
-async def _log_requests(request: Request, call_next):
-    """Log AND meter every request: method, path, status code, duration.
-
-    One middleware rather than two (#111 lists the structured-log and EMF
-    emissions as separate sub-tasks) because both need the same clock and
-    the same post-``call_next`` state — a second middleware would time the
-    request twice and add an ASGI layer per request for no new signal.
-
-    ``duration_ms`` is time to **response start**, not to last byte: an SSE
-    turn's ``call_next`` returns as soon as the headers are ready, so a
-    multi-minute stream logs its time-to-first-byte. See
-    ``record_request_outcome`` for why that is the right latency SLI here.
-    """
-    request_id = (
-        request.headers.get("x-amzn-requestid")
-        or request.headers.get("x-request-id")
-        or new_request_id()
-    )
-    set_request_context(request_id)
-
-    t0 = time.monotonic()
-    response = await call_next(request)
+async def _finish_request(
+    request: Request,
+    request_id: str,
+    status_code: int,
+    t0: float,
+    *,
+    unhandled: bool = False,
+) -> None:
+    """Emit the completion log line + the EMF request SLIs for one request."""
     duration_ms = int((time.monotonic() - t0) * 1000)
 
     # ``require_mgmt_user`` stashes the caller's fingerprint on request
@@ -131,16 +117,20 @@ async def _log_requests(request: Request, call_next):
     # request does NOT propagate back out to this frame.
     set_request_context(request_id, getattr(request.state, "client_id", ""))
 
-    level = "warning" if response.status_code >= 400 else "info"
+    level = "error" if unhandled else "warning" if status_code >= 400 else "info"
     getattr(logger, level)(
         "%s %s %d",
         request.method,
         request.url.path,
-        response.status_code,
+        status_code,
+        # Only the unhandled path has a live exception to attach; on every
+        # other path ``exc_info=True`` would be a no-op at best and would
+        # splice an unrelated in-flight traceback at worst.
+        exc_info=unhandled,
         extra={
             "method": request.method,
             "path": request.url.path,
-            "status_code": response.status_code,
+            "status_code": status_code,
             "duration_ms": duration_ms,
         },
     )
@@ -151,13 +141,11 @@ async def _log_requests(request: Request, call_next):
     try:
         await record_request_outcome(
             route=_route_template(request),
-            status_code=response.status_code,
+            status_code=status_code,
             duration_ms=duration_ms,
         )
     except Exception:
         logger.warning("request metric emission failed", exc_info=True)
-
-    return response
 
 
 @app.middleware("http")
@@ -181,6 +169,54 @@ async def _verify_origin_secret(request: Request, call_next):
 
         return JSONResponse(status_code=403, content={"detail": "Forbidden"})
     return await call_next(request)
+
+
+# Registered LAST, therefore the OUTERMOST user middleware: Starlette
+# builds the stack so the most recently added wrapper runs first. That
+# ordering is deliberate (#111) — from out here the request SLIs observe
+# every response the app produces, including the origin-verify 403 above,
+# which an inner layer would never see. It also means the request_id
+# context is established before any other middleware runs.
+@app.middleware("http")
+async def _log_requests(request: Request, call_next):
+    """Log AND meter every request: method, path, status code, duration.
+
+    One middleware rather than two (#111 lists the structured-log and EMF
+    emissions as separate sub-tasks) because both need the same clock and
+    the same post-``call_next`` state — a second middleware would time the
+    request twice and add an ASGI layer per request for no new signal.
+
+    ``duration_ms`` is time to **response start**, not to last byte: an SSE
+    turn's ``call_next`` returns as soon as the headers are ready, so a
+    multi-minute stream logs its time-to-first-byte. See
+    ``record_request_outcome`` for why that is the right latency SLI here.
+
+    Unhandled exceptions are metered as a synthetic 500 and re-raised.
+    ``ServerErrorMiddleware`` — which turns an escaped exception into the
+    500 the client actually receives — sits OUTSIDE the user middleware
+    stack entirely, so without this the single most alarm-worthy class of
+    failure (a route raising, e.g. the #291 denylist-read failure) would
+    produce neither a log line nor a ``Request5xxCount`` datapoint, and
+    ``ApiRequestErrorRate`` would stay flat through a real outage.
+    ``except Exception`` deliberately excludes ``BaseException``, so a
+    client disconnect (``CancelledError``) is not miscounted as a 500.
+    """
+    request_id = (
+        request.headers.get("x-amzn-requestid")
+        or request.headers.get("x-request-id")
+        or new_request_id()
+    )
+    set_request_context(request_id)
+
+    t0 = time.monotonic()
+    try:
+        response = await call_next(request)
+    except Exception:
+        await _finish_request(request, request_id, 500, t0, unhandled=True)
+        raise
+
+    await _finish_request(request, request_id, response.status_code, t0)
+    return response
 
 
 # Management UI auth endpoints (unauthenticated — issues mgmt JWTs)
