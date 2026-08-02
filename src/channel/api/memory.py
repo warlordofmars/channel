@@ -36,7 +36,10 @@ endpoints (#476 / #477 / #479) inherit one definition of a record.
   Showing stored records alone implies Channel uses far more than it does;
   showing only the recalled slice implies it has forgotten far more than it
   has. Both are silent lies in opposite directions (#227), so the response
-  carries both and every record carries ``used_in_recall``.
+  carries both and every record carries ``used_in_recall``. When
+  ``recall_window.enabled`` is false the hook injects nothing, so every
+  ``used_in_recall`` is false too — the flag and the envelope can never
+  contradict each other.
 - ``withheld_record_count`` — see §Scoping.
 - ``next_cursor`` — opaque; page on it, never on ``len(groups)``.
 
@@ -229,7 +232,18 @@ async def list_memory_records(
     client = _agentcore_client()
     memory_id = await asyncio.to_thread(_memory_id_for_env)
 
-    window = await recall_window_session_ids(client, memory_id=memory_id, actor_id=actor_id)
+    # With the kill-switch off the hook injects nothing, so NOTHING is in the
+    # recall window and every ``used_in_recall`` must read false. Reporting
+    # the window a disabled hook *would* have used would be precisely the
+    # kind of confident-but-wrong claim this surface exists to stop —
+    # `recall_window.enabled: false` alone would leave the per-record flag
+    # contradicting it. Short-circuiting also saves the extra ListSessions.
+    recall_enabled = _recall_enabled()
+    window: set[str] = (
+        await recall_window_session_ids(client, memory_id=memory_id, actor_id=actor_id)
+        if recall_enabled
+        else set()
+    )
 
     if chat_id is not None:
         chat = await _load_owned_chat(chat_id, user_id)
@@ -313,7 +327,7 @@ async def list_memory_records(
     return {
         "groups": groups,
         "summaries": await _summaries_for(verified),
-        "recall_window": recall_window(enabled=_recall_enabled()),
+        "recall_window": recall_window(enabled=recall_enabled),
         "withheld_record_count": withheld_records,
         "next_cursor": _encode_cursor(page_token, actor_id) if page_token else None,
     }

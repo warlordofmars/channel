@@ -196,6 +196,24 @@ def test_recall_window_enabled_reflects_the_kill_switch(monkeypatch: pytest.Monk
     assert _call(fake, {}).json()["recall_window"]["enabled"] is False
 
 
+def test_nothing_is_used_in_recall_while_the_kill_switch_is_off(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # A disabled hook injects nothing, so no record can be in the window.
+    # `recall_window.enabled: false` alongside `used_in_recall: true` would
+    # be the response contradicting itself.
+    monkeypatch.setenv("CHANNEL_RECALL_ENABLED", "0")
+    fake = _agentcore(["chat-a"], {"chat-a": [_event("e1", ("USER", "hi"))]})
+
+    body = _call(fake, {"chat-a": _chat("chat-a")}).json()
+
+    assert body["recall_window"]["enabled"] is False
+    assert [r["used_in_recall"] for r in body["groups"][0]["records"]] == [False]
+    # The window ListSessions is skipped entirely — only the page call runs.
+    assert len(fake.list_sessions.call_args_list) == 1
+    assert "maxResults" in fake.list_sessions.call_args_list[0].kwargs
+
+
 def test_groups_are_newest_chat_first():
     fake = _agentcore(
         ["old", "new"],
