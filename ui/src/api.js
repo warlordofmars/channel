@@ -1,17 +1,206 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
 /**
  * Channel API client — thin wrapper around fetch.
- * Token is read from localStorage.
+ * Token is read from localStorage via `lib/auth.js`.
  */
+
+import { clearSession, isTokenValid, loadSession, readToken, saveSession } from "./lib/auth.js";
 
 const BASE = import.meta.env.VITE_API_BASE ?? "";
 
-function getToken() {
-  return localStorage.getItem("starter_mgmt_token") ?? "";
+// ---- Silent refresh (#295, epic #241) --------------------------------------
+//
+// #291 cut the access token's TTL from 30 days to one hour. Without a
+// client that redeems the refresh token #292 mints at login, that lands
+// as an hourly forced sign-out — which is exactly what shipped between
+// those two issues and this one. Every authenticated call below routes
+// through `authHeader`, so renewing there covers the whole surface
+// without a second place to forget.
+
+/**
+ * Renew this far ahead of expiry.
+ *
+ * Wide enough that an in-flight request never carries a token that
+ * expires mid-transit, and that a clock a few minutes off the server's
+ * still renews before the server considers the token dead.
+ */
+const REFRESH_SKEW_MS = 5 * 60 * 1000;
+
+/**
+ * How long to stop trying after a refresh is refused.
+ *
+ * Two clients legitimately have no refresh credential to present: the
+ * desktop app until #297 wires `safeStorage` persistence, and any
+ * session minted by a bypass login (which deliberately mints no refresh
+ * family). Both spend the last `REFRESH_SKEW_MS` of every access token
+ * in the renew branch, and without a cooldown each would POST
+ * `/auth/refresh` once per API call for those five minutes — straight
+ * into #294's rate limiter, to no purpose.
+ */
+const REFRESH_COOLDOWN_MS = 30 * 1000;
+
+/**
+ * CSRF header required by `POST /auth/refresh`. The value is never
+ * inspected server-side; only its non-emptiness matters (see the CSRF
+ * section of `src/channel/auth/refresh.py`'s module docstring).
+ */
+const REFRESH_CSRF_HEADER = "X-Channel-Refresh";
+
+const LOGIN_ROUTE = "/app/login";
+
+/**
+ * The one in-flight refresh, shared by every concurrent caller.
+ *
+ * **Single-flight is a correctness requirement, not an optimisation.**
+ * #290 hard-rotates the refresh token on every use and treats a
+ * re-presented token as an OAuth 2.1 reuse breach (RFC 9700 §4.14.2),
+ * which revokes the entire device family. A page load fires several API
+ * calls at once; if each ran its own refresh, the first would rotate the
+ * token and the rest would present the now-revoked predecessor — logging
+ * the user out on the exact path built to keep them signed in. Collapsing
+ * them onto one promise makes that unrepresentable.
+ */
+let refreshInFlight = null;
+
+/** Epoch ms before which no refresh is attempted. See REFRESH_COOLDOWN_MS. */
+let refreshBlockedUntil = 0;
+
+/**
+ * Whether the last failed refresh was refused by the server with a
+ * **401** — the only status that is a verdict on the credential — as
+ * opposed to unreachable. Re-derived by every attempt that resolves, so
+ * it always describes the most recent real answer; it persists across
+ * the cooldown window only because no attempt is made during it.
+ */
+let refreshRefused = false;
+
+/**
+ * Perform the actual rotation.
+ *
+ * No request body: the web transport presents the `channel_refresh`
+ * HttpOnly cookie, which JavaScript cannot read and therefore cannot
+ * send explicitly. `credentials: "include"` is what attaches it when
+ * `VITE_API_BASE` points the SPA at another origin; same-origin
+ * deployments (CloudFront in prod, the Vite proxy in dev) would send it
+ * either way.
+ */
+async function performRefresh() {
+  const response = await fetch(`${BASE}/auth/refresh`, {
+    method: "POST",
+    headers: { [REFRESH_CSRF_HEADER]: "1" },
+    credentials: "include",
+    cache: "no-store",
+  });
+  if (!response.ok) throw new ApiError("refreshSession", response.status);
+  const body = await response.json();
+  // `expires_in` is seconds from now; store an absolute local deadline.
+  // A body `refresh_token` (the desktop transport) is deliberately NOT
+  // persisted here — see the note in lib/auth.js on why localStorage
+  // never holds one. #297 owns the desktop side.
+  //
+  // `saveSession` is the single validator for what may be persisted: it
+  // throws on a missing or malformed `access_token` rather than writing
+  // an unvalidated response body into browser storage, and that throw is
+  // caught below as an ordinary refresh failure.
+  //
+  // `expires_in` absent falls through to `saveSession`'s own `exp`-claim
+  // fallback rather than computing `Date.now() + 0` — which is truthy, so
+  // it would win the fallback and store an already-expired deadline,
+  // making the client re-rotate once per API call.
+  const ttl = Number(body.expires_in);
+  saveSession(body.access_token, ttl > 0 ? Date.now() + ttl * 1000 : 0);
+  refreshRefused = false;
+  return body.access_token;
 }
 
-function authHeader() {
-  const token = getToken();
+/**
+ * Arm the cooldown and report "no new token" to every awaiting caller.
+ *
+ * Records *why* it failed, because the two reasons deserve opposite
+ * treatment. Only **401** is an authoritative "this credential is no
+ * good" and, once the access token is also dead, ends the session.
+ * Everything else — offline, DNS, TLS, 5xx, a malformed body — says
+ * nothing about the credential, and destroying a recoverable session
+ * over a transient blip that happened to straddle expiry is precisely
+ * the class of spurious logout this whole change exists to remove.
+ *
+ * Deliberately `=== 401` rather than "any 4xx". `refresh_session`
+ * documents exactly two client errors, and neither of the others is a
+ * verdict on the credential: 403 means the CSRF header was missing (our
+ * bug), and #294 is about to add **429** to this very endpoint — a rate
+ * limit is the one response most likely to arrive in a burst, and
+ * reading it as "you are signed out" would turn throttling into a mass
+ * logout. The narrow test is what keeps that from landing silently.
+ */
+function onRefreshRejected(error) {
+  refreshBlockedUntil = Date.now() + REFRESH_COOLDOWN_MS;
+  refreshRefused = error instanceof ApiError && error.status === 401;
+  return "";
+}
+
+/** Release the single-flight slot once the rotation has settled. */
+function releaseRefreshSlot() {
+  refreshInFlight = null;
+}
+
+/**
+ * Refresh at most once at a time; resolves to the new token or `""`.
+ *
+ * The `??=` read and its assignment run in the same synchronous tick, so
+ * no second caller can slip between them and start a rival rotation.
+ */
+function refreshAccessToken() {
+  refreshInFlight ??= performRefresh().catch(onRefreshRejected).finally(releaseRefreshSlot);
+  return refreshInFlight;
+}
+
+/**
+ * Give up on the session: clear local state and route to the login page.
+ *
+ * The single place the SPA gives up on a session, so the "hard reload vs.
+ * soft in-app redirect" question (#483) has exactly one site to change.
+ */
+export function endSession() {
+  clearSession();
+  globalThis.location.assign(LOGIN_ROUTE);
+}
+
+/**
+ * The access token to send, renewing it first if it is about to expire.
+ *
+ * A refused refresh is **not** by itself a sign-out. `/auth/refresh`
+ * answers 401 both for a dead token and for a client that has no
+ * refresh credential at all, and that second case is the epic's
+ * migration path rather than an error (see `refresh_session`'s
+ * docstring): desktop until #297, bypass logins, and any session minted
+ * before #292 all live there. Treating it as a sign-out would evict
+ * exactly those users five minutes *earlier* than the status quo. So
+ * the still-valid token is used, and the session only ends once it is
+ * genuinely unusable.
+ */
+async function accessToken() {
+  const { access_token: token, expires_at: expiresAt } = loadSession();
+  // No session at all: let the request go out unauthenticated and 401.
+  // AuthGate owns the redirect for that case; competing with it here
+  // would race two navigations on a cold load.
+  if (!token) return "";
+  if (expiresAt - Date.now() >= REFRESH_SKEW_MS) return token;
+
+  const refreshed = Date.now() < refreshBlockedUntil ? "" : await refreshAccessToken();
+  if (refreshed) return refreshed;
+  if (isTokenValid(token)) return token;
+  if (refreshRefused) {
+    endSession();
+    return "";
+  }
+  // Unusable token, but the refresh endpoint was never reached, so the
+  // refresh cookie may well still be good. Keep local state and let this
+  // request fail on its own; a later attempt can still recover.
+  return token;
+}
+
+async function authHeader() {
+  const token = await accessToken();
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
@@ -46,7 +235,7 @@ export class ApiError extends Error {
 export async function createChat({ title = null, modelDefault = null } = {}) {
   const response = await fetch(`${BASE}/api/chats`, {
     method: "POST",
-    headers: { ...authHeader(), "Content-Type": "application/json" },
+    headers: { ...(await authHeader()), "Content-Type": "application/json" },
     body: JSON.stringify({ title, model_default: modelDefault }),
   });
   if (!response.ok) throw new Error(`createChat ${response.status}`);
@@ -57,7 +246,7 @@ export async function listChats({ limit = 50, cursor = null } = {}) {
   const qs = new URLSearchParams({ limit: String(limit) });
   if (cursor) qs.set("cursor", cursor);
   const response = await fetch(`${BASE}/api/chats?${qs}`, {
-    headers: authHeader(),
+    headers: await authHeader(),
   });
   if (!response.ok) throw new Error(`listChats ${response.status}`);
   return response.json();
@@ -69,7 +258,7 @@ export async function getChat(chatId, { limit = 200, before = null } = {}) {
   const qs = new URLSearchParams({ limit: String(limit) });
   if (before) qs.set("before", before);
   const response = await fetch(`${BASE}/api/chats/${chatId}?${qs}`, {
-    headers: authHeader(),
+    headers: await authHeader(),
   });
   if (!response.ok) throw new Error(`getChat ${response.status}`);
   return response.json();
@@ -78,7 +267,7 @@ export async function getChat(chatId, { limit = 200, before = null } = {}) {
 export async function patchChat(chatId, { title, archived } = {}) {
   const response = await fetch(`${BASE}/api/chats/${chatId}`, {
     method: "PATCH",
-    headers: { ...authHeader(), "Content-Type": "application/json" },
+    headers: { ...(await authHeader()), "Content-Type": "application/json" },
     body: JSON.stringify({ title, archived }),
   });
   if (!response.ok) throw new Error(`patchChat ${response.status}`);
@@ -87,7 +276,7 @@ export async function patchChat(chatId, { title, archived } = {}) {
 export async function deleteChat(chatId) {
   const response = await fetch(`${BASE}/api/chats/${chatId}`, {
     method: "DELETE",
-    headers: authHeader(),
+    headers: await authHeader(),
   });
   if (!response.ok) throw new Error(`deleteChat ${response.status}`);
 }
@@ -96,7 +285,7 @@ export async function streamMessage(
   chatId,
   { message, model, effort, attachments, idempotencyKey, signal } = {},
 ) {
-  const headers = { ...authHeader(), "Content-Type": "application/json" };
+  const headers = { ...(await authHeader()), "Content-Type": "application/json" };
   if (idempotencyKey) headers["Idempotency-Key"] = idempotencyKey;
   const response = await fetch(`${BASE}/api/chats/${chatId}/messages`, {
     method: "POST",
@@ -120,7 +309,7 @@ export async function streamMessage(
 }
 
 export async function listModels() {
-  const response = await fetch(`${BASE}/api/models`, { headers: authHeader() });
+  const response = await fetch(`${BASE}/api/models`, { headers: await authHeader() });
   if (!response.ok) throw new Error(`listModels ${response.status}`);
   return response.json();
 }
@@ -128,7 +317,7 @@ export async function listModels() {
 export async function regenerate(chatId, { model, effort, signal } = {}) {
   const response = await fetch(`${BASE}/api/chats/${chatId}/regenerate`, {
     method: "POST",
-    headers: { ...authHeader(), "Content-Type": "application/json" },
+    headers: { ...(await authHeader()), "Content-Type": "application/json" },
     body: JSON.stringify({ model, effort }),
     signal,
   });
@@ -145,7 +334,7 @@ export async function submitFeedback(chatId, msgId, { kind, note = null } = {}) 
     `${BASE}/api/chats/${chatId}/messages/${msgId}/feedback`,
     {
       method: "POST",
-      headers: { ...authHeader(), "Content-Type": "application/json" },
+      headers: { ...(await authHeader()), "Content-Type": "application/json" },
       body: JSON.stringify({ kind, note }),
     },
   );
@@ -165,7 +354,7 @@ export async function submitFeedback(chatId, msgId, { kind, note = null } = {}) 
 
 export async function listChatAssets(chatId) {
   const response = await fetch(`${BASE}/api/chats/${chatId}/assets`, {
-    headers: authHeader(),
+    headers: await authHeader(),
   });
   if (!response.ok) throw new ApiError("listChatAssets", response.status);
   return response.json();
@@ -174,7 +363,7 @@ export async function listChatAssets(chatId) {
 export async function getAssetContent(chatId, assetId) {
   const response = await fetch(
     `${BASE}/api/chats/${chatId}/assets/${assetId}/content`,
-    { headers: authHeader() },
+    { headers: await authHeader() },
   );
   if (!response.ok) throw new ApiError("getAssetContent", response.status);
   return response;
@@ -184,16 +373,51 @@ export async function getAssetContent(chatId, assetId) {
 //
 // POST /auth/logout records an immutable audit-log entry on the server
 // (event_type=auth.logout) so a stolen-laptop scenario has a server-side
-// signal for remediation. The endpoint does NOT invalidate the JWT (no
-// JTI denylist today — see #114); the caller is responsible for
-// clearing the local token. Best-effort by design — the SPA wraps the
-// call in `.catch(...)` so transient API outages don't strand a
-// signed-in user.
+// signal for remediation. It also denies the access token's `jti` (#240)
+// and revokes the presented refresh token's whole device family (#292) —
+// the caller is still responsible for clearing local state. Best-effort
+// by design — the SPA wraps the call in `.catch(...)` so transient API
+// outages don't strand a signed-in user.
+//
+// `credentials: "include"` matters here: the family revoke needs the
+// `channel_refresh` cookie, and without a session's refresh family being
+// killed server-side, the cookie could silently re-mint access tokens
+// after a "sign out". Same-origin deployments send it either way; this
+// covers a cross-origin `VITE_API_BASE`.
+//
+// This is the ONE authenticated call that deliberately does NOT go
+// through `authHeader()`. Two reasons, both load-bearing:
+//
+//  1. `Sidebar.signOut` fires this and then *synchronously* navigates
+//     away. `authHeader()` is now async and may await a whole refresh
+//     round trip, so the navigation would win the race and the request
+//     would never leave the tab — silently losing the server-side family
+//     revoke and the `jti` denylist write, which is the half of logout
+//     that actually ends the session. Reading the token synchronously
+//     keeps the `fetch` dispatched in the same tick, as it was before
+//     silent refresh existed.
+//  2. Rotating a token family one instant before revoking it is pure
+//     waste, and it would burn a rotation for nothing.
+//
+// NOTE: an expired token here does NOT still revoke. `/auth/logout` is
+// `Depends(require_mgmt_user)` and `decode_mgmt_jwt` enforces `exp`, so
+// an expired token 401s before the handler body runs — no jti denylist
+// write, no family revoke, no cookie clear — and `Sidebar.signOut`
+// swallows that with `.catch(() => {})`. Signing out of a tab left idle
+// past the 1h mark therefore leaves the refresh family live server-side.
+// Pre-existing (the old sync `authHeader()` sent the same stored token),
+// and silent refresh makes an expired token at sign-out much rarer, but
+// closing it properly needs a server change: accept the refresh cookie
+// alone as authority for logout. Needs a follow-up issue — none is filed
+// yet, and this PR deliberately does not file one (several sessions are
+// working this repo concurrently).
 
 export async function logout() {
+  const token = readToken();
   const res = await fetch(`${BASE}/auth/logout`, {
     method: "POST",
-    headers: authHeader(),
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    credentials: "include",
   });
   if (!res.ok) throw new Error(`logout ${res.status}`);
 }
@@ -252,7 +476,7 @@ export async function sha256Hex(blob) {
 export async function presignAttachment({ name, mime, size_bytes }) {
   const response = await fetch(`${BASE}/api/attachments/presign`, {
     method: "POST",
-    headers: { ...authHeader(), "Content-Type": "application/json" },
+    headers: { ...(await authHeader()), "Content-Type": "application/json" },
     body: JSON.stringify({ name, mime, size_bytes }),
   });
   if (!response.ok) throw new Error(`presignAttachment ${response.status}`);
@@ -271,7 +495,7 @@ export async function uploadToPresigned(url, headers, blob) {
 export async function finalizeAttachment({ presign_token, checksum_sha256 }) {
   const response = await fetch(`${BASE}/api/attachments`, {
     method: "POST",
-    headers: { ...authHeader(), "Content-Type": "application/json" },
+    headers: { ...(await authHeader()), "Content-Type": "application/json" },
     body: JSON.stringify({ presign_token, checksum_sha256 }),
   });
   if (!response.ok) throw new Error(`finalizeAttachment ${response.status}`);
@@ -313,7 +537,7 @@ export async function getAdminUsers({ cursor = null, limit = 50, sort = null } =
   if (cursor) qs.set("cursor", cursor);
   if (sort) qs.set("sort", sort);
   const response = await fetch(`${BASE}/api/admin/users?${qs}`, {
-    headers: authHeader(),
+    headers: await authHeader(),
   });
   return adminJson("getAdminUsers", response);
 }
@@ -322,7 +546,7 @@ export async function getAdminUser(userId) {
   // user_id is the JWT sub (an email today) — encode for the path.
   const response = await fetch(
     `${BASE}/api/admin/users/${encodeURIComponent(userId)}`,
-    { headers: authHeader() },
+    { headers: await authHeader() },
   );
   return adminJson("getAdminUser", response);
 }
@@ -334,7 +558,7 @@ export async function getPrefs() {
   // Cache-Control: no-store header — guarantees Chromium (browser +
   // Electron renderer) bypasses any heuristic cache when re-hydrating.
   const res = await fetch(`${BASE}/api/me/prefs`, {
-    headers: authHeader(),
+    headers: await authHeader(),
     cache: "no-store",
   });
   if (!res.ok) throw new Error(`getPrefs failed: ${res.status}`);
@@ -345,7 +569,7 @@ export async function getPrefs() {
 export async function putPrefs(partial) {
   const res = await fetch(`${BASE}/api/me/prefs`, {
     method: "PUT",
-    headers: { ...authHeader(), "Content-Type": "application/json" },
+    headers: { ...(await authHeader()), "Content-Type": "application/json" },
     body: JSON.stringify({ prefs: partial }),
   });
   if (!res.ok) throw new Error(`putPrefs failed: ${res.status}`);
@@ -355,7 +579,7 @@ export async function putPrefs(partial) {
 
 export async function listMCPServers() {
   const response = await fetch(`${BASE}/api/mcp/servers`, {
-    headers: authHeader(),
+    headers: await authHeader(),
   });
   if (!response.ok) throw new Error(`listMCPServers ${response.status}`);
   return response.json();
@@ -370,7 +594,7 @@ export async function registerMCPServer({
 }) {
   const response = await fetch(`${BASE}/api/mcp/servers`, {
     method: "POST",
-    headers: { ...authHeader(), "Content-Type": "application/json" },
+    headers: { ...(await authHeader()), "Content-Type": "application/json" },
     body: JSON.stringify({ name, url, tool_prefix, auth_type, token }),
   });
   if (!response.ok) {
@@ -404,7 +628,7 @@ export async function registerMCPServer({
 export async function patchMCPServer(serverId, updates) {
   const response = await fetch(`${BASE}/api/mcp/servers/${serverId}`, {
     method: "PATCH",
-    headers: { ...authHeader(), "Content-Type": "application/json" },
+    headers: { ...(await authHeader()), "Content-Type": "application/json" },
     body: JSON.stringify(updates),
   });
   if (!response.ok) throw new Error(`patchMCPServer ${response.status}`);
@@ -413,7 +637,7 @@ export async function patchMCPServer(serverId, updates) {
 export async function deleteMCPServer(serverId) {
   const response = await fetch(`${BASE}/api/mcp/servers/${serverId}`, {
     method: "DELETE",
-    headers: authHeader(),
+    headers: await authHeader(),
   });
   if (!response.ok) throw new Error(`deleteMCPServer ${response.status}`);
 }
@@ -421,7 +645,7 @@ export async function deleteMCPServer(serverId) {
 export async function reauthMCPServer(serverId) {
   const response = await fetch(`${BASE}/api/mcp/servers/${serverId}/reauth`, {
     method: "POST",
-    headers: authHeader(),
+    headers: await authHeader(),
   });
   if (!response.ok) throw new Error(`reauthMCPServer ${response.status}`);
   return response.json();
@@ -429,7 +653,7 @@ export async function reauthMCPServer(serverId) {
 
 export async function getChatMCPSettings(chatId) {
   const response = await fetch(`${BASE}/api/chats/${chatId}/mcp`, {
-    headers: authHeader(),
+    headers: await authHeader(),
   });
   if (!response.ok) throw new Error(`getChatMCPSettings ${response.status}`);
   return response.json();
@@ -438,7 +662,7 @@ export async function getChatMCPSettings(chatId) {
 export async function putChatMCPSettings(chatId, settings) {
   const response = await fetch(`${BASE}/api/chats/${chatId}/mcp`, {
     method: "PUT",
-    headers: { ...authHeader(), "Content-Type": "application/json" },
+    headers: { ...(await authHeader()), "Content-Type": "application/json" },
     body: JSON.stringify(settings),
   });
   if (!response.ok) throw new Error(`putChatMCPSettings ${response.status}`);
@@ -454,7 +678,7 @@ export async function putChatMCPSettings(chatId, settings) {
  */
 export async function getFeaturedServers() {
   const response = await fetch(`${BASE}/api/mcp/featured`, {
-    headers: authHeader(),
+    headers: await authHeader(),
   });
   if (!response.ok) throw new Error(`getFeaturedServers ${response.status}`);
   return response.json();
@@ -482,7 +706,7 @@ export async function getFeaturedServers() {
 export async function enableFeaturedServer({ featured_id, name, url, token = null }) {
   const response = await fetch(`${BASE}/api/mcp/servers`, {
     method: "POST",
-    headers: { ...authHeader(), "Content-Type": "application/json" },
+    headers: { ...(await authHeader()), "Content-Type": "application/json" },
     body: JSON.stringify({ featured_id, name, url, token }),
   });
   if (!response.ok) {
@@ -513,7 +737,7 @@ export async function getAdminMetricsSummary() {
   // "today" is a rolling 24h window; every counter is always present (0.0
   // when no data), so the Dashboard never guards against missing keys.
   const response = await fetch(`${BASE}/api/admin/metrics/summary`, {
-    headers: authHeader(),
+    headers: await authHeader(),
   });
   return adminJson("getAdminMetricsSummary", response);
 }
@@ -528,7 +752,7 @@ export async function getAdminMetricsTimeseries({ metric, window, bucket = null 
   const qs = new URLSearchParams({ metric, window });
   if (bucket) qs.set("bucket", bucket);
   const response = await fetch(`${BASE}/api/admin/metrics/timeseries?${qs}`, {
-    headers: authHeader(),
+    headers: await authHeader(),
   });
   return adminJson("getAdminMetricsTimeseries", response);
 }
@@ -548,7 +772,7 @@ export async function listAssets({ limit = 50, cursor = null } = {}) {
   const qs = new URLSearchParams({ limit: String(limit) });
   if (cursor) qs.set("cursor", cursor);
   const response = await fetch(`${BASE}/api/assets?${qs}`, {
-    headers: authHeader(),
+    headers: await authHeader(),
   });
   if (!response.ok) throw new ApiError("listAssets", response.status);
   return response.json();
@@ -559,7 +783,7 @@ export async function getAsset(chatId, assetId) {
   // the asset isn't on the loaded browse page. The route is per-chat, so
   // callers must carry both ids in the URL.
   const response = await fetch(`${BASE}/api/chats/${chatId}/assets/${assetId}`, {
-    headers: authHeader(),
+    headers: await authHeader(),
   });
   if (!response.ok) throw new ApiError("getAsset", response.status);
   return response.json();

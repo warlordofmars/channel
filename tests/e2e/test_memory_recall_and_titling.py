@@ -167,7 +167,7 @@ async def test_auto_title_fires_on_first_round_trip_only() -> None:
             page = await context.new_page()
             await page.goto(f"{ui_url}/app")
             await page.evaluate(
-                "(t) => window.localStorage.setItem('starter_mgmt_token', t)",
+                "(t) => window.localStorage.setItem('channel_mgmt_token', t)",
                 jwt,
             )
             await page.goto(f"{ui_url}/app")
@@ -245,7 +245,7 @@ async def _drive_chat(
     page = await context.new_page()
     await page.goto(f"{ui_url}/app")
     await page.evaluate(
-        "(t) => window.localStorage.setItem('starter_mgmt_token', t)",
+        "(t) => window.localStorage.setItem('channel_mgmt_token', t)",
         jwt,
     )
     await page.goto(f"{ui_url}/app")

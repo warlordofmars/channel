@@ -1,7 +1,7 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
 import React from "react";
 import { Navigate } from "react-router-dom";
-import { TOKEN_KEY, isTokenValid } from "../lib/auth.js";
+import { isTokenValid, readToken } from "../lib/auth.js";
 
 /**
  * Wraps any /app/* route. Reads the mgmt JWT from localStorage and either
@@ -12,7 +12,7 @@ import { TOKEN_KEY, isTokenValid } from "../lib/auth.js";
  * security.
  */
 export default function AuthGate({ children }) {
-  const token = localStorage.getItem(TOKEN_KEY) ?? "";
+  const token = readToken();
   if (!isTokenValid(token)) {
     return <Navigate to="/app/login" replace />;
   }

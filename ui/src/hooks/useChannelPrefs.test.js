@@ -9,6 +9,7 @@ import {
   __resetChannelPrefsForTest,
   __resetServerSyncForTest,
 } from "./useChannelPrefs.js";
+import { TOKEN_KEY } from "../lib/auth.js";
 
 describe("useChannelPrefs", () => {
   let storage;
@@ -203,7 +204,7 @@ describe("useChannelPrefs", () => {
   // ---- Server hydrate ----------------------------------------------------
 
   it("hydrates from server when a mgmt JWT is present", async () => {
-    storage["starter_mgmt_token"] = "tok";
+    storage[TOKEN_KEY] = "tok";
     __resetChannelPrefsForTest();
     __resetServerSyncForTest();
     const getPrefsSpy = vi.spyOn(api, "getPrefs").mockResolvedValue({
@@ -228,7 +229,7 @@ describe("useChannelPrefs", () => {
   });
 
   it("ignores unknown server keys during hydrate", async () => {
-    storage["starter_mgmt_token"] = "tok";
+    storage[TOKEN_KEY] = "tok";
     __resetChannelPrefsForTest();
     __resetServerSyncForTest();
     vi.spyOn(api, "getPrefs").mockResolvedValue({
@@ -240,7 +241,7 @@ describe("useChannelPrefs", () => {
   });
 
   it("hydrates boolean true values (covers the truthy boolean branch)", async () => {
-    storage["starter_mgmt_token"] = "tok";
+    storage[TOKEN_KEY] = "tok";
     __resetChannelPrefsForTest();
     __resetServerSyncForTest();
     vi.spyOn(api, "getPrefs").mockResolvedValue({
@@ -254,7 +255,7 @@ describe("useChannelPrefs", () => {
   });
 
   it("hydrate is a no-op when the server returns an empty prefs object", async () => {
-    storage["starter_mgmt_token"] = "tok";
+    storage[TOKEN_KEY] = "tok";
     __resetChannelPrefsForTest();
     __resetServerSyncForTest();
     const getPrefsSpy = vi.spyOn(api, "getPrefs").mockResolvedValue({});
@@ -267,7 +268,7 @@ describe("useChannelPrefs", () => {
   });
 
   it("hydrate handles a null prefs response (covers `serverPrefs || {}`)", async () => {
-    storage["starter_mgmt_token"] = "tok";
+    storage[TOKEN_KEY] = "tok";
     __resetChannelPrefsForTest();
     __resetServerSyncForTest();
     const getPrefsSpy = vi.spyOn(api, "getPrefs").mockResolvedValue(null);
@@ -277,7 +278,7 @@ describe("useChannelPrefs", () => {
   });
 
   it("swallows getPrefs errors during hydrate", async () => {
-    storage["starter_mgmt_token"] = "tok";
+    storage[TOKEN_KEY] = "tok";
     __resetChannelPrefsForTest();
     __resetServerSyncForTest();
     const getPrefsSpy = vi
@@ -290,7 +291,7 @@ describe("useChannelPrefs", () => {
   });
 
   it("hydrate is one-shot across mounts (second mount does not re-fetch)", async () => {
-    storage["starter_mgmt_token"] = "tok";
+    storage[TOKEN_KEY] = "tok";
     __resetChannelPrefsForTest();
     __resetServerSyncForTest();
     const getPrefsSpy = vi
@@ -321,7 +322,7 @@ describe("useChannelPrefs", () => {
   // ---- Debounced PUT -----------------------------------------------------
 
   it("debounces PUTs and collapses rapid changes to the latest value", async () => {
-    storage["starter_mgmt_token"] = "tok";
+    storage[TOKEN_KEY] = "tok";
     __resetChannelPrefsForTest();
     __resetServerSyncForTest();
     // Stub getPrefs first so the hydrate doesn't reject + leak.
@@ -343,7 +344,7 @@ describe("useChannelPrefs", () => {
   });
 
   it("PUTs booleans as JSON true/false (not '1' / '0')", async () => {
-    storage["starter_mgmt_token"] = "tok";
+    storage[TOKEN_KEY] = "tok";
     __resetChannelPrefsForTest();
     __resetServerSyncForTest();
     vi.spyOn(api, "getPrefs").mockResolvedValue({});
@@ -369,7 +370,7 @@ describe("useChannelPrefs", () => {
   });
 
   it("PUT failure does not roll back local state", async () => {
-    storage["starter_mgmt_token"] = "tok";
+    storage[TOKEN_KEY] = "tok";
     __resetChannelPrefsForTest();
     __resetServerSyncForTest();
     vi.spyOn(api, "getPrefs").mockResolvedValue({});
@@ -400,7 +401,7 @@ describe("useChannelPrefs", () => {
   });
 
   it("__resetServerSyncForTest clears pending debounced PUT timers", async () => {
-    storage["starter_mgmt_token"] = "tok";
+    storage[TOKEN_KEY] = "tok";
     __resetChannelPrefsForTest();
     __resetServerSyncForTest();
     vi.spyOn(api, "getPrefs").mockResolvedValue({});

@@ -1,7 +1,7 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
 import React from "react";
 import { Navigate, Outlet } from "react-router-dom";
-import { parseToken, TOKEN_KEY } from "../../lib/auth.js";
+import { parseToken, readToken } from "../../lib/auth.js";
 
 /**
  * Role gate for every `/app/admin/*` route. Reads the mgmt JWT from
@@ -19,7 +19,7 @@ import { parseToken, TOKEN_KEY } from "../../lib/auth.js";
  * dependency on the `/api/admin/*` endpoints (epic #233).
  */
 export default function AdminLayout() {
-  const claims = parseToken(localStorage.getItem(TOKEN_KEY) ?? "") ?? {};
+  const claims = parseToken(readToken()) ?? {};
   if (claims.role !== "admin") return <Navigate to="/app" replace />;
   return <Outlet />;
 }

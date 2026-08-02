@@ -1,7 +1,6 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
 import { useCallback, useEffect, useRef, useState } from "react";
 import * as api from "../api.js";
-import { TOKEN_KEY } from "../lib/auth.js";
 import { makeSseDecoder } from "../lib/sseParser.js";
 
 // #181 PR-3: in-place patch of one toolStep on the in-flight assistant
@@ -596,11 +595,16 @@ export function useChatStream(chatId, { onTitleSuggested } = {}) {
           sendRefusalError(err?.status, err?.detail),
         );
         if (err?.status === 401) {
-          // Session is dead — mirror Sidebar.signOut's local clear +
-          // redirect, minus the /auth/logout audit POST (the token is
+          // Session is dead — clear local state and send the user to the
+          // login page, minus the /auth/logout audit POST (the token is
           // already rejected, so that call would just 401 too).
-          localStorage.removeItem(TOKEN_KEY);
-          globalThis.location.assign("/app/login");
+          //
+          // A 401 here is now genuinely terminal rather than routine:
+          // `api.js` renews the access token before it expires (#295), so
+          // reaching this branch means the refresh could not be completed
+          // either. Routed through `api.endSession` so the SPA has one
+          // give-up path (#483 tracks making that a soft redirect).
+          api.endSession();
         }
         return { accepted: false };
       }

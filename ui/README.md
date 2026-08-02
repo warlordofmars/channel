@@ -37,7 +37,16 @@ The bare `uvicorn` command above starts the API **alone** — no DynamoDB. That 
 
 ## Authentication
 
-The UI stores the management Bearer token in `localStorage` under the key `starter_mgmt_token`.
+The UI stores the management session in `localStorage` under the key
+`channel_mgmt_token` (`ui/src/lib/auth.js`). The value is normally a JSON
+`{access_token, expires_at}` envelope — but immediately after a web login
+it is a **bare JWT**, because the server's login-completion page writes
+the token directly; the first SPA save or silent refresh converts it.
+Readers accept both shapes and fall back to the token's own `exp` claim
+for the bare one. `ui/src/api.js` renews the access token silently
+before it expires; the refresh token itself is never visible to JS (it
+rides an HttpOnly cookie). Reads still accept the pre-rename
+`starter_mgmt_token` key so sessions predating the rename survive.
 
 ## Project structure
 
