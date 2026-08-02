@@ -36,6 +36,14 @@ import {
   submitFeedback,
   uploadToPresigned,
 } from "./api.js";
+import { LEGACY_TOKEN_KEY, TOKEN_KEY } from "./lib/auth.js";
+
+// A stored session that is nowhere near expiry, so `authHeader` takes the
+// fast path and never reaches the silent-refresh branch. Suites that mean
+// to exercise refreshing build their own session (see "silent refresh").
+function liveSession(token) {
+  return JSON.stringify({ access_token: token, expires_at: Date.now() + 3_600_000 });
+}
 
 // ---------------------------------------------------------------------------
 // Chats wrappers (named exports)
@@ -54,7 +62,7 @@ describe("chats wrappers", () => {
       setItem: (k, v) => { storage[k] = v; },
       removeItem: (k) => { delete storage[k]; },
     });
-    storage["starter_mgmt_token"] = "tok-abc";
+    storage[TOKEN_KEY] = liveSession("tok-abc");
   });
 
   afterEach(() => {
@@ -105,7 +113,7 @@ describe("chats wrappers", () => {
     });
 
     it("omits Authorization header when no token is stored", async () => {
-      delete storage["starter_mgmt_token"];
+      delete storage[TOKEN_KEY];
       mockOk({});
       await createChat();
       expect(fetchMock.mock.calls[0][1].headers.Authorization).toBeUndefined();
@@ -468,7 +476,7 @@ describe("chats wrappers", () => {
     });
 
     it("omits Authorization when no token is stored", async () => {
-      delete storage["starter_mgmt_token"];
+      delete storage[TOKEN_KEY];
       fetchMock.mockResolvedValue({ ok: true, status: 204 });
       await logout();
       expect(fetchMock.mock.calls[0][1].headers.Authorization).toBeUndefined();
@@ -651,12 +659,12 @@ describe("chats wrappers", () => {
 
 describe("MCP API client", () => {
   beforeEach(() => {
-    localStorage.setItem("starter_mgmt_token", "test-token");
+    localStorage.setItem(TOKEN_KEY, liveSession("test-token"));
     global.fetch = vi.fn();
   });
 
   afterEach(() => {
-    localStorage.removeItem("starter_mgmt_token");
+    localStorage.removeItem(TOKEN_KEY);
     vi.restoreAllMocks();
   });
 
@@ -1025,13 +1033,13 @@ describe("admin API client", () => {
   let fetchMock;
 
   beforeEach(() => {
-    localStorage.setItem("starter_mgmt_token", "test-token");
+    localStorage.setItem(TOKEN_KEY, liveSession("test-token"));
     fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
   });
 
   afterEach(() => {
-    localStorage.removeItem("starter_mgmt_token");
+    localStorage.removeItem(TOKEN_KEY);
     vi.unstubAllGlobals();
   });
 
@@ -1212,13 +1220,13 @@ describe("assets API client", () => {
   let fetchMock;
 
   beforeEach(() => {
-    localStorage.setItem("starter_mgmt_token", "test-token");
+    localStorage.setItem(TOKEN_KEY, liveSession("test-token"));
     fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
   });
 
   afterEach(() => {
-    localStorage.removeItem("starter_mgmt_token");
+    localStorage.removeItem(TOKEN_KEY);
     vi.unstubAllGlobals();
   });
 
@@ -1303,5 +1311,233 @@ describe("assets API client", () => {
       expect(err).toBeInstanceOf(ApiError);
       expect(err.status).toBe(502);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Silent refresh (#295, epic #241)
+// ---------------------------------------------------------------------------
+//
+// `api.js` keeps two pieces of module-level state — the single-flight slot
+// and the post-failure cooldown — so each test here imports a FRESH module
+// instance via `vi.resetModules()` rather than reaching into the module to
+// reset it. That keeps the reset machinery out of production code.
+
+describe("silent refresh", () => {
+  const HOUR_MS = 3_600_000;
+  let storage;
+  let fetchMock;
+  let assign;
+
+  function jwt(expOffsetSeconds) {
+    const exp = Math.floor(Date.now() / 1000) + expOffsetSeconds;
+    return `eyJhbGciOiJIUzI1NiJ9.${btoa(JSON.stringify({ exp, sub: "u@example.com" }))}.sig`;
+  }
+
+  /** Store a session whose access token expires in `ms` from now. */
+  function storeSession(token, ms) {
+    storage[TOKEN_KEY] = JSON.stringify({ access_token: token, expires_at: Date.now() + ms });
+  }
+
+  function refreshCalls() {
+    return fetchMock.mock.calls.filter(([url]) => url === "/auth/refresh");
+  }
+
+  function apiCalls() {
+    return fetchMock.mock.calls.filter(([url]) => url !== "/auth/refresh");
+  }
+
+  /** Answer /auth/refresh from `refreshResponse`; everything else 200 {}. */
+  function route(refreshResponse) {
+    fetchMock.mockImplementation((url) =>
+      url === "/auth/refresh"
+        ? Promise.resolve(refreshResponse)
+        : Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) }),
+    );
+  }
+
+  function refreshOk(body) {
+    return { ok: true, status: 200, json: () => Promise.resolve(body) };
+  }
+
+  async function freshApi() {
+    vi.resetModules();
+    return import("./api.js");
+  }
+
+  beforeEach(() => {
+    storage = {};
+    vi.stubGlobal("localStorage", {
+      getItem: (k) => storage[k] ?? null,
+      setItem: (k, v) => { storage[k] = v; },
+      removeItem: (k) => { delete storage[k]; },
+    });
+    fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    assign = vi.fn();
+    vi.stubGlobal("location", { assign });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("does not refresh while the token is comfortably alive", async () => {
+    storeSession("live", HOUR_MS);
+    route(refreshOk({}));
+    const api = await freshApi();
+    await api.listModels();
+    expect(refreshCalls()).toHaveLength(0);
+    expect(apiCalls()[0][1].headers.Authorization).toBe("Bearer live");
+  });
+
+  it("refreshes inside the 5-minute skew window and sends the new token", async () => {
+    storeSession("stale", 60_000);
+    route(refreshOk({ access_token: "rotated", token_type: "bearer", expires_in: 3600 }));
+    const api = await freshApi();
+    await api.listModels();
+
+    expect(refreshCalls()).toHaveLength(1);
+    const [, init] = refreshCalls()[0];
+    expect(init.method).toBe("POST");
+    // Non-empty CSRF header; the value itself is never inspected server-side.
+    expect(init.headers["X-Channel-Refresh"]).toBeTruthy();
+    // No body — the refresh token rides the HttpOnly cookie, which JS
+    // cannot read and therefore cannot send explicitly.
+    expect(init.body).toBeUndefined();
+    expect(init.credentials).toBe("include");
+
+    expect(apiCalls()[0][1].headers.Authorization).toBe("Bearer rotated");
+    const saved = JSON.parse(storage[TOKEN_KEY]);
+    expect(saved.access_token).toBe("rotated");
+    expect(saved.expires_at).toBeGreaterThan(Date.now() + 3_000_000);
+  });
+
+  it("collapses concurrent callers onto ONE rotation", async () => {
+    // The load-bearing test: #290 hard-rotates on every use and reads a
+    // re-presented token as a reuse breach that kills the device family,
+    // so a second concurrent refresh would sign the user out.
+    storeSession("stale", 60_000);
+    route(refreshOk({ access_token: "rotated", expires_in: 3600 }));
+    const api = await freshApi();
+
+    await Promise.all([api.listModels(), api.listModels(), api.listModels(), api.listModels()]);
+
+    expect(refreshCalls()).toHaveLength(1);
+    expect(apiCalls()).toHaveLength(4);
+    for (const [, init] of apiCalls()) {
+      expect(init.headers.Authorization).toBe("Bearer rotated");
+    }
+  });
+
+  it("refreshes again once the stored deadline has moved on", async () => {
+    storeSession("stale", 60_000);
+    route(refreshOk({ access_token: "rotated", expires_in: 3600 }));
+    const api = await freshApi();
+    await api.listModels();
+    await api.listModels();
+    // Second call reads the refreshed deadline, so it takes the fast path.
+    expect(refreshCalls()).toHaveLength(1);
+  });
+
+  it("migrates a legacy-key session onto the new key when it refreshes", async () => {
+    storage[LEGACY_TOKEN_KEY] = jwt(60);
+    route(refreshOk({ access_token: "rotated", expires_in: 3600 }));
+    const api = await freshApi();
+    await api.listModels();
+
+    expect(refreshCalls()).toHaveLength(1);
+    expect(JSON.parse(storage[TOKEN_KEY]).access_token).toBe("rotated");
+    expect(storage[LEGACY_TOKEN_KEY]).toBeUndefined();
+  });
+
+  it("keeps a still-valid token when the refresh is refused", async () => {
+    // The desktop app (until #297) and bypass logins have no refresh
+    // credential; /auth/refresh answers 401 for them by design. Signing
+    // them out here would evict them EARLIER than doing nothing at all.
+    const token = jwt(60);
+    storeSession(token, 60_000);
+    route({ ok: false, status: 401, json: () => Promise.resolve({}) });
+    const api = await freshApi();
+    await api.listModels();
+
+    expect(apiCalls()[0][1].headers.Authorization).toBe(`Bearer ${token}`);
+    expect(assign).not.toHaveBeenCalled();
+    expect(storage[TOKEN_KEY]).toBeDefined();
+  });
+
+  it("ends the session when the refresh is refused and the token is dead", async () => {
+    storeSession(jwt(-60), -60_000);
+    storage[LEGACY_TOKEN_KEY] = "leftover";
+    route({ ok: false, status: 401, json: () => Promise.resolve({}) });
+    const api = await freshApi();
+    await api.listModels();
+
+    expect(storage[TOKEN_KEY]).toBeUndefined();
+    expect(storage[LEGACY_TOKEN_KEY]).toBeUndefined();
+    expect(assign).toHaveBeenCalledWith("/app/login");
+    expect(apiCalls()[0][1].headers.Authorization).toBeUndefined();
+  });
+
+  it("treats a 200 with no access_token as a failed refresh", async () => {
+    storeSession(jwt(-60), -60_000);
+    route(refreshOk({ token_type: "bearer" }));
+    const api = await freshApi();
+    await api.listModels();
+    expect(assign).toHaveBeenCalledWith("/app/login");
+  });
+
+  it("defaults a missing expires_in to an immediate deadline", async () => {
+    // Degrades to "refresh again next call" rather than trusting an
+    // undated token forever.
+    storeSession("stale", 60_000);
+    route(refreshOk({ access_token: "rotated" }));
+    const api = await freshApi();
+    await api.listModels();
+    expect(JSON.parse(storage[TOKEN_KEY]).expires_at).toBeLessThanOrEqual(Date.now());
+  });
+
+  it("stops retrying for a cooldown after a refusal", async () => {
+    const token = jwt(60);
+    storeSession(token, 60_000);
+    route({ ok: false, status: 401, json: () => Promise.resolve({}) });
+    const api = await freshApi();
+
+    await api.listModels();
+    await api.listModels();
+    await api.listModels();
+
+    // One attempt, not one per call — #294 rate-limits this endpoint.
+    expect(refreshCalls()).toHaveLength(1);
+    expect(apiCalls()).toHaveLength(3);
+  });
+
+  it("never refreshes when there is no session at all", async () => {
+    route(refreshOk({}));
+    const api = await freshApi();
+    await api.listModels();
+    // AuthGate owns the redirect for a cold no-token load; competing with
+    // it here would race two navigations.
+    expect(refreshCalls()).toHaveLength(0);
+    expect(assign).not.toHaveBeenCalled();
+    expect(apiCalls()[0][1].headers.Authorization).toBeUndefined();
+  });
+
+  it("endSession clears both keys and routes to the login page", async () => {
+    storage[TOKEN_KEY] = JSON.stringify({ access_token: "a", expires_at: 1 });
+    storage[LEGACY_TOKEN_KEY] = "b";
+    const api = await freshApi();
+    api.endSession();
+    expect(storage[TOKEN_KEY]).toBeUndefined();
+    expect(storage[LEGACY_TOKEN_KEY]).toBeUndefined();
+    expect(assign).toHaveBeenCalledWith("/app/login");
+  });
+
+  it("sends the refresh cookie with the logout revoke", async () => {
+    storeSession("live", HOUR_MS);
+    fetchMock.mockResolvedValue({ ok: true, status: 204 });
+    const api = await freshApi();
+    await api.logout();
+    expect(fetchMock.mock.calls[0][1].credentials).toBe("include");
   });
 });

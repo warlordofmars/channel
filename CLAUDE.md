@@ -59,7 +59,7 @@ channel/
 │   │   │   ├── site.css       # Marketing site layout (nav, footer, hero, tiers)
 │   │   │   └── app.css        # Chat-app layout (sidebar, composer, popovers, greet)
 │   │   ├── lib/
-│   │   │   ├── auth.js        # parseToken, isTokenValid, TOKEN_KEY
+│   │   │   ├── auth.js        # session storage: load/save/clearSession, readToken, TOKEN_KEY
 │   │   │   └── utils.js       # cn (class-name join via clsx)
 │   │   ├── hooks/
 │   │   │   ├── useAssetContent.js   # Auth-fetched asset payload → blob object-URL or text; shared render hook
@@ -138,8 +138,9 @@ management **access** JWT (`typ=mgmt`, `role=admin|user`, **1-hour
 TTL**, revocable via the `DENY#{jti}` denylist — #240) signed with
 HS256 using a secret resolved from SSM
 (`/channel/{env}/jwt-secret`). All `/api/*` endpoints
-require a valid Bearer mgmt JWT. The token is stored client-side in
-`localStorage` under the `starter_mgmt_token` key.
+require a valid Bearer mgmt JWT. The session is stored client-side in
+`localStorage` under the `channel_mgmt_token` key as a JSON
+`{access_token, expires_at}` envelope — see §"Silent refresh (SPA)".
 
 `decode_mgmt_jwt` (`src/channel/auth/tokens.py`) is the single
 validation point: it enforces the signature, `iss`, `exp`, and
@@ -238,6 +239,41 @@ the access JWT it renews has usually already expired.
 - Response: `{access_token, token_type: "bearer", expires_in}` plus
   `refresh_token` on the body transport only.
 
+### Silent refresh (SPA) (#295)
+
+`ui/src/api.js` renews the access token before it expires, so #291's
+1-hour TTL is invisible to the user. Three rules are load-bearing:
+
+- **One seam.** Every authenticated wrapper builds its headers through
+  `authHeader()`, which is `async` and renews first. Adding a new
+  endpoint wrapper inherits refresh automatically; a raw `fetch` with a
+  hand-rolled `Authorization` header does not.
+- **Single-flight is correctness, not optimisation.** #290 hard-rotates
+  on every use and reads a re-presented token as an OAuth 2.1 reuse
+  breach that revokes the whole device family. A page load fires several
+  API calls at once, so concurrent renewals would present the
+  just-revoked predecessor and sign the user out on the exact path meant
+  to keep them in. All callers share one in-flight promise.
+- **A refused refresh is not automatically a sign-out.** `/auth/refresh`
+  answers 401 both for a dead token and for a client with no refresh
+  credential at all (desktop until #297, bypass logins, pre-#292
+  sessions) — the latter is the epic's migration path. The still-valid
+  access token is used, with a 30s cooldown before retrying; the session
+  ends (`endSession()` — clear storage, route to `/app/login`) only once
+  the access token is genuinely unusable.
+
+Storage lives in `ui/src/lib/auth.js`: a JSON `{access_token,
+expires_at}` envelope under `channel_mgmt_token`, renewed when
+`expires_at` is within 5 minutes. **A refresh token never enters
+localStorage** — web uses the HttpOnly cookie, desktop will use the OS
+keychain (#297). Reads accept the pre-rename `starter_mgmt_token` key
+and a bare-JWT value (the shape `/auth/callback`'s login page writes),
+deriving the deadline from the `exp` claim; every write goes to the new
+key and deletes the legacy one. That read order is only safe while
+nothing writes the legacy key, so `MGMT_TOKEN_STORAGE_KEY` in
+`mgmt_auth.py` and `TOKEN_KEY` in `lib/auth.js` must move together.
+Dropping the legacy fallback is a follow-up, one release out.
+
 ### `/api/me/sessions` (#293)
 
 `GET` lists the caller's live sessions — one entry per `device_id`,
@@ -271,12 +307,11 @@ revoke routes write an audit event (`auth.session_revoke` /
 eventually-consistent index cannot promise (see the refresh-token entry
 under §DynamoDB single table design).
 
-Still to land in epic #241: rate limiting + EMF counters (#294), the
-SPA's silent-refresh wrapper (#295), and desktop `safeStorage`
-persistence (#297). **Until #295 lands the SPA does not call
-`/auth/refresh`**, so a web session still ends at the 1h access-token
-expiry even though the refresh token it needs is now issued (#292) —
-and the sessions list shows the one device the current login minted.
+Still to land in epic #241: rate limiting + EMF counters (#294) and
+desktop `safeStorage` persistence (#297). The SPA's silent-refresh
+wrapper landed in #295 — see §"Silent refresh (SPA)" below. Until #297,
+the desktop app still has no refresh credential to present and re-auths
+at the 1h access-token expiry.
 
 ## DynamoDB single table design
 
@@ -817,7 +852,7 @@ alarm for a metric you have not wired up now fails at `inv pre-push`.
 - React SPA (Vite), runs on port 5173 in dev
 - Marketing routes at `/`, app routes at `/app/*`
 - Communicates with FastAPI management API on port 8001
-- Auth: Google OAuth via `/auth/login`; token stored in localStorage as `starter_mgmt_token`
+- Auth: Google OAuth via `/auth/login`; session stored in localStorage as `channel_mgmt_token`
 - Web SPA AND Electron desktop app ship from the same `ui/` SPA source. The
   desktop wrapper lives in `desktop/` (Electron main + preload) and bundles
   the SPA build. See `## Desktop app` below.
@@ -1072,9 +1107,11 @@ re-derive these during design review — cite them.
   use `Modal.jsx` (`ui/src/components/Modal.jsx`) for backdrop + Esc
   dismissal. Don't reinvent the modal shell.
 - **User identity from JWT** — chat-app components that need the user's
-  email or display name read the mgmt JWT from `localStorage[TOKEN_KEY]`
-  via `parseToken` from `lib/auth.js`. Display name = email's local-part
-  unless we later add a `name` claim.
+  email or display name read the mgmt JWT via `readToken()` from
+  `lib/auth.js` (never `localStorage.getItem` directly — the stored value
+  is an envelope, and there is a legacy key to fall back to), then
+  `parseToken`. Display name = the `display_name` claim, falling back to
+  the email's local-part.
 
 ## Copyright headers
 

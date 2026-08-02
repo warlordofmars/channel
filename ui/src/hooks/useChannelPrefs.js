@@ -1,5 +1,6 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
 import { useCallback, useEffect, useSyncExternalStore } from "react";
+import { readToken } from "../lib/auth.js";
 
 export const STORAGE_KEYS = Object.freeze({
   theme:             "channel-theme",
@@ -103,7 +104,7 @@ const pendingPuts = {};
 
 function shouldHydrate() {
   try {
-    return Boolean(localStorage.getItem("starter_mgmt_token"));
+    return Boolean(readToken());
   } catch {
     return false;
   }

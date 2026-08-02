@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 import Login from "./Login.jsx";
 import { __resetChannelPrefsForTest } from "../hooks/useChannelPrefs.js";
+import { TOKEN_KEY } from "../lib/auth.js";
 
 // navigateSpy is shared across the desktop-mode describe block.
 // vi.mock is hoisted, so the factory runs before imports.
@@ -134,7 +135,9 @@ describe("Login (desktop mode)", () => {
     render(<MemoryRouter><Login /></MemoryRouter>);
     await userEvent.click(screen.getByRole("button", { name: /sign in with google/i }));
     expect(window.channelDesktop.login).toHaveBeenCalled();
-    expect(localStorage.getItem("starter_mgmt_token")).toBe("THE_JWT");
+    // Stored through saveSession, so it lands under the de-branded key in
+    // the {access_token, expires_at} envelope the refresh wrapper reads.
+    expect(JSON.parse(localStorage.getItem(TOKEN_KEY)).access_token).toBe("THE_JWT");
     expect(navigateSpy).toHaveBeenCalledWith("/app");
   });
 });

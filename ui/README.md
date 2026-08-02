@@ -34,7 +34,12 @@ VITE_API_BASE=http://localhost:8001 npm run dev
 
 ## Authentication
 
-The UI stores the management Bearer token in `localStorage` under the key `starter_mgmt_token`.
+The UI stores the management session in `localStorage` under the key
+`channel_mgmt_token`, as a JSON `{access_token, expires_at}` envelope
+(`ui/src/lib/auth.js`). `ui/src/api.js` renews the access token silently
+before it expires; the refresh token itself is never visible to JS (it
+rides an HttpOnly cookie). Reads still accept the pre-rename
+`starter_mgmt_token` key so sessions predating the rename survive.
 
 ## Project structure
 

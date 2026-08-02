@@ -445,11 +445,11 @@ the opaque refresh token (`REFRESH#{sha256(token)}`, #290), exchanged at
 | `iat` / `exp` claims | seconds since epoch; TTL = 1 hour |
 | TTL constant | `MGMT_JWT_TTL_SECONDS = 3600` (1 hour) in `src/channel/auth/tokens.py` |
 | Revocation | logout writes `DENY#{jti}` (DynamoDB `ttl` = the token's `exp`); `decode_mgmt_jwt` rejects a denied `jti`, surfacing as HTTP 401 (#240 / #291) |
-| Browser storage key | `localStorage["starter_mgmt_token"]` |
+| Browser storage key | `localStorage["channel_mgmt_token"]` — JSON `{access_token, expires_at}`; reads still fall back to the pre-rename `starter_mgmt_token` (#260/#295) |
 | Issuer (server) | `src/channel/auth/tokens.py` (`issue_mgmt_jwt`) via `src/channel/auth/mgmt_auth.py` |
 | Validator (server) | `src/channel/auth/tokens.py` (`decode_mgmt_jwt`) via `src/channel/api/_auth.py` (`require_mgmt_user`, `require_admin`) |
 | Issuer (UI) | server-side `mgmt_callback` returns an HTML redirect that writes the token |
-| Sender (UI) | `ui/src/api.js` reads the token and sets the `Authorization` header |
+| Sender (UI) | `ui/src/api.js` reads the token, silently renews it via `POST /auth/refresh` when it is within 5 minutes of expiry, and sets the `Authorization` header |
 
 ### Validation rules
 
@@ -476,8 +476,10 @@ failure* is not a `JWTError` and therefore is not translated to 401: it
 propagates as a 500, so revocation can never be bypassed by inducing
 DynamoDB errors.
 
-The UI clears `localStorage["starter_mgmt_token"]` on any 401 from
-the API; see `ui/src/api.js`.
+The UI renews the access token before it expires (#295), so a 401 from
+the API means the silent refresh could not be completed either. It is
+therefore terminal: `api.endSession()` clears both storage keys and
+routes to `/app/login`; see `ui/src/api.js`.
 
 ### Refresh tokens
 

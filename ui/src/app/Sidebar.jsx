@@ -1,7 +1,7 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
 import React, { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { parseToken, TOKEN_KEY } from "../lib/auth.js";
+import { clearSession, parseToken, readToken } from "../lib/auth.js";
 import { logout as apiLogout } from "../api.js";
 import Icon from "../components/Icon.jsx";
 import AccountPopover from "./AccountPopover.jsx";
@@ -107,7 +107,7 @@ export default function Sidebar({
     window.channelDesktop?.relaunchToUpdate?.();
   }
 
-  const token = localStorage.getItem(TOKEN_KEY) ?? "";
+  const token = readToken();
   const claims = parseToken(token) ?? {};
   // Link visibility only — the /app/admin/* routes are independently
   // gated by AdminLayout (and the API by require_admin). Read
@@ -151,7 +151,7 @@ export default function Sidebar({
     // races the navigation, the visible logout still completes — local
     // token clear + redirect happens unconditionally. See issue #151.
     apiLogout().catch(() => {});
-    localStorage.removeItem(TOKEN_KEY);
+    clearSession();
     globalThis.location.assign("/");
   }
 
