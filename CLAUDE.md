@@ -489,12 +489,43 @@ auto-titling of fresh chats via a Haiku one-shot Agent (Phase 7d).
 - **`CHANNEL_AGENTCORE_MEMORY_NAME`** overrides the default name —
   useful for pointing a personal dev environment at a pre-existing
   Memory resource.
-- **`actorId = sanitize(jwt.sub)`** — one actor per Channel user.
-  Disallowed characters (anything outside `[a-zA-Z0-9_/-]`) are
-  replaced with `_` so email-form JWT subs (containing `@` and `.`)
-  satisfy AgentCore's regex. Per-workspace partitioning (per the
-  "workspaces are the tenancy root" product decision) will eventually
-  become `actorId = f"{workspace_id}/{user_id}"`.
+- **`actorId = derive_actor_id(jwt.sub)`** — one actor per Channel
+  user, and **the only partition this Memory resource has**, so the
+  derivation being injective is a cross-user isolation boundary, not
+  hygiene. Shape: `{label}-{sha256(jwt_sub)[:32]}` — a lossy,
+  human-legible label (disallowed chars → `_`, capped at 48, leading
+  non-alphanumerics stripped) for console readability, plus a
+  fixed-width digest that carries identity. Equal outputs imply equal
+  digests imply equal inputs; distinct users can never share a
+  partition. `src/channel/agents/memory.py` owns the ONE
+  implementation — `recall.py`, `tools/memory_tools.py`, `api/chats.py`
+  (session wipe) and `api/_debug.py` all import it, pinned by
+  `test_one_shared_derivation_across_every_call_site`. Values are
+  storage keys: golden vectors in `tests/unit/test_memory.py` pin them
+  permanently, and changing one orphans that user's stored memories.
+  Per-workspace partitioning (per the "workspaces are the tenancy root"
+  product decision) becomes
+  `derive_actor_id(f"{workspace_id}/{user_id}")` — the composite key
+  goes through the same function, never around it.
+  - **History (#474).** Until this landed, the derivation was a bare
+    `re.sub(r"[^a-zA-Z0-9_/-]", "_", jwt_sub)`, which is **not
+    injective**: `jc+work@x.com` and `jc_work@x.com` both yielded
+    `jc_work_x_com`, as did `a.b@x.com` / `a@b.x.com`. Colliding users
+    shared one memory store, so `AgentCoreRecallHook` would replay one
+    person's chat content into another's system prompt.
+  - **Migration: accept the loss, deliberately.** Memories written
+    under the old ids are orphaned rather than dual-read. A dual-read
+    fallback would have to *read the lossy partition*, which is exactly
+    the cross-user disclosure being fixed — it would keep the hole open
+    for the length of the fallback window. The loss is bounded (sign-in
+    is `ALLOWED_EMAILS`-gated, so the user set is tiny) and
+    self-clearing (`eventExpiryDuration=90` days), and it costs no chat
+    content: DynamoDB remains the source of truth and the current
+    chat's history is fed from there. What degrades is cross-chat
+    recall, until new events accumulate. Reversible if that turns out
+    wrong: `_legacy_lossy_actor_id` (same module) still computes the
+    old id, so an offline tool can find and copy-forward a legacy
+    partition after checking it isn't shared.
 - **`sessionId = chat_id`** — one AgentCore session per Channel chat.
   Chat ids are UUIDs so no sanitization needed.
 - **Failure mode**: log + EMF counter (`MemoryWriteFailures`) +
@@ -510,7 +541,11 @@ auto-titling of fresh chats via a Haiku one-shot Agent (Phase 7d).
   AgentCore Memory events for the chat's session (`ListEvents` +
   `DeleteEvent`). Failure is logged + counted
   (`ChatDeleteMemoryWipeFailures`) but does not fail the user-visible
-  delete — DDB is the source of truth for chat existence.
+  delete — DDB is the source of truth for chat existence. The wipe
+  targets the **current** `actorId`, so events written before the #474
+  derivation change are not reached by it and persist until the 90-day
+  `eventExpiryDuration` — an accepted consequence of the accept-the-loss
+  migration above, not an oversight.
 
 Dev-only `GET /api/_debug/memory/events?chat_id=...&limit=...` and
 `DELETE /api/_debug/memory/events?chat_id=...&event_id=...`
@@ -571,7 +606,7 @@ infra**.
   `memory_id` / `actor_id` / `session_id`. Appended to the tools list
   **inside `build_agent`** (not `chats._build_tool_registry`) where
   that context exists. Scoping reuses `actorId =
-  _sanitize_actor_id(jwt.sub)` — follows, does not pre-empt, the future
+  derive_actor_id(jwt.sub)` — follows, does not pre-empt, the future
   `{workspace_id}/{user_id}` scheme.
 - **Kill-switch** — `CHANNEL_MEMORY_TOOLS_ENABLED` (default `"1"`, same
   memory-family convention as `CHANNEL_RECALL_ENABLED` /

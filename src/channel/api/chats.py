@@ -47,7 +47,7 @@ from channel.agents.chat_agent import (
     resolve_model_id,
     sanitize_title,
 )
-from channel.agents.memory import _sanitize_actor_id, get_or_create_memory
+from channel.agents.memory import derive_actor_id, get_or_create_memory
 from channel.agents.strands_sse import (
     sse_asset_created,
     sse_attachment_error,
@@ -492,12 +492,12 @@ async def _wipe_agentcore_session(actor_id: str, chat_id: str) -> None:
     """
     client = _agentcore_client()
     memory_id = _memory_id_for_env()
-    sanitized_actor = _sanitize_actor_id(actor_id)
+    derived_actor = derive_actor_id(actor_id)
     next_token: str | None = None
     while True:
         kwargs: dict[str, Any] = {
             "memoryId": memory_id,
-            "actorId": sanitized_actor,
+            "actorId": derived_actor,
             "sessionId": chat_id,
             "maxResults": 100,
         }
@@ -508,7 +508,7 @@ async def _wipe_agentcore_session(actor_id: str, chat_id: str) -> None:
             await asyncio.to_thread(
                 client.delete_event,
                 memoryId=memory_id,
-                actorId=sanitized_actor,
+                actorId=derived_actor,
                 sessionId=chat_id,
                 eventId=event["eventId"],
             )

@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Memory read model + `GET /api/memory/records` (#475, epic #129). The
+  first honest answer to "what does Channel remember about me": the new
+  endpoint enumerates the caller's AgentCore Memory grouped by chat,
+  labels every record's provenance (`conversation` / `remembered` /
+  `meta`, derived from the `[remember]` / `[meta]` text prefixes and
+  applied only to ASSISTANT turns so a user message can't masquerade),
+  and — critically — flags which records are actually reaching the model
+  via `used_in_recall`, alongside a `recall_window` block read straight
+  from `recall.py`'s cap constants. Showing stored records alone implies
+  Channel uses far more than it does; showing only the recalled slice
+  implies it has forgotten far more than it has (#227). The #245 rolling
+  head summaries ride along read-only, because they are injected into
+  their chat's system prompt every single turn. Enumeration lives in a
+  new shared `agents/memory_records.py` so the later forget / edit /
+  export surfaces inherit one definition of a record; `_debug` is
+  untouched. **Security:** the actor-id derivation was not injective
+  when this landed (#474 — `jc+work@x.com` and `jc_work@x.com` derived
+  the same `actorId`), so scoping by actor alone could expose a
+  colliding user's memory; every session is therefore additionally
+  verified against its chat row's owner using the raw JWT sub, and
+  anything unverified is dropped and counted in
+  `withheld_record_count`. #474 itself is fixed below, but the gate
+  stays: a read boundary must not depend on a derivation's properties,
+  and the count is now a standing canary that should read 0. Record
+  text is returned in full and is **data**: render it as plain text,
+  never as Markdown (#465).
 - Image generation via the `generate_image` tool (#279, epic #321).
   Channel can now draw: a single narrow `generate_image(prompt,
   aspect_ratio)` Strands tool calls Stability AI Stable Image Core
@@ -194,6 +220,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Security:** the AgentCore `actorId` derivation is now injective, so
+  two distinct users can no longer share a memory partition (#474). The
+  old mapping replaced every disallowed character with `_`, which
+  collapsed everyday address shapes onto one id — `jc+work@x.com` and
+  `jc_work@x.com` both became `jc_work_x_com`, as did `a.b@x.com` and
+  `a@b.x.com`. Since one AgentCore Memory resource serves an entire
+  environment and `actorId` is its only partition, a collision meant
+  one person's chat content could surface in another's system prompt
+  via the recall hook. `derive_actor_id` now appends a 128-bit SHA-256
+  suffix to a (still readable) label prefix, and every call site —
+  memory hook, recall hook, memory tools, chat-delete session wipe,
+  debug endpoints — derives through that one function. Memories written
+  under the old ids are deliberately orphaned rather than dual-read: a
+  fallback read of the lossy partition would be the very disclosure
+  being fixed. See CLAUDE.md §AgentCore Memory for the full migration
+  reasoning.
 - Auto-titler now salvages partial output when the Haiku titler trips
   `MaxTokensReachedException`. Previously the whole title was
   discarded and the chat stayed on "New chat" in the sidebar. The

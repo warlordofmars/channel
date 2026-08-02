@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
+from channel.agents.memory import derive_actor_id
 from channel.api import main as main_module
 from channel.api._auth import require_mgmt_user
 
@@ -64,7 +65,7 @@ def test_get_memory_events_returns_scoped_results(mounted_app: TestClient):
     }
     fake_client.list_events.assert_called_once_with(
         memoryId="m-1",
-        actorId="u-abc",
+        actorId=derive_actor_id("u-abc"),
         sessionId="chat-xyz",
         maxResults=5,
     )
@@ -109,7 +110,7 @@ def test_delete_memory_event_calls_agentcore_delete(mounted_app: TestClient):
     assert resp.json() == {"status": "deleted"}
     fake_client.delete_event.assert_called_once_with(
         memoryId="m-1",
-        actorId="u-abc",
+        actorId=derive_actor_id("u-abc"),
         sessionId="chat-xyz",
         eventId="evt-1",
     )
@@ -192,7 +193,7 @@ def test_inspect_recall_returns_block_provenance_and_token_count(mounted_app: Te
     assert resp.status_code == 200
     body = resp.json()
     assert body["chat_id"] == "current-chat"
-    assert body["actor_id"] == "u-abc"
+    assert body["actor_id"] == derive_actor_id("u-abc")
     assert body["recall_enabled"] is True
     # Block reuses the hook's real formatting (heading + turn bullets).
     assert "## What we've talked about before" in body["block"]
@@ -207,7 +208,7 @@ def test_inspect_recall_returns_block_provenance_and_token_count(mounted_app: Te
     # Current chat is excluded from the ListEvents fan-out.
     fake_client.list_events.assert_called_once_with(
         memoryId="m-1",
-        actorId="u-abc",
+        actorId=derive_actor_id("u-abc"),
         sessionId="prior-1",
         maxResults=2,
     )

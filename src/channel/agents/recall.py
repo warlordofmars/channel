@@ -29,7 +29,7 @@ from typing import Any
 import boto3
 from strands.hooks.events import BeforeInvocationEvent
 
-from channel.agents.memory import _sanitize_actor_id
+from channel.agents.memory import derive_actor_id
 from channel.metrics import record_recall_outcome
 
 logger = logging.getLogger(__name__)
@@ -198,10 +198,10 @@ class AgentCoreRecallHook:
         client: Any | None = None,
     ) -> None:
         self._memory_id = memory_id
-        # Sanitize at the hook boundary so callers can pass raw JWT
+        # Derive at the hook boundary so callers can pass raw JWT
         # sub (email-form or otherwise) — same pattern as the write
         # hook. AgentCore's actorId/namespace regex rejects ``@`` and ``.``.
-        self._actor_id = _sanitize_actor_id(actor_id)
+        self._actor_id = derive_actor_id(actor_id)
         self._client = client if client is not None else boto3.client("bedrock-agentcore")
 
     def register_hooks(self, registry: Any, **_: Any) -> None:

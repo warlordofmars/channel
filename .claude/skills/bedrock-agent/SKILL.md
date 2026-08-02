@@ -31,7 +31,7 @@ The real code paths today:
 - `src/channel/agents/memory.py` — `AgentCoreMemoryHook`
   (`AfterInvocationEvent` write) + `get_or_create_memory` (one
   Memory resource per env, `channel_{env}`; `actorId =
-  sanitize(jwt.sub)`; `sessionId = chat_id`).
+  derive_actor_id(jwt.sub)`; `sessionId = chat_id`).
 - `src/channel/agents/recall.py` — `AgentCoreRecallHook`
   (`BeforeInvocationEvent` read via `ListSessions` + `ListEvents`).
 - `src/channel/agents/strands_sse.py` — Strands event → SSE byte
@@ -53,6 +53,13 @@ front because they are enforced elsewhere:
   decisions"; ADR-0009; `_payload_from_messages` in `memory.py`).
 - **Memory writes are fail-soft** — log + EMF counter + swallow; a
   failed Memory write must never break a chat.
+- **`actorId` is derived through exactly one function** —
+  `derive_actor_id` in `memory.py`. Never re-derive it locally and
+  never relax it: one Memory resource serves an entire environment
+  and `actorId` is its only partition, so a non-injective mapping
+  puts two users in one memory store (issue #474; CLAUDE.md
+  §"AgentCore Memory"). Pinned by
+  `test_one_shared_derivation_across_every_call_site`.
 
 ## Gaps
 
