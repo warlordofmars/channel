@@ -51,11 +51,72 @@ gate's behaviour depend on intermediaries rather than on our own rule.
 It is also the stricter of the two readings, which is the right default
 for a CSRF control.
 
+Rate limiting (#294)
+--------------------
+An unauthenticated endpoint that performs a DynamoDB read plus a
+conditional write per call needs a ceiling. The scope of that ceiling is
+the whole design, because a badly-scoped limit on a *session* endpoint
+signs people out — a self-inflicted DoS strictly worse than the traffic
+it was meant to shed. Three candidate keys, and why one wins:
+
+- **Global** — one looping client throttles every user on the instance.
+  Rejected outright.
+- **Per client IP** — WAF already does this coarsely
+  (``GlobalRateLimit``, 1 000 / 5 min). A *tight* per-IP limit here
+  would be actively harmful: carrier NAT and corporate egress share one
+  address across thousands of unrelated users, so one broken client
+  would lock out an entire office.
+- **Per token-family (chosen)** — the blast radius of a limit keyed on
+  the credential is exactly the one device that is misbehaving. It
+  cannot spill onto another device, another user, or another tenant of
+  the same IP.
+
+The key is a **process-local keyed digest of the presented token**
+(:func:`_rate_limit_key`), which under hard rotation *is* a family
+address: a family has exactly one live token at a time. On a successful
+rotation the limiter's window and count are carried from the spent
+token's key to its successor's (``rekey``) — without that hand-off the
+limit would be trivially escapable, since every success mints a fresh
+credential that would otherwise hash to a fresh key with a fresh window.
+
+Two properties are load-bearing, both pinned by tests:
+
+1. **A rate-limited request never reaches ``consume_refresh_token``.**
+   The 429 is returned before the token is touched, so the presented
+   token stays live and unrotated, and the client's later retry succeeds
+   normally. Were the rejection to land *after* consumption, the retry
+   would present an already-rotated token — indistinguishable from
+   replay — and reuse detection would revoke the whole family. Throttling
+   a client must never manufacture the breach signal.
+2. **A 429 does not clear the refresh cookie.** The credential is still
+   valid; only this attempt was shed. Clearing it would turn a transient
+   throttle into a permanent sign-out, which is the failure mode the
+   per-family scoping exists to prevent.
+
+The limiter also runs *before* the token's validity is known, so a 429
+is returned for a garbage token and a good one alike — it can never be
+used as an existence oracle, the same reasoning behind the single
+``_REJECTION_DETAIL``.
+
+Config: ``CHANNEL_REFRESH_RATE_LIMIT`` (default 5) and
+``CHANNEL_REFRESH_RATE_LIMIT_WINDOW_SECONDS`` (default 60). ``0``
+disables the limiter. Five per minute is roughly 300× a healthy client's
+rate — it refreshes about once an hour — so the ceiling only ever
+catches a loop.
+
+Observability (#294)
+--------------------
+Every request that reaches the route emits exactly one of
+``RefreshSuccess`` / ``RefreshFailure``, plus ``RefreshReuseDetected``
+or ``RefreshRateLimited`` where they apply. See
+:func:`~channel.metrics.record_refresh_outcome` for the counter
+semantics and the no-dimensions cardinality rule.
+
 Not in scope here
 -----------------
-The sessions API (#293), rate limiting + EMF counters (#294). This
-module deliberately only consumes and rotates; #290's storage layer owns
-the rest. Minting the session's *first* refresh token belongs to the
+The sessions API (#293). This module deliberately only consumes and
+rotates; #290's storage layer owns the rest. Minting the session's
+*first* refresh token belongs to the
 Google callback (#292, :mod:`channel.auth.mgmt_auth`) — but the cookie
 itself is defined here, and both that callback and ``POST /auth/logout``
 drive it through :func:`set_refresh_cookie` /
@@ -66,8 +127,13 @@ exactly how a mint/rotate mismatch silently breaks the web flow.
 
 from __future__ import annotations
 
+import hashlib
+import math
+import os
+import secrets
+from collections.abc import Callable
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, TypeVar
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
@@ -76,7 +142,9 @@ from pydantic import BaseModel, ConfigDict
 from channel.auth.mgmt_auth import make_mgmt_user
 from channel.auth.tokens import MGMT_JWT_TTL_SECONDS, issue_mgmt_jwt
 from channel.logging_config import fingerprint_id, get_logger
+from channel.metrics import record_refresh_outcome
 from channel.models import RefreshConsumeOutcome, RefreshToken
+from channel.rate_limit import FixedWindowRateLimiter
 
 # ``_parse_iso_utc`` is module-private by naming convention but is the
 # canonical parser for this table's ISO columns — ``consume_refresh_token``
@@ -117,6 +185,144 @@ REFRESH_CSRF_HEADER = "x-channel-refresh"
 # attacker probing the token space and the SPA's response is identical in
 # every case (clear local state, go to /app/login).
 _REJECTION_DETAIL = "Invalid or expired refresh token"
+
+# 429 body. Unlike ``_REJECTION_DETAIL`` this one is allowed to be
+# specific: it says nothing about whether the presented token was any
+# good (the limiter runs before validity is known), and the client needs
+# to distinguish "back off" from "you are signed out" — a SPA that
+# treated a throttle as a 401 would send the user to the login page over
+# a transient burst.
+_RATE_LIMIT_DETAIL = "Too many refresh attempts; retry shortly"
+
+# 5 per minute per token-family. See the module docstring for why the
+# key is the family rather than the IP, and why the ceiling is this
+# generous relative to a healthy client's ~1/hour.
+_RATE_LIMIT_ENV = "CHANNEL_REFRESH_RATE_LIMIT"
+_RATE_LIMIT_WINDOW_ENV = "CHANNEL_REFRESH_RATE_LIMIT_WINDOW_SECONDS"
+_DEFAULT_RATE_LIMIT = 5
+_DEFAULT_RATE_LIMIT_WINDOW_SECONDS = 60.0
+
+# Shortest window that can still limit anything. Below roughly a second
+# the window rolls between consecutive requests, so the limiter admits
+# everything — see :func:`_build_refresh_limiter`. A second is already
+# three orders of magnitude tighter than this endpoint's healthy
+# ~1/hour cadence, so nothing legitimate wants a smaller one.
+_MIN_RATE_LIMIT_WINDOW_SECONDS = 1.0
+
+_Number = TypeVar("_Number", int, float)
+
+
+def _env_number(name: str, default: _Number, cast: Callable[[str], _Number]) -> _Number:
+    """Read a numeric env override, falling back on anything unparseable.
+
+    Deliberately never raises. This runs at **import** time, so a bare
+    ``int(os.environ[...])`` would turn a typo in the one knob an
+    operator reaches for under pressure — ``CHANNEL_REFRESH_RATE_LIMIT``,
+    whose documented value for "turn this off" is ``0`` — into a
+    ``ValueError`` during ``import channel.api.main``, taking the whole
+    Lambda down. A misconfigured rate limit must not be able to escalate
+    into a total outage. (``storage.py``'s
+    ``CHANNEL_AUDIT_RETENTION_DAYS`` parse can afford to be strict: it
+    runs inside a function, so it fails narrowly.)
+
+    "Unparseable" deliberately includes values that *do* parse but are
+    not finite. ``float("nan")`` and ``float("inf")`` are perfectly legal
+    ``float`` calls, so a window of ``nan`` or ``inf`` would sail through
+    a bare ``except ValueError`` and only detonate later, inside
+    :meth:`~channel.rate_limit.FixedWindowRateLimiter.check`, where
+    ``math.ceil`` cannot convert either to an ``int``. That moves the
+    blast radius from "import fails loudly" to "every throttled refresh
+    500s", which is worse — so the finite check happens here, at the one
+    place a non-finite value can enter. ``OverflowError`` is caught for
+    the same reason: an absurdly large integer literal parses fine and
+    then overflows the finite check itself.
+    """
+
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = cast(raw)
+        if not math.isfinite(value):
+            raise ValueError(f"non-finite value {raw!r}")
+    except (ValueError, OverflowError):
+        logger.warning("auth.refresh ignoring malformed %s=%r, using %r", name, raw, default)
+        return default
+    return value
+
+
+def _build_refresh_limiter() -> FixedWindowRateLimiter:
+    """Construct the route's limiter from the environment.
+
+    Extracted from the module-level assignment so a test can exercise
+    the env → limiter wiring (notably the documented ``0`` kill switch)
+    without reimporting the module.
+
+    A *window* below :data:`_MIN_RATE_LIMIT_WINDOW_SECONDS` is corrected
+    rather than honoured. Such a value parses fine, is finite, and may
+    even be positive — but ``now - started_at >= window_seconds`` is then
+    true for practically any two consecutive requests, so the window
+    rolls continuously and the limiter admits everything while still
+    reporting ``enabled`` and leaving ``RefreshRateLimited`` flat. A
+    silently-off abuse damper that looks identical to "no abuse" is the
+    worst of the three outcomes; the limit is disabled *legibly* via
+    ``CHANNEL_REFRESH_RATE_LIMIT=0`` instead.
+
+    The floor is a floor rather than a ``> 0`` check because ``0`` is not
+    the only value with that shape: ``0.0001`` has it too, and is the
+    likelier operator slip of the two (unit confusion — someone thinking
+    in milliseconds). Rejecting only the exact zero would leave the
+    footgun loaded.
+
+    A non-positive **limit** is deliberately left alone: that is the
+    documented kill switch, and ``enabled`` reports it honestly, which is
+    exactly the property the window case lacks. An absurdly *large* limit
+    is likewise left alone — it is at least plausibly intentional, and it
+    fails in the same direction as the LRU eviction this module already
+    accepts (toward admitting traffic).
+    """
+
+    window = _env_number(_RATE_LIMIT_WINDOW_ENV, _DEFAULT_RATE_LIMIT_WINDOW_SECONDS, float)
+    if window < _MIN_RATE_LIMIT_WINDOW_SECONDS:
+        logger.warning(
+            "auth.refresh ignoring sub-%rs %s=%r, using %r",
+            _MIN_RATE_LIMIT_WINDOW_SECONDS,
+            _RATE_LIMIT_WINDOW_ENV,
+            window,
+            _DEFAULT_RATE_LIMIT_WINDOW_SECONDS,
+        )
+        window = _DEFAULT_RATE_LIMIT_WINDOW_SECONDS
+
+    return FixedWindowRateLimiter(
+        limit=_env_number(_RATE_LIMIT_ENV, _DEFAULT_RATE_LIMIT, int),
+        window_seconds=window,
+    )
+
+
+_refresh_limiter = _build_refresh_limiter()
+
+# Per-process salt for the limiter's bucket keys, regenerated on every
+# cold start. The obvious key would be the same SHA-256 digest storage
+# uses for ``PK=REFRESH#{hash}``, but that would put a table of live
+# primary keys in process memory for no benefit — the limiter never
+# needs to correlate its keys with anything outside itself. A keyed
+# digest gives the same collision resistance while making the in-memory
+# value inert: it is not the token, and it is not the row's identifier.
+_RATE_LIMIT_KEY_SALT = secrets.token_bytes(32)
+
+
+def _rate_limit_key(presented: str) -> str:
+    """Bucket key for a presented refresh token.
+
+    Under hard rotation a device family has exactly one live token, so
+    the live token's digest addresses the family. :func:`refresh_session`
+    keeps that address current by handing the bucket to the successor's
+    key on every rotation.
+    """
+
+    return hashlib.blake2b(
+        presented.encode("utf-8"), key=_RATE_LIMIT_KEY_SALT, digest_size=16
+    ).hexdigest()
 
 
 class RefreshRequest(BaseModel):
@@ -237,6 +443,27 @@ def _rejection(*, via_cookie: bool) -> JSONResponse:
     return response
 
 
+def _rate_limited(retry_after_seconds: int) -> JSONResponse:
+    """429 for a request shed by the per-family limiter (#294).
+
+    **Deliberately does not clear the refresh cookie**, unlike
+    :func:`_rejection`. The credential is still live — the request was
+    shed, not rejected — and clearing it would convert a throttle that
+    resolves in under a minute into a sign-out that costs a full Google
+    round trip. Turning a rate limit into a logout is the self-inflicted
+    DoS the limiter's per-family scoping exists to avoid; doing it in
+    the response builder would reintroduce it at the last step.
+
+    ``Retry-After`` is the remaining whole seconds of the window, so a
+    client (and #295's silent-refresh wrapper) can back off exactly long
+    enough rather than guessing.
+    """
+
+    response = _no_store(JSONResponse(status_code=429, content={"detail": _RATE_LIMIT_DETAIL}))
+    response.headers["Retry-After"] = str(retry_after_seconds)
+    return response
+
+
 def _issued(row: RefreshToken, rotated: str, *, via_cookie: bool) -> JSONResponse:
     """200 carrying a fresh access JWT and the rotated refresh token.
 
@@ -284,15 +511,20 @@ def _issued(row: RefreshToken, rotated: str, *, via_cookie: bool) -> JSONRespons
 async def refresh_session(request: Request, body: RefreshRequest | None = None) -> JSONResponse:
     """Exchange a refresh token for a new access JWT + rotated refresh token.
 
-    Returns 403 when the CSRF header is absent, 401 for any unusable
-    token, and 200 with ``{access_token, token_type, expires_in}`` (plus
-    ``refresh_token`` on the body transport) on success.
+    Returns 403 when the CSRF header is absent, 429 when the per-family
+    rate limit is exceeded, 401 for any unusable token, and 200 with
+    ``{access_token, token_type, expires_in}`` (plus ``refresh_token`` on
+    the body transport) on success.
 
     A client with no refresh token at all also gets a 401 — that is the
     epic's migration path, not an error: a session predating the refresh
     flow keeps using its existing long-lived access token until it
     expires, and the SPA treats this 401 as "nothing to refresh" rather
     than "signed out".
+
+    Every exit path emits exactly one of ``RefreshSuccess`` /
+    ``RefreshFailure`` (#294), so the pair is a complete denominator for
+    the failure ratio.
     """
 
     if not request.headers.get(REFRESH_CSRF_HEADER):
@@ -301,6 +533,7 @@ async def refresh_session(request: Request, body: RefreshRequest | None = None) 
         # absent). Rejected before the token is even read: a request that
         # cannot prove it was made by our own JavaScript must not be
         # allowed to burn a rotation, which would log the real client out.
+        await record_refresh_outcome(success=False, reason="csrf_missing")
         raise HTTPException(status_code=403, detail="Missing X-Channel-Refresh header")
 
     body_token = (body.refresh_token or "").strip() if body else ""
@@ -315,7 +548,25 @@ async def refresh_session(request: Request, body: RefreshRequest | None = None) 
     via_cookie = not body_token and raw_cookie is not None
 
     if not presented:
+        await record_refresh_outcome(success=False, reason="no_token")
         return _rejection(via_cookie=via_cookie)
+
+    # Rate limit BEFORE the token is consumed (#294). A request shed here
+    # leaves the presented token live and unrotated, so the client's
+    # retry after ``Retry-After`` succeeds normally. Shedding *after*
+    # consumption would leave the client holding a spent token whose
+    # retry is indistinguishable from replay — throttling would then
+    # trigger reuse detection and revoke the whole device family.
+    rate_key = _rate_limit_key(presented)
+    decision = _refresh_limiter.check(rate_key)
+    if not decision.allowed:
+        logger.warning(
+            "auth.refresh rate_limited transport=%s retry_after=%d",
+            "cookie" if via_cookie else "body",
+            decision.retry_after_seconds,
+        )
+        await record_refresh_outcome(success=False, reason="rate_limited")
+        return _rate_limited(decision.retry_after_seconds)
 
     result = consume_refresh_token(presented)
     rotated, row = result.raw_token, result.token
@@ -325,6 +576,13 @@ async def refresh_session(request: Request, body: RefreshRequest | None = None) 
     # arm to exclude from coverage.
     if result.outcome is not RefreshConsumeOutcome.OK or rotated is None or row is None:
         logger.warning("auth.refresh rejected outcome=%s", result.outcome.value)
+        await record_refresh_outcome(success=False, reason=result.outcome.value)
         return _rejection(via_cookie=via_cookie)
 
+    # Hand the family's window to the successor the client will present
+    # next. Without this every success would start a fresh window (a new
+    # token hashes to a new key), making the limit unreachable by exactly
+    # the runaway rotation loop it exists to bound.
+    _refresh_limiter.rekey(rate_key, _rate_limit_key(rotated))
+    await record_refresh_outcome(success=True)
     return _issued(row, rotated, via_cookie=via_cookie)
