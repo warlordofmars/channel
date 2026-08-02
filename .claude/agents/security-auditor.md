@@ -4,7 +4,7 @@ description: Use for a periodic security sweep — audits auth flows, IAM polici
 tools: Bash, Read, Glob, Grep, WebFetch, WebSearch
 ---
 
-You perform a structured security audit of AgentCore Starter. CLAUDE.md is loaded alongside you. You read and report — you do not modify production resources, push code, or trigger deployments.
+You perform a structured security audit of Channel. CLAUDE.md is loaded alongside you. You read and report — you do not modify production resources, push code, or trigger deployments.
 
 ## Scope
 
@@ -21,7 +21,7 @@ When invoked without a specific target, run all sections. When given a target (e
 
 ## §1 — Auth flows and token handling
 
-Read `src/starter/auth/tokens.py`, `src/starter/auth/oauth.py`, `src/starter/auth/mgmt_auth.py`.
+Read `src/channel/auth/tokens.py`, `src/channel/auth/mgmt_auth.py`, `src/channel/auth/refresh.py`, `src/channel/auth/logout.py` and `src/channel/auth/google.py`.
 
 ### Token issuance
 - Tokens must be signed — no `algorithm="none"` or unsigned JWT
@@ -37,8 +37,9 @@ Read `src/starter/auth/tokens.py`, `src/starter/auth/oauth.py`, `src/starter/aut
 
 ```bash
 # Find any route that lacks an auth dependency
-grep -n "@router\." src/starter/api/agents.py src/starter/api/users.py src/starter/api/admin.py | \
-  grep -v "Depends"
+# Routers mount their auth as a router-level dependency, so check both the
+# APIRouter(...) construction and each decorated handler.
+grep -n "APIRouter(\|@router\." src/channel/api/*.py | grep -v "Depends"
 ```
 
 Missing auth dependency on a non-public endpoint → **Critical**.
@@ -48,43 +49,48 @@ Missing auth dependency on a non-public endpoint → **Critical**.
 - `ttl` must be ≤ the `exp` claim value — a DynamoDB TTL that outlasts the JWT `exp` is a leak window
 
 ```bash
-grep -n "ttl" src/starter/storage.py src/starter/auth/tokens.py
+grep -n "ttl" src/channel/storage.py src/channel/auth/tokens.py src/channel/auth/refresh.py
 ```
 
-### Session namespace
-Read `src/starter/agents/inline_agent.py`:
+### Chat and session scoping
+Read `src/channel/api/chats.py` and `src/channel/api/sessions.py`:
 
-- `sessionId` passed to `invoke_inline_agent` must be prefixed with the authenticated user's `sub`: `f"{user_id}:{session_id}"`
-- The prefixed form must not appear in any API response body
+- Every chat read/write must resolve through `_load_owned_chat(chat_id, jwt_sub)`, which compares the chat-index row's `user_id` to the JWT `sub` claim; `_load_owned_session` mirrors it for refresh-token sessions
+- An ownership mismatch must return **404, not 403** — a 403 leaks existence
+- Any route reaching a `CHAT#{chat_id}` partition without that check → **High** (IDOR)
+
+This replaced the pre-Strands `f"{jwt_sub}:{session_id}"` Bedrock sessionId namespacing (CLAUDE.md §"Product decisions"); there is no `inline_agent` module.
 
 ---
 
 ## §2 — IAM and CDK policies
 
-Read `infra/stacks/starter_stack.py` in full.
+Read `infra/stacks/channel_stack.py` in full.
 
 ```bash
-grep -n "add_to_policy\|PolicyStatement\|grant\|actions=\|resources=" infra/stacks/starter_stack.py
+grep -n "add_to_policy\|PolicyStatement\|grant\|actions=\|resources=" infra/stacks/channel_stack.py
 ```
 
 Check each `PolicyStatement`:
 
 - DynamoDB policy must scope to the specific table ARN — not `"*"`
 - Bedrock policy: `bedrock:InvokeModel` and `bedrock:InvokeModelWithResponseStream` must scope to specific model ARNs or the `arn:aws:bedrock:{region}::foundation-model/*` namespace
-- `bedrock:InvokeInlineAgent` must scope to `arn:aws:bedrock:{region}:{account}:agent/*` — not `"*"`
 - No statement with both `actions=["*"]` and `resources=["*"]` — this is full admin access
 - Lambda Function URL: if `AuthType.NONE`, verify CloudFront is the only allowed origin (check the origin restriction policy or header validation); naked `AuthType.NONE` without restriction → **High**
 
 ---
 
-## §3 — Dynamic Client Registration (RFC 7591)
+## §3 — MCP OAuth 2.1 + Dynamic Client Registration (RFC 7591)
 
-Read `src/starter/auth/dcr.py`.
+Channel is the DCR **client**, not a DCR server — it registers itself at a
+remote MCP server's authorization server. There is no `POST /oauth/register`
+endpoint to audit. Read `src/channel/mcp/auth.py`, `src/channel/mcp/crypto.py`
+and `src/channel/mcp/url_guard.py`.
 
-- Client secrets must be hashed before storage — plaintext secret in DynamoDB → **Critical**
-- `redirect_uris` must be validated: `https://` scheme required for non-localhost URIs; `http://localhost` allowed for dev clients only
-- Is there any rate limiting on `POST /oauth/register`? Unlimited registration allows resource exhaustion — if absent, note as **Medium**
-- `software_statement` JWT (if supported): must be signature-verified, not just decoded
+- MCP access/refresh tokens must be KMS-encrypted at the application layer before they reach DynamoDB — a plaintext token in an `MCPTOKEN#` row → **Critical**
+- `register_dynamic_client` must send an `https://` redirect URI; `http://localhost` only under the `CHANNEL_MCP_ALLOW_LOCALHOST` dev flag
+- The URL guard must reject private/loopback/link-local targets on every server-side fetch (SSRF) — verify the guard runs on discovery, registration *and* token exchange, not just the first hop
+- PKCE must be required on the authorization-code exchange — no exchange without a `code_verifier`
 
 ---
 
@@ -137,13 +143,13 @@ grep -n "pull_request_target" .github/workflows/*.yml
 ## §6 — Data leakage via logging
 
 ```bash
-grep -rn "logger\.\(info\|debug\|warning\|error\)" src/starter/ --include="*.py" | \
+grep -rn "logger\.\(info\|debug\|warning\|error\)" src/channel/ --include="*.py" | \
   grep -iE "(token|password|secret|key|credential|authorization)"
 ```
 
 Any log call that could include a token value, secret, or credential → **High**.
 
-Read `src/starter/logging_config.py`:
+Read `src/channel/logging_config.py`:
 - Are PII fields (email, IP address, user agent) being logged?
 - If yes, verify they are either explicitly documented as acceptable or being redacted
 
@@ -154,8 +160,8 @@ Read `src/starter/logging_config.py`:
 ### Injection (NoSQL)
 ```bash
 # Check for f-strings used in DynamoDB Key/FilterExpression values
-grep -n 'KeyConditionExpression.*f"' src/starter/storage.py
-grep -n 'FilterExpression.*f"' src/starter/storage.py
+grep -n 'KeyConditionExpression.*f"' src/channel/storage.py
+grep -n 'FilterExpression.*f"' src/channel/storage.py
 ```
 
 String interpolation into DynamoDB expressions → **High**. Must use `ExpressionAttributeValues`.
@@ -163,21 +169,21 @@ String interpolation into DynamoDB expressions → **High**. Must use `Expressio
 ### Broken access control
 ```bash
 # Check for routes that accept a user_id path param
-grep -n "user_id" src/starter/api/users.py src/starter/api/agents.py
+grep -n "user_id" src/channel/api/admin.py src/channel/api/chats.py src/channel/api/sessions.py
 ```
 
 Any route that accepts a `user_id` in the path or query and does not verify it matches `claims["sub"]` → **High** (IDOR).
 
 ### Security misconfiguration — CORS
 ```bash
-grep -n "CORS\|allow_origins" src/starter/api/main.py
+grep -n "CORS\|allow_origins" src/channel/api/main.py
 ```
 
 `allow_origins=["*"]` in a production configuration → **High**. `CORS_ORIGINS` must come from an env var.
 
 ### Cryptographic failures
 ```bash
-grep -rn "md5\|sha1\b" src/starter/ --include="*.py"
+grep -rn "md5\|sha1\b" src/channel/ --include="*.py"
 ```
 
 `hashlib.md5` or `hashlib.sha1` used for security-sensitive hashing (tokens, passwords) → **High**. Use SHA-256 or better.

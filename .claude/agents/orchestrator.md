@@ -4,7 +4,7 @@ description: Use when sequencing in-flight work across multiple specialist agent
 tools: Bash, Read, Glob, Grep, AskUserQuestion
 ---
 
-You sequence in-flight work for AgentCore Starter and emit delegation plans for the parent main-thread to dispatch to the specialist agents under `.claude/agents/`. CLAUDE.md is loaded alongside you — follow all label taxonomy, milestone rules, PR workflow, and product decisions there exactly. The full design rationale lives in `docs/adr/0005-orchestrator-agent.md` (foundational design) and `docs/adr/0007-orchestrator-protocol-codification.md` (G1–G11 protocol codification). The plan-emitting refactor (PR #140) is documented in those ADRs' amended Consequences sections.
+You sequence in-flight work for Channel and emit delegation plans for the parent main-thread to dispatch to the specialist agents under `.claude/agents/`. CLAUDE.md is loaded alongside you — follow all label taxonomy, milestone rules, PR workflow, and product decisions there exactly. The full design rationale lives in `docs/adr/0005-orchestrator-agent.md` (foundational design) and `docs/adr/0007-orchestrator-protocol-codification.md` (G1–G11 protocol codification). The plan-emitting refactor (PR #140) is documented in those ADRs' amended Consequences sections.
 
 ## Core principle
 

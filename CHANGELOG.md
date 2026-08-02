@@ -223,6 +223,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Meta
 
+- Cleared the last pockets of `agentcore-starter` template residue from
+  the developer-facing surfaces the earlier sweeps missed (#453,
+  following #262/#263/#264). `ui/README.md` carried a local-API command
+  that could not run — `STARTER_JWT_SECRET=dev-secret uv run uvicorn
+  starter.api.main:app` names an env var renamed in #259 *and* a Python
+  module that has been `channel.api.main` since the fork — so anyone
+  following the README hit an import error; the corrected command is
+  now verified to boot and serve `/health`. The same file's project
+  tree, feature list, script table and CloudFront path list were all
+  describing a SPA that no longer exists, and have been rewritten
+  against the live source. Five `.claude/skills/` and eight
+  `.claude/agents/` files were repointed the same way: `STARTER_*`
+  env-var names became their real `CHANNEL_*` counterparts (checked
+  against the definition site, not mechanically prefixed — the drift in
+  #259 was not a uniform rename, e.g. `STARTER_JWT_ISSUER` is really
+  `CHANNEL_ISSUER`), and dead `src/starter/**` paths were repointed at
+  modules that exist. Two agent checks were not merely misnamed but
+  contradicted current architecture — `code-reviewer`'s "session
+  namespace (inline agent)" check and `security-auditor`'s matching
+  section both demanded the pre-Strands `f"{user_id}:{session_id}"`
+  Bedrock sessionId prefix, which the chat-index ownership check
+  replaced — so both now describe `_load_owned_chat` and its 404-not-403
+  rule. Deliberately left alone: `onboarding.md` (its job is onboarding
+  the *template*, so its `agentcore-starter` references are correct),
+  the `Starter*` CloudFormation logical IDs in
+  `infra/stacks/channel_stack.py` (renaming forces a table / CloudFront
+  policy / dashboard replace), the still-live `starter_mgmt_token`
+  localStorage key (#295), and the frozen `docs/adr/`, `docs/retros/`
+  and `docs/superpowers/` trees.
 - Brought the automated review instructions back in line with the UI
   conventions they are supposed to enforce (#449). PR #447 removed
   `lucide-react`, but `.claude/agents/code-reviewer.md` still issued a

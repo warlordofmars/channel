@@ -61,7 +61,7 @@ front because they are enforced elsewhere:
 - **What's missing:** The step-by-step convention for adding a new
   Strands tool under `src/channel/agents/tools/` — the `@tool`
   signature shape, registration in `chats._build_tool_registry`,
-  the kill-switch env-var pattern (`STARTER_<TOOL>_ENABLED`), and
+  the kill-switch env-var pattern (`CHANNEL_<TOOL>_ENABLED`), and
   how tool results reach the SSE stream via `translate_event`.
 - **Why deferred:** This resync (#358) repoints the stub at the
   real files; writing the full convention set from those files is a
@@ -89,7 +89,7 @@ front because they are enforced elsewhere:
   ASSISTANT message shape, the recall caps
   (`_RECALL_MAX_SESSIONS`, `_RECALL_EVENTS_PER_SESSION`,
   `_RECALL_EVENT_TEXT_TRUNCATE`), and the kill-switches
-  (`STARTER_RECALL_ENABLED`, `STARTER_AUTO_TITLE_ENABLED`).
+  (`CHANNEL_RECALL_ENABLED`, `CHANNEL_AUTO_TITLE_ENABLED`).
 - **Why deferred:** Documented in CLAUDE.md §"AgentCore Memory"
   today; folding it into a full skill is the deferred work.
 - **Unblocks when:** the same skill-authoring pass; no issue

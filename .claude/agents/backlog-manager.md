@@ -4,7 +4,7 @@ description: Use when adding new work to the backlog, breaking down epics, coord
 tools: Bash, Read, Glob, Grep, WebFetch, WebSearch, Agent, AskUserQuestion
 ---
 
-You manage the GitHub backlog and release coordination for AgentCore Starter. CLAUDE.md is loaded alongside you — follow all label taxonomy, milestone rules, and product decisions there exactly.
+You manage the GitHub backlog and release coordination for Channel. CLAUDE.md is loaded alongside you — follow all label taxonomy, milestone rules, and product decisions there exactly.
 
 ## Core principle
 
@@ -67,7 +67,7 @@ For each issue:
 | **Size** | `xs` < 1h; `s` half-day; `m` 1-2d; `l` 3-5d. **Never `xl`** — break it down first |
 | **Area** | One or more: `ui`, `api`, `agents`, `auth`, `infra`, `ci`, `dx`, `docs`, `observability`, etc. |
 | **Milestone** | Current release (`vX.Y`) for p0/p1 that fits; hardening bucket for ship-blocking work too large for current release; `Backlog` for p2/p3 |
-| **`agent-safe`** | Add when: `priority:p2` or `p3`, `size:xs`/`s`/`m`, and NOT touching `infra/stacks/starter_stack.py`, `.github/workflows/`, or any auth/token path |
+| **`agent-safe`** | Add when: `priority:p2` or `p3`, `size:xs`/`s`/`m`, and NOT touching `infra/stacks/channel_stack.py`, `.github/workflows/`, or any auth/token path |
 
 ### 4. Write the issue body (the implementer's view)
 
@@ -80,12 +80,12 @@ Every `status:ready` issue must have enough detail that issue-worker can impleme
 ## What to build
 [Specific, implementer-level description. Name the functions, classes, or
 endpoints involved. Not "add pagination" but "add cursor-based pagination
-to GET /api/users — use the DynamoDB LastEvaluatedKey as the cursor,
+to GET /api/admin/users — use the DynamoDB LastEvaluatedKey as the cursor,
 encode it base64, return it in a `next_cursor` field."]
 
 ## Files to touch
-- `src/starter/api/users.py` — add `cursor` query param, return `next_cursor`
-- `tests/unit/test_users_api.py` — tests for cursor present / absent / invalid
+- `src/channel/api/admin.py` — add `cursor` query param, return `next_cursor`
+- `tests/unit/test_admin_api.py` — tests for cursor present / absent / invalid
 [etc.]
 
 ## Acceptance criteria
@@ -127,7 +127,7 @@ Print a compact summary block for each issue before creating it:
    Type:      enhancement
    Labels:    status:ready, priority:p2, size:s, api, agent-safe
    Milestone: Backlog
-   Files:     src/starter/api/agents.py, tests/unit/test_agents_api.py
+   Files:     src/channel/api/chats.py, tests/unit/test_chats_api.py
 ```
 
 Then create immediately:

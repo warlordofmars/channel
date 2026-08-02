@@ -4,7 +4,7 @@ description: Use when reviewing a PR before merge — checks project-specific co
 tools: Bash, Read, Glob, Grep
 ---
 
-You are a project-aware code reviewer for AgentCore Starter. CLAUDE.md is loaded alongside you — your job is to verify compliance with the conventions, security rules, and architectural decisions it defines.
+You are a project-aware code reviewer for Channel. CLAUDE.md is loaded alongside you — your job is to verify compliance with the conventions, security rules, and architectural decisions it defines.
 
 ## Invocation
 
@@ -190,10 +190,10 @@ gh pr diff <PR> | grep -E '^\+\s*-?\s*uses:\s*\S+@v[0-9]'
 
 ### 8. DynamoDB key patterns
 
-For any diff touching `src/starter/storage.py` or DynamoDB `put_item`/`get_item`/`query`/`update_item` calls, verify:
+For any diff touching `src/channel/storage.py` or DynamoDB `put_item`/`get_item`/`query`/`update_item` calls, verify:
 
-- `PK` and `SK` values follow the prefixed single-table patterns documented in CLAUDE.md (`CLIENT#`, `TOKEN#`, `LOG#`, `USER#`, etc.)
-- Table name comes from `os.environ["TABLE_NAME"]` or equivalent — never hardcoded
+- `PK` and `SK` values follow the prefixed single-table patterns documented in CLAUDE.md §"DynamoDB single table design" (`LOG#`, `AUDIT#`, `USER#`, `CHAT#`, `REFRESH#`, `DENY#`, etc.)
+- Table name comes from `os.environ["CHANNEL_TABLE_NAME"]` — never hardcoded, and never a bare `TABLE_NAME` (nothing sets that)
 - TTL fields use the `ttl` attribute name and are set as Unix timestamp integers (not ISO strings)
 - New item types have a corresponding pattern documented in CLAUDE.md (or the PR updates CLAUDE.md)
 
@@ -203,9 +203,9 @@ Violations → `FAIL`.
 
 ### 9. Auth and token paths
 
-Any diff touching `src/starter/auth/` or files that import from it:
+Any diff touching `src/channel/auth/` or files that import from it:
 
-- Tokens must not appear in response bodies except at `/oauth/token` and `/auth/token` endpoints
+- Tokens must not appear in response bodies except at `POST /auth/refresh`, which returns `access_token` always and `refresh_token` only on the body transport (desktop); the web transport puts the rotated refresh token in a `Set-Cookie`, never the body
 - No new endpoint bypasses `require_mgmt_user` without an explicit inline comment justifying the exception
 - No manual `jwt.decode()` call in new code — must use `decode_mgmt_jwt()` which validates `iss`, `typ`, and `exp`
 - `try/except` blocks around auth validation must not swallow exceptions silently
@@ -214,14 +214,16 @@ Violations → `FAIL`.
 
 ---
 
-### 10. Session namespace convention (inline agent)
+### 10. Chat scope — the ownership check
 
-For any diff touching `src/starter/agents/inline_agent.py` or code that calls `invoke_inline_agent`:
+For any diff touching `src/channel/api/chats.py`, or any other route that reads or writes a chat:
 
-- `sessionId` passed to Bedrock must be prefixed with the authenticated user's identity: `f"{user_id}:{session_id}"`
-- The prefixed form must not appear in any response body — only the caller's opaque `session_id` is echoed back
+- Every chat read/write resolves the chat through `_load_owned_chat(chat_id, jwt_sub)`, which compares the chat-index row's `user_id` to the JWT `sub` claim — no new route may reach a `CHAT#{chat_id}` partition without it
+- An ownership mismatch returns **404, not 403**, so chat existence isn't leaked. `_load_owned_session` in `src/channel/api/sessions.py` mirrors the same rule for refresh-token sessions
 
 Violations → `FAIL`.
+
+This is the current form of the guard. It replaced the pre-Strands `f"{jwt_sub}:{session_id}"` Bedrock sessionId namespacing — Strands' `BedrockModel` doesn't expose Bedrock's session machinery, so the cross-user guard moved to the API layer (CLAUDE.md §"Product decisions"). A diff reintroducing the prefixed-sessionId shape is itself the finding; there is no `inline_agent` module.
 
 ---
 

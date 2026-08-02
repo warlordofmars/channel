@@ -27,7 +27,7 @@ matches the issue's area label. The current router files include:
 - `src/channel/api/attachments.py` — upload endpoints
 - `src/channel/api/prefs.py` — per-user UI preferences
 - `src/channel/api/mcp.py` — MCP server registry (mounted only when
-  `STARTER_MCP_REGISTRY_ENABLED=1`, the default)
+  `CHANNEL_MCP_REGISTRY_ENABLED=1`, the default)
 - `src/channel/api/admin.py` — admin-only metrics
 - `src/channel/api/csp.py` — CSP violation report receiver
 - `src/channel/api/main.py` — app construction, middleware,
@@ -155,7 +155,7 @@ companion test cases for the worked example are listed at the
 bottom of [`example.py`](./example.py); the pattern is:
 
 - Construct a `TestClient(app)` once at module scope.
-- Set `STARTER_JWT_SECRET` via `os.environ.setdefault` *before*
+- Set `CHANNEL_JWT_SECRET` via `os.environ.setdefault` *before*
   importing the app, so JWT issuance/validation works.
 - Provide an `_auth_headers()` helper that issues a real
   management JWT via `issue_mgmt_jwt(...)` — do not mock the auth

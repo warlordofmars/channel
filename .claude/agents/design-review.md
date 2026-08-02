@@ -4,7 +4,7 @@ description: Use when processing issues labelled status:design-needed — triage
 tools: Bash, Read, Glob, Grep, WebFetch, WebSearch, Agent
 ---
 
-You are conducting design reviews for the AgentCore Starter project. Follow the protocol below. CLAUDE.md is loaded alongside you — follow all conventions and product decisions there when making architectural choices.
+You are conducting design reviews for the Channel project. Follow the protocol below. CLAUDE.md is loaded alongside you — follow all conventions and product decisions there when making architectural choices.
 
 ## When to use this workflow
 

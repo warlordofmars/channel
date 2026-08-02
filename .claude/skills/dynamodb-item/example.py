@@ -16,7 +16,7 @@ Mirrors every convention captured in ``SKILL.md``:
 3. TTL semantics — ``ttl`` attribute, Unix timestamp integer
 4. Hour-shard pattern — for the time-series / log-style item
 5. GSI naming — sets ``GSIxPK`` to surface the item on the GSI
-6. Table-name source — ``os.environ["STARTER_TABLE_NAME"]``,
+6. Table-name source — ``os.environ["CHANNEL_TABLE_NAME"]``,
    never hardcoded
 7. Update CLAUDE.md — see the docstring banner near the bottom
 """
@@ -35,7 +35,7 @@ import boto3
 # Table-name resolution (§6)
 # ---------------------------------------------------------------------------
 #
-# The project contract is ``STARTER_TABLE_NAME`` (the ``STARTER_*`` prefix
+# The project contract is ``CHANNEL_TABLE_NAME`` (the ``CHANNEL_*`` prefix
 # scopes config across the codebase). The Lambda runtime sets it via
 # ``infra/stacks/channel_stack.py``; the integration suite sets it via
 # ``tests/integration/conftest.py``; local dev provisions the ``channel``
@@ -46,10 +46,10 @@ import boto3
 
 
 def _get_table() -> Any:
-    # ``STARTER_TABLE_NAME`` is required — mirrors ``_get_table()`` in
+    # ``CHANNEL_TABLE_NAME`` is required — mirrors ``_get_table()`` in
     # ``src/channel/storage.py``, which raises ``KeyError`` if it is unset
     # rather than falling back to a default table.
-    table_name = os.environ["STARTER_TABLE_NAME"]
+    table_name = os.environ["CHANNEL_TABLE_NAME"]
     endpoint_url = os.environ.get("DYNAMODB_ENDPOINT")  # set for DynamoDB Local
     region = os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
     dynamodb = boto3.resource("dynamodb", region_name=region, endpoint_url=endpoint_url)
@@ -145,8 +145,8 @@ def get_user_by_email(email: str) -> dict[str, Any] | None:
 # Example D — Retention env-var pattern (§3)
 # ---------------------------------------------------------------------------
 #
-# Pattern: TTL window is operator-tunable via ``STARTER_<ITEM>_RETENTION_DAYS``
-# with a sensible default. Mirrors ``STARTER_AUDIT_RETENTION_DAYS`` (default
+# Pattern: TTL window is operator-tunable via ``CHANNEL_<ITEM>_RETENTION_DAYS``
+# with a sensible default. Mirrors ``CHANNEL_AUDIT_RETENTION_DAYS`` (default
 # 365) for the audit-log item type.
 
 
@@ -154,7 +154,7 @@ def put_audit(event_id: str, actor_id: str, action: str) -> None:
     """Append an immutable audit entry with operator-configurable retention."""
     table = _get_table()
     now = datetime.now(timezone.utc)
-    retention_days = int(os.environ.get("STARTER_AUDIT_RETENTION_DAYS", "365"))
+    retention_days = int(os.environ.get("CHANNEL_AUDIT_RETENTION_DAYS", "365"))
     table.put_item(
         Item={
             "PK": f"AUDIT#{now:%Y-%m-%d}#{now:%H}",  # hour-sharded
