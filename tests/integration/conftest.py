@@ -2,8 +2,17 @@
 """
 Shared integration test fixtures.
 
-Integration tests run against DynamoDB Local (docker).
-Start it before running: docker run -p 8000:8000 amazon/dynamodb-local:latest
+Integration tests run against DynamoDB Local (docker). Start it before
+running — ``uv run inv dynamo-start`` is the supported route, since it
+honours ``CHANNEL_DYNAMO_PORT`` and names the container accordingly.
+The equivalent by hand::
+
+    docker run -p 8000:8000 amazon/dynamodb-local:latest
+
+Note the container **always** listens on 8000 internally, so only the
+host side of that mapping varies: a private instance on port 8123 is
+``-p 8123:8000``, never ``-p 8123:8123`` (which would bind nothing).
+Point the suite at it with ``CHANNEL_DYNAMO_PORT=8123``.
 
 Every pytest session provisions its **own** table and drops it at
 session end — see the per-run isolation block below (#466).
