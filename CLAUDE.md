@@ -1070,8 +1070,12 @@ focus roughly hourly.
   desktop feature test, so a pre-#297 or bypass session degrades
   correctly. It persists the **rotated successor before** the access
   token, since `saveSession` throws on a malformed token and the
-  predecessor is already dead by then. `clearSession()` deletes the
-  keychain file as well as the localStorage keys.
+  predecessor is already dead by then. **A failed write clears the file
+  too**: what survives a failed write is the spent predecessor, and
+  re-presenting that trips #290's reuse detection and revokes the whole
+  device family (at login it may even be a different account's token on
+  a shared machine). `clearSession()` deletes the keychain file as well
+  as the localStorage keys.
 - **`login()` resolves `{token, refreshToken}`**, not a bare token
   string: `main/auth.js` reads `refresh_token` off the loopback
   redirect (#292) and `Login.jsx` persists both. `refreshToken` is `""`

@@ -329,6 +329,26 @@ describe("desktop refresh-token keychain", () => {
       expect(await saveRefreshToken("rt")).toBe(false);
     });
 
+    it("drops the predecessor when the successor cannot be written", async () => {
+      // What is still on disk after a failed write is the token the
+      // server has ALREADY consumed (#290 hard-rotates). Re-presenting it
+      // reads as an RFC 9700 reuse breach and revokes the whole device
+      // family — a disk-full blip would sign the user out everywhere and
+      // look like an attack. Degrading to access-token-only is better.
+      const b = installBridge({ write: vi.fn().mockRejectedValue(new Error("disk full")) });
+      expect(await saveRefreshToken("rt-next")).toBe(false);
+      expect(b.clear).toHaveBeenCalledTimes(1);
+    });
+
+    it("survives a write failure whose cleanup also fails", async () => {
+      const b = installBridge({
+        write: vi.fn().mockRejectedValue(new Error("disk full")),
+        clear: vi.fn().mockRejectedValue(new Error("still disk full")),
+      });
+      expect(await saveRefreshToken("rt-next")).toBe(false);
+      expect(b.clear).toHaveBeenCalled();
+    });
+
     it("clears the keychain on sign-out, not just localStorage", async () => {
       const b = installBridge();
       storage[TOKEN_KEY] = JSON.stringify({ access_token: makeToken(), expires_at: 1 });

@@ -227,18 +227,11 @@ export function clearSession() {
   // teardown step here is unconditional — a failed delete must not
   // prevent the visible sign-out.
   //
-  // Wrapped as well as `.catch`-ed because the two failure shapes are
-  // different: a bridge whose `clear` is missing or is not a function
-  // throws *synchronously*, before there is a promise to attach a
-  // handler to, so `.catch` alone would let it escape and abort a
-  // sign-out that must always complete. `readRefreshToken` /
-  // `saveRefreshToken` already cover both shapes with their own `try`;
-  // this makes the third call site consistent with them.
-  try {
-    keychain()?.clear().catch(ignoreKeychainFailure);
-  } catch {
-    ignoreKeychainFailure();
-  }
+  // Not awaited, and safe not to be: `dropStoredRefreshToken` neither
+  // throws nor rejects, so there is nothing here that could abort a
+  // sign-out that must always complete.
+  const bridge = keychain();
+  if (bridge) void dropStoredRefreshToken(bridge);
 }
 
 // ---- Desktop keychain (#297) ----------------------------------------------
@@ -271,6 +264,25 @@ function ignoreKeychainFailure() {
 }
 
 /**
+ * Best-effort delete of the stored refresh token. **Never throws and
+ * never rejects**, so callers may `await` it or not, as suits them.
+ *
+ * Both failure shapes are absorbed here rather than at each call site: a
+ * bridge that cannot reach the file *rejects*, while one whose `clear`
+ * is missing or is not a function (a mismatched preload/renderer
+ * surface) throws *synchronously*, before there is a promise to attach a
+ * handler to. Inside an `async` function the synchronous throw becomes a
+ * rejection this `try` catches, which is what collapses the two.
+ */
+async function dropStoredRefreshToken(bridge) {
+  try {
+    await bridge.clear();
+  } catch {
+    ignoreKeychainFailure();
+  }
+}
+
+/**
  * The desktop refresh token, or `""` when there isn't one.
  *
  * `""` covers every "nothing to present" case: a browser (no bridge), a
@@ -299,6 +311,18 @@ export async function readRefreshToken() {
  * server-side, so keeping it would leave a credential that can never
  * work again.
  *
+ * **A failed write also clears**, which is the non-obvious half. What is
+ * still on disk at that point is the *predecessor* — and #290 hard-
+ * rotates, so the server has already consumed it. Leaving it there means
+ * the next refresh re-presents a spent token, which RFC 9700 §4.14.2
+ * reuse detection reads as a breach and answers by revoking the whole
+ * device family: a disk-full blip would sign the user out everywhere and
+ * look like an attack in the audit trail. At login the stale value may
+ * belong to a *different account* on a shared machine, in which case the
+ * next refresh would quietly swap this session for theirs. Dropping it
+ * degrades to access-token-only and a clean re-login — strictly the
+ * better failure in both cases.
+ *
  * **Never throws.** The caller has just consumed a refresh token whose
  * successor this is; a rejection propagating out of `performRefresh`
  * would discard a perfectly good access token that was already saved and
@@ -308,14 +332,15 @@ export async function readRefreshToken() {
 export async function saveRefreshToken(refreshToken) {
   const bridge = keychain();
   if (!bridge) return false;
+  if (typeof refreshToken !== "string" || refreshToken === "") {
+    await dropStoredRefreshToken(bridge);
+    return false;
+  }
   try {
-    if (typeof refreshToken !== "string" || refreshToken === "") {
-      await bridge.clear();
-      return false;
-    }
     await bridge.write({ refresh_token: refreshToken });
     return true;
   } catch {
+    await dropStoredRefreshToken(bridge);
     return false;
   }
 }
