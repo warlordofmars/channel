@@ -462,6 +462,21 @@ class RefreshToken(BaseModel):
     ``revoked_at`` paired with ``revoked_reason == ROTATED``. The column
     is kept distinct because a future sliding-window rotation (epic
     #241 Q1's rejected alternative) would make the two diverge.
+
+    ``display_name`` is the one claim a refreshed access token cannot
+    rebuild from ``user_id`` (#292). Google's ``name`` claim reaches us
+    exactly once — on the OAuth callback — so without carrying it here a
+    refreshed session degrades to the email's local-part, which
+    ``Sidebar.jsx`` / ``ChatHome.jsx`` render as the *legacy token*
+    fallback rather than a normal state. Optional because rows minted
+    before #292 (and any future non-Google issuer that has no name to
+    give) simply don't have one; readers fall back to the local-part.
+    Carried forward unchanged by rotation, exactly like
+    ``absolute_expires_at``, so it survives the family's whole life.
+    Deliberately *not* recomputed per refresh the way ``role`` is: a
+    renamed Google account keeps the login-time name until the next full
+    sign-in, which is the cheaper half of a trade that would otherwise
+    put an identity-provider round trip on the refresh path.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -473,6 +488,7 @@ class RefreshToken(BaseModel):
     last_used_at: str
     absolute_expires_at: str
     idle_expires_at: str
+    display_name: str | None = None
     revoked: bool = False
     revoked_reason: RefreshRevokeReason | None = None
     revoked_at: str | None = None

@@ -9,9 +9,26 @@ share state — the previous in-process dict broke under concurrent
 execution because the callback could hit a different warm container
 than the one that issued the state.
 
+Refresh tokens (#292, epic #241)
+--------------------------------
+``/auth/callback`` is where a session's *first* refresh token is minted.
+That matters more than it sounds: #291 cut the access token's TTL to one
+hour, and until this module started minting, ``mint_refresh_token``'s
+only production caller was ``consume_refresh_token`` rotating a family
+that nothing had ever created — so ``POST /auth/refresh`` could only
+ever 401 and every user was bounced back through Google hourly.
+
+Transport follows the client, mirroring ``/auth/refresh``'s own split:
+the web flow sets the ``HttpOnly`` cookie on the login-completion page,
+while the desktop loopback redirect carries ``{token, refresh_token}``
+in its query string (Electron persists it via ``safeStorage`` — #297).
+The cookie's attribute matrix lives in :mod:`channel.auth.refresh`, not
+here; this module drives it through ``set_refresh_cookie`` so the mint
+and the rotation cannot disagree.
+
 Routes:
   GET /auth/login    — redirect to Google (or issue bypass JWT in non-prod)
-  GET /auth/callback — handle Google callback, issue mgmt JWT
+  GET /auth/callback — handle Google callback, issue mgmt JWT + refresh token
 """
 
 from __future__ import annotations
@@ -20,10 +37,10 @@ import html
 import os
 import re
 import secrets
-from typing import Any
+from typing import Any, TypeVar
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from channel.auth import state_store
@@ -35,10 +52,25 @@ from channel.auth.google import (
     verify_google_id_token,
 )
 from channel.auth.tokens import ISSUER, issue_mgmt_jwt
-from channel.logging_config import get_logger
+from channel.logging_config import fingerprint_id, get_logger
+from channel.models import RefreshToken
+from channel.storage import mint_refresh_token
 
 router = APIRouter(tags=["mgmt-auth"])
 logger = get_logger(__name__)
+
+# Preserves the concrete response type through ``_finish_login`` so the
+# route signatures keep saying HTMLResponse / RedirectResponse.
+_ResponseT = TypeVar("_ResponseT", bound=Response)
+
+# Entropy for the server-side opaque device id. Epic #241 Q2 settled
+# this in favour of a server-generated opaque value over anything
+# client-derived: a browser fingerprint is neither stable nor private,
+# and a client-supplied id would let a caller choose which token-family
+# its session joins. 128 bits is well past collision relevance inside a
+# single user's partition, which is the only scope the id is ever
+# compared in (``REFRESH_USER#{user_id}``).
+_DEVICE_ID_BYTES = 16
 
 # Opt-in ONLY on the exact string "1" — matching the repo's default-off
 # flag convention (CHANNEL_ENABLE_DEBUG_ENDPOINTS, CHANNEL_MCP_ALLOW_LOCALHOST,
@@ -127,6 +159,80 @@ def make_mgmt_user(email: str, display_name: str) -> dict[str, Any]:
     }
 
 
+def _finish_login(response: _ResponseT, minted: tuple[str, RefreshToken] | None) -> _ResponseT:
+    """Attach this login's refresh cookie — or clear whatever was there.
+
+    **Every login-completing response must go through here**, including
+    the ones that mint nothing. ``POST /auth/refresh`` is unauthenticated
+    by design (the access token it renews has usually expired), so the
+    cookie *is* the identity: the endpoint trusts ``row.user_id`` of
+    whatever cookie arrives. A login that leaves a previous account's
+    cookie untouched therefore hands the new user the old user's
+    session on the next refresh.
+
+    That is reachable on any deployed non-prod stack, where
+    ``CHANNEL_BYPASS_GOOGLE_AUTH=1`` is always set: sign in as A through
+    Google, then hit ``/auth/login?test_email=b@example.com``.
+    localStorage holds B's access token while the jar still holds A's
+    30-day refresh family — and the next refresh returns an access token
+    for **A**. The fail-soft mint path has the same shape in prod (A
+    signs in, B signs in on the same browser, minting hits a storage
+    blip, B silently retains A's family).
+
+    Clearing costs nothing when no cookie exists, so the invariant is
+    cheap to hold unconditionally. The desktop transports pass
+    ``minted=None`` deliberately: they carry the token in the loopback
+    query string, and the browser that ran the OAuth dance is the user's
+    *default* browser, which may well be holding a web session's cookie.
+    """
+
+    from channel.auth.refresh import (  # noqa: PLC0415
+        clear_refresh_cookie,
+        set_refresh_cookie,
+    )
+
+    if minted is None:
+        clear_refresh_cookie(response)
+    else:
+        set_refresh_cookie(response, minted[0], minted[1].absolute_expires_at)
+    return response
+
+
+def _mint_session_refresh_token(email: str, display_name: str) -> tuple[str, RefreshToken] | None:
+    """Mint this login's first refresh token, or ``None`` if minting failed.
+
+    Every sign-in starts a new token-family under a fresh opaque
+    ``device_id``. Signing in twice from the same browser therefore
+    produces two families, which #293's session list shows as two
+    entries — correct rather than a leak: the server has no
+    device-stable identifier it can trust, each family is independently
+    revocable, and both still die at their own 30-day ceiling. Binding
+    families to a long-lived device *cookie* instead would trade that
+    for a persistent tracking identifier, which is a worse deal.
+
+    **Fail-soft.** A minting failure degrades the session to
+    access-token-only — the user is signed in, just facing a re-login in
+    an hour — whereas raising would convert a DynamoDB blip into a total
+    login outage. That is the same best-effort posture ``/auth/logout``
+    takes for its denylist and audit writes, and the wrong-way-round
+    version of this trade is the more damaging one. The failure is
+    logged loudly; #294 adds the EMF counter that makes it alarmable.
+    """
+
+    try:
+        return mint_refresh_token(
+            user_id=email,
+            device_id=secrets.token_urlsafe(_DEVICE_ID_BYTES),
+            display_name=display_name,
+        )
+    except Exception:
+        logger.exception(
+            "auth.login refresh-token mint failed user=%s — session is access-token-only",
+            fingerprint_id(email),
+        )
+        return None
+
+
 @router.get("/auth/login", include_in_schema=False)
 async def mgmt_login(request: Request) -> RedirectResponse:
     """Redirect the management UI user to Google for authentication.
@@ -147,7 +253,10 @@ async def mgmt_login(request: Request) -> RedirectResponse:
     if _BYPASS and test_email:
         user = make_mgmt_user(test_email, test_email.split("@")[0])
         token = issue_mgmt_jwt(user)
-        return _html_redirect(token)  # type: ignore[return-value]
+        # Mints nothing (see the module docstring on why the bypass stays
+        # capped at the 1h access token) — so it must clear, or the jar
+        # keeps the previous account's refresh family. See _finish_login.
+        return _finish_login(_html_redirect(token), None)  # type: ignore[return-value]
 
     desktop_callback = request.query_params.get("desktop_callback")
     caller_state = request.query_params.get("state")
@@ -176,7 +285,7 @@ async def mgmt_login(request: Request) -> RedirectResponse:
             user = make_mgmt_user(dev_email, dev_email.split("@")[0])
             token = issue_mgmt_jwt(user)
             qs = urlencode({"token": token, "state": caller_state})
-            return RedirectResponse(f"{validated}?{qs}", status_code=302)
+            return _finish_login(RedirectResponse(f"{validated}?{qs}", status_code=302), None)
         state = caller_state
         payload["desktop_callback"] = validated
     else:
@@ -228,17 +337,42 @@ async def mgmt_callback(
     token = issue_mgmt_jwt(user)
     logger.info("Management login: %s (role=%s)", email, user["role"])
 
+    # Defense-in-depth: validate again at consume time. The same check ran
+    # at store time (mgmt_login), so failure here means the record was
+    # tampered with at rest or written by an unvalidated code path.
     desktop_callback = record.get("desktop_callback")
+    if desktop_callback and _validate_desktop_callback(desktop_callback) is None:
+        logger.warning("Stored desktop_callback failed re-validation: %r", desktop_callback)
+        raise HTTPException(status_code=400, detail="Invalid stored desktop_callback")
+
+    # Minted only after every rejection path above has been cleared, so a
+    # login that ends in a 400/403 never leaves an orphaned live row
+    # behind in the user's token partition.
+    minted = _mint_session_refresh_token(email, display_name)
+
     if desktop_callback:
-        # Defense-in-depth: validate again at consume time. The same check
-        # ran at store time (mgmt_login), so failure here means the record
-        # was tampered with at rest or written by an unvalidated code path.
-        if _validate_desktop_callback(desktop_callback) is None:
-            logger.warning("Stored desktop_callback failed re-validation: %r", desktop_callback)
-            raise HTTPException(status_code=400, detail="Invalid stored desktop_callback")
         from urllib.parse import urlencode
 
-        qs = urlencode({"token": token, "state": state})
-        return RedirectResponse(f"{desktop_callback}?{qs}", status_code=302)
+        params = {"token": token, "state": state}
+        if minted is not None:
+            # Loopback-only (``_validate_desktop_callback`` pins host and
+            # scheme), and the access token already rides the same query
+            # string, so this adds no transport the flow did not have.
+            params["refresh_token"] = minted[0]
+        qs = urlencode(params)
+        # ``None`` even though minting succeeded: the loopback query
+        # string is this transport's carrier, so there is no cookie to
+        # set. Clearing rather than simply not-setting is what keeps the
+        # set-or-clear rule *total* — a rule with an exception is one a
+        # future login path can quietly fall outside of.
+        #
+        # This is the one arm where no cross-identity leak is possible
+        # anyway: the desktop redirect writes nothing to the browser's
+        # localStorage, so it cannot create the token/cookie mismatch the
+        # other three arms can. The cost is real but small — after #295,
+        # signing into the desktop app ends silent refresh for a web tab
+        # in the same default browser, which re-logins at its next 1h
+        # expiry. Clearing is the safe direction, so it wins the tie.
+        return _finish_login(RedirectResponse(f"{desktop_callback}?{qs}", status_code=302), None)
 
-    return _html_redirect(token)
+    return _finish_login(_html_redirect(token), minted)
