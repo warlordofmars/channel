@@ -25,6 +25,7 @@ table is not cleaned between tests).
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -209,3 +210,93 @@ def test_a_revoked_token_cannot_be_consumed(starter_table) -> None:  # type: ign
 
     assert result.outcome == RefreshConsumeOutcome.REVOKED
     assert result.revoked_count == 0
+
+
+# ----------------------------------------------------------------
+# Sessions read + per-device revoke (#293)
+# ----------------------------------------------------------------
+
+
+def test_list_live_refresh_tokens_reads_every_device_off_the_index(starter_table) -> None:  # type: ignore[no-untyped-def]
+    """The #293 list path against the real GSI. The fake table ignores
+    ``IndexName`` entirely, so only this proves the sessions list is
+    actually served by ``RefreshByUserIndex`` and not by luck."""
+    user_id = _user()
+    bystander = _user()
+    for device in ("d-1", "d-2", "d-3"):
+        storage.mint_refresh_token(user_id=user_id, device_id=device)
+    storage.mint_refresh_token(user_id=bystander, device_id="d-1")
+
+    rows = storage.list_live_refresh_tokens(user_id)
+
+    assert {r.device_id for r in rows} == {"d-1", "d-2", "d-3"}
+    assert all(r.user_id == user_id for r in rows)
+    # Newest-first, which the index walk alone does not give us: every
+    # refresh row shares SK="META", so the ordering is the helper's.
+    assert [r.issued_at for r in rows] == sorted((r.issued_at for r in rows), reverse=True)
+
+
+def test_list_live_refresh_tokens_shows_only_the_surviving_row_after_a_rotation(
+    starter_table,  # type: ignore[no-untyped-def]
+) -> None:
+    """A rotated ancestor stays in the table for reuse detection but must
+    not show up as a second session for the same device."""
+    user_id = _user()
+    raw, first = storage.mint_refresh_token(user_id=user_id, device_id="d-1")
+    rotated = storage.consume_refresh_token(raw)
+    assert rotated.token is not None
+
+    rows = storage.list_live_refresh_tokens(user_id)
+
+    assert len(storage._query_user_refresh_rows(user_id, "d-1")) == 2
+    assert [r.token_hash for r in rows] == [rotated.token.token_hash]
+    assert first.token_hash not in {r.token_hash for r in rows}
+
+
+def test_list_live_refresh_tokens_drops_a_row_past_its_idle_window(starter_table) -> None:  # type: ignore[no-untyped-def]
+    """Liveness is the consume path's rule, so a session the next refresh
+    would reject must never be advertised as active."""
+    user_id = _user()
+    _, token = storage.mint_refresh_token(user_id=user_id, device_id="d-1")
+    starter_table.update_item(
+        Key={"PK": f"REFRESH#{token.token_hash}", "SK": "META"},
+        UpdateExpression="SET idle_expires_at = :past",
+        ExpressionAttributeValues={
+            ":past": (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(
+                timespec="microseconds"
+            )
+        },
+    )
+
+    assert storage.list_live_refresh_tokens(user_id) == []
+
+
+def test_revoke_device_refresh_tokens_ends_one_session_and_leaves_the_rest(
+    starter_table,  # type: ignore[no-untyped-def]
+) -> None:
+    user_id = _user()
+    _, phone = storage.mint_refresh_token(user_id=user_id, device_id="d-1")
+    storage.mint_refresh_token(user_id=user_id, device_id="d-2")
+
+    assert storage.revoke_device_refresh_tokens(user_id, "d-1") == 1
+
+    assert [r.device_id for r in storage.list_live_refresh_tokens(user_id)] == ["d-2"]
+    revoked = _row(starter_table, phone.token_hash)
+    assert revoked["revoked"] is True
+    assert revoked["revoked_reason"] == RefreshRevokeReason.USER_REVOKED.value
+    # Idempotent: nothing live is left on that device to revoke twice.
+    assert storage.revoke_device_refresh_tokens(user_id, "d-1") == 0
+
+
+def test_revoke_device_refresh_tokens_is_scoped_to_the_owning_user(starter_table) -> None:  # type: ignore[no-untyped-def]
+    """Two users can independently own the same ``device_id`` string; the
+    GSI partition is the tenancy boundary, and the sessions API's 404
+    rests on this."""
+    owner = _user()
+    other = _user()
+    _, theirs = storage.mint_refresh_token(user_id=owner, device_id="same-id")
+
+    assert storage.revoke_device_refresh_tokens(other, "same-id") == 0
+
+    assert _row(starter_table, theirs.token_hash)["revoked"] is False
+    assert [r.device_id for r in storage.list_live_refresh_tokens(owner)] == ["same-id"]

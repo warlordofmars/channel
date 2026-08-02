@@ -47,6 +47,7 @@ src/channel/
 │   ├── mcp.py                # MCP-server registry REST + OAuth callback
 │   ├── models.py             # GET /api/models — server allowlist
 │   ├── prefs.py              # GET/PUT /api/me/prefs
+│   ├── sessions.py           # GET/DELETE /api/me/sessions[/{device_id}] — active-device list + revoke
 │   ├── admin.py              # Admin-only user list/detail + metrics
 │   └── csp.py                # CSP violation reporting endpoint
 ├── mcp/

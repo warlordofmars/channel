@@ -1894,9 +1894,12 @@ def _query_user_refresh_rows(user_id: str, device_id: str | None = None) -> list
     **Ordering is oldest-first.** This helper does not set
     ``ScanIndexForward``, so DynamoDB's default ascending order applies
     — every caller here revokes the whole set, for which order is
-    irrelevant. #293 wants the reverse and must pass
-    ``ScanIndexForward=False`` explicitly; nothing about the index
-    makes newest-first automatic.
+    irrelevant, and nothing about the index makes newest-first
+    automatic. #293's session list, which does want newest-first, sorts
+    in Python inside :func:`list_live_refresh_tokens` rather than
+    passing ``ScanIndexForward=False`` here: this helper already walks
+    every page, and #293 groups the rows by ``device_id`` afterwards,
+    which would not preserve index order anyway.
 
     **This read is eventually consistent and cannot be made otherwise.**
     DynamoDB rejects ``ConsistentRead=True`` on a global secondary
@@ -1975,11 +1978,14 @@ def _revoke_refresh_family(
     apart and their outcomes are highly correlated, so this is a
     meaningful reduction, not two independent trials. It does not close
     the window, and no amount of sweeping would; closing it needs a
-    strongly-consistent family marker read on the consume path, which
-    belongs with the per-device session row #293 introduces. Until then
-    the honest contract is **best-effort with respect to concurrent
-    mints**, and the bound on the damage is that any surviving row
-    still expires at the family's unchanged ``absolute_expires_at``.
+    strongly-consistent family marker read on the consume path. #293 did
+    **not** add one — its sessions API is a read-and-revoke surface over
+    this same index and inherits the window (see
+    :func:`list_live_refresh_tokens`); a family marker is mint/consume-path
+    work and remains unbuilt. Until then the honest contract is
+    **best-effort with respect to concurrent mints**, and the bound on
+    the damage is that any surviving row still expires at the family's
+    unchanged ``absolute_expires_at``.
     """
 
     revoked = 0
@@ -2214,6 +2220,91 @@ def revoke_all_user_refresh_tokens(user_id: str) -> int:
         RefreshRevokeReason.USER_REVOKED,
         sweeps=_REFRESH_ADVERSARIAL_SWEEPS,
     )
+
+
+def revoke_device_refresh_tokens(user_id: str, device_id: str) -> int:
+    """Revoke one device's token-family for ``user_id`` ("sign out this device").
+
+    The per-device counterpart of :func:`revoke_all_user_refresh_tokens`,
+    and the write behind ``DELETE /api/me/sessions/{device_id}`` (#293).
+    Returns how many rows flipped from live to revoked.
+
+    Scoped by ``user_id`` as well as ``device_id`` on purpose: the query
+    runs against the caller's own ``REFRESH_USER#{user_id}`` partition,
+    so a ``device_id`` belonging to somebody else matches nothing and
+    revokes nothing rather than reaching across the tenancy boundary.
+    The route's 404 comes from the same scoping — see
+    ``api/sessions.py``.
+
+    Sweeps twice, like :func:`revoke_all_user_refresh_tokens`: revoking a
+    named device is what a user reaches for when they believe *that*
+    device is compromised (lost laptop, shared machine), which is the
+    adversarial shape, not the self-inflicted-ordering shape that
+    justifies logout's single sweep. Still subject to the
+    eventually-consistent index window documented on
+    :func:`_revoke_refresh_family`.
+    """
+
+    return _revoke_refresh_family(
+        user_id,
+        device_id,
+        RefreshRevokeReason.USER_REVOKED,
+        sweeps=_REFRESH_ADVERSARIAL_SWEEPS,
+    )
+
+
+def _refresh_row_is_live(row: RefreshToken, now: datetime) -> bool:
+    """Would :func:`consume_refresh_token` still accept this row?
+
+    One definition of "live", checked in the same order as the consume
+    path: not revoked, then inside the absolute window, then inside the
+    idle window. Keeping it here rather than in the route is what stops
+    the sessions list from advertising a session that the very next
+    refresh would reject.
+    """
+
+    return (
+        not row.revoked
+        and now < _parse_iso_utc(row.absolute_expires_at)
+        and now < _parse_iso_utc(row.idle_expires_at)
+    )
+
+
+def list_live_refresh_tokens(user_id: str) -> list[RefreshToken]:
+    """Every still-usable refresh row for ``user_id``, newest first (#293).
+
+    The read behind ``GET /api/me/sessions``. Liveness is
+    :func:`_refresh_row_is_live`, so revoked ancestors (kept until TTL
+    for reuse detection) and rows past either expiry are filtered out —
+    what comes back is the set of sessions the user could actually
+    refresh into.
+
+    **Ordering is newest-first by ``issued_at``**, produced by sorting in
+    Python rather than by passing ``ScanIndexForward=False`` to the
+    index walk. Two reasons: :func:`_query_user_refresh_rows` already
+    pulls every page (so there is no page-ordering benefit to win), and
+    the caller groups rows by ``device_id`` to build the session list —
+    grouping does not preserve index order anyway, so the sort has to
+    happen after the filter regardless. ``token_hash`` breaks ties so
+    two rows minted in the same microsecond order deterministically.
+
+    **This read is eventually consistent**, inheriting the
+    ``RefreshByUserIndex`` window documented on
+    :func:`_query_user_refresh_rows`: a session created moments ago may
+    not be projected onto the index yet and will be missing from this
+    list. The consequence for callers is that the sessions list is a
+    recent-past snapshot, not a transactional view — see
+    ``api/sessions.py`` for how the route handles that.
+    """
+
+    now = datetime.now(timezone.utc)
+    live = [
+        row
+        for row in (_refresh_from_item(item) for item in _query_user_refresh_rows(user_id))
+        if _refresh_row_is_live(row, now)
+    ]
+    live.sort(key=lambda row: (row.issued_at, row.token_hash), reverse=True)
+    return live
 
 
 # ----------------------------------------------------------------
