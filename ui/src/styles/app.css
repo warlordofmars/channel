@@ -1418,10 +1418,13 @@ html.is-electron-mac .sb-top {
 
    Everything in this block is gated behind `@media (max-width: 640px)`
    so wide viewports stay byte-for-byte unchanged (desktop must not
-   regress). The two mobile-only chrome elements — `.mobile-topbar` and
-   `.mobile-nav-backdrop` — default to `display: none` here at base and
-   are switched on only inside the media query, so they are inert on
-   desktop even though Shell always renders the topbar.
+   regress), with three deliberate base-rule exceptions below, each of
+   which is a no-op at ≥641px. The two mobile-only chrome elements —
+   `.mobile-topbar` and `.mobile-nav-backdrop` — default to
+   `display: none` here at base and are switched on only inside the
+   media query, so they are inert on desktop even though Shell always
+   renders the topbar. `.table-scroll` (#468) is the third: it paints
+   nothing while its content fits, which on desktop it does.
 
    Kept as a self-contained trailing section so a parallel edit to
    app.css (e.g. #400 admin styles) rebases cleanly.
@@ -1443,7 +1446,13 @@ html.is-electron-mac .sb-top {
    no scrollbar and reserves no space while the content fits: at ≥641px the
    admin tables fit their 920px column, so wide viewports render exactly as
    they did before, and a narrow desktop window gets the same containment
-   for free. */
+   for free.
+
+   Note this is a two-axis scroll container, not the x-only box it reads as:
+   per the overflow spec, `overflow-x: auto` forces a `visible` `overflow-y`
+   to compute to `auto` as well. Harmless for a table at auto height with no
+   absolutely-positioned descendants — but anything that has to escape the
+   box (a tooltip, a popover) would clip, so keep those outside it. */
 .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 
 @media (max-width: 640px) {
