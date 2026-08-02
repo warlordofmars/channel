@@ -681,15 +681,45 @@ def test_a_malformed_limit_falls_back_instead_of_crashing_the_lambda(monkeypatch
 
 @pytest.mark.parametrize(
     ("raw", "expected"),
-    [(None, 7), ("11", 11), ("nonsense", 7), ("", 7)],
+    [(None, 7), ("11", 11), ("nonsense", 7), ("", 7), ("9" * 400, 7)],
 )
 def test_env_number_parses_or_falls_back(monkeypatch, raw, expected):
+    """The 400-digit case parses as an ``int`` but overflows the finite
+    check — caught as malformed rather than raised out of an import."""
     if raw is None:
         monkeypatch.delenv("CHANNEL_TEST_KNOB", raising=False)
     else:
         monkeypatch.setenv("CHANNEL_TEST_KNOB", raw)
 
     assert refresh_module._env_number("CHANNEL_TEST_KNOB", 7, int) == expected
+
+
+@pytest.mark.parametrize("raw", ["nan", "inf", "-inf", "1e999"])
+def test_env_number_rejects_values_that_parse_but_are_not_finite(monkeypatch, raw):
+    """``float("nan")`` / ``float("inf")`` are legal ``float`` calls, so a
+    bare ``except ValueError`` would let them through — and they only
+    detonate later, in the limiter's ``math.ceil``. Rejecting them here
+    keeps a misconfigured knob from turning every throttled refresh into
+    a 500."""
+    monkeypatch.setenv("CHANNEL_TEST_KNOB", raw)
+
+    assert refresh_module._env_number("CHANNEL_TEST_KNOB", 60.0, float) == 60.0
+
+
+@pytest.mark.parametrize("raw", ["nan", "inf"])
+def test_a_non_finite_window_never_reaches_the_limiter(consumed, monkeypatch, raw):
+    """End-to-end statement of the above: the throttled path still
+    answers 429 rather than 500."""
+    monkeypatch.setenv("CHANNEL_REFRESH_RATE_LIMIT", "1")
+    monkeypatch.setenv("CHANNEL_REFRESH_RATE_LIMIT_WINDOW_SECONDS", raw)
+    monkeypatch.setattr(refresh_module, "_refresh_limiter", refresh_module._build_refresh_limiter())
+    box = consumed[1]
+    box["result"] = RefreshConsumeResult(outcome=RefreshConsumeOutcome.NOT_FOUND)
+
+    assert _post("junk").status_code == 401
+    throttled = _post("junk")
+    assert throttled.status_code == 429
+    assert throttled.headers["retry-after"] == "60"
 
 
 def test_the_bucket_key_is_neither_the_token_nor_its_storage_digest(limiter, consumed):

@@ -128,6 +128,7 @@ exactly how a mint/rotate mismatch silently breaks the web flow.
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 import secrets
 from collections.abc import Callable
@@ -216,16 +217,31 @@ def _env_number(name: str, default: _Number, cast: Callable[[str], _Number]) -> 
     into a total outage. (``storage.py``'s
     ``CHANNEL_AUDIT_RETENTION_DAYS`` parse can afford to be strict: it
     runs inside a function, so it fails narrowly.)
+
+    "Unparseable" deliberately includes values that *do* parse but are
+    not finite. ``float("nan")`` and ``float("inf")`` are perfectly legal
+    ``float`` calls, so a window of ``nan`` or ``inf`` would sail through
+    a bare ``except ValueError`` and only detonate later, inside
+    :meth:`~channel.rate_limit.FixedWindowRateLimiter.check`, where
+    ``math.ceil`` cannot convert either to an ``int``. That moves the
+    blast radius from "import fails loudly" to "every throttled refresh
+    500s", which is worse — so the finite check happens here, at the one
+    place a non-finite value can enter. ``OverflowError`` is caught for
+    the same reason: an absurdly large integer literal parses fine and
+    then overflows the finite check itself.
     """
 
     raw = os.environ.get(name)
     if raw is None:
         return default
     try:
-        return cast(raw)
-    except ValueError:
+        value = cast(raw)
+        if not math.isfinite(value):
+            raise ValueError(f"non-finite value {raw!r}")
+    except (ValueError, OverflowError):
         logger.warning("auth.refresh ignoring malformed %s=%r, using %r", name, raw, default)
         return default
+    return value
 
 
 def _build_refresh_limiter() -> FixedWindowRateLimiter:
