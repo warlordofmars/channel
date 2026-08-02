@@ -230,9 +230,10 @@ def check_copyright(ctx):
         "json": "Machine-readable output",
         "fix": "Apply the two unambiguous label flips (stale-block, missing-block)",
         "repo": "owner/name to sweep (default: the current repo)",
+        "limit": "Max open issues to fetch (raise it if the sweep warns about truncation)",
     }
 )
-def check_blockers(ctx, json=False, fix=False, repo=None):
+def check_blockers(ctx, json=False, fix=False, repo=None, limit=None):
     """Sweep the backlog for `Blocked by #N` refs that outlived their blocker.
 
     Read-only unless ``--fix`` is passed. Deliberately NOT part of ``lint`` or
@@ -249,8 +250,10 @@ def check_blockers(ctx, json=False, fix=False, repo=None):
     if fix:
         cmd += " --fix"
     if repo:
-        # ctx.run goes through a shell — quote the one caller-supplied value.
+        # ctx.run goes through a shell — quote the caller-supplied values.
         cmd += f" --repo {shlex.quote(repo)}"
+    if limit:
+        cmd += f" --limit {shlex.quote(str(limit))}"
     # warn=True so a findings exit (1) reports the backlog state instead of
     # raising invoke's UnexpectedExit traceback over the report.
     result = ctx.run(cmd, pty=True, warn=True)

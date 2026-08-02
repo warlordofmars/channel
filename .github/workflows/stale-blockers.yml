@@ -62,6 +62,12 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           set -uo pipefail
+          # GitHub runs `run:` blocks as `bash -e {0}`, so errexit is already
+          # on and `set -uo pipefail` does NOT clear it. Without this `+e` the
+          # shell aborts at the sweep's non-zero exit — the exact path this
+          # block exists for — leaving the summary fence unterminated and the
+          # remediation annotation below unreachable.
+          set +e
           {
             echo "## Stale blocker sweep"
             echo

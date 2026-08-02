@@ -248,8 +248,19 @@ def _ref_query(numbers: Sequence[int]) -> str:
 
 
 def _check_graphql_errors(payload: dict[str, Any]) -> None:
-    """Raise unless every GraphQL error is an expected ``NOT_FOUND``."""
-    unexpected = [err for err in payload.get("errors") or [] if err.get("type") != _NOT_FOUND]
+    """Raise unless every GraphQL error is an expected *per-alias* ``NOT_FOUND``.
+
+    Only an error pointing at one of the aliases (path ``["repository", "n42"]``)
+    is the dangling-ref case. A NOT_FOUND on the repository itself (path
+    ``["repository"]``) means the repo name or the token is wrong — that is a
+    fetch error, and reporting it as "every reference is missing" would turn an
+    auth problem into a backlog-sized dangling-ref report.
+    """
+    unexpected = [
+        err
+        for err in payload.get("errors") or []
+        if err.get("type") != _NOT_FOUND or len(err.get("path") or []) < 2
+    ]
     if unexpected:
         messages = "; ".join(err.get("message", str(err)) for err in unexpected)
         raise RuntimeError(f"GraphQL query failed: {messages}")
@@ -277,7 +288,14 @@ def fetch_ref_states(repo: str, numbers: Sequence[int]) -> dict[int, RefState]:
             tolerate_exit=True,
         )
         _check_graphql_errors(payload)
-        repo_data = ((payload.get("data") or {}).get("repository")) or {}
+        repo_data = (payload.get("data") or {}).get("repository")
+        if repo_data is None:
+            # No repository object at all — the query never reached the backlog.
+            # Falling through would mark every reference "Missing" and report a
+            # backlog-sized dangling-ref list on exit 1; this is an exit-2 error.
+            raise RuntimeError(
+                f"could not read {repo} — check the repository name and `gh auth status`"
+            )
         for number in batch:
             node = repo_data.get(f"n{number}")
             if not node:
@@ -444,11 +462,24 @@ def apply_fixes(repo: str, findings: Sequence[Finding]) -> int:
 
     The taxonomy allows exactly one ``status:*`` label, so a fix that adds one
     removes the others it displaces.
+
+    An issue can be *both* stale-blocked and blocked on a ``NOT_PLANNED``
+    closure — every blocker is closed, but one of them was abandoned rather
+    than delivered. Clearing that block is exactly the "assume it's done"
+    mistake ``not-planned-blocker`` exists to catch, so those issues are
+    reported and skipped, not fixed.
     """
+    needs_judgement = {f.number for f in findings if f.kind == NOT_PLANNED_BLOCKER}
     changed = 0
     for finding in findings:
         others = [s for s in finding.statuses if s != BLOCKED_LABEL]
         if finding.kind == STALE_BLOCK:
+            if finding.number in needs_judgement:
+                print(
+                    f"  skipped #{finding.number}: a blocker was closed NOT PLANNED — "
+                    "re-point the dependency by hand"
+                )
+                continue
             args = ["--remove-label", BLOCKED_LABEL]
             if others:
                 # Already carries some other status — removing the stale block

@@ -302,7 +302,7 @@ def test_fetch_ref_states_resolves_issues_prs_and_missing(
                     "n3": {"__typename": "PullRequest", "state": "MERGED"},
                     "n4": None,
                 },
-                errors=[{"type": "NOT_FOUND", "message": "no #4"}],
+                errors=[{"type": "NOT_FOUND", "path": ["repository", "n4"], "message": "no #4"}],
             ),
             returncode=1,  # gh exits 1 when any alias is NOT_FOUND
         )
@@ -358,18 +358,48 @@ def test_fetch_ref_states_handles_an_empty_reference_set(
     run.assert_not_called()
 
 
-def test_fetch_ref_states_treats_a_null_repository_as_all_missing(
+def test_fetch_ref_states_raises_when_the_repository_itself_is_null(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A bad repo name or token must be an exit-2 error, not "every ref is missing"."""
     monkeypatch.setattr(
         sweep.subprocess,
         "run",
         mock.Mock(return_value=_proc(stdout=json.dumps({"data": {"repository": None}}))),
     )
 
-    states = sweep.fetch_ref_states("acme/widgets", [7])
+    with pytest.raises(RuntimeError, match="could not read acme/widgets"):
+        sweep.fetch_ref_states("acme/widgets", [7])
 
-    assert not states[7].exists
+
+def test_fetch_ref_states_raises_on_a_repository_level_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """NOT_FOUND on the repository (not on an alias) is a fetch error."""
+    monkeypatch.setattr(
+        sweep.subprocess,
+        "run",
+        mock.Mock(
+            return_value=_proc(
+                stdout=json.dumps(
+                    {
+                        "data": {"repository": None},
+                        "errors": [
+                            {
+                                "type": "NOT_FOUND",
+                                "path": ["repository"],
+                                "message": "Could not resolve to a Repository",
+                            }
+                        ],
+                    }
+                ),
+                returncode=1,
+            )
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="Could not resolve to a Repository"):
+        sweep.fetch_ref_states("acme/widgets", [7])
 
 
 def test_fetch_ref_states_raises_on_a_real_graphql_error(
@@ -617,6 +647,39 @@ def test_apply_fixes_adds_blocked_when_no_status_label_exists(
 
     assert "--remove-label" not in run.call_args.args[0]
     assert "added status:blocked" in capsys.readouterr().out
+
+
+def test_apply_fixes_will_not_clear_a_block_whose_blocker_was_not_planned(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Clearing that block is the "assume it's done" mistake the kind exists to catch."""
+    run = mock.Mock(return_value=_proc())
+    monkeypatch.setattr(sweep.subprocess, "run", run)
+    findings = [
+        _finding(sweep.STALE_BLOCK, 11, ["status:blocked"]),
+        _finding(sweep.NOT_PLANNED_BLOCKER, 11, ["status:blocked"]),
+    ]
+
+    changed = sweep.apply_fixes("acme/widgets", findings)
+
+    assert changed == 0
+    run.assert_not_called()
+    assert "skipped #11" in capsys.readouterr().out
+
+
+def test_apply_fixes_still_fixes_other_issues_alongside_a_skipped_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = mock.Mock(return_value=_proc())
+    monkeypatch.setattr(sweep.subprocess, "run", run)
+    findings = [
+        _finding(sweep.STALE_BLOCK, 11, ["status:blocked"]),
+        _finding(sweep.NOT_PLANNED_BLOCKER, 11, ["status:blocked"]),
+        _finding(sweep.STALE_BLOCK, 12, ["status:blocked"]),
+    ]
+
+    assert sweep.apply_fixes("acme/widgets", findings) == 1
+    assert run.call_args.args[0][3] == "12"
 
 
 def test_apply_fixes_skips_the_judgement_calls(monkeypatch: pytest.MonkeyPatch) -> None:
