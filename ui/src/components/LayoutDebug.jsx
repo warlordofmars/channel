@@ -177,13 +177,7 @@ export function isLayoutDebugRequested() {
   return isLayoutDebugParamRequested() || isLayoutDebugArmed();
 }
 
-/**
- * Flip the persisted flag and announce it. Returns the new state.
- *
- * The announcement is a plain window event rather than a React context
- * so the gesture's owner (`Shell`) and the readout's mount site (`App`)
- * stay decoupled — `App` is above the router, `Shell` is well below it.
- */
+/** Persist the armed state, falling back to memory if storage refuses. */
 function writeArmed(armed) {
   try {
     if (armed) localStorage.setItem(LAYOUT_DEBUG_STORAGE_KEY, "1");
@@ -198,6 +192,13 @@ function writeArmed(armed) {
   }
 }
 
+/**
+ * Flip the armed state and announce it. Returns the new state.
+ *
+ * The announcement is a plain window event rather than a React context
+ * so the gesture's owner (`Shell`) and the readout's mount site (`App`)
+ * stay decoupled — `App` is above the router, `Shell` is well below it.
+ */
 export function toggleLayoutDebugArmed() {
   const armed = !isLayoutDebugArmed();
   writeArmed(armed);
@@ -225,6 +226,14 @@ export function disarmLayoutDebug() {
     const url = new URL(window.location.href);
     url.searchParams.delete(LAYOUT_DEBUG_PARAM);
     window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+    // `replaceState` doesn't notify React Router, so its own location
+    // snapshot would keep the parameter — and any view that derives its
+    // next URL from that snapshot would put it straight back. Artifacts'
+    // `openRow` does exactly that (`new URLSearchParams(params)`), so
+    // opening an artifact after Close would remount the readout. A
+    // synthetic popstate is the notification the router already listens
+    // for; it costs nothing when no such view is mounted.
+    window.dispatchEvent(new PopStateEvent("popstate"));
   }
   window.dispatchEvent(new Event(LAYOUT_DEBUG_EVENT));
 }

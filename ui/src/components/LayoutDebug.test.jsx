@@ -534,6 +534,35 @@ describe("disarmLayoutDebug", () => {
     expect(window.location.hash).toBe("#frag");
   });
 
+  it("tells React Router the URL moved, so no view can put it back", () => {
+    // `replaceState` is invisible to the router, whose location snapshot
+    // would keep the parameter. Views that build their next URL from
+    // that snapshot — Artifacts' `openRow` does `new URLSearchParams(
+    // params)` — would then re-add it on the next navigation and
+    // remount the readout (code-reviewer, PR #505).
+    const popped = vi.fn();
+    window.addEventListener("popstate", popped);
+    window.history.pushState({}, "", `/app?${LAYOUT_DEBUG_PARAM}=1`);
+
+    disarmLayoutDebug();
+
+    expect(popped).toHaveBeenCalledTimes(1);
+    window.removeEventListener("popstate", popped);
+  });
+
+  it("stays quiet when there was no parameter to strip", () => {
+    // Nothing moved, so nothing to announce — the persisted-flag path
+    // must not churn the router on every Close in the PWA.
+    const popped = vi.fn();
+    window.addEventListener("popstate", popped);
+    localStorage.setItem(LAYOUT_DEBUG_STORAGE_KEY, "1");
+
+    disarmLayoutDebug();
+
+    expect(popped).not.toHaveBeenCalled();
+    window.removeEventListener("popstate", popped);
+  });
+
   it("announces the change so the mount site re-renders", () => {
     const heard = vi.fn();
     window.addEventListener(LAYOUT_DEBUG_EVENT, heard);
