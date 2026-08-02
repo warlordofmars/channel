@@ -24,6 +24,7 @@ channel/
 │       ├── models.py          # Data models
 │       ├── logging_config.py  # Structured JSON logging setup
 │       ├── metrics.py         # CloudWatch EMF metrics helpers
+│       ├── rate_limit.py      # In-process fixed-window rate limiter (#294)
 │       ├── auth/
 │       │   ├── tokens.py      # Management JWT issuance + validation
 │       │   ├── google.py      # Google OAuth integration
@@ -242,6 +243,34 @@ the access JWT it renews has usually already expired.
   its existing access token until it expires.
 - Response: `{access_token, token_type: "bearer", expires_in}` plus
   `refresh_token` on the body transport only.
+- **Rate limited to 5/min per token-family (#294)** — 429 with
+  `Retry-After`, config `CHANNEL_REFRESH_RATE_LIMIT` /
+  `CHANNEL_REFRESH_RATE_LIMIT_WINDOW_SECONDS`. `CHANNEL_REFRESH_RATE_LIMIT=0`
+  is the kill switch; everything else that would leave the limiter
+  *silently* ineffective is corrected back to the default with a warning
+  — a malformed or non-finite value, and any window under 1s (which
+  rolls between consecutive requests, so the limiter admits everything
+  while still reporting itself enabled). Disabling must be legible.
+
+  The scope is the *credential*, never the client IP: a tight per-IP
+  limit on a session endpoint would sign out every user behind one NAT
+  because one machine looped. The bucket key is a process-local keyed digest of the
+  presented token — under hard rotation a family has exactly one live
+  token, so that digest *is* the family's address, and a successful
+  rotation hands the window to the successor's key (without that
+  hand-off every success would start a fresh window and the limit would
+  be unreachable). See `src/channel/rate_limit.py` for the limiter
+  itself (fixed window, per-process, LRU-capped, fails open).
+
+  Two invariants are load-bearing and pinned by tests — **the 429 is
+  returned before `consume_refresh_token` is called**, so a shed request
+  leaves the token live and the client's retry is a first use rather
+  than a replay (throttling must never manufacture the reuse-detection
+  breach signal and revoke a legitimate family), and **a 429 does not
+  clear the refresh cookie**, since the credential is still valid.
+  Rejected calls do not extend the window, so recovery is guaranteed
+  within one window of the last *admitted* call. The limiter runs before
+  validity is known, so a 429 is no existence oracle.
 
 ### Silent refresh (SPA) (#295)
 
@@ -363,11 +392,22 @@ revoke routes write an audit event (`auth.session_revoke` /
 eventually-consistent index cannot promise (see the refresh-token entry
 under §DynamoDB single table design).
 
-Still to land in epic #241: rate limiting + EMF counters (#294). The
-SPA's silent-refresh wrapper landed in #295 (see §"Silent refresh
-(SPA)") and desktop `safeStorage` persistence in #297 (see §"Token
-persistence + refresh transport" under §Desktop app), so both clients
-now renew rather than re-authing hourly.
+Epic #241 completes with rate limiting + EMF counters (#294) — see the
+rate-limit entry under `/auth/refresh` above. The SPA's silent-refresh
+wrapper landed in #295 (see §"Silent refresh (SPA)") and desktop
+`safeStorage` persistence in #297 (see §"Token persistence + refresh
+transport" under §Desktop app), so both clients now renew rather than
+re-authing hourly.
+
+**A 429 from `/auth/refresh` must never be treated as a sign-out** — the
+token is still live and only this attempt was shed, so mapping it onto
+the 401 path would undo the whole point of #294's per-family scoping.
+#295's `onRefreshRejected` already gets this right and says so: it sets
+`refreshRefused` on **401 only**, deliberately not "any 4xx", so a
+throttled refresh takes the 30s cooldown and retries rather than ending
+the session. That narrowness is load-bearing — a rate limit is the one
+response most likely to arrive in a burst, so widening the test would
+turn throttling into a mass logout.
 
 ## DynamoDB single table design
 
@@ -590,7 +630,8 @@ auto-titling of fresh chats via a Haiku one-shot Agent (Phase 7d).
   digests imply equal inputs; distinct users can never share a
   partition. `src/channel/agents/memory.py` owns the ONE
   implementation — `recall.py`, `tools/memory_tools.py`, `api/chats.py`
-  (session wipe) and `api/_debug.py` all import it, pinned by
+  (session wipe), `api/_debug.py` and `api/memory.py` (the #475 read
+  model) all import it, pinned by
   `test_one_shared_derivation_across_every_call_site`. Values are
   storage keys: golden vectors in `tests/unit/test_memory.py` pin them
   permanently, and changing one orphans that user's stored memories.
@@ -927,6 +968,37 @@ selector, not a dimension, so the `_STREAM_ERROR_MAP` code set can grow
 without multiplying metrics; the per-code breakdown stays in the
 `chat_stream_failed` log line. A client disconnect re-raises before this
 point and is deliberately not counted as a Bedrock error.
+
+### Refresh-token SLIs (#294)
+
+`POST /auth/refresh` emits one `record_refresh_outcome` per request that
+reaches the route — including the ones rejected before a token is read
+(missing CSRF header, no credential, rate-limited). That makes
+`RefreshSuccess` + `RefreshFailure` a complete denominator. Two subset
+counters ride alongside a failure, the same way `BedrockThrottles` is a
+subset of `BedrockErrors`:
+
+- **`RefreshReuseDetected`** — the RFC 9700 §4.14.2 breach signal (a
+  rotated token was re-presented, so the device family was revoked). The
+  one counter here worth alarming on; it is kept out of the general
+  failure counter so a routine expiry can't drown it. **No CDK alarm
+  watches it yet.** #294 deliberately stayed out of
+  `infra/stacks/channel_stack.py`; wiring the alarm is unfiled follow-up
+  work, so until an issue exists this paragraph is the only record that
+  the breach signal is emitted but unwatched.
+- **`RefreshRateLimited`** — the limiter shed a request. Without it the
+  limiter is invisible and "did my rate limit just sign everyone out?"
+  has no answer, which is what makes the ceiling tunable from evidence.
+
+`reason` is a branch selector, not a dimension: the route forwards the
+full `RefreshConsumeOutcome` taxonomy and `metrics.py` decides which
+values earn a subset counter, so the taxonomy can grow without
+multiplying series. Dimensions are `{Environment}` only — this endpoint's
+obvious dimension candidates (`user_id`, `device_id`, client IP) are
+precisely the unbounded ones, and one of them is PII. None of the four
+are on the `/api/admin/metrics/*` allowlist yet (that endpoint queries
+every allowlisted name on each dashboard load, so adding them is a
+dashboard change, not a metrics one).
 
 ### Alarms must reference metrics we emit
 

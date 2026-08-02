@@ -774,3 +774,116 @@ def test_record_history_window_truncated_signature_locks_out_dimensions():
 
     sig = inspect.signature(record_history_window_truncated)
     assert list(sig.parameters.keys()) == []
+
+
+# ----------------------------------------------------------------
+# #294 — refresh-token SLIs
+# ----------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_record_refresh_outcome_success_emits_one_counter():
+    from channel.metrics import ENVIRONMENT, record_refresh_outcome
+
+    with patch("channel.metrics._emit_batch", new=AsyncMock()) as mock_batch:
+        await record_refresh_outcome(success=True)
+
+    metrics, dimension_sets = _batch_call(mock_batch)
+    assert metrics == [("RefreshSuccess", 1.0, "Count")]
+    assert dimension_sets == [{"Environment": ENVIRONMENT}]
+
+
+@pytest.mark.asyncio
+async def test_record_refresh_outcome_failure_emits_the_failure_counter():
+    from channel.metrics import record_refresh_outcome
+
+    with patch("channel.metrics._emit_batch", new=AsyncMock()) as mock_batch:
+        await record_refresh_outcome(success=False, reason="not_found")
+
+    metrics, _ = _batch_call(mock_batch)
+    assert metrics == [("RefreshFailure", 1.0, "Count")]
+
+
+@pytest.mark.asyncio
+async def test_record_refresh_outcome_reuse_adds_the_breach_subset_counter():
+    """RFC 9700 §4.14.2 reuse detection is the one signal here worth
+    alarming on, so it gets its own name rather than drowning in the
+    general failure counter alongside routine expiries."""
+    from channel.metrics import record_refresh_outcome
+
+    with patch("channel.metrics._emit_batch", new=AsyncMock()) as mock_batch:
+        await record_refresh_outcome(success=False, reason="reused")
+
+    metrics, _ = _batch_call(mock_batch)
+    assert metrics == [
+        ("RefreshFailure", 1.0, "Count"),
+        ("RefreshReuseDetected", 1.0, "Count"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_record_refresh_outcome_rate_limited_adds_its_subset_counter():
+    """Without this the limiter is invisible and 'did my rate limit just
+    sign everyone out?' has no answer."""
+    from channel.metrics import record_refresh_outcome
+
+    with patch("channel.metrics._emit_batch", new=AsyncMock()) as mock_batch:
+        await record_refresh_outcome(success=False, reason="rate_limited")
+
+    metrics, _ = _batch_call(mock_batch)
+    assert metrics == [
+        ("RefreshFailure", 1.0, "Count"),
+        ("RefreshRateLimited", 1.0, "Count"),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reason", ["not_found", "revoked", "expired_idle", "expired_absolute", "csrf_missing"]
+)
+async def test_record_refresh_outcome_other_reasons_stay_in_the_failure_counter(reason):
+    """``reason`` is a branch selector: the full taxonomy may be passed,
+    but only the two named subsets earn their own series."""
+    from channel.metrics import record_refresh_outcome
+
+    with patch("channel.metrics._emit_batch", new=AsyncMock()) as mock_batch:
+        await record_refresh_outcome(success=False, reason=reason)
+
+    metrics, _ = _batch_call(mock_batch)
+    assert [name for name, _v, _u in metrics] == ["RefreshFailure"]
+
+
+@pytest.mark.asyncio
+async def test_record_refresh_outcome_ignores_a_reason_on_the_success_path():
+    """A success is never also a breach or a throttle."""
+    from channel.metrics import record_refresh_outcome
+
+    with patch("channel.metrics._emit_batch", new=AsyncMock()) as mock_batch:
+        await record_refresh_outcome(success=True, reason="reused")
+
+    metrics, _ = _batch_call(mock_batch)
+    assert metrics == [("RefreshSuccess", 1.0, "Count")]
+
+
+def test_record_refresh_outcome_signature_locks_out_dimensions():
+    """This endpoint's obvious dimension candidates — ``user_id``,
+    ``device_id``, client IP — are precisely the unbounded ones, and one
+    of them is PII. ``reason`` is a branch selector that never reaches
+    CloudWatch, and there is no ``**dimensions`` escape hatch."""
+    from channel.metrics import record_refresh_outcome
+
+    sig = inspect.signature(record_refresh_outcome)
+    assert list(sig.parameters.keys()) == ["success", "reason"]
+    assert sig.parameters["success"].annotation == "bool"
+    assert sig.parameters["reason"].annotation == "str | None"
+    assert sig.parameters["reason"].default is None
+    assert all(
+        param.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD for param in sig.parameters.values()
+    )
+
+
+@pytest.mark.asyncio
+async def test_record_refresh_outcome_end_to_end_does_not_raise():
+    from channel.metrics import record_refresh_outcome
+
+    await record_refresh_outcome(success=False, reason="reused")

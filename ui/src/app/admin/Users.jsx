@@ -154,74 +154,80 @@ export default function Users() {
   } else {
     content = (
       <div>
-        <table className="art-table" data-testid="admin-users-table">
-          <thead>
-            <tr>
-              {COLUMNS.map((col) => (
-                // aria-sort on the <th> (not aria-pressed on the
-                // button) conveys column sort order to assistive tech
-                // with correct table semantics (Copilot review, #343).
-                <th
-                  key={col.key}
-                  aria-sort={
-                    col.sort
-                      ? col.sort === sort
-                        ? SORT_DIRECTION[sort]
-                        : "none"
-                      : undefined
-                  }
-                >
-                  {col.sort ? (
-                    <button
-                      type="button"
-                      data-sort={col.sort}
-                      onClick={handleHeaderClick}
-                      style={HEADER_BUTTON_STYLE}
-                    >
-                      {col.label}
-                      {col.sort === sort && (
-                        <span
-                          data-testid="sort-indicator"
-                          style={{
-                            display: "inline-flex",
-                            // email sorts ascending; timestamps descending.
-                            transform: sort === "email" ? "none" : "rotate(180deg)",
-                          }}
-                        >
-                          <Icon name="arrow-up" size={11} />
-                        </span>
-                      )}
-                    </button>
-                  ) : (
-                    col.label
-                  )}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((u) => (
-              <tr key={u.user_id}>
-                <td>
-                  <Link
-                    to={`/app/admin/users/${encodeURIComponent(u.user_id)}`}
-                    style={{
-                      color: "var(--accent-ink)",
-                      textDecoration: "none",
-                      fontWeight: 600,
-                    }}
+        {/* Scrolls the table, not the page, when the columns outgrow a
+            narrow viewport (#468). `tabIndex`/`role`/`aria-label` are the
+            standard scrollable-region pattern: a keyboard-only user needs
+            to be able to focus the box to scroll it (WCAG 2.1.1). */}
+        <div className="table-scroll" role="region" aria-label="Users" tabIndex={0}>
+          <table className="art-table" data-testid="admin-users-table">
+            <thead>
+              <tr>
+                {COLUMNS.map((col) => (
+                  // aria-sort on the <th> (not aria-pressed on the
+                  // button) conveys column sort order to assistive tech
+                  // with correct table semantics (Copilot review, #343).
+                  <th
+                    key={col.key}
+                    aria-sort={
+                      col.sort
+                        ? col.sort === sort
+                          ? SORT_DIRECTION[sort]
+                          : "none"
+                        : undefined
+                    }
                   >
-                    {u.email}
-                  </Link>
-                </td>
-                <td className="mono">{fmtDate(u.created_at)}</td>
-                <td className="mono">{fmtDate(u.last_chat_at)}</td>
-                <td className="mono">{u.chat_count}</td>
-                <td className="mono">{fmtDate(u.last_login_at)}</td>
+                    {col.sort ? (
+                      <button
+                        type="button"
+                        data-sort={col.sort}
+                        onClick={handleHeaderClick}
+                        style={HEADER_BUTTON_STYLE}
+                      >
+                        {col.label}
+                        {col.sort === sort && (
+                          <span
+                            data-testid="sort-indicator"
+                            style={{
+                              display: "inline-flex",
+                              // email sorts ascending; timestamps descending.
+                              transform: sort === "email" ? "none" : "rotate(180deg)",
+                            }}
+                          >
+                            <Icon name="arrow-up" size={11} />
+                          </span>
+                        )}
+                      </button>
+                    ) : (
+                      col.label
+                    )}
+                  </th>
+                ))}
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {rows.map((u) => (
+                <tr key={u.user_id}>
+                  <td>
+                    <Link
+                      to={`/app/admin/users/${encodeURIComponent(u.user_id)}`}
+                      style={{
+                        color: "var(--accent-ink)",
+                        textDecoration: "none",
+                        fontWeight: 600,
+                      }}
+                    >
+                      {u.email}
+                    </Link>
+                  </td>
+                  <td className="mono">{fmtDate(u.created_at)}</td>
+                  <td className="mono">{fmtDate(u.last_chat_at)}</td>
+                  <td className="mono">{u.chat_count}</td>
+                  <td className="mono">{fmtDate(u.last_login_at)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
         {error && (
           <p style={{ ...MUTED_STYLE, color: "var(--danger)", marginTop: 12 }}>
             {error}

@@ -115,39 +115,42 @@ export default function UserDetail() {
           {recentChats.length === 0 ? (
             <p style={MUTED_STYLE}>No chats yet.</p>
           ) : (
-            <table className="art-table" data-testid="admin-user-chats">
-              <thead>
-                <tr>
-                  <th>Title</th>
-                  <th>Created</th>
-                  <th>Last message</th>
-                  <th>Messages</th>
-                  <th>Status</th>
-                </tr>
-              </thead>
-              <tbody>
-                {recentChats.map((c) => (
-                  <tr key={c.chat_id}>
-                    <td>
-                      <Link
-                        to={`/app/c/${c.chat_id}`}
-                        style={{
-                          color: "var(--accent-ink)",
-                          textDecoration: "none",
-                          fontWeight: 600,
-                        }}
-                      >
-                        {c.title || "Untitled"}
-                      </Link>
-                    </td>
-                    <td className="mono">{fmtDate(c.created_at)}</td>
-                    <td className="mono">{fmtDate(c.last_message_at)}</td>
-                    <td className="mono">{c.message_count}</td>
-                    <td className="mono">{c.archived ? "archived" : "active"}</td>
+            // Scroll box per #468 — see the matching wrapper in Users.jsx.
+            <div className="table-scroll" role="region" aria-label="Recent chats" tabIndex={0}>
+              <table className="art-table" data-testid="admin-user-chats">
+                <thead>
+                  <tr>
+                    <th>Title</th>
+                    <th>Created</th>
+                    <th>Last message</th>
+                    <th>Messages</th>
+                    <th>Status</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {recentChats.map((c) => (
+                    <tr key={c.chat_id}>
+                      <td>
+                        <Link
+                          to={`/app/c/${c.chat_id}`}
+                          style={{
+                            color: "var(--accent-ink)",
+                            textDecoration: "none",
+                            fontWeight: 600,
+                          }}
+                        >
+                          {c.title || "Untitled"}
+                        </Link>
+                      </td>
+                      <td className="mono">{fmtDate(c.created_at)}</td>
+                      <td className="mono">{fmtDate(c.last_message_at)}</td>
+                      <td className="mono">{c.message_count}</td>
+                      <td className="mono">{c.archived ? "archived" : "active"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
         </section>
 

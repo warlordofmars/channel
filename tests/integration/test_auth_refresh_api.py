@@ -24,11 +24,21 @@ from fastapi.testclient import TestClient
 
 from channel import storage
 from channel.api.main import app
+from channel.auth import refresh as refresh_module
 from channel.auth.refresh import REFRESH_COOKIE_NAME, REFRESH_COOKIE_PATH
 from channel.auth.tokens import decode_mgmt_jwt
 from channel.models import RefreshConsumeOutcome
 
 _CSRF = {"X-Channel-Refresh": "1"}
+
+
+@pytest.fixture(autouse=True)
+def _reset_rate_limiter():
+    """The #294 limiter is process-global; keep one test's window out of
+    the next one's."""
+    refresh_module._refresh_limiter.clear()
+    yield
+    refresh_module._refresh_limiter.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -133,3 +143,56 @@ def test_revoked_family_cannot_refresh(client) -> None:  # type: ignore[no-untyp
 
     resp = client.post("/auth/refresh", json={"refresh_token": raw}, headers=_CSRF)
     assert resp.status_code == 401
+
+
+def test_a_throttled_family_keeps_its_live_token(client) -> None:  # type: ignore[no-untyped-def]
+    """#294's load-bearing property, against the real rotation machinery.
+
+    The unit suite proves a 429 never calls ``consume_refresh_token``.
+    What it cannot prove is the consequence: that the credential the
+    client is holding when it gets throttled is still a *live row* — not
+    a rotated ancestor whose next presentation is the RFC 9700 §4.14.2
+    breach signal. Getting this wrong would mean throttling a client
+    revokes its whole device family, turning a rate limit into a forced
+    re-login: a self-inflicted DoS strictly worse than the traffic it
+    sheds.
+    """
+    user_id = _user()
+    presented, _ = storage.mint_refresh_token(user_id=user_id, device_id="d-throttle")
+
+    # Spend the family's whole window on legitimate chained rotations.
+    for _ in range(5):
+        resp = client.post("/auth/refresh", json={"refresh_token": presented}, headers=_CSRF)
+        assert resp.status_code == 200
+        presented = resp.json()["refresh_token"]
+
+    throttled = client.post("/auth/refresh", json={"refresh_token": presented}, headers=_CSRF)
+    assert throttled.status_code == 429
+    assert int(throttled.headers["retry-after"]) >= 1
+
+    # The token survived untouched: consuming it now succeeds, which it
+    # could not do had the shed request rotated (or cascaded over) it.
+    assert storage.consume_refresh_token(presented).outcome is RefreshConsumeOutcome.OK
+
+
+def test_the_limit_is_scoped_to_one_device_family(client) -> None:  # type: ignore[no-untyped-def]
+    """A second device of the SAME user is unaffected — the reason the
+    key is the credential rather than the client IP, which every device
+    behind one NAT would share."""
+    user_id = _user()
+    noisy, _ = storage.mint_refresh_token(user_id=user_id, device_id="d-noisy")
+    quiet, _ = storage.mint_refresh_token(user_id=user_id, device_id="d-quiet")
+
+    for _ in range(5):
+        resp = client.post("/auth/refresh", json={"refresh_token": noisy}, headers=_CSRF)
+        assert resp.status_code == 200
+        noisy = resp.json()["refresh_token"]
+    assert (
+        client.post("/auth/refresh", json={"refresh_token": noisy}, headers=_CSRF).status_code
+        == 429
+    )
+
+    assert (
+        client.post("/auth/refresh", json={"refresh_token": quiet}, headers=_CSRF).status_code
+        == 200
+    )

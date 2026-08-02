@@ -1418,10 +1418,13 @@ html.is-electron-mac .sb-top {
 
    Everything in this block is gated behind `@media (max-width: 640px)`
    so wide viewports stay byte-for-byte unchanged (desktop must not
-   regress). The two mobile-only chrome elements — `.mobile-topbar` and
-   `.mobile-nav-backdrop` — default to `display: none` here at base and
-   are switched on only inside the media query, so they are inert on
-   desktop even though Shell always renders the topbar.
+   regress), with three deliberate base-rule exceptions below, each of
+   which is a no-op at ≥641px. The two mobile-only chrome elements —
+   `.mobile-topbar` and `.mobile-nav-backdrop` — default to
+   `display: none` here at base and are switched on only inside the
+   media query, so they are inert on desktop even though Shell always
+   renders the topbar. `.table-scroll` (#468) is the third: it paints
+   nothing while its content fits, which on desktop it does.
 
    Kept as a self-contained trailing section so a parallel edit to
    app.css (e.g. #400 admin styles) rebases cleanly.
@@ -1429,6 +1432,28 @@ html.is-electron-mac .sb-top {
 
 .mobile-topbar { display: none; }
 .mobile-nav-backdrop { display: none; }
+
+/* Scroll box for a full-width `.art-table` (#468) — same shape as
+   `.convo-data-scroll` (#363), which is the existing precedent for a
+   scrollable table in this file.
+
+   The WRAPPER is the scroll container, never the table: giving a `<table>`
+   `display: block; overflow-x: auto` scrolls just as well but drops the
+   table role in Safari/VoiceOver — the exact browser this issue was
+   reported on — so the columns stop being announced as a table.
+
+   Declared at base rather than inside the media query because `auto` paints
+   no scrollbar and reserves no space while the content fits: at ≥641px the
+   admin tables fit their 920px column, so wide viewports render exactly as
+   they did before, and a narrow desktop window gets the same containment
+   for free.
+
+   Note this is a two-axis scroll container, not the x-only box it reads as:
+   per the overflow spec, `overflow-x: auto` forces a `visible` `overflow-y`
+   to compute to `auto` as well. Harmless for a table at auto height with no
+   absolutely-positioned descendants — but anything that has to escape the
+   box (a tooltip, a popover) would clip, so keep those outside it. */
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 
 @media (max-width: 640px) {
   /* ----- sidebar → off-canvas drawer ----- */
@@ -1583,6 +1608,69 @@ html.is-electron-mac .sb-top {
     padding-left: calc(12px + env(safe-area-inset-left));
     padding-right: calc(12px + env(safe-area-inset-right));
   }
+
+  /* ----- secondary views: gutters, card grids, tables (Tier 3 of #125, #468) -----
+
+     Third self-contained sub-block of the mobile section, appended after the
+     #437 safe-area rules for the same rebase reason they were appended after
+     the #425 rules.
+
+     #425 (Tier 1) deliberately scoped itself to the core chat flow, so the
+     shared view primitives never got a mobile pass and still carried
+     desktop-only geometry at 390px: content ran off the right edge on
+     `/app/admin/users` (the `CHATS` column clipped to `CH`) and
+     `/app/admin/dashboard` (the `7 DAYS` card and `Tool calls` chart sliced
+     off). `.view`, `.view-inner`, `.view-head`, `.grid` and `.art-table` back
+     the Projects, Artifacts and Customize views as well as the four admin
+     ones, so these rules fix every secondary view at once rather than
+     patching admin in isolation.
+
+     Same additive `calc(<gutter> + env(...))` form as the block above —
+     `env(safe-area-inset-*)` is 0 on every non-notched device and in every
+     desktop browser — and the whole sub-block sits behind the 640px query,
+     so desktop never evaluates it. ----- */
+
+  /* 32px desktop side gutters → 14px, matching `.convo-inner`. The bottom
+     inset matters more here than on the chat routes: these views have no
+     `.bottom-composer` beneath them, so in standalone their last row would
+     otherwise sit under the home indicator. */
+  .view-inner {
+    padding: 14px 14px 32px;
+    padding-left: calc(14px + env(safe-area-inset-left));
+    padding-right: calc(14px + env(safe-area-inset-right));
+    padding-bottom: calc(32px + env(safe-area-inset-bottom));
+  }
+
+  /* `repeat(2, 1fr)` never collapsed, so two cards plus the gap always
+     exceeded a 390px viewport. `minmax(0, 1fr)` rather than a bare `1fr`:
+     a grid item's implicit `min-width: auto` lets an over-wide child push
+     the track past the viewport, which is the overflow being fixed here. */
+  .grid { grid-template-columns: minmax(0, 1fr); }
+
+  /* Dashboard composes its rollup grid (3 columns) and chart grid (2) from
+     inline style objects, which no stylesheet rule can override without
+     `!important`. Overriding rather than lifting those objects into CSS is
+     the narrower change: desktop keeps rendering from the untouched inline
+     styles — nothing to verify — and the mobile collapse stays here with the
+     rest of the mobile layout. `minmax(0, 1fr)` matters especially for the
+     charts: a Recharts SVG still holding its pre-resize pixel width would
+     otherwise widen the track and take the page with it. */
+  .admin-grid { grid-template-columns: minmax(0, 1fr) !important; }
+
+  /* `minmax(0, 1fr)` caps the track, but a child can still paint outside the
+     box it was given — and a `<svg>` carrying an explicit pre-resize width is
+     exactly that child. Clipping it at the card edge keeps the stale frame's
+     spill off the page; Recharts re-measures and repaints at the container's
+     real width immediately afterwards. Cards are auto-height, so the
+     shorthand's vertical clip has nothing to cut. */
+  .admin-grid > * { overflow: hidden; }
+
+  /* Six columns of user data don't fit 390px however they're sized, so the
+     table scrolls inside `.table-scroll` (base rule above) and the page
+     doesn't. `width: max-content` stops `width: 100%` squeezing the columns
+     down to their min-content wrap — the squeeze is what clipped the `CHATS`
+     header — while `min-width: 100%` keeps a narrow table filling its card. */
+  .table-scroll .art-table { width: max-content; min-width: 100%; }
 }
 
 /* ============================================================

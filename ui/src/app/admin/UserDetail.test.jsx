@@ -115,6 +115,17 @@ describe("UserDetail", () => {
     );
   });
 
+  // #468 — same mobile-overflow treatment as the users table in Users.jsx.
+  it("wraps the recent-chats table in a focusable, labelled scroll container", async () => {
+    getAdminUser.mockResolvedValue(makeDetail());
+    await act(async () => renderDetail());
+
+    const scroller = screen.getByRole("region", { name: "Recent chats" });
+    expect(scroller.className).toBe("table-scroll");
+    expect(scroller.getAttribute("tabindex")).toBe("0");
+    expect(scroller.contains(screen.getByTestId("admin-user-chats"))).toBe(true);
+  });
+
   it("links recent chats to /app/c/:id and renders null-field branches", async () => {
     getAdminUser.mockResolvedValue(makeDetail());
     await act(async () => renderDetail());

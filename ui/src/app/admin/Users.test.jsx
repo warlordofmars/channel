@@ -82,6 +82,28 @@ describe("Users", () => {
     expect(screen.queryByRole("button", { name: /load more/i })).toBeNull();
   });
 
+  // #468 — six columns of user data don't fit a 390px viewport, so the table
+  // has to scroll inside its own box rather than pushing the page sideways.
+  it("wraps the table in a focusable, labelled scroll container", async () => {
+    getAdminUsers.mockResolvedValue({ items: [makeUser()], next_cursor: null });
+    await act(async () => renderUsers());
+
+    const scroller = screen.getByRole("region", { name: "Users" });
+    expect(scroller.className).toBe("table-scroll");
+    // Keyboard-only users need to focus the box to scroll it (WCAG 2.1.1).
+    expect(scroller.getAttribute("tabindex")).toBe("0");
+    expect(scroller.contains(screen.getByTestId("admin-users-table"))).toBe(true);
+  });
+
+  it("keeps the load-more control outside the scroll container", async () => {
+    getAdminUsers.mockResolvedValue({ items: [makeUser()], next_cursor: "c1" });
+    await act(async () => renderUsers());
+
+    const scroller = screen.getByRole("region", { name: "Users" });
+    const more = screen.getByRole("button", { name: /load more/i });
+    expect(scroller.contains(more)).toBe(false);
+  });
+
   it("requests the server default sort and marks Last chat descending", async () => {
     getAdminUsers.mockResolvedValue({ items: [makeUser()], next_cursor: null });
     await act(async () => renderUsers());
