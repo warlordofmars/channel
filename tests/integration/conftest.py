@@ -130,12 +130,35 @@ def dynamodb_resource() -> Any:
 
 
 def _drop_table(dynamodb_resource: Any, name: str) -> None:
-    """Delete ``name`` and wait for it to go away; no-op if absent."""
+    """Delete ``name`` and wait for it to go away; no-op if absent.
+
+    ``ResourceInUseException`` means the table is mid-``CREATING`` /
+    ``UPDATING`` / ``DELETING``, i.e. *another process is working on a
+    table this run believes it owns*. With per-run names that is
+    unreachable — nobody else knows the name. It becomes reachable only
+    when ``CHANNEL_INTEGRATION_TABLE_NAME`` pins a shared name across
+    overlapping runs, which the module docstring tells you not to do.
+
+    So it is re-raised, not swallowed, but with the cause named. Waiting
+    it out would be worse than useless: if the peer is *creating* rather
+    than deleting, ``wait_until_not_exists`` blocks for ~8 minutes and
+    then fails anyway. Failing immediately with a legible message is the
+    point — #466 exists so that a red integration suite means something.
+    """
     table = dynamodb_resource.Table(name)
+    client = dynamodb_resource.meta.client
     try:
         table.delete()
-    except dynamodb_resource.meta.client.exceptions.ResourceNotFoundException:
+    except client.exceptions.ResourceNotFoundException:
         return
+    except client.exceptions.ResourceInUseException as exc:
+        raise RuntimeError(
+            f"Table {name!r} is being created or deleted by another process. "
+            f"Per-run table names make this impossible, so "
+            f"CHANNEL_INTEGRATION_TABLE_NAME is almost certainly pinned to a "
+            f"shared name while runs overlap — unset it, or give each run its "
+            f"own value (see #466)."
+        ) from exc
     table.wait_until_not_exists()
 
 
