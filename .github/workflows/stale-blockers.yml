@@ -1,0 +1,83 @@
+# Copyright (c) 2026 John Carter. All rights reserved.
+# Weekly sweep for `Blocked by #N` references that outlived their blocker
+# (issue #457). Labels do not follow when a blocker merges, so the queue
+# silently shrinks: an issue stays `status:blocked` after its blocker closed,
+# or names an open blocker without carrying the label at all. Both hide real
+# work, and both are mechanically detectable.
+#
+# REPORT ONLY — this workflow must NEVER pass `--fix`.
+#   `--fix` mutates issue labels. Automatic relabelling on a cron is a bigger
+#   call than it looks: a body edit, a re-pointed dependency, or a
+#   deliberately-parked issue would all be silently overwritten by a job
+#   nobody is watching. The sweep reports; a human runs
+#   `uv run inv check-blockers --fix` (or fixes by hand) after reading it.
+#   Keep `permissions:` read-only so the token cannot relabel even if a
+#   future edit slips a `--fix` in.
+#
+# Trigger surface (mirrors protection-drift.yml):
+#   - Weekly cron — the backlog rots on merges, not on pushes to this file
+#   - Push to development — catches breakage in the script itself immediately
+#   - workflow_dispatch — manual re-check while triaging
+#
+# Why it fails the job on findings rather than reporting silently:
+#   A green-forever check nobody clicks into is the same as no check. The
+#   script exits 1 for findings and 2 for a fetch error, and both fail here,
+#   so a rotted reference shows up as a red weekly run. The remedy is to act
+#   on the finding (re-label, or re-point the dependency), not to silence the
+#   sweep.
+name: Stale Blocker Sweep
+
+on:
+  schedule:
+    - cron: "0 8 * * 1" # Every Monday at 08:00 UTC (after the protection-drift check)
+  push:
+    branches:
+      - development
+    paths:
+      - "scripts/check_stale_blockers.py"
+      - ".github/workflows/stale-blockers.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: read
+
+jobs:
+  sweep:
+    name: Detect stale Blocked by references
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+
+      # No `uv` / dependency-resolution step on purpose: the script imports
+      # stdlib only and shells out to the runner's pre-installed `gh`, so the
+      # runner's own python3 runs it directly. Nothing is resolved, built, or
+      # installed here — no setup scripts execute in this job. Same precedent
+      # as ci.yml's `python3 scripts/sonar_to_sarif.py` step.
+      - name: Sweep for stale blockers
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Read by the script's repo resolution — no hardcoded owner/name,
+          # so a fork sweeps its own backlog.
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          # GitHub runs `run:` blocks as `bash -e {0}`, so errexit is already
+          # on and `set -uo pipefail` does NOT clear it. Without this `+e` the
+          # shell aborts at the sweep's non-zero exit — the exact path this
+          # block exists for — leaving the summary fence unterminated and the
+          # remediation annotation below unreachable.
+          set +e
+          {
+            echo "## Stale blocker sweep"
+            echo
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          # NOTE: report only. Never add --fix here (see header).
+          python3 scripts/check_stale_blockers.py | tee -a "$GITHUB_STEP_SUMMARY"
+          status=$?
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          if [ "$status" -eq 1 ]; then
+            echo "::error title=Stale blockers found::Backlog dependency labels are out of date — see the job summary. Fix with 'uv run inv check-blockers --fix' (stale-block / missing-block) or re-point the dependency by hand."
+          fi
+          exit "$status"

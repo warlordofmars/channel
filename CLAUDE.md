@@ -45,6 +45,7 @@ channel/
 │           ├── mcp.py         # MCP-server registry REST (list/register/rename/delete/reauth) + per-chat override + /auth/mcp/callback
 │           ├── models.py      # GET /api/models — server allowlist
 │           ├── prefs.py       # User preferences API — GET/PUT /api/me/prefs (single PREFS row)
+│           ├── sessions.py    # Sessions API — GET/DELETE /api/me/sessions[/{device_id}] over refresh rows
 │           └── csp.py         # CSP violation reporting endpoint
 ├── ui/
 │   ├── index.html             # Vite entry HTML
@@ -237,11 +238,45 @@ the access JWT it renews has usually already expired.
 - Response: `{access_token, token_type: "bearer", expires_in}` plus
   `refresh_token` on the body transport only.
 
-Still to land in epic #241: the sessions API (#293), rate limiting + EMF
-counters (#294), the SPA's silent-refresh wrapper (#295), and desktop
-`safeStorage` persistence (#297). **Until #295 lands the SPA does not
-call this endpoint**, so a web session still ends at the 1h access-token
-expiry even though the refresh token it needs is now issued (#292).
+### `/api/me/sessions` (#293)
+
+`GET` lists the caller's live sessions — one entry per `device_id`,
+newest first, projected from the live refresh rows
+(`list_live_refresh_tokens`). A *session is a device*, not a refresh
+row: hard rotation burns through a chain of rows per device, so the
+route collapses live rows by `device_id` and shows the newest. `DELETE
+/api/me/sessions/{device_id}` ends one device
+(`revoke_device_refresh_tokens`); `DELETE /api/me/sessions` ends every
+device **and denylists the caller's own access token**, so "sign out
+everywhere" takes effect immediately on the device that pressed it
+rather than at that token's `exp` — the same pairing `/auth/logout`
+performs at single-device scope (#292). The per-device route can't do
+the equivalent for its target: the mgmt JWT still carries no `device_id`
+claim, so there is no way to map a device to the `jti` it holds. That
+would be a mint-path change and remains unbuilt.
+
+Neither `DELETE` clears the `channel_refresh` cookie. It doesn't need
+to: the server-side revoke is the authoritative one, and a browser
+presenting the now-dead cookie to `/auth/refresh` gets a 401 that clears
+it (see above). Clearing here would be cosmetic, and the cookie's
+`Path=/auth` doesn't reach `/api/*` on the request side anyway.
+
+Ownership is the JWT `sub` claim and a mismatch is **404, not 403**
+(`_load_owned_session` mirrors `_load_owned_chat`): lookups run inside
+the caller's own `REFRESH_USER#{sub}` index partition, so another user's
+`device_id` is indistinguishable from one that never existed. Both
+revoke routes write an audit event (`auth.session_revoke` /
+`auth.session_revoke_all`), like `/auth/logout`. The `DELETE`s return
+204 with no revoked-row count — a count would imply a post-condition the
+eventually-consistent index cannot promise (see the refresh-token entry
+under §DynamoDB single table design).
+
+Still to land in epic #241: rate limiting + EMF counters (#294), the
+SPA's silent-refresh wrapper (#295), and desktop `safeStorage`
+persistence (#297). **Until #295 lands the SPA does not call
+`/auth/refresh`**, so a web session still ends at the 1h access-token
+expiry even though the refresh token it needs is now issued (#292) —
+and the sessions list shows the one device the current login minted.
 
 ## DynamoDB single table design
 
@@ -287,9 +322,15 @@ expiry even though the refresh token it needs is now issued (#292).
   so a row minted inside the index-propagation window can survive a
   cascade — the reuse path sweeps twice to narrow this, which does not
   close it. Closing it needs a strongly-consistent per-device family
-  marker checked on consume; that belongs with the session row #293
-  introduces. Damage is bounded by the family's unchanged
-  `absolute_expires_at` — #290, epic #241)
+  marker checked on consume. **#293 did not add one** — the sessions
+  API it introduced (`GET`/`DELETE /api/me/sessions`, backed by
+  `list_live_refresh_tokens` / `revoke_device_refresh_tokens`) is a
+  read-and-revoke surface over this same index and *inherits* the
+  window: a just-created session can be missing from the list, and
+  revoking it can 404 until the index catches up. A family marker is a
+  change to the mint/consume path, not to that read surface, and is
+  still unbuilt. Damage is bounded by the family's unchanged
+  `absolute_expires_at` — #290, #293, epic #241)
 - Chat-index items: `PK=USER#{user_id}`, `SK=CHAT#{created_at}#{chat_id}`
   (one row per chat; sortable so the Recents query is a single
   `Query(ScanIndexForward=False)`; also projects onto `ChatByIdIndex`)
@@ -1365,6 +1406,14 @@ create the next one and promote items from the hardening bucket.
 
 - **Weekly** — glance at issues created in the last 7 days; fix any
   missing priority / size / area labels
+- **Weekly** — run `uv run inv check-blockers` (read-only) to catch
+  `Blocked by #N` references that outlived their blocker: a
+  `status:blocked` issue whose blockers all closed, an unlabelled issue
+  naming an open blocker, a blocker closed `NOT_PLANNED` (re-point it,
+  don't just clear it), or a reference to a non-existent issue. Add
+  `--fix` to apply the two mechanical label flips. The
+  `stale-blockers.yml` workflow runs the same sweep every Monday, but
+  **report-only** — it never passes `--fix`
 - **Monthly** — review the hardening bucket and promote shippable items
   into the current release
 - **Quarterly** — review `priority:p3` and `status:design-needed` issues;

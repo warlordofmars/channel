@@ -50,6 +50,7 @@ from channel.storage import (
     is_jti_denied,
     list_audit_events_for_actor,
     list_chats_for_user,
+    list_live_refresh_tokens,
     list_messages,
     list_messages_page,
     list_recent_messages,
@@ -57,6 +58,7 @@ from channel.storage import (
     patch_chat,
     put_message,
     revoke_all_user_refresh_tokens,
+    revoke_device_refresh_tokens,
     revoke_refresh_token,
     scan_users,
     update_chat_index,
@@ -3636,3 +3638,135 @@ def test_losing_because_the_row_was_ttl_swept_is_not_found(
     _lose_the_conditional_update(table, monkeypatch, sweep_it)
 
     assert consume_refresh_token(raw).outcome == RefreshConsumeOutcome.NOT_FOUND
+
+
+# ----------------------------------------------------------------
+# Sessions read + per-device revoke (#293, epic #241)
+# ----------------------------------------------------------------
+
+
+def test_list_live_refresh_tokens_returns_the_users_rows_newest_first(
+    table: FakeTable,
+) -> None:
+    """Ordering is produced in Python, not by the index walk — so it must
+    hold even though every refresh row shares ``SK="META"`` and the query
+    therefore has no meaningful sort key to lean on."""
+    _seed_refresh_row(table, user_id="u-1", device_id="d-old", issued_at=_iso(-900))
+    _seed_refresh_row(table, user_id="u-1", device_id="d-new", issued_at=_iso(-5))
+    _seed_refresh_row(table, user_id="u-1", device_id="d-mid", issued_at=_iso(-60))
+
+    rows = list_live_refresh_tokens("u-1")
+
+    assert [r.device_id for r in rows] == ["d-new", "d-mid", "d-old"]
+
+
+def test_list_live_refresh_tokens_breaks_same_instant_ties_deterministically(
+    table: FakeTable,
+) -> None:
+    same_instant = _iso(-30)
+    _seed_refresh_row(
+        table, raw_token="tok-b", user_id="u-1", device_id="d-1", issued_at=same_instant
+    )
+    _seed_refresh_row(
+        table, raw_token="tok-a", user_id="u-1", device_id="d-2", issued_at=same_instant
+    )
+
+    hashes = [r.token_hash for r in list_live_refresh_tokens("u-1")]
+
+    assert hashes == sorted(hashes, reverse=True)
+
+
+def test_list_live_refresh_tokens_omits_revoked_rows(table: FakeTable) -> None:
+    """Revoked ancestors stick around until TTL so reuse detection can
+    see them — they are emphatically not sessions."""
+    _seed_refresh_row(table, user_id="u-1", device_id="d-live")
+    _seed_refresh_row(
+        table,
+        user_id="u-1",
+        device_id="d-dead",
+        revoked=True,
+        revoked_reason=RefreshRevokeReason.ROTATED,
+        revoked_at=_iso(-1),
+    )
+
+    assert [r.device_id for r in list_live_refresh_tokens("u-1")] == ["d-live"]
+
+
+def test_list_live_refresh_tokens_omits_rows_past_the_absolute_deadline(
+    table: FakeTable,
+) -> None:
+    _seed_refresh_row(table, user_id="u-1", device_id="d-live")
+    _seed_refresh_row(table, user_id="u-1", device_id="d-stale", absolute_expires_at=_iso(-1))
+
+    assert [r.device_id for r in list_live_refresh_tokens("u-1")] == ["d-live"]
+
+
+def test_list_live_refresh_tokens_omits_rows_past_the_idle_deadline(
+    table: FakeTable,
+) -> None:
+    _seed_refresh_row(table, user_id="u-1", device_id="d-live")
+    _seed_refresh_row(table, user_id="u-1", device_id="d-idle", idle_expires_at=_iso(-1))
+
+    assert [r.device_id for r in list_live_refresh_tokens("u-1")] == ["d-live"]
+
+
+def test_list_live_refresh_tokens_is_scoped_to_one_user(table: FakeTable) -> None:
+    _seed_refresh_row(table, user_id="u-1", device_id="d-mine")
+    _seed_refresh_row(table, user_id="u-2", device_id="d-theirs")
+
+    assert [r.device_id for r in list_live_refresh_tokens("u-1")] == ["d-mine"]
+    assert [r.device_id for r in list_live_refresh_tokens("u-2")] == ["d-theirs"]
+
+
+def test_list_live_refresh_tokens_is_empty_for_an_unknown_user(table: FakeTable) -> None:
+    _seed_refresh_row(table, user_id="u-1", device_id="d-1")
+
+    assert list_live_refresh_tokens("nobody") == []
+
+
+def test_list_live_refresh_tokens_keeps_every_live_row_of_a_rotating_device(
+    table: FakeTable,
+) -> None:
+    """Collapsing a device's concurrent live rows is the API layer's job;
+    storage reports what it found."""
+    _seed_refresh_row(table, raw_token="t1", user_id="u-1", device_id="d-1")
+    _seed_refresh_row(table, raw_token="t2", user_id="u-1", device_id="d-1")
+
+    assert len(list_live_refresh_tokens("u-1")) == 2
+
+
+def test_revoke_device_refresh_tokens_kills_only_the_named_device(
+    table: FakeTable,
+) -> None:
+    _, keep = _seed_refresh_row(table, raw_token="keep", user_id="u-1", device_id="d-2")
+    _seed_refresh_row(table, raw_token="kill-1", user_id="u-1", device_id="d-1")
+    _seed_refresh_row(table, raw_token="kill-2", user_id="u-1", device_id="d-1")
+
+    assert revoke_device_refresh_tokens("u-1", "d-1") == 2
+
+    assert [r.device_id for r in list_live_refresh_tokens("u-1")] == ["d-2"]
+    assert table.items[(f"REFRESH#{keep.token_hash}", "META")]["revoked"] is False
+    killed = [i for i in _refresh_rows(table) if i["device_id"] == "d-1"]
+    assert {i["revoked_reason"] for i in killed} == {RefreshRevokeReason.USER_REVOKED.value}
+
+
+def test_revoke_device_refresh_tokens_cannot_reach_another_users_device(
+    table: FakeTable,
+) -> None:
+    """The tenancy guard behind the sessions API's 404: the query runs in
+    the caller's own index partition, so a foreign ``device_id`` matches
+    nothing even when that device really exists."""
+    _, theirs = _seed_refresh_row(table, user_id="u-2", device_id="shared-name")
+
+    assert revoke_device_refresh_tokens("u-1", "shared-name") == 0
+
+    assert table.items[(f"REFRESH#{theirs.token_hash}", "META")]["revoked"] is False
+
+
+def test_revoke_device_refresh_tokens_is_zero_for_an_already_dead_family(
+    table: FakeTable,
+) -> None:
+    _seed_refresh_row(table, user_id="u-1", device_id="d-1")
+
+    assert revoke_device_refresh_tokens("u-1", "d-1") == 1
+    assert revoke_device_refresh_tokens("u-1", "d-1") == 0

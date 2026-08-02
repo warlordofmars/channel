@@ -25,6 +25,7 @@ from channel.api.chats import router as chats_router
 from channel.api.csp import router as csp_router
 from channel.api.models import router as models_router
 from channel.api.prefs import router as prefs_router
+from channel.api.sessions import router as sessions_router
 from channel.auth.logout import router as logout_router
 from channel.auth.mgmt_auth import router as mgmt_auth_router
 from channel.auth.refresh import router as refresh_router
@@ -259,6 +260,11 @@ app.include_router(admin_router, prefix="/api")
 # User preferences — GET/PUT /api/me/prefs (full paths declared on the
 # router so no prefix needed here)
 app.include_router(prefs_router)
+
+# Active sessions — GET/DELETE /api/me/sessions[/{device_id}]; every
+# route requires a valid mgmt JWT and is scoped to the caller's own
+# refresh-token rows (#293)
+app.include_router(sessions_router, prefix="/api")
 
 # MCP server registry — /api/mcp/* (auth-gated) + /auth/mcp/callback
 # (browser redirect target, unauthenticated, state-store guarded).
