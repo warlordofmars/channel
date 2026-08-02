@@ -101,10 +101,16 @@ describe(".stage viewport height (#467)", () => {
 
   it("never sizes width from the viewport", () => {
     // `100vw` includes the scrollbar gutter, so it would overflow the
-    // desktop layout by the scrollbar width. Width must stay implied by
-    // the left/right insets.
+    // desktop layout by the scrollbar width. `.stage` width must stay
+    // implied by the left/right insets.
+    //
+    // Both assertions are deliberately scoped to `.stage` rather than the
+    // whole stylesheet: other rules use viewport-relative widths quite
+    // legitimately (e.g. `min(84vw, 300px)` on the mobile drawer), and a
+    // file-wide ban would fail on edits that have nothing to do with the
+    // app layer's height.
     expect(stageRule()).not.toMatch(/width:/);
-    expect(css).not.toMatch(/\b100(?:d|s|l)?vw\b/);
+    expect(stageRule()).not.toMatch(/\d+(?:d|s|l)?vw\b/);
   });
 });
 
