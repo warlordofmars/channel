@@ -5,9 +5,41 @@
 [data-shape="sharp"] { --r-xs: 2px; --r-sm: 3px; --r-md: 4px; --r-lg: 6px; --r-xl: 10px; }
 
 /* ---------- desktop stage / wallpaper ---------- */
+/* `.stage` is the app's outermost layer — everything (`.win`, and through it
+   the sidebar, conversation and composer) is sized off it, so its height is
+   the whole app's height.
+
+   The two `height` declarations are a fallback pair, not a duplicate (#467).
+   An engine that doesn't know `dvh` drops the second declaration and keeps
+   `100vh`; an engine that does know it takes the second, since it comes
+   later. Without them the layer was sized *solely* by `inset: 0`, i.e. against
+   the layout viewport — and on iOS in standalone mode that box does not
+   reliably re-expand after the software keyboard is dismissed, leaving a dead
+   strip below the composer where the keyboard used to be. `dvh` resolves
+   against the dynamic viewport instead, which iOS recomputes on the
+   viewport-resize events it does fire.
+
+   `position: fixed; inset: 0` is deliberately kept. `top`/`left`/`right`
+   still pin the layer to the viewport; only `bottom` is dropped, because
+   `top` + `bottom` + `height` is over-constrained and CSS resolves that by
+   ignoring `bottom`. That is precisely the intent — height should come from
+   the dynamic viewport, position from the insets.
+
+   Desktop is unaffected. `dvh` is defined to equal `vh` wherever there is no
+   dynamically-retracting UA chrome (every desktop browser), and the global
+   `* { box-sizing: border-box }` in channel.css means this explicit height
+   sets the *border* box — the same box `inset: 0` was already producing — so
+   the 30px padding below stays inside it exactly as before rather than adding
+   to it. Width is deliberately left to `left`/`right`; `100vw` would include
+   the scrollbar gutter and *would* be a desktop regression.
+
+   NOTE: the fix itself can only be confirmed on a real installed iOS PWA —
+   it does not reproduce in a desktop browser or an emulated viewport. */
 .stage {
   position: fixed;
   inset: 0;
+  height: 100vh;
+  height: 100dvh;
   display: flex;
   align-items: center;
   justify-content: center;
