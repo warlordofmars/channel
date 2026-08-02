@@ -10,6 +10,16 @@ import {
 } from "./appViewport.js";
 
 /**
+ * jsdom's own `innerHeight` accessor, captured before any test replaces
+ * it. `Object.defineProperty` overwrites the accessor with a plain value
+ * property, and neither `vi.unstubAllGlobals` nor `vi.restoreAllMocks`
+ * undoes that — so without restoring the original descriptor the
+ * override outlives the suite and any later test that spies on the
+ * getter would silently see a value property instead.
+ */
+const ORIGINAL_INNER_HEIGHT = Object.getOwnPropertyDescriptor(window, "innerHeight");
+
+/**
  * jsdom performs no layout, so `documentElement.clientHeight` is a
  * hard-coded 0 and `innerHeight` a hard-coded 768. Both are redefined
  * per test — the module's entire behaviour is a comparison between them,
@@ -39,6 +49,7 @@ afterEach(() => {
   root.style.removeProperty(APP_VH_PROPERTY);
   root.removeAttribute(APP_VH_ATTRIBUTE);
   delete document.documentElement.clientHeight;
+  Object.defineProperty(window, "innerHeight", ORIGINAL_INNER_HEIGHT);
   vi.restoreAllMocks();
 });
 

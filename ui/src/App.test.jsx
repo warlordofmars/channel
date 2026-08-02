@@ -219,20 +219,29 @@ describe("App routing", () => {
     // The installed-iOS-PWA shape: the window is taller than the layout
     // viewport `inset: 0` / `100dvh` resolve against, so `.stage` needs
     // the measured height published to it.
+    //
+    // `Object.defineProperty` replaces jsdom's `innerHeight` accessor with
+    // a value property that no vitest cleanup undoes, so the original
+    // descriptor is captured and restored — otherwise the override
+    // outlives this test and every later one mounts against a 852px
+    // window, silently re-pinning `--app-vh` on <html>.
+    const originalInnerHeight = Object.getOwnPropertyDescriptor(window, "innerHeight");
     Object.defineProperty(window, "innerHeight", { configurable: true, value: 852 });
     Object.defineProperty(document.documentElement, "clientHeight", {
       configurable: true,
       value: 756,
     });
+    try {
+      await act(async () => render(<App />));
 
-    await act(async () => render(<App />));
-
-    expect(document.documentElement.style.getPropertyValue("--app-vh")).toBe("852px");
-    expect(document.documentElement.hasAttribute("data-app-vh")).toBe(true);
-
-    document.documentElement.style.removeProperty("--app-vh");
-    document.documentElement.removeAttribute("data-app-vh");
-    delete document.documentElement.clientHeight;
+      expect(document.documentElement.style.getPropertyValue("--app-vh")).toBe("852px");
+      expect(document.documentElement.hasAttribute("data-app-vh")).toBe(true);
+    } finally {
+      document.documentElement.style.removeProperty("--app-vh");
+      document.documentElement.removeAttribute("data-app-vh");
+      delete document.documentElement.clientHeight;
+      Object.defineProperty(window, "innerHeight", originalInnerHeight);
+    }
   });
 
   it("mounts the temporary layout readout only for ?__layout-debug=1 (#467)", async () => {

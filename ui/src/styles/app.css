@@ -1676,7 +1676,10 @@ html[data-app-vh] .stage { height: var(--app-vh); }
    carries `?__layout-debug=1`; without it the component never mounts, so
    none of these rules ever match a node. Remove this block together with
    the component once the dead strip is confirmed fixed on a real
-   installed iOS PWA — tracked by the follow-up issue linked from #467.
+   installed iOS PWA — removal tracked by #503.
+
+   The `html[data-app-vh] .stage` rule ABOVE is not part of this — that
+   one is the fix, not instrumentation, and stays.
 
    Sized for a ~390px screen: 10px monospace, wrapping, and scrollable,
    because the chain readout is longer than any phone viewport. Fills the

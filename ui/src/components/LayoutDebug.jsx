@@ -9,7 +9,9 @@ import {
 /**
  * TEMPORARY on-device layout readout for #467 — remove once the dead
  * strip below the composer is confirmed fixed on a real installed iOS
- * PWA. Tracked for removal by the follow-up issue linked from #467.
+ * PWA. **Removal is tracked by #503**, which lists every file this
+ * touches and what stays behind (the `lib/appViewport.js` correction is
+ * the fix, not instrumentation, and does not come out with it).
  *
  * ## Why this exists
  *

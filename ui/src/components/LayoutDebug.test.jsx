@@ -31,6 +31,14 @@ function mountComposerFixture() {
   return { stage, bottom, composer };
 }
 
+/**
+ * jsdom's own `innerHeight` accessor. `Object.defineProperty` replaces it
+ * with a value property that no vitest cleanup undoes, so the original
+ * descriptor is captured here and put back in `afterEach` — see the same
+ * note in `lib/appViewport.test.js`.
+ */
+const ORIGINAL_INNER_HEIGHT = Object.getOwnPropertyDescriptor(window, "innerHeight");
+
 function setViewport({ windowHeight, layoutHeight }) {
   Object.defineProperty(window, "innerHeight", {
     configurable: true,
@@ -47,6 +55,7 @@ afterEach(() => {
   document.documentElement.style.removeProperty(APP_VH_PROPERTY);
   document.documentElement.removeAttribute(APP_VH_ATTRIBUTE);
   delete document.documentElement.clientHeight;
+  Object.defineProperty(window, "innerHeight", ORIGINAL_INNER_HEIGHT);
   window.history.pushState({}, "", "/");
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
