@@ -393,6 +393,16 @@ wrapper landed in #295 (see §"Silent refresh (SPA)") and desktop
 transport" under §Desktop app), so both clients now renew rather than
 re-authing hourly.
 
+**A 429 from `/auth/refresh` must never be treated as a sign-out** — the
+token is still live and only this attempt was shed, so mapping it onto
+the 401 path would undo the whole point of #294's per-family scoping.
+#295's `onRefreshRejected` already gets this right and says so: it sets
+`refreshRefused` on **401 only**, deliberately not "any 4xx", so a
+throttled refresh takes the 30s cooldown and retries rather than ending
+the session. That narrowness is load-bearing — a rate limit is the one
+response most likely to arrive in a burst, so widening the test would
+turn throttling into a mass logout.
+
 ## DynamoDB single table design
 
 - Activity log items: `PK=LOG#{date}#{hour}`, `SK={timestamp}#{event_id}`
@@ -966,7 +976,10 @@ subset of `BedrockErrors`:
   rotated token was re-presented, so the device family was revoked). The
   one counter here worth alarming on; it is kept out of the general
   failure counter so a routine expiry can't drown it. **No CDK alarm
-  watches it yet** — a follow-up, not an oversight.
+  watches it yet.** #294 deliberately stayed out of
+  `infra/stacks/channel_stack.py`; wiring the alarm is unfiled follow-up
+  work, so until an issue exists this paragraph is the only record that
+  the breach signal is emitted but unwatched.
 - **`RefreshRateLimited`** — the limiter shed a request. Without it the
   limiter is invisible and "did my rate limit just sign everyone out?"
   has no answer, which is what makes the ceiling tunable from evidence.

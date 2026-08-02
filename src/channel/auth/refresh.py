@@ -130,8 +130,9 @@ from __future__ import annotations
 import hashlib
 import os
 import secrets
+from collections.abc import Callable
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, TypeVar
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
@@ -197,15 +198,53 @@ _RATE_LIMIT_DETAIL = "Too many refresh attempts; retry shortly"
 # generous relative to a healthy client's ~1/hour.
 _RATE_LIMIT_ENV = "CHANNEL_REFRESH_RATE_LIMIT"
 _RATE_LIMIT_WINDOW_ENV = "CHANNEL_REFRESH_RATE_LIMIT_WINDOW_SECONDS"
-_DEFAULT_RATE_LIMIT = "5"
-_DEFAULT_RATE_LIMIT_WINDOW_SECONDS = "60"
+_DEFAULT_RATE_LIMIT = 5
+_DEFAULT_RATE_LIMIT_WINDOW_SECONDS = 60.0
 
-_refresh_limiter = FixedWindowRateLimiter(
-    limit=int(os.environ.get(_RATE_LIMIT_ENV, _DEFAULT_RATE_LIMIT)),
-    window_seconds=float(
-        os.environ.get(_RATE_LIMIT_WINDOW_ENV, _DEFAULT_RATE_LIMIT_WINDOW_SECONDS)
-    ),
-)
+_Number = TypeVar("_Number", int, float)
+
+
+def _env_number(name: str, default: _Number, cast: Callable[[str], _Number]) -> _Number:
+    """Read a numeric env override, falling back on anything unparseable.
+
+    Deliberately never raises. This runs at **import** time, so a bare
+    ``int(os.environ[...])`` would turn a typo in the one knob an
+    operator reaches for under pressure — ``CHANNEL_REFRESH_RATE_LIMIT``,
+    whose documented value for "turn this off" is ``0`` — into a
+    ``ValueError`` during ``import channel.api.main``, taking the whole
+    Lambda down. A misconfigured rate limit must not be able to escalate
+    into a total outage. (``storage.py``'s
+    ``CHANNEL_AUDIT_RETENTION_DAYS`` parse can afford to be strict: it
+    runs inside a function, so it fails narrowly.)
+    """
+
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return cast(raw)
+    except ValueError:
+        logger.warning("auth.refresh ignoring malformed %s=%r, using %r", name, raw, default)
+        return default
+
+
+def _build_refresh_limiter() -> FixedWindowRateLimiter:
+    """Construct the route's limiter from the environment.
+
+    Extracted from the module-level assignment so a test can exercise
+    the env → limiter wiring (notably the documented ``0`` kill switch)
+    without reimporting the module.
+    """
+
+    return FixedWindowRateLimiter(
+        limit=_env_number(_RATE_LIMIT_ENV, _DEFAULT_RATE_LIMIT, int),
+        window_seconds=_env_number(
+            _RATE_LIMIT_WINDOW_ENV, _DEFAULT_RATE_LIMIT_WINDOW_SECONDS, float
+        ),
+    )
+
+
+_refresh_limiter = _build_refresh_limiter()
 
 # Per-process salt for the limiter's bucket keys, regenerated on every
 # cold start. The obvious key would be the same SHA-256 digest storage

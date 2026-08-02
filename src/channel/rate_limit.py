@@ -41,6 +41,16 @@ window open forever and a one-second burst becomes a permanent lockout —
 again, exactly the self-DoS shape. Recovery is guaranteed within
 ``window_seconds`` of the last *admitted* call.
 
+**A per-credential key bounds repetition, not volume.** A caller keyed
+on the credential it presents is limited in how often it may re-present
+*the same* one; a spray of *distinct* junk credentials is not bounded by
+this limiter at all, since each one gets its own fresh bucket. That is
+inherent to the key choice and accepted — WAF's per-IP
+``GlobalRateLimit`` is the volumetric backstop, and the credential check
+behind this is what makes a wrong guess worthless. It does mean
+``RefreshRateLimited`` must never be read as coverage against credential
+stuffing: it measures repetition, and a stuffing run would leave it flat.
+
 **Bounded memory, failing open.** ``max_keys`` caps the tracked-key set
 with LRU eviction, so an attacker presenting a flood of distinct junk
 credentials cannot grow the dict without limit. Eviction resets an

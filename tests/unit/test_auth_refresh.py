@@ -640,16 +640,56 @@ def test_a_missing_csrf_header_is_not_bucketed(consumed, limiter):
 
 def test_the_limit_is_configurable_off(consumed, monkeypatch):
     """``CHANNEL_REFRESH_RATE_LIMIT=0`` is the operator's escape hatch if
-    the ceiling turns out to be wrong in production."""
-    monkeypatch.setattr(
-        refresh_module,
-        "_refresh_limiter",
-        FixedWindowRateLimiter(limit=0, window_seconds=60.0),
-    )
+    the ceiling turns out to be wrong in production.
+
+    Driven through the real env → :func:`_build_refresh_limiter` wiring
+    rather than by handing the route a pre-built ``limit=0`` limiter, so
+    the escape hatch is exercised the way an operator actually reaches
+    for it.
+    """
+    monkeypatch.setenv("CHANNEL_REFRESH_RATE_LIMIT", "0")
+    monkeypatch.setattr(refresh_module, "_refresh_limiter", refresh_module._build_refresh_limiter())
     box = consumed[1]
     box["result"] = RefreshConsumeResult(outcome=RefreshConsumeOutcome.NOT_FOUND)
 
     assert [_post("junk").status_code for _ in range(20)] == [401] * 20
+
+
+def test_the_limit_and_window_are_configurable_from_the_environment(consumed, monkeypatch):
+    monkeypatch.setenv("CHANNEL_REFRESH_RATE_LIMIT", "2")
+    monkeypatch.setenv("CHANNEL_REFRESH_RATE_LIMIT_WINDOW_SECONDS", "120")
+    monkeypatch.setattr(refresh_module, "_refresh_limiter", refresh_module._build_refresh_limiter())
+    box = consumed[1]
+    box["result"] = RefreshConsumeResult(outcome=RefreshConsumeOutcome.NOT_FOUND)
+
+    assert [_post("junk").status_code for _ in range(3)] == [401, 401, 429]
+    assert _post("junk").headers["retry-after"] == "120"
+
+
+def test_a_malformed_limit_falls_back_instead_of_crashing_the_lambda(monkeypatch):
+    """The parse runs at import, so raising here would turn a typo in the
+    rate-limit knob into a total outage rather than a wrong ceiling."""
+    monkeypatch.setenv("CHANNEL_REFRESH_RATE_LIMIT", "five")
+    monkeypatch.setenv("CHANNEL_REFRESH_RATE_LIMIT_WINDOW_SECONDS", "a while")
+
+    built = refresh_module._build_refresh_limiter()
+
+    assert built.enabled is True
+    assert built._limit == 5
+    assert built._window == 60.0
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [(None, 7), ("11", 11), ("nonsense", 7), ("", 7)],
+)
+def test_env_number_parses_or_falls_back(monkeypatch, raw, expected):
+    if raw is None:
+        monkeypatch.delenv("CHANNEL_TEST_KNOB", raising=False)
+    else:
+        monkeypatch.setenv("CHANNEL_TEST_KNOB", raw)
+
+    assert refresh_module._env_number("CHANNEL_TEST_KNOB", 7, int) == expected
 
 
 def test_the_bucket_key_is_neither_the_token_nor_its_storage_digest(limiter, consumed):
