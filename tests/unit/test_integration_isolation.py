@@ -15,7 +15,11 @@ claim in a docstring.
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -28,6 +32,8 @@ from tests.integration._helpers import (
 
 NOW = datetime(2026, 8, 2, 12, 0, 0, tzinfo=timezone.utc)
 LONG_AGO = NOW - ABANDONED_TABLE_MAX_AGE - timedelta(hours=1)
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # Every table name observed in the real shared container while #466 was
 # being fixed. `hive-*` belong to an entirely different project; the
@@ -123,6 +129,65 @@ def test_name_gate_agrees_with_the_full_predicate():
     """A name the gate rejects can never be swept, at any age."""
     for name in FOREIGN_TABLE_NAMES:
         assert is_abandoned_run_table(name, LONG_AGO, NOW) is is_run_table_name(name) is False
+
+
+def _import_conftest(**env_overrides: str | None) -> subprocess.CompletedProcess[str]:
+    """Import the integration conftest in a clean subprocess.
+
+    The behaviour under test is an *import-time* side effect of a module
+    that mutates ``os.environ``. Exercising it in-process would mean
+    ``importlib.reload``, which reassigns ``CHANNEL_TABLE_NAME`` to a
+    fresh random name — potentially out from under a table the combined
+    unit+integration run has already provisioned. A subprocess is the
+    only hermetic way to assert on it.
+    """
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(REPO_ROOT)
+    for key, value in env_overrides.items():
+        if value is None:
+            env.pop(key, None)
+        else:
+            env[key] = value
+    return subprocess.run(
+        [sys.executable, "-c", "import tests.integration.conftest"],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_malformed_port_is_ignored_when_the_endpoint_is_explicit():
+    """A bad CHANNEL_DYNAMO_PORT must not break a run that never reads it.
+
+    Regression guard for the eager-argument-evaluation bug: writing
+    ``os.environ.setdefault("DYNAMODB_ENDPOINT", _default_endpoint())``
+    evaluates the helper unconditionally, so a malformed port raised at
+    import even though the endpoint was already supplied — which every
+    ``inv`` entry point does.
+
+    This shape bit the PR twice (the sweep's DescribeTable
+    short-circuit was the other), and this file is where it would recur:
+    the whole change is "compute a default only if needed", which is
+    exactly where eager evaluation hides.
+    """
+    result = _import_conftest(
+        CHANNEL_DYNAMO_PORT="8000a",
+        DYNAMODB_ENDPOINT="http://localhost:8000",
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_malformed_port_still_raises_when_the_endpoint_is_needed():
+    """The guard must not soften the fail-loud behaviour it wraps.
+
+    Falling back to 8000 silently would put the caller on the shared
+    container while they believe they are isolated — the #466 confusion.
+    """
+    result = _import_conftest(CHANNEL_DYNAMO_PORT="8000a", DYNAMODB_ENDPOINT=None)
+    assert result.returncode != 0
+    assert "CHANNEL_DYNAMO_PORT" in result.stderr
 
 
 def test_cutoff_leaves_room_for_container_clock_skew():
