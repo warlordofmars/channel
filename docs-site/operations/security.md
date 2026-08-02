@@ -445,7 +445,7 @@ the opaque refresh token (`REFRESH#{sha256(token)}`, #290), exchanged at
 | `iat` / `exp` claims | seconds since epoch; TTL = 1 hour |
 | TTL constant | `MGMT_JWT_TTL_SECONDS = 3600` (1 hour) in `src/channel/auth/tokens.py` |
 | Revocation | logout writes `DENY#{jti}` (DynamoDB `ttl` = the token's `exp`); `decode_mgmt_jwt` rejects a denied `jti`, surfacing as HTTP 401 (#240 / #291) |
-| Browser storage key | `localStorage["channel_mgmt_token"]` — JSON `{access_token, expires_at}`; reads still fall back to the pre-rename `starter_mgmt_token` (#260/#295) |
+| Browser storage key | `localStorage["channel_mgmt_token"]` — JSON `{access_token, expires_at}`, or a **bare JWT** between a web login and the first SPA save (the login-completion page writes the token directly; `expires_at` is then derived from the `exp` claim). Reads still fall back to the pre-rename `starter_mgmt_token` (#260/#295) |
 | Issuer (server) | `src/channel/auth/tokens.py` (`issue_mgmt_jwt`) via `src/channel/auth/mgmt_auth.py` |
 | Validator (server) | `src/channel/auth/tokens.py` (`decode_mgmt_jwt`) via `src/channel/api/_auth.py` (`require_mgmt_user`, `require_admin`) |
 | Issuer (UI) | server-side `mgmt_callback` returns an HTML redirect that writes the token |

@@ -139,8 +139,12 @@ TTL**, revocable via the `DENY#{jti}` denylist — #240) signed with
 HS256 using a secret resolved from SSM
 (`/channel/{env}/jwt-secret`). All `/api/*` endpoints
 require a valid Bearer mgmt JWT. The session is stored client-side in
-`localStorage` under the `channel_mgmt_token` key as a JSON
-`{access_token, expires_at}` envelope — see §"Silent refresh (SPA)".
+`localStorage` under the `channel_mgmt_token` key. The value is normally
+a JSON `{access_token, expires_at}` envelope, but is a **bare JWT**
+between a web login and the first SPA save — the login-completion page
+writes the token directly rather than restating the envelope's shape in
+a Python string template. Readers accept both and derive the deadline
+from the `exp` claim for the bare form. See §"Silent refresh (SPA)".
 
 `decode_mgmt_jwt` (`src/channel/auth/tokens.py`) is the single
 validation point: it enforces the signature, `iss`, `exp`, and
