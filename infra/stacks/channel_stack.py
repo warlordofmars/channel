@@ -655,6 +655,17 @@ class ChannelStack(cdk.Stack):
         common_env["CHANNEL_IMAGE_GEN_ENABLED"] = "1"
         common_env["CHANNEL_IMAGE_GEN_REGION"] = "us-west-2"
 
+        # #111 per-request metrics — the per-``Route`` EMF dimension set is
+        # the cost lever on this feature (one extra custom metric per route
+        # that receives traffic; the aggregate ``{Environment}`` series that
+        # alarms and the admin dashboard read is unaffected). Set explicitly
+        # for the same reason as the flags above: the deployed value is
+        # auditable in the template rather than only a code default, and a
+        # future default-shift can't flip it by accident. Flip to ``"0"`` to
+        # drop the breakdown — Logs Insights answers the same question from
+        # the structured request log lines for free.
+        common_env["CHANNEL_REQUEST_ROUTE_DIMENSION_ENABLED"] = "1"
+
         # #207 MCP registry — dedicated CMK + redirect-URI env + IAM.
         # The CMK has annual rotation enabled and is destroyed on stack
         # teardown only in non-prod envs (data_removal mirrors the other
@@ -1798,7 +1809,7 @@ function handler(event) {
 
         # Throttling is a quota wall, not a bug: the response is to switch
         # model or raise the account quota, so it gets its own alarm rather
-        # than hiding inside the error rate. Two consecutive breaching
+        # than hiding inside the error rate. Two consecutive breaching 5-min
         # periods, so a single retried burst stays quiet.
         bedrock_throttle_alarm = cw.Alarm(
             self,
@@ -1810,7 +1821,9 @@ function handler(event) {
             datapoints_to_alarm=2,
             comparison_operator=cw.ComparisonOperator.GREATER_THAN_THRESHOLD,
             treat_missing_data=cw.TreatMissingData.NOT_BREACHING,
-            alarm_description=f"Channel Bedrock throttling sustained > 5 min ({env_name})",
+            alarm_description=(
+                f"Channel Bedrock throttling in 2 consecutive 5-min periods ({env_name})"
+            ),
         )
         _notify(bedrock_throttle_alarm)
 
@@ -2183,20 +2196,12 @@ function handler(event) {
             cw.Row(
                 cw.AlarmWidget(alarm=api_error_alarm, title="API Error Rate", width=6),
                 cw.AlarmWidget(alarm=ddb_throttle_alarm, title="DDB Throttles", width=6),
-                cw.AlarmWidget(
-                    alarm=api_request_error_alarm, title="API 5xx Rate", width=6
-                ),
-                cw.AlarmWidget(
-                    alarm=api_request_latency_alarm, title="API Latency p99", width=6
-                ),
+                cw.AlarmWidget(alarm=api_request_error_alarm, title="API 5xx Rate", width=6),
+                cw.AlarmWidget(alarm=api_request_latency_alarm, title="API Latency p99", width=6),
             ),
             cw.Row(
-                cw.AlarmWidget(
-                    alarm=bedrock_error_rate_alarm, title="Bedrock Error Rate", width=6
-                ),
-                cw.AlarmWidget(
-                    alarm=bedrock_throttle_alarm, title="Bedrock Throttles", width=6
-                ),
+                cw.AlarmWidget(alarm=bedrock_error_rate_alarm, title="Bedrock Error Rate", width=6),
+                cw.AlarmWidget(alarm=bedrock_throttle_alarm, title="Bedrock Throttles", width=6),
             ),
         )
 

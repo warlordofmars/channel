@@ -1116,6 +1116,18 @@ def test_lambda_asset_exclude_shields_fingerprint_from_junk_churn(tmp_path):
 # ----------------------------------------------------------------
 
 
+@pytest.mark.parametrize("env_fixture", ["dev_template", "prod_template"])
+def test_request_route_dimension_flag_is_set_explicitly(env_fixture, request):
+    """The per-``Route`` EMF dimension set is the cost lever on #111, so
+    the deployed value is pinned in the template rather than left to a code
+    default — same discipline as the other kill switches (``#181`` clock
+    tool, ``#279`` image gen). A console edit to the Lambda env map would be
+    clobbered by the next ``cdk deploy``, so this IS the flip point."""
+    api_fn = _api_function(request.getfixturevalue(env_fixture))
+    env_vars = api_fn["Properties"]["Environment"]["Variables"]
+    assert env_vars.get("CHANNEL_REQUEST_ROUTE_DIMENSION_ENABLED") == "1"
+
+
 def _alarms(template: assertions.Template) -> dict[str, dict]:
     """Every ``AWS::CloudWatch::Alarm`` keyed by its ``AlarmName``."""
     return {
