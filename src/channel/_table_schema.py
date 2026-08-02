@@ -6,8 +6,9 @@ DynamoDB Local — used by ``inv dev`` and the integration test suite — has
 no CloudFormation, so each consumer would otherwise re-declare the schema
 inline. This module is the single source of truth those consumers share:
 
-* ``tests/integration/conftest.py`` — provisions ``channel-test`` for the
-  integration suite (session-scoped fixture).
+* ``tests/integration/conftest.py`` — provisions a per-run
+  ``channel-integration-<8 hex>`` table for the integration suite
+  (session-scoped fixture, dropped at session end — #466).
 * ``scripts/reset_dev_table.py`` — drops and recreates ``channel`` in the
   developer's local DDB after ``inv dev`` restarts.
 
