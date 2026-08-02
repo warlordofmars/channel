@@ -1,11 +1,12 @@
 # Copyright (c) 2026 John Carter. All rights reserved.
-"""Unit tests for ``POST /auth/refresh`` (#291, epic #241).
+"""Unit tests for ``POST /auth/refresh`` (#291, #294, epic #241).
 
 The AWS boundary mocked here is ``consume_refresh_token`` — #290's
 storage primitive, which has its own unit + DynamoDB Local coverage.
 These tests pin the *endpoint's* contract on top of it: the CSRF gate,
 which transport each caller shape selects, what crosses the wire in each
-direction, and the cookie attribute matrix.
+direction, the cookie attribute matrix, and (#294) the per-token-family
+rate limit and the EMF counters every exit path emits.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from __future__ import annotations
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -20,6 +22,7 @@ from fastapi.testclient import TestClient
 os.environ.setdefault("CHANNEL_JWT_SECRET", "test-secret-for-unit-tests")
 
 from channel.api.main import app  # noqa: E402
+from channel.auth import refresh as refresh_module  # noqa: E402
 from channel.auth.refresh import (  # noqa: E402
     REFRESH_COOKIE_NAME,
     REFRESH_COOKIE_PATH,
@@ -30,6 +33,7 @@ from channel.models import (  # noqa: E402
     RefreshConsumeResult,
     RefreshToken,
 )
+from channel.rate_limit import FixedWindowRateLimiter  # noqa: E402
 
 _client = TestClient(app)
 
@@ -96,6 +100,57 @@ def consumed(monkeypatch: pytest.MonkeyPatch):
 def _non_admin(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep role resolution off the SSM/allowlist path in unit tests."""
     monkeypatch.setattr("channel.auth.mgmt_auth.is_admin_email", lambda _email: False)
+
+
+@pytest.fixture(autouse=True)
+def _reset_rate_limiter():
+    """Isolate each test from the module-level limiter's window (#294).
+
+    The limiter is process-global by design, so without this a suite that
+    replays the same token across a dozen assertions would start 429-ing
+    partway through — and which test tipped it over would depend on
+    collection order.
+    """
+    refresh_module._refresh_limiter.clear()
+    yield
+    refresh_module._refresh_limiter.clear()
+
+
+class _Clock:
+    """Manually advanced monotonic clock for the limiter."""
+
+    def __init__(self) -> None:
+        self.now = 1_000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+@pytest.fixture
+def limiter(monkeypatch: pytest.MonkeyPatch):
+    """Swap in a limiter on a fake clock; return ``(limiter, clock)``."""
+    clock = _Clock()
+    replacement = FixedWindowRateLimiter(limit=5, window_seconds=60.0, clock=clock)
+    monkeypatch.setattr(refresh_module, "_refresh_limiter", replacement)
+    return replacement, clock
+
+
+@pytest.fixture
+def counters(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    """Capture ``record_refresh_outcome`` calls made by the route."""
+    recorder = AsyncMock()
+    monkeypatch.setattr(refresh_module, "record_refresh_outcome", recorder)
+    return recorder
+
+
+def _outcomes(recorder: AsyncMock) -> list[tuple[bool, str | None]]:
+    """Flatten recorded calls to ``(success, reason)`` pairs."""
+    return [
+        (call.kwargs["success"], call.kwargs.get("reason")) for call in recorder.await_args_list
+    ]
 
 
 # ----------------------------------------------------------------
@@ -430,3 +485,260 @@ def test_refresh_ignores_the_authorization_header(consumed):
     )
     assert resp.status_code == 200
     assert resp.json()["access_token"]
+
+
+# ----------------------------------------------------------------
+# Rate limiting (#294)
+# ----------------------------------------------------------------
+
+
+def _post(token: str) -> Any:
+    return _client.post("/auth/refresh", json={"refresh_token": token}, headers=_CSRF)
+
+
+def test_a_sixth_attempt_in_the_window_is_rejected(consumed, limiter):
+    """5/min per token-family. Driven on the failure path so no rotation
+    intervenes — a bad token is exactly the flood shape worth bounding."""
+    box = consumed[1]
+    box["result"] = RefreshConsumeResult(outcome=RefreshConsumeOutcome.NOT_FOUND)
+
+    assert [_post("junk").status_code for _ in range(5)] == [401] * 5
+
+    sixth = _post("junk")
+    assert sixth.status_code == 429
+    assert sixth.json()["detail"] == "Too many refresh attempts; retry shortly"
+
+
+def test_the_429_advertises_how_long_to_wait(consumed, limiter):
+    box = consumed[1]
+    box["result"] = RefreshConsumeResult(outcome=RefreshConsumeOutcome.NOT_FOUND)
+    _, clock = limiter
+    for _ in range(5):
+        _post("junk")
+
+    clock.advance(20.0)
+
+    assert _post("junk").headers["retry-after"] == "40"
+
+
+def test_the_window_reopens(consumed, limiter):
+    box = consumed[1]
+    box["result"] = RefreshConsumeResult(outcome=RefreshConsumeOutcome.NOT_FOUND)
+    _, clock = limiter
+    for _ in range(5):
+        _post("junk")
+    assert _post("junk").status_code == 429
+
+    clock.advance(60.0)
+
+    assert _post("junk").status_code == 401
+
+
+def test_the_429_is_no_store(consumed, limiter):
+    box = consumed[1]
+    box["result"] = RefreshConsumeResult(outcome=RefreshConsumeOutcome.NOT_FOUND)
+    for _ in range(5):
+        _post("junk")
+
+    assert _post("junk").headers["cache-control"] == "no-store"
+
+
+def test_one_familys_flood_does_not_shed_another_familys_traffic(consumed, limiter):
+    """The reason the key is the credential and not the client IP: carrier
+    NAT and corporate egress share one address across unrelated users."""
+    box = consumed[1]
+    box["result"] = RefreshConsumeResult(outcome=RefreshConsumeOutcome.NOT_FOUND)
+    for _ in range(6):
+        _post("noisy-device")
+
+    assert _post("quiet-device").status_code == 401  # rejected on merit, not throttled
+
+
+def test_the_family_budget_follows_the_rotated_token(consumed, limiter):
+    """Hard rotation hands the client a new credential on every success,
+    so a limiter keyed on the credential is only meaningful if the window
+    is carried forward. Without the hand-off this loop never trips."""
+    seen, box = consumed
+    presented = "chain-0"
+    for i in range(1, 6):
+        box["result"] = _ok(rotated=f"chain-{i}")
+        assert _post(presented).status_code == 200
+        presented = f"chain-{i}"
+
+    box["result"] = _ok(rotated="chain-6")
+    assert _post(presented).status_code == 429
+    # The sixth call was shed before storage saw it.
+    assert seen == [f"chain-{i}" for i in range(5)]
+
+
+def test_a_rate_limited_request_never_reaches_storage(consumed, limiter):
+    """The property that keeps throttling from manufacturing the breach
+    signal: a shed request leaves the presented token live and unrotated,
+    so the client's retry is a first use, not a replay."""
+    seen, box = consumed
+    box["result"] = RefreshConsumeResult(outcome=RefreshConsumeOutcome.NOT_FOUND)
+    for _ in range(5):
+        _post("still-good")
+    seen.clear()
+
+    assert _post("still-good").status_code == 429
+    assert seen == []
+
+
+def test_a_throttled_client_can_still_refresh_once_the_window_reopens(consumed, limiter):
+    """End-to-end statement of the anti-self-DoS property: a burst costs
+    the client a wait, never its session."""
+    seen, box = consumed
+    _, clock = limiter
+    box["result"] = RefreshConsumeResult(outcome=RefreshConsumeOutcome.EXPIRED_IDLE)
+    for _ in range(5):
+        _post("live-token")
+    assert _post("live-token").status_code == 429
+
+    clock.advance(60.0)
+    box["result"] = _ok(rotated="successor")
+    resp = _post("live-token")
+
+    # The token survived the throttle intact, so this is an ordinary
+    # rotation — not the reuse cascade a post-consumption rejection would
+    # have produced.
+    assert resp.status_code == 200
+    assert resp.json()["refresh_token"] == "successor"
+
+
+def test_a_429_does_not_clear_the_refresh_cookie(consumed, limiter):
+    """Clearing would turn a sub-minute throttle into a full sign-out —
+    the exact self-inflicted DoS the per-family scoping avoids."""
+    box = consumed[1]
+    box["result"] = RefreshConsumeResult(outcome=RefreshConsumeOutcome.NOT_FOUND)
+    for _ in range(5):
+        _with_cookie("web-token").post("/auth/refresh", headers=_CSRF)
+
+    resp = _with_cookie("web-token").post("/auth/refresh", headers=_CSRF)
+
+    assert resp.status_code == 429
+    assert "set-cookie" not in {k.lower() for k in resp.headers}
+
+
+def test_a_request_with_no_token_is_not_bucketed(consumed, limiter):
+    """There is no credential to key on, so bucketing these would put
+    every tokenless caller in one shared bucket — a global limit by the
+    back door."""
+    for _ in range(10):
+        assert _client.post("/auth/refresh", headers=_CSRF).status_code == 401
+
+    assert len(limiter[0]._buckets) == 0
+
+
+def test_a_missing_csrf_header_is_not_bucketed(consumed, limiter):
+    """Rejected before the body is even read, so nothing is charged."""
+    for _ in range(10):
+        assert _client.post("/auth/refresh", json={"refresh_token": "t"}).status_code == 403
+
+    assert len(limiter[0]._buckets) == 0
+
+
+def test_the_limit_is_configurable_off(consumed, monkeypatch):
+    """``CHANNEL_REFRESH_RATE_LIMIT=0`` is the operator's escape hatch if
+    the ceiling turns out to be wrong in production."""
+    monkeypatch.setattr(
+        refresh_module,
+        "_refresh_limiter",
+        FixedWindowRateLimiter(limit=0, window_seconds=60.0),
+    )
+    box = consumed[1]
+    box["result"] = RefreshConsumeResult(outcome=RefreshConsumeOutcome.NOT_FOUND)
+
+    assert [_post("junk").status_code for _ in range(20)] == [401] * 20
+
+
+def test_the_bucket_key_is_neither_the_token_nor_its_storage_digest(limiter, consumed):
+    """The in-memory key must be inert: not a credential, and not the
+    ``PK=REFRESH#{sha256}`` row identifier."""
+    import hashlib
+
+    _post("secret-token")
+
+    keys = set(limiter[0]._buckets)
+    assert "secret-token" not in keys
+    assert hashlib.sha256(b"secret-token").hexdigest() not in keys
+    assert len(keys) == 1
+
+
+# ----------------------------------------------------------------
+# EMF counters (#294)
+# ----------------------------------------------------------------
+
+
+def test_a_successful_refresh_counts_a_success(consumed, counters):
+    _post("t")
+    assert _outcomes(counters) == [(True, None)]
+
+
+def test_a_missing_csrf_header_counts_a_failure(consumed, counters):
+    _client.post("/auth/refresh", json={"refresh_token": "t"})
+    assert _outcomes(counters) == [(False, "csrf_missing")]
+
+
+def test_a_tokenless_request_counts_a_failure(consumed, counters):
+    _client.post("/auth/refresh", headers=_CSRF)
+    assert _outcomes(counters) == [(False, "no_token")]
+
+
+def test_a_rate_limited_request_counts_a_failure_tagged_rate_limited(consumed, counters, limiter):
+    box = consumed[1]
+    box["result"] = RefreshConsumeResult(outcome=RefreshConsumeOutcome.NOT_FOUND)
+    for _ in range(5):
+        _post("junk")
+    counters.reset_mock()
+
+    _post("junk")
+
+    assert _outcomes(counters) == [(False, "rate_limited")]
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        RefreshConsumeOutcome.NOT_FOUND,
+        RefreshConsumeOutcome.REVOKED,
+        RefreshConsumeOutcome.REUSED,
+        RefreshConsumeOutcome.EXPIRED_ABSOLUTE,
+        RefreshConsumeOutcome.EXPIRED_IDLE,
+    ],
+)
+def test_each_rejected_outcome_counts_a_failure_carrying_its_reason(consumed, counters, outcome):
+    """The reason is a branch selector, never a dimension — the endpoint
+    forwards the full taxonomy and ``metrics.py`` decides which of them
+    earn a subset counter."""
+    box = consumed[1]
+    box["result"] = RefreshConsumeResult(outcome=outcome)
+
+    _post("t")
+
+    assert _outcomes(counters) == [(False, outcome.value)]
+
+
+def test_reuse_detection_reaches_the_counter_as_its_own_reason(consumed, counters):
+    """``RefreshReuseDetected`` is the one counter here worth alarming
+    on, so it must not arrive indistinguishable from a routine expiry."""
+    box = consumed[1]
+    box["result"] = RefreshConsumeResult(outcome=RefreshConsumeOutcome.REUSED, revoked_count=3)
+
+    _post("t")
+
+    assert _outcomes(counters) == [(False, "reused")]
+
+
+def test_every_request_records_exactly_one_outcome(consumed, counters, limiter):
+    """The invariant that makes ``RefreshFailure / (RefreshSuccess +
+    RefreshFailure)`` a real ratio rather than a count against an unknown
+    denominator."""
+    box = consumed[1]
+    _client.post("/auth/refresh", json={"refresh_token": "t"})  # 403
+    _client.post("/auth/refresh", headers=_CSRF)  # 401, no token
+    _post("t")  # 200
+    box["result"] = RefreshConsumeResult(outcome=RefreshConsumeOutcome.REVOKED)
+    _post("dead")  # 401
+
+    assert counters.await_count == 4
