@@ -47,6 +47,19 @@ _RUN_TABLE_RE = re.compile(rf"^{re.escape(RUN_TABLE_PREFIX)}-[0-9a-f]{{8}}$")
 ABANDONED_TABLE_MAX_AGE = timedelta(hours=24)
 
 
+def is_run_table_name(name: str) -> bool:
+    """Does ``name`` have the shape this suite generates?
+
+    Split out from :func:`is_abandoned_run_table` so the sweep can gate
+    its loop on the name alone. ``ListTables`` already returned the
+    name, but reading a table's ``creation_date_time`` costs a
+    ``DescribeTable`` — and Python evaluates call arguments eagerly, so
+    passing it straight to the full predicate would describe *every*
+    table in a shared container rather than only the candidates.
+    """
+    return bool(_RUN_TABLE_RE.match(name))
+
+
 def is_abandoned_run_table(name: str, created: datetime, now: datetime) -> bool:
     """Is ``name`` a per-run table left behind by a dead session?
 
@@ -61,7 +74,7 @@ def is_abandoned_run_table(name: str, created: datetime, now: datetime) -> bool:
     the offset, and a naive/aware comparison would raise inside the
     sweep's suppression and silently disable cleanup.
     """
-    if not _RUN_TABLE_RE.match(name):
+    if not is_run_table_name(name):
         return False
     if created.tzinfo is None:
         created = created.replace(tzinfo=timezone.utc)

@@ -26,6 +26,7 @@ from tests.integration._helpers import (
     RUN_TABLE_PREFIX,
     FakeS3,
     is_abandoned_run_table,
+    is_run_table_name,
 )
 
 # Hosts that are safe targets for the destructive drop+recreate in
@@ -135,7 +136,12 @@ def _sweep_abandoned_run_tables(dynamodb_resource: Any, current_table: str) -> N
     """
     now = datetime.now(timezone.utc)
     for table in dynamodb_resource.tables.all():
-        if table.name == current_table:
+        # Gate on the name first. ``ListTables`` already supplied it,
+        # whereas ``creation_date_time`` lazily costs a ``DescribeTable``
+        # — and Python evaluates call arguments eagerly, so folding this
+        # into the full predicate would describe every table in a shared
+        # container instead of only the candidates.
+        if table.name == current_table or not is_run_table_name(table.name):
             continue
         with contextlib.suppress(Exception):
             if is_abandoned_run_table(table.name, table.creation_date_time, now):

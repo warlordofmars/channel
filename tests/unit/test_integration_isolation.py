@@ -23,6 +23,7 @@ from tests.integration._helpers import (
     ABANDONED_TABLE_MAX_AGE,
     RUN_TABLE_PREFIX,
     is_abandoned_run_table,
+    is_run_table_name,
 )
 
 NOW = datetime(2026, 8, 2, 12, 0, 0, tzinfo=timezone.utc)
@@ -101,6 +102,27 @@ def test_naive_timestamps_are_treated_as_utc():
         is_abandoned_run_table(f"{RUN_TABLE_PREFIX}-ab12cd34", LONG_AGO.replace(tzinfo=None), NOW)
         is True
     )
+
+
+@pytest.mark.parametrize("name", FOREIGN_TABLE_NAMES)
+def test_name_gate_rejects_foreign_tables_without_describing_them(name):
+    """The sweep's loop guard — cheap, name-only, no DescribeTable.
+
+    Keeping this separate from the age check is what stops the sweep
+    issuing a DescribeTable per table in a container shared with other
+    projects.
+    """
+    assert is_run_table_name(name) is False
+
+
+def test_name_gate_accepts_the_generated_shape():
+    assert is_run_table_name(f"{RUN_TABLE_PREFIX}-ab12cd34") is True
+
+
+def test_name_gate_agrees_with_the_full_predicate():
+    """A name the gate rejects can never be swept, at any age."""
+    for name in FOREIGN_TABLE_NAMES:
+        assert is_abandoned_run_table(name, LONG_AGO, NOW) is is_run_table_name(name) is False
 
 
 def test_cutoff_leaves_room_for_container_clock_skew():
