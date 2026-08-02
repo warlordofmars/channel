@@ -1796,6 +1796,11 @@ def _refresh_item(token: RefreshToken) -> dict[str, Any]:
         "revoked": token.revoked,
         "ttl": int(_parse_iso_utc(token.absolute_expires_at).timestamp()),
     }
+    if token.display_name is not None:
+        # Omitted rather than written as null when absent, matching the
+        # revocation columns below: a row minted before #292 has no name
+        # to carry and reads back as ``None`` either way.
+        item["display_name"] = token.display_name
     if token.revoked_reason is not None:
         item["revoked_reason"] = token.revoked_reason.value
     if token.revoked_at is not None:
@@ -1813,6 +1818,7 @@ def _refresh_from_item(item: dict[str, Any]) -> RefreshToken:
         last_used_at=item["last_used_at"],
         absolute_expires_at=item["absolute_expires_at"],
         idle_expires_at=item["idle_expires_at"],
+        display_name=item.get("display_name"),
         revoked=bool(item.get("revoked", False)),
         revoked_reason=RefreshRevokeReason(reason) if reason else None,
         revoked_at=item.get("revoked_at"),
@@ -1987,6 +1993,7 @@ def mint_refresh_token(
     user_id: str,
     device_id: str,
     absolute_expires_at: str | None = None,
+    display_name: str | None = None,
 ) -> tuple[str, RefreshToken]:
     """Create a refresh row for ``(user_id, device_id)``.
 
@@ -2001,6 +2008,12 @@ def mint_refresh_token(
     the previous row's value so refreshing can never walk the absolute
     lifetime forward — that property is the whole point of having an
     absolute window alongside the idle one.
+
+    ``display_name`` travels the same way for the same reason (#292):
+    the Google callback supplies it once at login and every rotation
+    passes the previous row's value through, so the claim survives for
+    the family's whole life instead of decaying to the email local-part
+    on the first refresh. See :class:`~channel.models.RefreshToken`.
     """
 
     raw_token = secrets.token_urlsafe(_REFRESH_TOKEN_BYTES)
@@ -2019,6 +2032,7 @@ def mint_refresh_token(
         idle_expires_at=(now + timedelta(seconds=REFRESH_IDLE_TIMEOUT_SECONDS)).isoformat(
             timespec="microseconds"
         ),
+        display_name=display_name,
     )
     _get_table().put_item(Item=_refresh_item(token))
     return raw_token, token
@@ -2079,6 +2093,7 @@ def consume_refresh_token(raw_token: str) -> RefreshConsumeResult:
         user_id=row.user_id,
         device_id=row.device_id,
         absolute_expires_at=row.absolute_expires_at,
+        display_name=row.display_name,
     )
     return RefreshConsumeResult(
         outcome=RefreshConsumeOutcome.OK,

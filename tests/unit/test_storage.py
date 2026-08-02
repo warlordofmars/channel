@@ -2963,6 +2963,52 @@ def test_mint_refresh_token_honours_a_carried_over_absolute_expiry(table: FakeTa
     assert token.absolute_expires_at == carried
 
 
+def test_mint_refresh_token_persists_the_display_name(table: FakeTable) -> None:
+    """#292's seam: the Google ``name`` claim only reaches us at login."""
+
+    _, token = mint_refresh_token(user_id="ada@example.com", device_id="d-1", display_name="Ada L")
+
+    assert token.display_name == "Ada L"
+    assert _refresh_rows(table)[0]["display_name"] == "Ada L"
+
+
+def test_mint_refresh_token_omits_display_name_when_absent(table: FakeTable) -> None:
+    """No name to carry writes no attribute, matching the revocation columns."""
+
+    _, token = mint_refresh_token(user_id="u-1", device_id="d-1")
+
+    assert token.display_name is None
+    assert "display_name" not in _refresh_rows(table)[0]
+
+
+def test_refresh_from_item_reads_a_pre_292_row_as_nameless(table: FakeTable) -> None:
+    """Rows minted before #292 have no attribute; readers fall back."""
+
+    from channel import storage
+
+    mint_refresh_token(user_id="u-1", device_id="d-1")
+    item = _refresh_rows(table)[0]
+    assert "display_name" not in item
+
+    assert storage._refresh_from_item(item).display_name is None
+
+
+def test_consume_refresh_token_carries_the_display_name_across_rotation(
+    table: FakeTable,
+) -> None:
+    """Losing the name on the first refresh is the bug #292 exists to fix."""
+
+    raw, _ = mint_refresh_token(
+        user_id="ada@example.com", device_id="d-1", display_name="Ada Lovelace"
+    )
+
+    result = consume_refresh_token(raw)
+
+    assert result.outcome is RefreshConsumeOutcome.OK
+    assert result.token is not None
+    assert result.token.display_name == "Ada Lovelace"
+
+
 def test_refresh_item_renders_revocation_columns_when_present() -> None:
     from channel import storage
 
