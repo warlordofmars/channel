@@ -198,6 +198,17 @@ describe("openExternalIfSafe", () => {
     expect(openExternalIfSafe("https://example.com", openExternal)).toBe(true);
     await flush();
   });
+
+  it("contains a hand-off that throws synchronously", () => {
+    // Promise.resolve() never gets to wrap a synchronous throw, so without
+    // the try/catch this escapes into the will-navigate listener and takes
+    // down the main process.
+    const openExternal = vi.fn(() => {
+      throw new Error("EINVAL");
+    });
+    expect(() => openExternalIfSafe("https://example.com", openExternal)).not.toThrow();
+    expect(openExternal).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("installNavigationGuards", () => {

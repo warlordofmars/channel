@@ -2,22 +2,42 @@
 import { contextBridge, ipcRenderer } from "electron";
 
 // Kept in sync with APP_ORIGIN_FLAG in desktop/main/window.js, which sets
-// it via webPreferences.additionalArguments. A sandboxed preload can't
-// read process.env, but additionalArguments does land in process.argv —
-// so this is how the main process tells the preload which single origin
-// is allowed to hold the bridge.
+// it via webPreferences.additionalArguments — that is how the main
+// process tells the preload which single origin may hold the bridge.
+//
+// Why argv and not process.env: a sandboxed preload *can* read
+// process.env (verified — it sees the main process's environment), but
+// env is process-global while additionalArguments is per-window, and
+// routing it through window.js keeps the origin computed in exactly one
+// place, right next to the loadURL that establishes it. The two can't
+// drift.
 const APP_ORIGIN_FLAG = "--channel-app-origin=";
 
 /**
- * The app origin the main process configured, or null when the flag is
- * absent. Null means "fail closed" — never "allow anything".
+ * The app origin the main process configured, or null when that can't be
+ * determined unambiguously. Null means "fail closed" — never "allow
+ * anything".
+ *
+ * Requires exactly one occurrence. Selecting by position would be
+ * arbitrary: Chromium's own renderer switches surround ours in argv
+ * (measured: our flag lands at index 23 of 25, with `--seatbelt-client`
+ * after it), so neither the first nor the last match is authoritative.
+ * A duplicated flag means something unexpected shaped the command line,
+ * and the safe reading of an ambiguous security parameter is to refuse
+ * it rather than pick a winner.
  */
 export function expectedOriginFrom(argv) {
-  const flag = (argv ?? []).find((arg) => arg.startsWith(APP_ORIGIN_FLAG));
-  return flag === undefined ? null : flag.slice(APP_ORIGIN_FLAG.length);
+  const flags = (argv ?? []).filter((arg) => arg.startsWith(APP_ORIGIN_FLAG));
+  if (flags.length !== 1) return null;
+  return flags[0].slice(APP_ORIGIN_FLAG.length);
 }
 
-/** The IPC surface handed to the renderer. Five functions, no more. */
+/**
+ * The IPC surface handed to the renderer, and nothing beyond it: seven
+ * keys — five callable methods (login, logout, getVersion,
+ * onUpdateStatus, relaunchToUpdate) plus the read-only `isDesktop` and
+ * `platform` values.
+ */
 export function createBridge() {
   return {
     isDesktop: true,

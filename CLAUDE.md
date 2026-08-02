@@ -921,12 +921,21 @@ halves live in `desktop/main/window.js` + `desktop/preload/index.js`.
   `smb:` or a custom scheme through would trade the stranded-window bug
   for a launch-anything bug. Allowlist, never denylist.
 - **The preload fails closed.** `window.js` passes the one permitted
-  origin via `webPreferences.additionalArguments` (a sandboxed preload
-  can't read `process.env`, but `additionalArguments` does land in the
-  renderer's `process.argv`); the preload exposes the bridge only when
-  `location.origin` matches. No flag, an origin mismatch, or an opaque
-  `"null"` origin all yield no bridge. This is defence in depth — the
-  navigation guards are the primary control.
+  origin via `webPreferences.additionalArguments`, which lands in the
+  renderer's `process.argv`; the preload exposes the bridge only when
+  `location.origin` matches. No flag, *more than one* flag, an origin
+  mismatch, or an opaque `"null"` origin all yield no bridge. This is
+  defence in depth — the navigation guards are the primary control.
+  (`additionalArguments` is preferred over `process.env`, which a
+  sandboxed preload *can* read, because it is scoped per window and
+  keeps the origin computed once, next to the `loadURL` that
+  establishes it.)
+- **Artifact downloads are unaffected.** `triggerBlobDownload` in
+  `ArtifactPanel.jsx` clicks a transient `<a download href="blob:…">`;
+  Chromium routes that to the download manager without firing
+  `will-navigate`, so the guard never sees it (verified against a live
+  Electron). Don't add `blob:` to the `shell.openExternal` allowlist to
+  "fix" a problem that doesn't exist — it would be a hole.
 - **The OAuth loopback is unaffected.** `auth.js` calls
   `shell.openExternal` from the *main* process, which the guards never
   intercept, and the callback is served to the system browser by the

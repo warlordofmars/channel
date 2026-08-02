@@ -23,10 +23,12 @@ const PACKAGED_BASE_URL = "app://-";
 const EXTERNAL_SCHEMES = new Set(["http:", "https:"]);
 
 // Flag used to hand the preload the single origin that is allowed to
-// hold the `window.channelDesktop` bridge. Sandboxed preloads cannot
-// read process.env, so `webPreferences.additionalArguments` is the
-// supported channel for this (it lands in the renderer's process.argv).
-// Kept in sync with the same constant in desktop/preload/index.js.
+// hold the `window.channelDesktop` bridge, via
+// `webPreferences.additionalArguments` (which lands in the renderer's
+// process.argv). Chosen over process.env — which a sandboxed preload can
+// in fact read — because additionalArguments is scoped per window, and
+// because it keeps the origin computed once, here, next to the loadURL
+// that establishes it. Kept in sync with desktop/preload/index.js.
 const APP_ORIGIN_FLAG = "--channel-app-origin=";
 
 // macOS-only: hide the title bar chrome but keep the traffic lights, so
@@ -81,18 +83,20 @@ export function isAppOrigin(url, appOrigin) {
   return target !== null && target === appOrigin;
 }
 
-// Named rather than inline so the swallowed rejection is legible in a
+// Named rather than inline so the swallowed failure is legible in a
 // stack trace and countable by the coverage gate.
 function ignoreOpenFailure() {
-  // shell.openExternal rejects when the OS has no handler for the URL.
-  // There is nothing actionable to do about it, but an unhandled
-  // rejection in the main process is noise we don't want.
+  // A hand-off to the OS can fail two ways: shell.openExternal rejects
+  // (no registered handler for the URL) or it throws synchronously (bad
+  // argument). Neither is actionable. Both must be contained here —
+  // these run inside a will-navigate listener, so anything that escapes
+  // surfaces as an uncaught exception in the main process.
 }
 
 /**
  * Hand a URL to the system browser, but only if its scheme is on the
- * allowlist. Returns whether the hand-off happened, so callers can tell
- * "opened externally" from "refused".
+ * allowlist. Returns whether the URL was accepted for hand-off, so
+ * callers can tell "opened externally" from "refused".
  */
 export function openExternalIfSafe(url, openExternal) {
   let parsed;
@@ -102,10 +106,15 @@ export function openExternalIfSafe(url, openExternal) {
     return false;
   }
   if (!EXTERNAL_SCHEMES.has(parsed.protocol)) return false;
-  // Pass the re-serialised URL rather than the raw string so whatever the
-  // parser normalised (embedded tabs/newlines, backslashes) is what the OS
-  // actually receives.
-  Promise.resolve(openExternal(parsed.toString())).catch(ignoreOpenFailure);
+  try {
+    // Pass the re-serialised URL rather than the raw string so whatever the
+    // parser normalised (embedded tabs/newlines, backslashes) is what the OS
+    // actually receives.
+    Promise.resolve(openExternal(parsed.toString())).catch(ignoreOpenFailure);
+  } catch {
+    // Synchronous throw — Promise.resolve() never got to wrap it.
+    ignoreOpenFailure();
+  }
   return true;
 }
 

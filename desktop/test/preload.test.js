@@ -115,6 +115,33 @@ describe("preload — origin guard (#472)", () => {
     expect(expectedOriginFrom(undefined)).toBeNull();
   });
 
+  it("finds the flag wherever Chromium puts it in argv", async () => {
+    const { expectedOriginFrom } = await import("../preload/index.js");
+    // Measured against a live Electron: our flag lands mid-argv (index 23
+    // of 25), with Chromium's own switches on both sides — so neither the
+    // first nor the last position is the one to key off.
+    expect(
+      expectedOriginFrom([
+        "/path/to/Electron",
+        "--trace-process-track-uuid=319070899",
+        ORIGIN_FLAG,
+        "--seatbelt-client=50",
+      ]),
+    ).toBe(APP_ORIGIN);
+  });
+
+  it("fails closed when the origin flag appears more than once", async () => {
+    const { expectedOriginFrom } = await import("../preload/index.js");
+    // An ambiguous security parameter is refused rather than resolved by
+    // picking a winner — position carries no authority here.
+    expect(
+      expectedOriginFrom([ORIGIN_FLAG, "--channel-app-origin=https://attacker.example"]),
+    ).toBeNull();
+    expect(
+      expectedOriginFrom(["--channel-app-origin=https://attacker.example", ORIGIN_FLAG]),
+    ).toBeNull();
+  });
+
   it("installs the bridge when the document origin matches", async () => {
     const { installBridge } = await import("../preload/index.js");
     const expose = vi.fn();
@@ -148,7 +175,7 @@ describe("preload — origin guard (#472)", () => {
     expect(expose).not.toHaveBeenCalled();
   });
 
-  it("builds the five-function bridge and nothing more", async () => {
+  it("builds the seven-key bridge (five methods + two values) and nothing more", async () => {
     const { createBridge } = await import("../preload/index.js");
     expect(Object.keys(createBridge()).sort()).toEqual([
       "getVersion",
@@ -172,6 +199,13 @@ describe("preload — origin guard at module load", () => {
 
   it("does not expose the bridge when no origin flag was passed", async () => {
     process.argv = [...originalArgv];
+    await import("../preload/index.js");
+    const { contextBridge } = await import("electron");
+    expect(contextBridge.exposeInMainWorld).not.toHaveBeenCalled();
+  });
+
+  it("does not expose the bridge when the origin flag is duplicated", async () => {
+    process.argv = [...originalArgv, ORIGIN_FLAG, ORIGIN_FLAG];
     await import("../preload/index.js");
     const { contextBridge } = await import("electron");
     expect(contextBridge.exposeInMainWorld).not.toHaveBeenCalled();
