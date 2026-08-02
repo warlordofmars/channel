@@ -141,6 +141,22 @@ export function isLayoutDebugParamRequested() {
 }
 
 /**
+ * Armed state when `localStorage` refuses to hold it, else `null`.
+ *
+ * Once storage has proven unusable it stops being the source of truth —
+ * a blocked write leaves nothing for the next read to find, so the gate
+ * would report disarmed a moment after the gesture said otherwise.
+ * Holding the value here keeps the toggle honest for the page's life,
+ * which is the whole of what a device with blocked storage can offer.
+ */
+let inMemoryArmed = null;
+
+/** Drop the fallback so storage is authoritative again. Tests only. */
+export function __resetLayoutDebugFallbackForTest() {
+  inMemoryArmed = null;
+}
+
+/**
  * True when the tap gesture has armed the readout.
  *
  * Storage access is guarded because this runs during `App`'s render:
@@ -148,6 +164,7 @@ export function isLayoutDebugParamRequested() {
  * here would take the whole app down rather than one debug readout.
  */
 export function isLayoutDebugArmed() {
+  if (inMemoryArmed !== null) return inMemoryArmed;
   try {
     return localStorage.getItem(LAYOUT_DEBUG_STORAGE_KEY) === "1";
   } catch {
@@ -167,17 +184,49 @@ export function isLayoutDebugRequested() {
  * so the gesture's owner (`Shell`) and the readout's mount site (`App`)
  * stay decoupled — `App` is above the router, `Shell` is well below it.
  */
-export function toggleLayoutDebugArmed() {
-  const armed = !isLayoutDebugArmed();
+function writeArmed(armed) {
   try {
     if (armed) localStorage.setItem(LAYOUT_DEBUG_STORAGE_KEY, "1");
     else localStorage.removeItem(LAYOUT_DEBUG_STORAGE_KEY);
+    inMemoryArmed = null;
   } catch {
-    // Storage unavailable. The toggle still fires for this page life —
-    // it just won't survive a relaunch, which beats swallowing the tap.
+    // Storage refused the write, so fall back to memory: the toggle
+    // still applies for this page life, it just won't survive a
+    // relaunch. Swallowing the tap outright would be worse — a device
+    // with blocked storage is exactly where this readout is needed.
+    inMemoryArmed = armed;
   }
+}
+
+export function toggleLayoutDebugArmed() {
+  const armed = !isLayoutDebugArmed();
+  writeArmed(armed);
   window.dispatchEvent(new Event(LAYOUT_DEBUG_EVENT));
   return armed;
+}
+
+/**
+ * Turn **both** gates off — what the readout's own Close button does.
+ *
+ * This is the only way out from inside an installed PWA. The readout is
+ * `position: fixed; inset: 0; z-index: 9999` over an opaque background,
+ * so once it mounts it covers the brand mark and the arming gesture
+ * cannot be repeated to undo itself; there is no address bar to edit
+ * either, and the gate is `param || armed`, so dropping the parameter
+ * alone could never subtract a persisted flag anyway. Without this,
+ * arming the readout on a phone would be a one-way trip out of the app.
+ *
+ * The parameter is cleared through `replaceState` rather than a reload,
+ * so closing the readout doesn't discard the page it was measuring.
+ */
+export function disarmLayoutDebug() {
+  writeArmed(false);
+  if (isLayoutDebugParamRequested()) {
+    const url = new URL(window.location.href);
+    url.searchParams.delete(LAYOUT_DEBUG_PARAM);
+    window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+  }
+  window.dispatchEvent(new Event(LAYOUT_DEBUG_EVENT));
 }
 
 /**
@@ -360,9 +409,19 @@ export default function LayoutDebug() {
     <div className="layout-debug" role="region" aria-label="Layout debug readout">
       <div className="layout-debug-head">
         <span className="layout-debug-title">LAYOUT DEBUG · #467 · temporary</span>
-        <button type="button" className="layout-debug-refresh" onClick={refresh}>
-          Re-measure
-        </button>
+        <span className="layout-debug-actions">
+          <button type="button" className="layout-debug-refresh" onClick={refresh}>
+            Re-measure
+          </button>
+          {/* The only way out on a phone — see `disarmLayoutDebug`. */}
+          <button
+            type="button"
+            className="layout-debug-refresh"
+            onClick={disarmLayoutDebug}
+          >
+            Close
+          </button>
+        </span>
       </div>
       <dl className="layout-debug-rows">
         {snapshot.rows.map(([label, value]) => (

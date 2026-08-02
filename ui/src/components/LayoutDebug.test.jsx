@@ -12,6 +12,7 @@ import LayoutDebug, {
   collectChain,
   collectSnapshot,
   describeElement,
+  disarmLayoutDebug,
   elementLabel,
   findChainRoot,
   isLayoutDebugArmed,
@@ -20,6 +21,7 @@ import LayoutDebug, {
   matchesDisplayMode,
   readSafeAreaInsets,
   round,
+  __resetLayoutDebugFallbackForTest,
   subscribeLayoutDebug,
   toggleLayoutDebugArmed,
   useLayoutDebugRequested,
@@ -70,6 +72,7 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   localStorage.removeItem(LAYOUT_DEBUG_STORAGE_KEY);
+  __resetLayoutDebugFallbackForTest();
 });
 
 /** Stand-in for Shell's brand mark — the gesture's only real call site. */
@@ -385,26 +388,57 @@ describe("the persisted gesture gate (#504)", () => {
     window.removeEventListener(LAYOUT_DEBUG_EVENT, heard);
   });
 
-  it("announces the toggle even when the write is refused", () => {
+  it("really arms for the page's life when the write is refused", () => {
+    // A blocked write leaves nothing for the next read to find, so
+    // without the in-memory fallback the gate would report disarmed an
+    // instant after the gesture reported success (Copilot, PR #505).
     const heard = vi.fn();
     window.addEventListener(LAYOUT_DEBUG_EVENT, heard);
     const setItem = vi.fn(function blockedWrite() {
       throw new Error("QuotaExceededError");
     });
+    const removeItem = vi.fn();
     vi.stubGlobal("localStorage", {
       getItem: vi.fn(function readsEmpty() {
         return null;
       }),
       setItem,
-      removeItem: vi.fn(),
+      removeItem,
     });
 
-    // The tap still registers for this page life; it just won't persist.
     expect(toggleLayoutDebugArmed()).toBe(true);
     expect(setItem).toHaveBeenCalledTimes(1);
     expect(heard).toHaveBeenCalledTimes(1);
+    // The gate agrees, even though storage holds nothing.
+    expect(isLayoutDebugArmed()).toBe(true);
+    expect(isLayoutDebugRequested()).toBe(true);
+
+    // And the gesture still disarms from the fallback.
+    expect(toggleLayoutDebugArmed()).toBe(false);
+    expect(isLayoutDebugArmed()).toBe(false);
 
     window.removeEventListener(LAYOUT_DEBUG_EVENT, heard);
+  });
+
+  it("hands authority back to storage once a write succeeds", () => {
+    vi.stubGlobal("localStorage", {
+      getItem: vi.fn(function readsEmpty() {
+        return null;
+      }),
+      setItem: vi.fn(function blockedWrite() {
+        throw new Error("QuotaExceededError");
+      }),
+      removeItem: vi.fn(),
+    });
+    expect(toggleLayoutDebugArmed()).toBe(true);
+    expect(isLayoutDebugArmed()).toBe(true);
+
+    // Storage recovers: the successful write clears the fallback, so a
+    // stale in-memory value can't outlive the condition that caused it.
+    vi.unstubAllGlobals();
+    expect(toggleLayoutDebugArmed()).toBe(false);
+    expect(localStorage.getItem(LAYOUT_DEBUG_STORAGE_KEY)).toBeNull();
+    expect(isLayoutDebugArmed()).toBe(false);
   });
 });
 
@@ -470,5 +504,65 @@ describe("useLayoutDebugTapGesture", () => {
     expect(isLayoutDebugArmed()).toBe(true);
 
     vi.useRealTimers();
+  });
+});
+
+describe("disarmLayoutDebug", () => {
+  it("clears the persisted flag", () => {
+    localStorage.setItem(LAYOUT_DEBUG_STORAGE_KEY, "1");
+
+    disarmLayoutDebug();
+
+    expect(localStorage.getItem(LAYOUT_DEBUG_STORAGE_KEY)).toBeNull();
+    expect(isLayoutDebugRequested()).toBe(false);
+  });
+
+  it("also strips the query parameter, since the gate is an OR", () => {
+    // Clearing only the flag would leave `?__layout-debug=1` mounting
+    // the readout forever — the URL gate can add but never subtract.
+    window.history.pushState({}, "", `/app?keep=yes&${LAYOUT_DEBUG_PARAM}=1#frag`);
+    localStorage.setItem(LAYOUT_DEBUG_STORAGE_KEY, "1");
+
+    disarmLayoutDebug();
+
+    expect(isLayoutDebugParamRequested()).toBe(false);
+    expect(isLayoutDebugRequested()).toBe(false);
+    // Only the debug parameter goes — the rest of the URL is preserved,
+    // so closing the readout doesn't disturb the page being measured.
+    expect(window.location.pathname).toBe("/app");
+    expect(window.location.search).toBe("?keep=yes");
+    expect(window.location.hash).toBe("#frag");
+  });
+
+  it("announces the change so the mount site re-renders", () => {
+    const heard = vi.fn();
+    window.addEventListener(LAYOUT_DEBUG_EVENT, heard);
+
+    disarmLayoutDebug();
+
+    expect(heard).toHaveBeenCalledTimes(1);
+    window.removeEventListener(LAYOUT_DEBUG_EVENT, heard);
+  });
+});
+
+describe("<LayoutDebug /> Close button", () => {
+  it("unmounts the readout from inside — the only exit on a phone", () => {
+    // `.layout-debug` is fixed/inset-0/z-index-9999 over an opaque
+    // background, so the armed readout covers the brand mark and the
+    // five-tap gesture can never undo itself. Without this control,
+    // arming on a phone is a one-way trip (code-reviewer, PR #505).
+    mountComposerFixture();
+    setViewport({ windowHeight: 852, layoutHeight: 756 });
+    localStorage.setItem(LAYOUT_DEBUG_STORAGE_KEY, "1");
+    render(<GateHarness />);
+    expect(screen.getByTestId("gate").textContent).toBe("true");
+
+    render(<LayoutDebug />);
+    act(() => {
+      fireEvent.click(screen.getByRole("button", { name: /^close$/i }));
+    });
+
+    expect(localStorage.getItem(LAYOUT_DEBUG_STORAGE_KEY)).toBeNull();
+    expect(screen.getByTestId("gate").textContent).toBe("false");
   });
 });
