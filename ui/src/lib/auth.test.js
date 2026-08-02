@@ -136,6 +136,18 @@ describe("session storage", () => {
     expect(readToken()).toBe(token);
   });
 
+  it("falls back to the legacy key when the new key holds an unusable value", () => {
+    // A corrupt or access-token-less envelope under the new key must not
+    // force a re-login while a good pre-rename session sits beside it —
+    // that is precisely what read-both exists to prevent.
+    const token = makeToken();
+    for (const junk of ["{ not json", JSON.stringify({ expires_at: 1 }), ""]) {
+      storage[TOKEN_KEY] = junk;
+      storage[LEGACY_TOKEN_KEY] = token;
+      expect(readToken()).toBe(token);
+    }
+  });
+
   it("prefers the new key when both are present", () => {
     storage[TOKEN_KEY] = JSON.stringify({ access_token: "new", expires_at: 1 });
     storage[LEGACY_TOKEN_KEY] = "old";

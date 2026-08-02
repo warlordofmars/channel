@@ -66,9 +66,11 @@ let refreshInFlight = null;
 let refreshBlockedUntil = 0;
 
 /**
- * Whether the last failed refresh was *refused* by the server (4xx) as
- * opposed to unreachable. Sticky until a refresh succeeds, so it still
- * describes the last real answer while the cooldown short-circuits.
+ * Whether the last failed refresh was refused by the server with a
+ * **401** — the only status that is a verdict on the credential — as
+ * opposed to unreachable. Re-derived by every attempt that resolves, so
+ * it always describes the most recent real answer; it persists across
+ * the cooldown window only because no attempt is made during it.
  */
 let refreshRefused = false;
 
@@ -406,7 +408,9 @@ export async function getAssetContent(chatId, assetId) {
 // Pre-existing (the old sync `authHeader()` sent the same stored token),
 // and silent refresh makes an expired token at sign-out much rarer, but
 // closing it properly needs a server change: accept the refresh cookie
-// alone as authority for logout. Tracked as a follow-up, not fixed here.
+// alone as authority for logout. Needs a follow-up issue — none is filed
+// yet, and this PR deliberately does not file one (several sessions are
+// working this repo concurrently).
 
 export async function logout() {
   const token = readToken();

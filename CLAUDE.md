@@ -313,7 +313,7 @@ Server-side companion gap: `/auth/logout` is `Depends(require_mgmt_user)`
 and `decode_mgmt_jwt` enforces `exp`, so signing out of a tab left idle
 past the 1h mark 401s before the family revoke runs and leaves the
 refresh family live. Closing it means letting the refresh cookie alone
-authorise a logout.
+authorise a logout. No issue filed for this yet — it needs one.
 
 ### `/api/me/sessions` (#293)
 

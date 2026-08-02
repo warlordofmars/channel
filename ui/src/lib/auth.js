@@ -103,25 +103,33 @@ function expiryFromToken(token) {
 }
 
 /**
- * Decode a raw localStorage value into the envelope shape.
+ * Decode a raw localStorage value into the envelope shape, or `null` if
+ * it does not yield a usable session.
  *
  * A JWT is three base64url segments, so it can never begin with `{` —
  * that one character separates the enveloped form from a bare token
  * without attempting a parse on every read.
+ *
+ * Returning `null` for *every* unusable shape — absent, corrupt JSON, or
+ * a well-formed envelope carrying no `access_token` — is what lets
+ * `loadSession` chain the two keys with `??`. An envelope that parsed
+ * but held nothing would otherwise count as a hit and suppress the
+ * legacy fallback.
  */
 function decodeStored(raw) {
   if (!raw) return null;
   if (!raw.startsWith("{")) return { access_token: raw, expires_at: 0 };
   try {
     const parsed = JSON.parse(raw);
+    if (!parsed?.access_token) return null;
     return {
-      access_token: parsed.access_token ?? "",
+      access_token: parsed.access_token,
       expires_at: Number(parsed.expires_at) || 0,
     };
   } catch {
-    // Corrupt envelope — read as "no session" rather than throwing on
-    // every render. There is nothing here to salvage, and a signed-out
-    // user can sign back in; a thrown parse error just white-screens.
+    // Corrupt envelope — read as "nothing here" rather than throwing on
+    // every render. A signed-out user can sign back in; a thrown parse
+    // error just white-screens.
     return null;
   }
 }
@@ -136,8 +144,17 @@ function decodeStored(raw) {
  * attempts a renewal instead of trusting an undatable token.
  */
 export function loadSession() {
-  const raw = localStorage.getItem(TOKEN_KEY) ?? localStorage.getItem(LEGACY_TOKEN_KEY);
-  const stored = decodeStored(raw);
+  // Falls through to the legacy key whenever the new one yields nothing
+  // *usable*, not merely when it is absent. A corrupt or access-token-less
+  // envelope under the new key would otherwise force a re-login while a
+  // perfectly good pre-rename session sat untouched beside it — the exact
+  // failure the read-both migration exists to prevent. This cannot
+  // resurrect a stale session: nothing writes the legacy key any more, so
+  // whatever is there predates the rename, and any successful save removes
+  // it.
+  const stored =
+    decodeStored(localStorage.getItem(TOKEN_KEY)) ??
+    decodeStored(localStorage.getItem(LEGACY_TOKEN_KEY));
   if (!stored?.access_token) return NO_SESSION;
   return {
     access_token: stored.access_token,
