@@ -43,7 +43,32 @@ user asked for. So the two routes differ deliberately:
   there is no way to map a device to the ``jti`` it holds. That device
   stops being able to refresh immediately, and its current access token
   dies at its own ``exp``. Closing that gap needs a device claim on the
-  access token, which is mint-path work (#292).
+  access token — mint-path work that #292 did not add and that remains
+  unbuilt.
+
+**Relationship to ``/auth/logout`` (#292).** Logout does the same two
+writes at single-device scope: ``deny_jti`` for the presented access
+token plus ``revoke_refresh_token`` for that device's family. These
+routes are the multi-device generalisation, so the two compose rather
+than collide. Concretely: ``deny_jti`` is a plain ``PutItem`` and
+idempotent, and ``_revoke_refresh_rows`` skips rows already flagged, so
+calling both in either order writes nothing twice. The **first** reason
+recorded wins — a family revoked here as ``user_revoked`` keeps that
+reason through a later logout — which is the right precedence, and
+neither reason is ``rotated``, so neither arms the reuse cascade.
+
+One deliberate divergence: logout **swallows** a ``deny_jti`` failure,
+this route does not. Logout's visible effect is client-side (the SPA
+clears local storage regardless), so a swallowed failure still leaves
+the user signed out where they can see it. "Sign out everywhere" has no
+such counterpart — its entire effect is server-side, and a caller told
+"204" has no way to discover the denylist write never landed.
+
+Neither route clears the ``channel_refresh`` cookie, and deliberately
+so. The server-side revoke is the authoritative one; a browser that
+later presents the dead cookie to ``/auth/refresh`` gets a 401 that
+clears it (#291). Clearing here would be cosmetic — and the cookie's
+``Path=/auth`` means it is not even sent to ``/api/*``.
 
 **The reads are eventually consistent** — they walk
 ``RefreshByUserIndex``, and DynamoDB refuses ``ConsistentRead`` on a
@@ -91,10 +116,14 @@ class Session(BaseModel):
     stable per-token identifier is a needless correlation handle. The
     fields below are exactly what a "your active sessions" view needs.
 
-    ``device_id`` is the only device identity #290 persists — there is
-    no human-readable label column, so a friendlier name ("MacBook Pro",
-    "Chrome on Windows") needs a new attribute written at mint time and
-    belongs with the login path, not here.
+    ``device_id`` is still the only *device* identity the row carries.
+    #292 added a ``display_name`` column, but that is the user's own
+    name from Google's ``name`` claim, carried across rotation so a
+    refreshed session doesn't decay to the email local-part — it is
+    identical for every one of a user's devices, so surfacing it here
+    would repeat one constant per row and label nothing. A real device
+    label ("MacBook Pro", "Chrome on Windows") is a different attribute,
+    derived at login from the User-Agent, and belongs with the mint path.
     """
 
     model_config = ConfigDict(extra="forbid")
