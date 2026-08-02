@@ -544,6 +544,13 @@ def worktree_setup(ctx):
     ``deploy`` / ``desktop_dev`` precedent — so re-running on an already-prepared
     checkout is fast and non-destructive (``npm ci`` wipes ``node_modules`` on
     every run, the wrong shape for a re-runnable prep task).
+
+    Also deliberately omits the ``--ignore-scripts`` that CI's installs and
+    ``deploy`` carry (#441). That flag hardens *CI runners* against a
+    compromised dependency's lifecycle script; a developer worktree already
+    runs this repo's own code, so the threat model doesn't apply, and leaving
+    scripts enabled keeps local setup working if a future dependency genuinely
+    needs its postinstall for dev tooling. Don't "fix" the inconsistency.
     """
     ctx.run("uv sync --all-extras --group infra", pty=True)
     ctx.run(f"cd {UI} && npm install", pty=True)
@@ -821,7 +828,13 @@ def deploy(ctx, env="prod"):
     release_channel = "latest" if env == "prod" else "dev"
     build_env = {**os.environ, "VITE_RELEASE_CHANNEL": release_channel}
     with ctx.cd(UI):
-        ctx.run("npm install --silent", hide=True)
+        # --ignore-scripts matches the workflow installs (#441). Without it
+        # the deploy path would re-run the very dependency lifecycle scripts
+        # `npm ci --ignore-scripts` just skipped in the CI job above. No
+        # dependency in ui/ needs one — the only install-script package in
+        # that tree is the optional, macOS-only `fsevents`, which ships a
+        # prebuilt binding.
+        ctx.run("npm install --ignore-scripts --silent", hide=True)
         ctx.run("npm run build", pty=True, env=build_env)
 
     with ctx.cd(INFRA):
