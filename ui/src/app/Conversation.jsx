@@ -672,7 +672,20 @@ export default function Conversation() {
                     />
                   </div>
                 )}
-                {isLast && t.followUps && t.followUps.length > 0 && (
+                {/* #469 — belt-and-braces client gate on the user's
+                    "Suggest follow-ups" pref. The server already skips
+                    the follow-ups model call entirely when the pref is
+                    off (`chats.py` §follow-up suggestions), so this
+                    normally has nothing to hide. It matters when the
+                    server's copy of the pref is stale: the debounced
+                    PUT to /api/me/prefs is fire-and-forget and its
+                    failures are swallowed, and until #295 lands the SPA
+                    never refreshes its 1h access token — so a PUT
+                    issued on an expired token 401s silently and the
+                    server keeps emitting chips the user switched off.
+                    Gating the render makes the toggle take effect
+                    immediately and locally regardless. */}
+                {isLast && prefs.suggestFollowups && t.followUps && t.followUps.length > 0 && (
                   <div className="followups">
                     {t.followUps.map((s) => (
                       <button

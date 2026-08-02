@@ -1561,6 +1561,52 @@ describe("Conversation", () => {
     expect(container.querySelectorAll(".followup-chip")).toHaveLength(0);
   });
 
+  it("does NOT render follow-up chips when the suggestFollowups pref is off", () => {
+    // #469 — belt-and-braces client gate. The server normally never
+    // emits the frame when the pref is off, but a stale server-side
+    // copy of the pref (swallowed PUT failure / expired access token)
+    // can keep the chips coming. Seed localStorage BEFORE resetting the
+    // shared prefs store so the snapshot picks the "off" value up.
+    storage["channel-suggest-followups"] = "0";
+    __resetChannelPrefsForTest();
+    mockStream({
+      turns: [
+        { role: "user", text: "hi", msg_id: "u1" },
+        {
+          role: "assistant",
+          text: "ok",
+          msg_id: "a1",
+          streaming: false,
+          followUps: ["Follow A", "Follow B", "Follow C"],
+        },
+      ],
+    });
+    const { container } = renderAt("/app/c/c1");
+    expect(container.querySelectorAll(".followup-chip")).toHaveLength(0);
+    expect(container.querySelector(".followups")).toBeNull();
+  });
+
+  it("renders follow-up chips when the suggestFollowups pref is explicitly on", () => {
+    // Complement of the test above — pins that the gate reads the pref
+    // rather than unconditionally suppressing.
+    storage["channel-suggest-followups"] = "1";
+    __resetChannelPrefsForTest();
+    mockStream({
+      turns: [
+        { role: "user", text: "hi", msg_id: "u1" },
+        {
+          role: "assistant",
+          text: "ok",
+          msg_id: "a1",
+          streaming: false,
+          followUps: ["Follow A"],
+        },
+      ],
+    });
+    const { container } = renderAt("/app/c/c1");
+    expect(container.querySelectorAll(".followup-chip")).toHaveLength(1);
+  });
+
   it("does NOT render a chip row when followUps is missing or empty", () => {
     mockStream({
       turns: [
