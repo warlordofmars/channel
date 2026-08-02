@@ -18,8 +18,12 @@ Transport is pluggable, per the epic's design decisions (Q4/Q5):
 - **Web SPA — HttpOnly cookie.** The token arrives in the
   ``channel_refresh`` cookie and the rotated successor goes back in a
   ``Set-Cookie`` with ``HttpOnly`` + ``Secure`` + ``SameSite=Strict``,
-  path-scoped to ``/auth/refresh``. XSS cannot read it, and the path
-  scope means it is not attached to any other request in the app.
+  path-scoped to ``/auth``. XSS cannot read it, and the path scope keeps
+  it off every ``/api/*`` request — the app's entire data surface.
+  (#291 scoped it to ``/auth/refresh`` exactly; #292 widened it by one
+  segment because ``POST /auth/logout`` has to *read* the cookie to
+  revoke the family, and a browser only sends a cookie to paths under
+  its ``Path``. See :func:`set_refresh_cookie`.)
 - **Desktop / future mobile — request body.** Electron persists the
   token in the OS keychain via ``safeStorage`` (#297), so it sends
   ``{"refresh_token": ...}`` and gets the successor back in the JSON
@@ -49,9 +53,15 @@ for a CSRF control.
 
 Not in scope here
 -----------------
-Minting the first refresh token at login (#292), the sessions API
-(#293), rate limiting + EMF counters (#294). This module deliberately
-only consumes and rotates; #290's storage layer owns the rest.
+The sessions API (#293), rate limiting + EMF counters (#294). This
+module deliberately only consumes and rotates; #290's storage layer owns
+the rest. Minting the session's *first* refresh token belongs to the
+Google callback (#292, :mod:`channel.auth.mgmt_auth`) — but the cookie
+itself is defined here, and both that callback and ``POST /auth/logout``
+drive it through :func:`set_refresh_cookie` /
+:func:`clear_refresh_cookie` rather than re-spelling the attribute
+matrix. Three call sites writing the same ``Set-Cookie`` by hand is
+exactly how a mint/rotate mismatch silently breaks the web flow.
 """
 
 from __future__ import annotations
@@ -59,7 +69,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
@@ -79,10 +89,22 @@ router = APIRouter(tags=["mgmt-auth"])
 logger = get_logger(__name__)
 
 # Cookie carrying the web SPA's refresh token. Path-scoped so the
-# browser attaches it to exactly one endpoint — every other request in
-# the app travels without it.
+# browser keeps it off every ``/api/*`` request — the app's whole data
+# surface travels without it.
+#
+# ``/auth`` rather than ``/auth/refresh`` (#292): a browser sends a
+# cookie only to request paths *under* its ``Path``, and
+# ``POST /auth/logout`` must read this cookie to revoke the token family
+# server-side. Scoped to ``/auth/refresh`` the logout endpoint never
+# receives it, so "log out" would clear the browser's copy while leaving
+# a live 30-day credential on the server — the exact hole #292's third
+# acceptance criterion closes. Widening admits four sibling endpoints
+# (``/auth/login``, ``/auth/callback``, ``/auth/logout``,
+# ``/auth/mcp/callback``), all first-party, all low-traffic, and none of
+# which echo cookies back; ``SameSite=Strict`` additionally keeps the
+# cookie off the two that are reached by cross-site redirect.
 REFRESH_COOKIE_NAME = "channel_refresh"
-REFRESH_COOKIE_PATH = "/auth/refresh"
+REFRESH_COOKIE_PATH = "/auth"
 
 # CSRF guard. Matched case-insensitively by Starlette's header mapping,
 # so the constant is stored lowercase.
@@ -132,6 +154,55 @@ def _cookie_max_age(absolute_expires_at: str) -> int:
     return max(0, int(remaining.total_seconds()))
 
 
+def set_refresh_cookie(response: Response, raw_token: str, absolute_expires_at: str) -> None:
+    """Attach the web transport's refresh cookie to ``response``.
+
+    The single definition of the attribute matrix. Three flows write
+    this cookie — the Google callback minting a session's first token
+    (#292), this module rotating it, and any future re-issue — and they
+    must agree on every attribute or the browser silently ends up with
+    two cookies (``Path`` and ``Name`` together form a cookie's identity,
+    so a mismatched ``Path`` *adds* rather than replaces). A helper is
+    the cheapest way to make that class of bug unrepresentable.
+
+    ``max_age`` is pinned to the family's absolute deadline rather than
+    the idle window — see :func:`_cookie_max_age`.
+    """
+
+    response.set_cookie(
+        REFRESH_COOKIE_NAME,
+        raw_token,
+        max_age=_cookie_max_age(absolute_expires_at),
+        path=REFRESH_COOKIE_PATH,
+        httponly=True,
+        secure=True,
+        samesite="strict",
+    )
+
+
+def clear_refresh_cookie(response: Response) -> None:
+    """Expire the refresh cookie in the caller's browser.
+
+    Attributes must match :func:`set_refresh_cookie`'s for the deletion
+    to land on the same cookie. Note a response is free to clear a
+    cookie scoped to a path it was not itself served from — ``Path`` is
+    chosen by the server on the way out, not constrained by the request
+    URL — which is what lets ``/auth/logout`` retire this cookie.
+
+    Clearing is never the whole job on the logout path: the browser's
+    copy going away does nothing about a copy already exfiltrated, so
+    the server-side family revoke is what actually ends the session.
+    """
+
+    response.delete_cookie(
+        REFRESH_COOKIE_NAME,
+        path=REFRESH_COOKIE_PATH,
+        httponly=True,
+        secure=True,
+        samesite="strict",
+    )
+
+
 def _no_store(response: JSONResponse) -> JSONResponse:
     """Mark a response uncacheable.
 
@@ -162,43 +233,33 @@ def _rejection(*, via_cookie: bool) -> JSONResponse:
 
     response = _no_store(JSONResponse(status_code=401, content={"detail": _REJECTION_DETAIL}))
     if via_cookie:
-        response.delete_cookie(
-            REFRESH_COOKIE_NAME,
-            path=REFRESH_COOKIE_PATH,
-            httponly=True,
-            secure=True,
-            samesite="strict",
-        )
+        clear_refresh_cookie(response)
     return response
 
 
 def _issued(row: RefreshToken, rotated: str, *, via_cookie: bool) -> JSONResponse:
     """200 carrying a fresh access JWT and the rotated refresh token.
 
-    .. warning::
-       **``display_name`` degrades here, and #292 is where that gets
-       fixed.** Claims are rebuilt through the same helper the login
-       flow uses, so a refreshed session cannot drift from a freshly
-       logged-in one — except in the one field the refresh row cannot
-       supply. ``RefreshToken`` (#290) stores only ``user_id``, which
-       equals the user's email in the current mgmt-JWT shape, so the
-       best this can do for ``display_name`` is the email's local-part.
-       Google's real name ("John Carter" → "john") is lost, and
-       ``Sidebar.jsx`` / ``ChatHome.jsx`` treat that as the *legacy
-       token* fallback rather than a normal state.
+    Claims are rebuilt through the same helper the login flow uses, so a
+    refreshed session cannot drift from a freshly logged-in one.
 
-       This is unreachable today: nothing in ``src/`` mints a first
-       refresh token — ``mint_refresh_token``'s only production caller
-       is ``consume_refresh_token`` rotating an existing family — so no
-       client can reach this branch until #292 wires minting into the
-       Google callback. #292 is also the only place with the name to
-       persist (it is a claim on the Google ID token, present nowhere
-       else), so the fix belongs there: carry ``display_name`` onto the
-       refresh row and forward through rotation the way
-       ``absolute_expires_at`` already is, then read it here.
+    ``display_name`` was the one field that used to drift: #290's row
+    stored only ``user_id``, so #291 could do no better than the email's
+    local-part, which ``Sidebar.jsx`` / ``ChatHome.jsx`` render as the
+    *legacy token* fallback rather than a normal state. #292 closed that
+    by persisting Google's ``name`` claim on the row at login and
+    carrying it through every rotation, so the value below is the real
+    name for any session minted since. The local-part fallback survives
+    for exactly two cases: a family minted before #292, and an account
+    Google gave no ``name`` for.
+
+    ``role``, by contrast, is deliberately *recomputed* by
+    ``make_mgmt_user`` on every call rather than stored — an admin grant
+    or revocation lands on the next refresh instead of the next full
+    sign-in.
     """
 
-    user = make_mgmt_user(row.user_id, row.user_id.split("@")[0])
+    user = make_mgmt_user(row.user_id, row.display_name or row.user_id.split("@")[0])
     payload: dict[str, Any] = {
         "access_token": issue_mgmt_jwt(user),
         "token_type": "bearer",
@@ -209,15 +270,7 @@ def _issued(row: RefreshToken, rotated: str, *, via_cookie: bool) -> JSONRespons
 
     response = _no_store(JSONResponse(content=payload))
     if via_cookie:
-        response.set_cookie(
-            REFRESH_COOKIE_NAME,
-            rotated,
-            max_age=_cookie_max_age(row.absolute_expires_at),
-            path=REFRESH_COOKIE_PATH,
-            httponly=True,
-            secure=True,
-            samesite="strict",
-        )
+        set_refresh_cookie(response, rotated, row.absolute_expires_at)
     logger.info(
         "auth.refresh rotated user=%s device=%s transport=%s",
         fingerprint_id(row.user_id),

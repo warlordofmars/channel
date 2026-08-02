@@ -178,6 +178,26 @@ def test_access_token_carries_the_rows_identity(consumed):
     assert claims["exp"] - claims["iat"] == MGMT_JWT_TTL_SECONDS
 
 
+def test_access_token_carries_the_rows_persisted_display_name(consumed):
+    """#292 put Google's real name on the row so refreshing stops degrading it."""
+    box = consumed[1]
+    box["result"] = _ok(user_id="grace@example.com", display_name="Grace Hopper")
+
+    resp = _client.post("/auth/refresh", json={"refresh_token": "t"}, headers=_CSRF)
+
+    assert decode_mgmt_jwt(resp.json()["access_token"])["display_name"] == "Grace Hopper"
+
+
+def test_access_token_falls_back_to_the_local_part_for_a_nameless_row(consumed):
+    """Families minted before #292 have no name; the old fallback still applies."""
+    box = consumed[1]
+    box["result"] = _ok(user_id="grace@example.com")  # display_name defaults to None
+
+    resp = _client.post("/auth/refresh", json={"refresh_token": "t"}, headers=_CSRF)
+
+    assert decode_mgmt_jwt(resp.json()["access_token"])["display_name"] == "grace"
+
+
 def test_access_token_role_is_recomputed_at_refresh(consumed, monkeypatch):
     """An allowlist grant takes effect on the next refresh, not the next login."""
     monkeypatch.setattr("channel.auth.mgmt_auth.is_admin_email", lambda _email: True)
