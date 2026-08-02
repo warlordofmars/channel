@@ -45,17 +45,36 @@ const appCss = readFileSync(
  */
 const css = appCss.replace(/\/\*[\s\S]*?\*\//g, "");
 
-/** Body of the top-level `.stage { ... }` rule. */
+/**
+ * Body of the top-level `.stage { ... }` rule.
+ *
+ * Throws a named error rather than letting a failed match surface as
+ * `Cannot read properties of null` — if the selector is ever renamed the
+ * reader should be told the rule vanished, not handed a TypeError from
+ * inside a regex helper.
+ */
 function stageRule() {
   // `^` + multiline pins this to the un-indented, top-level rule, so
   // neither `.stage.full` nor any media-query-nested `.stage` can match.
   const match = css.match(/^\.stage\s*\{([^}]*)\}/m);
+  if (!match) {
+    throw new Error(
+      "no top-level `.stage { ... }` rule in app.css — it was renamed or " +
+        "removed; these #467 assertions need repointing at its replacement",
+    );
+  }
   return match[1];
 }
 
 /** Body of the `@media (max-width: 640px)` mobile block. */
 function mobileBlock() {
   const start = css.indexOf("@media (max-width: 640px)");
+  if (start === -1) {
+    throw new Error(
+      "no `@media (max-width: 640px)` block in app.css — the mobile section " +
+        "was renamed or removed; see #425 / #437",
+    );
+  }
   // Nested rules mean a naive `[^}]*` stops early; walk the braces instead.
   let depth = 0;
   for (let i = css.indexOf("{", start); i < css.length; i += 1) {
