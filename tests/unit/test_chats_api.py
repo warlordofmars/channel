@@ -16,6 +16,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from channel.api._auth import require_mgmt_user
+from channel.api.chats import _HISTORY_MAX_MESSAGES
 from channel.api.main import app
 from channel.models import Chat, Message, MessageRole, Prefs
 
@@ -5733,7 +5734,7 @@ def test_apply_history_token_budget_reports_only_the_budget_arm() -> None:
     strips the trailing user turn.
     """
 
-    from channel.api.chats import _HISTORY_MAX_MESSAGES, _apply_history_token_budget
+    from channel.api.chats import _apply_history_token_budget
 
     msgs = [
         Message(
@@ -5763,8 +5764,6 @@ def test_regenerate_still_detects_the_row_cap_after_stripping_the_user_turn(
     ≥500-turn chat of short turns (which fits the token budget) would
     silently skip both the truncation counter and the summary pass.
     """
-
-    from channel.api.chats import _HISTORY_MAX_MESSAGES
 
     history = _history(_HISTORY_MAX_MESSAGES)
     # Trailing turn must be a USER turn — that's what regenerate strips.
@@ -5803,7 +5802,11 @@ def test_regenerate_still_detects_the_row_cap_after_stripping_the_user_turn(
     ("history", "expected_reason"),
     [
         (_history(60, chars=8_000), "token_budget"),
-        (_history(500), "row_cap"),
+        # Keyed off the constant, not a literal — if the cap is ever
+        # retuned this case must keep exercising the row-cap arm rather
+        # than silently asserting `row_cap` against a window that never
+        # hit it.
+        (_history(_HISTORY_MAX_MESSAGES), "row_cap"),
     ],
     ids=["budget-trim", "row-cap"],
 )

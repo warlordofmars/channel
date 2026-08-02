@@ -1265,9 +1265,12 @@ async def _stream_bedrock_reply(
     # regenerate, silently skipping the counter and the summary pass for a
     # ≥500-turn chat whose turns are short enough to fit the token budget.
     hit_row_cap = len(prior_msgs) >= _HISTORY_MAX_MESSAGES
+    # Captured here for the same reason, one line above the strip: read
+    # post-strip it would log ``rows_read=499 max_messages=500`` on the
+    # regenerate path and appear to contradict its own ``reason=row_cap``.
+    rows_read = len(prior_msgs)
     if not persist_user and prior_msgs and prior_msgs[-1].role == MessageRole.USER:
         prior_msgs = prior_msgs[:-1]
-    rows_read = len(prior_msgs)
     # #245: size the window by the token envelope, not by a turn count.
     prior_msgs, trimmed_by_budget = _apply_history_token_budget(prior_msgs)
     window_slid = trimmed_by_budget or hit_row_cap
