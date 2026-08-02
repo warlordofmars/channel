@@ -33,10 +33,18 @@ export function expectedOriginFrom(argv) {
 }
 
 /**
- * The IPC surface handed to the renderer, and nothing beyond it: seven
+ * The IPC surface handed to the renderer, and nothing beyond it: eight
  * keys — five callable methods (login, logout, getVersion,
- * onUpdateStatus, relaunchToUpdate) plus the read-only `isDesktop` and
- * `platform` values.
+ * onUpdateStatus, relaunchToUpdate), the `tokenStorage` sub-object, and
+ * the read-only `isDesktop` and `platform` values.
+ *
+ * `tokenStorage` (#297) is the renderer's only route to the OS keychain.
+ * It is three fixed methods over three fixed channels — no path, no key
+ * namespace, nothing the caller can point somewhere else — so what the
+ * renderer can reach through it is a property of this file rather than
+ * of any argument it passes. `installBridge` below gates the whole
+ * object on the document origin, so `tokenStorage` inherits the #484
+ * origin guard along with everything else.
  */
 export function createBridge() {
   return {
@@ -51,6 +59,11 @@ export function createBridge() {
       ipcRenderer.on("desktop:update-status", (_event, payload) => cb(payload));
     },
     relaunchToUpdate: () => ipcRenderer.invoke("desktop:relaunch-to-update"),
+    tokenStorage: {
+      read: () => ipcRenderer.invoke("desktop:token-read"),
+      write: (session) => ipcRenderer.invoke("desktop:token-write", session),
+      clear: () => ipcRenderer.invoke("desktop:token-clear"),
+    },
   };
 }
 
@@ -59,8 +72,9 @@ export function createBridge() {
  *
  * Defence in depth behind the main process's navigation guards (#472): if
  * a guard is ever bypassed, or a future code path loads a foreign page in
- * this window, that page must still not receive `relaunchToUpdate()` and
- * friends. Fails closed — an unknown expected origin, an origin mismatch,
+ * this window, that page must still not receive `relaunchToUpdate()`,
+ * `tokenStorage.read()` — which hands back the refresh token — or
+ * anything else. Fails closed: an unknown expected origin, a mismatch,
  * or a document with no origin at all (opaque `"null"`) all yield no
  * bridge.
  *

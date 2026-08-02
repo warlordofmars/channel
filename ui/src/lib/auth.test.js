@@ -7,7 +7,9 @@ import {
   isTokenValid,
   loadSession,
   parseToken,
+  readRefreshToken,
   readToken,
+  saveRefreshToken,
   saveSession,
 } from "./auth.js";
 
@@ -215,5 +217,166 @@ describe("session storage", () => {
     expect(storage[TOKEN_KEY]).toBeUndefined();
     expect(storage[LEGACY_TOKEN_KEY]).toBeUndefined();
     expect(readToken()).toBe("");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Desktop keychain — window.channelDesktop.tokenStorage (#297)
+// ---------------------------------------------------------------------------
+
+describe("desktop refresh-token keychain", () => {
+  let bridge;
+  let storage;
+
+  function installBridge(overrides = {}) {
+    bridge = {
+      read: vi.fn().mockResolvedValue(null),
+      write: vi.fn().mockResolvedValue(undefined),
+      clear: vi.fn().mockResolvedValue(undefined),
+      ...overrides,
+    };
+    vi.stubGlobal("channelDesktop", { isDesktop: true, tokenStorage: bridge });
+    return bridge;
+  }
+
+  beforeEach(() => {
+    storage = {};
+    vi.stubGlobal("localStorage", {
+      getItem: (k) => storage[k] ?? null,
+      setItem: (k, v) => { storage[k] = v; },
+      removeItem: (k) => { delete storage[k]; },
+    });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  describe("in a browser (no bridge)", () => {
+    it("reads no refresh token — the web transport is the HttpOnly cookie", async () => {
+      expect(await readRefreshToken()).toBe("");
+    });
+
+    it("persists nothing and reports that it stored nothing", async () => {
+      expect(await saveRefreshToken("rt")).toBe(false);
+    });
+  });
+
+  describe("with an older preload that has no tokenStorage", () => {
+    // A desktop build predating #297 paired with a newer renderer. Must
+    // degrade to the access-token-only session, not throw on every call.
+    beforeEach(() => {
+      vi.stubGlobal("channelDesktop", { isDesktop: true });
+    });
+
+    it("reads no refresh token", async () => {
+      expect(await readRefreshToken()).toBe("");
+    });
+
+    it("persists nothing", async () => {
+      expect(await saveRefreshToken("rt")).toBe(false);
+    });
+  });
+
+  describe("on desktop", () => {
+    it("reads the refresh token out of the keychain", async () => {
+      installBridge({ read: vi.fn().mockResolvedValue({ refresh_token: "rt-7" }) });
+      expect(await readRefreshToken()).toBe("rt-7");
+    });
+
+    it.each([
+      ["an empty keychain", null],
+      ["a session with no refresh_token", { access_token: "x" }],
+      ["a non-string refresh_token", { refresh_token: 42 }],
+    ])("reads \"\" for %s", async (_label, stored) => {
+      installBridge({ read: vi.fn().mockResolvedValue(stored) });
+      expect(await readRefreshToken()).toBe("");
+    });
+
+    it("reads \"\" rather than throwing when the keychain read fails", async () => {
+      // Linux without libsecret, a revoked keychain entry, a corrupt
+      // file. All of them mean "nothing to present" — and a throw here
+      // would escape `performRefresh` before it ever reached the network.
+      installBridge({ read: vi.fn().mockRejectedValue(new Error("keychain locked")) });
+      expect(await readRefreshToken()).toBe("");
+    });
+
+    it("writes the refresh token through the bridge", async () => {
+      const b = installBridge();
+      expect(await saveRefreshToken("rt-8")).toBe(true);
+      expect(b.write).toHaveBeenCalledWith({ refresh_token: "rt-8" });
+      expect(b.clear).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["an empty string", ""],
+      ["undefined", undefined],
+      ["a non-string", 42],
+    ])("clears the file rather than storing %s", async (_label, value) => {
+      // A rotation that came back without a successor: the predecessor is
+      // already dead server-side, so keeping it would leave a credential
+      // that can never work again.
+      const b = installBridge();
+      expect(await saveRefreshToken(value)).toBe(false);
+      expect(b.clear).toHaveBeenCalled();
+      expect(b.write).not.toHaveBeenCalled();
+    });
+
+    it("never throws when the keychain write fails", async () => {
+      // The caller has already saved a good access token by this point;
+      // a rejection escaping would discard it and arm the cooldown.
+      installBridge({ write: vi.fn().mockRejectedValue(new Error("disk full")) });
+      expect(await saveRefreshToken("rt")).toBe(false);
+    });
+
+    it("drops the predecessor when the successor cannot be written", async () => {
+      // What is still on disk after a failed write is the token the
+      // server has ALREADY consumed (#290 hard-rotates). Re-presenting it
+      // reads as an RFC 9700 reuse breach and revokes the whole device
+      // family — a disk-full blip would sign the user out everywhere and
+      // look like an attack. Degrading to access-token-only is better.
+      const b = installBridge({ write: vi.fn().mockRejectedValue(new Error("disk full")) });
+      expect(await saveRefreshToken("rt-next")).toBe(false);
+      expect(b.clear).toHaveBeenCalledTimes(1);
+    });
+
+    it("survives a write failure whose cleanup also fails", async () => {
+      const b = installBridge({
+        write: vi.fn().mockRejectedValue(new Error("disk full")),
+        clear: vi.fn().mockRejectedValue(new Error("still disk full")),
+      });
+      expect(await saveRefreshToken("rt-next")).toBe(false);
+      expect(b.clear).toHaveBeenCalled();
+    });
+
+    it("clears the keychain on sign-out, not just localStorage", async () => {
+      const b = installBridge();
+      storage[TOKEN_KEY] = JSON.stringify({ access_token: makeToken(), expires_at: 1 });
+      clearSession();
+      expect(storage[TOKEN_KEY]).toBeUndefined();
+      expect(b.clear).toHaveBeenCalledTimes(1);
+    });
+
+    it("still completes sign-out when the keychain delete rejects", async () => {
+      const b = installBridge({ clear: vi.fn().mockRejectedValue(new Error("nope")) });
+      storage[TOKEN_KEY] = JSON.stringify({ access_token: makeToken(), expires_at: 1 });
+      expect(() => clearSession()).not.toThrow();
+      expect(storage[TOKEN_KEY]).toBeUndefined();
+      // Let the swallowed rejection settle so it cannot surface as an
+      // unhandled rejection in a later test.
+      await b.clear.mock.results[0].value.catch(() => {});
+    });
+
+    it("still completes sign-out when the bridge has no usable clear()", () => {
+      // A preload/renderer surface mismatch: `tokenStorage` is present
+      // but `clear` is missing or not a function, so the call throws
+      // synchronously — before there is a promise to `.catch`. Sign-out
+      // is best-effort and must finish regardless.
+      vi.stubGlobal("channelDesktop", { isDesktop: true, tokenStorage: { read: vi.fn() } });
+      storage[TOKEN_KEY] = JSON.stringify({ access_token: makeToken(), expires_at: 1 });
+      expect(() => clearSession()).not.toThrow();
+      expect(storage[TOKEN_KEY]).toBeUndefined();
+      expect(readToken()).toBe("");
+    });
   });
 });
