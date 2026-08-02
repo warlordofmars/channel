@@ -475,9 +475,11 @@ async def count_session_records(
 
     Used only for the ``withheld_record_count`` on sessions that failed
     :func:`resolve_owned_chats`. Deliberately returns an ``int`` and nothing
-    else: the count is the #474 collision signal worth surfacing, the
-    content is not ours to return. The AgentCore response is transient
-    within this call — never logged, never built into a
+    else: the count is the signal worth surfacing, the content is not ours
+    to return. Post-#485 that signal should read 0 — a non-zero value means
+    a partition anomaly or an orphaned session left by a failed
+    chat-delete wipe, both worth knowing. The AgentCore response is
+    transient within this call — never logged, never built into a
     :class:`MemoryRecord`, never sent to a client.
 
     Counts only the capped page, same as :func:`list_session_records` — so
