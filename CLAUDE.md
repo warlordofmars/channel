@@ -157,6 +157,29 @@ which is server-side, hard-rotated on every use, and revocable.
 `MGMT_JWT_TTL_SECONDS` was 8h originally, 30 days under #240 (a stop-gap
 while no refresh flow existed), and is 1h again as of #291.
 
+**`/auth/callback` mints the session's first refresh token (#292)** —
+bound to a server-side opaque `device_id` generated per sign-in (epic
+#241 Q2; never client-supplied). The web flow sets the `channel_refresh`
+cookie on the login-completion page; the desktop loopback redirect
+carries `{token, refresh_token}` in its query string. Minting is
+**fail-soft**: a storage failure logs loudly and degrades the session to
+access-token-only rather than turning a DynamoDB blip into a total login
+outage. The `?test_email=` and desktop-dev bypass shortcuts on
+`/auth/login` deliberately mint **no** refresh token — they run on every
+deployed non-prod stack, and the decision was to keep a bypass
+credential's blast radius at 1 hour rather than extend it to a 30-day
+family. Bypass logins therefore re-auth hourly.
+
+**`POST /auth/logout` revokes both credentials.** It denies the access
+token's `jti` (#240) *and* calls `revoke_refresh_token` on the presented
+refresh token, which kills the whole device family — not just the one
+row, so a successor minted by a concurrent rotation dies too. The token
+reaches it by cookie (web) or `{"refresh_token": ...}` body (desktop),
+body winning. The cookie is also cleared, but that is cosmetic next to
+the server-side revoke: clearing retires the browser's copy, not one
+already exfiltrated. All three writes are best-effort — a failure is
+logged, never stranding the visible logout.
+
 ### `POST /auth/refresh` (#291)
 
 Exchanges a refresh token for a fresh 1h access JWT, rotating the
@@ -166,11 +189,20 @@ the access JWT it renews has usually already expired.
 
 - **Transport is pluggable.** Web SPA: the token rides the
   `channel_refresh` cookie (`HttpOnly` + `Secure` + `SameSite=Strict`,
-  path-scoped to `/auth/refresh`, `Max-Age` pinned to the family's
+  path-scoped to `/auth`, `Max-Age` pinned to the family's
   `absolute_expires_at`) and the rotated successor goes back in a
   `Set-Cookie` — never in the response body. Desktop/mobile: the token
   arrives as `{"refresh_token": ...}` and the successor comes back in
   the JSON body. A body token wins over a stray cookie.
+  **Never re-spell the cookie's attributes** — `set_refresh_cookie` /
+  `clear_refresh_cookie` in `src/channel/auth/refresh.py` are the single
+  definition, shared by the mint (`mgmt_auth.py`), the rotation, and the
+  logout clear. `Path` + `Name` together are a cookie's identity, so a
+  mismatched `Path` silently *adds* a second cookie instead of replacing
+  the first. The path is `/auth`, not `/auth/refresh`, because
+  `/auth/logout` has to receive the cookie to revoke the family (#292);
+  it still keeps the cookie off every `/api/*` request, which is the
+  exposure the scoping exists to limit.
 - **CSRF**: a **non-empty** `X-Channel-Refresh` header is required; its
   content is never inspected, so send any non-empty string. (Empty is
   treated as absent — proxies and client stacks routinely strip empty
@@ -190,11 +222,11 @@ the access JWT it renews has usually already expired.
 - Response: `{access_token, token_type: "bearer", expires_in}` plus
   `refresh_token` on the body transport only.
 
-Still to land in epic #241: minting the first refresh token at login
-(#292), the sessions API (#293), rate limiting + EMF counters (#294),
-the SPA's silent-refresh wrapper (#295), and desktop `safeStorage`
-persistence (#297). **Until #292 lands, no refresh token is ever
-issued**, so the 1h access TTL means an hourly re-login.
+Still to land in epic #241: the sessions API (#293), rate limiting + EMF
+counters (#294), the SPA's silent-refresh wrapper (#295), and desktop
+`safeStorage` persistence (#297). **Until #295 lands the SPA does not
+call this endpoint**, so a web session still ends at the 1h access-token
+expiry even though the refresh token it needs is now issued (#292).
 
 ## DynamoDB single table design
 
@@ -219,7 +251,12 @@ issued**, so the 1h access TTL means an hourly re-login.
   `issued_at`, `last_used_at`, plus two independent expiry columns:
   `absolute_expires_at` (30 days, fixed at login, carried forward
   unchanged by every rotation) and `idle_expires_at` (7 days, renewed
-  on each rotation). `ttl` = `absolute_expires_at` as integer Unix
+  on each rotation). Optional `display_name` (#292) carries Google's
+  `name` claim — which reaches the server only at the OAuth callback —
+  forward across rotations the same way `absolute_expires_at` does, so a
+  refreshed access token stops degrading to the email's local-part;
+  absent on pre-#292 rows, where readers fall back to that local-part.
+  `ttl` = `absolute_expires_at` as integer Unix
   seconds so a whole token-family self-prunes together. Hard rotation:
   `consume_refresh_token` flips the presented row to `revoked=True` /
   `revoked_reason=rotated` via a **conditional `update_item`**

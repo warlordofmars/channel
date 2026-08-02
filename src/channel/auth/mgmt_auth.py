@@ -9,9 +9,26 @@ share state — the previous in-process dict broke under concurrent
 execution because the callback could hit a different warm container
 than the one that issued the state.
 
+Refresh tokens (#292, epic #241)
+--------------------------------
+``/auth/callback`` is where a session's *first* refresh token is minted.
+That matters more than it sounds: #291 cut the access token's TTL to one
+hour, and until this module started minting, ``mint_refresh_token``'s
+only production caller was ``consume_refresh_token`` rotating a family
+that nothing had ever created — so ``POST /auth/refresh`` could only
+ever 401 and every user was bounced back through Google hourly.
+
+Transport follows the client, mirroring ``/auth/refresh``'s own split:
+the web flow sets the ``HttpOnly`` cookie on the login-completion page,
+while the desktop loopback redirect carries ``{token, refresh_token}``
+in its query string (Electron persists it via ``safeStorage`` — #297).
+The cookie's attribute matrix lives in :mod:`channel.auth.refresh`, not
+here; this module drives it through ``set_refresh_cookie`` so the mint
+and the rotation cannot disagree.
+
 Routes:
   GET /auth/login    — redirect to Google (or issue bypass JWT in non-prod)
-  GET /auth/callback — handle Google callback, issue mgmt JWT
+  GET /auth/callback — handle Google callback, issue mgmt JWT + refresh token
 """
 
 from __future__ import annotations
@@ -35,10 +52,21 @@ from channel.auth.google import (
     verify_google_id_token,
 )
 from channel.auth.tokens import ISSUER, issue_mgmt_jwt
-from channel.logging_config import get_logger
+from channel.logging_config import fingerprint_id, get_logger
+from channel.models import RefreshToken
+from channel.storage import mint_refresh_token
 
 router = APIRouter(tags=["mgmt-auth"])
 logger = get_logger(__name__)
+
+# Entropy for the server-side opaque device id. Epic #241 Q2 settled
+# this in favour of a server-generated opaque value over anything
+# client-derived: a browser fingerprint is neither stable nor private,
+# and a client-supplied id would let a caller choose which token-family
+# its session joins. 128 bits is well past collision relevance inside a
+# single user's partition, which is the only scope the id is ever
+# compared in (``REFRESH_USER#{user_id}``).
+_DEVICE_ID_BYTES = 16
 
 # Opt-in ONLY on the exact string "1" — matching the repo's default-off
 # flag convention (CHANNEL_ENABLE_DEBUG_ENDPOINTS, CHANNEL_MCP_ALLOW_LOCALHOST,
@@ -125,6 +153,41 @@ def make_mgmt_user(email: str, display_name: str) -> dict[str, Any]:
         "display_name": display_name,
         "role": "admin" if is_admin_email(email) else "user",
     }
+
+
+def _mint_session_refresh_token(email: str, display_name: str) -> tuple[str, RefreshToken] | None:
+    """Mint this login's first refresh token, or ``None`` if minting failed.
+
+    Every sign-in starts a new token-family under a fresh opaque
+    ``device_id``. Signing in twice from the same browser therefore
+    produces two families, which #293's session list shows as two
+    entries — correct rather than a leak: the server has no
+    device-stable identifier it can trust, each family is independently
+    revocable, and both still die at their own 30-day ceiling. Binding
+    families to a long-lived device *cookie* instead would trade that
+    for a persistent tracking identifier, which is a worse deal.
+
+    **Fail-soft.** A minting failure degrades the session to
+    access-token-only — the user is signed in, just facing a re-login in
+    an hour — whereas raising would convert a DynamoDB blip into a total
+    login outage. That is the same best-effort posture ``/auth/logout``
+    takes for its denylist and audit writes, and the wrong-way-round
+    version of this trade is the more damaging one. The failure is
+    logged loudly; #294 adds the EMF counter that makes it alarmable.
+    """
+
+    try:
+        return mint_refresh_token(
+            user_id=email,
+            device_id=secrets.token_urlsafe(_DEVICE_ID_BYTES),
+            display_name=display_name,
+        )
+    except Exception:
+        logger.exception(
+            "auth.login refresh-token mint failed user=%s — session is access-token-only",
+            fingerprint_id(email),
+        )
+        return None
 
 
 @router.get("/auth/login", include_in_schema=False)
@@ -228,17 +291,38 @@ async def mgmt_callback(
     token = issue_mgmt_jwt(user)
     logger.info("Management login: %s (role=%s)", email, user["role"])
 
+    # Defense-in-depth: validate again at consume time. The same check ran
+    # at store time (mgmt_login), so failure here means the record was
+    # tampered with at rest or written by an unvalidated code path.
     desktop_callback = record.get("desktop_callback")
+    if desktop_callback and _validate_desktop_callback(desktop_callback) is None:
+        logger.warning("Stored desktop_callback failed re-validation: %r", desktop_callback)
+        raise HTTPException(status_code=400, detail="Invalid stored desktop_callback")
+
+    # Minted only after every rejection path above has been cleared, so a
+    # login that ends in a 400/403 never leaves an orphaned live row
+    # behind in the user's token partition.
+    minted = _mint_session_refresh_token(email, display_name)
+
     if desktop_callback:
-        # Defense-in-depth: validate again at consume time. The same check
-        # ran at store time (mgmt_login), so failure here means the record
-        # was tampered with at rest or written by an unvalidated code path.
-        if _validate_desktop_callback(desktop_callback) is None:
-            logger.warning("Stored desktop_callback failed re-validation: %r", desktop_callback)
-            raise HTTPException(status_code=400, detail="Invalid stored desktop_callback")
         from urllib.parse import urlencode
 
-        qs = urlencode({"token": token, "state": state})
+        params = {"token": token, "state": state}
+        if minted is not None:
+            # Loopback-only (``_validate_desktop_callback`` pins host and
+            # scheme), and the access token already rides the same query
+            # string, so this adds no transport the flow did not have.
+            params["refresh_token"] = minted[0]
+        qs = urlencode(params)
         return RedirectResponse(f"{desktop_callback}?{qs}", status_code=302)
 
-    return _html_redirect(token)
+    response = _html_redirect(token)
+    if minted is not None:
+        # Imported here, not at module scope: ``channel.auth.refresh``
+        # imports ``make_mgmt_user`` from this module, so a top-level
+        # import would close the cycle. The cookie's definition belongs
+        # with the endpoint that rotates it; only the call site lives here.
+        from channel.auth.refresh import set_refresh_cookie  # noqa: PLC0415
+
+        set_refresh_cookie(response, minted[0], minted[1].absolute_expires_at)
+    return response
