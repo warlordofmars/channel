@@ -35,14 +35,38 @@ Read `src/channel/auth/tokens.py`, `src/channel/auth/mgmt_auth.py`, `src/channel
 - Every non-public FastAPI endpoint must depend on `require_mgmt_user` (or equivalent auth dependency)
 - No `try/except` that swallows auth exceptions silently
 
+Auth is declared **per handler**, in the function signature, as
+`Depends(require_mgmt_user)` or `Depends(require_admin)`. No `APIRouter`
+in this codebase uses the router-level `dependencies=[...]` form — verify
+that is still true before trusting any check that assumes otherwise:
+
 ```bash
-# Find any route that lacks an auth dependency
-# Routers mount their auth as a router-level dependency, so check both the
-# APIRouter(...) construction and each decorated handler.
-grep -n "APIRouter(\|@router\." src/channel/api/*.py | grep -v "Depends"
+grep -rn "dependencies=" src/channel/api/ src/channel/auth/   # expect: no output
 ```
 
-Missing auth dependency on a non-public endpoint → **Critical**.
+Because the `Depends(...)` line therefore sits *below* the `@router.`
+decorator, **no single-line `grep ... | grep -v Depends` can judge a
+route** — it flags every correctly-authed handler. Print each decorator
+with the signature block that follows and read them:
+
+```bash
+grep -rn -A 12 "^@\(router\|callback_router\|app\)\.\(get\|post\|put\|delete\|patch\)" \
+  src/channel/api/*.py
+```
+
+A handler whose signature block contains neither `Depends(require_mgmt_user)`
+nor `Depends(require_admin)` is the finding — **unless** it is one of the
+three deliberately-public routes, which are the expected baseline:
+
+- `GET /health` (`api/main.py`)
+- the CSP violation report receiver (`api/csp.py`) — browsers post these unauthenticated
+- `GET /auth/mcp/callback` (`api/mcp.py`) — an OAuth callback, authenticated by its `state` parameter, not a bearer token
+
+Everything under `src/channel/auth/` is also public by design (that is
+where a caller goes to *obtain* credentials); audit those against §"Token
+issuance" instead.
+
+Any other endpoint missing an auth dependency → **Critical**.
 
 ### Token storage
 - Token items in DynamoDB must have `ttl` set as a Unix timestamp integer
@@ -88,7 +112,7 @@ endpoint to audit. Read `src/channel/mcp/auth.py`, `src/channel/mcp/crypto.py`
 and `src/channel/mcp/url_guard.py`.
 
 - MCP access/refresh tokens must be KMS-encrypted at the application layer before they reach DynamoDB — a plaintext token in an `MCPTOKEN#` row → **Critical**
-- `register_dynamic_client` must send an `https://` redirect URI; `http://localhost` only under the `CHANNEL_MCP_ALLOW_LOCALHOST` dev flag
+- The DCR redirect URI is **not** validated anywhere in `src/channel/mcp/` — it comes straight from `CHANNEL_MCP_REDIRECT_URI`, set to `https://{domain}/auth/mcp/callback` by `infra/stacks/channel_stack.py` and unconditionally to `http://localhost:8001/auth/mcp/callback` by `tasks.py` for local dev. Confirm the deployed stack still sets the `https://` form; a non-`https` value in a deployed env would carry the authorization code over plaintext → **High**
 - The URL guard must reject private/loopback/link-local targets on every server-side fetch (SSRF) — verify the guard runs on discovery, registration *and* token exchange, not just the first hop
 - PKCE must be required on the authorization-code exchange — no exchange without a `code_verifier`
 

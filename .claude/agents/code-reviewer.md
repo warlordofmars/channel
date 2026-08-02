@@ -205,7 +205,7 @@ Violations → `FAIL`.
 
 Any diff touching `src/channel/auth/` or files that import from it:
 
-- Tokens must not appear in response bodies except at `POST /auth/refresh`, which returns `access_token` always and `refresh_token` only on the body transport (desktop); the web transport puts the rotated refresh token in a `Set-Cookie`, never the body
+- Tokens must not appear in response bodies except at two known sites: `POST /auth/refresh`, which returns `access_token` always and `refresh_token` only on the body transport (desktop) — the web transport puts the rotated refresh token in a `Set-Cookie`, never the body — and `_html_redirect` in `src/channel/auth/mgmt_auth.py`, which deliberately embeds the mgmt JWT in a one-shot HTML page that writes it to `localStorage` (reached from `/auth/login` under the bypass and from `/auth/callback` on the web path). A token in any *other* response body → `FAIL`
 - No new endpoint bypasses `require_mgmt_user` without an explicit inline comment justifying the exception
 - No manual `jwt.decode()` call in new code — must use `decode_mgmt_jwt()` which validates `iss`, `typ`, and `exp`
 - `try/except` blocks around auth validation must not swallow exceptions silently
