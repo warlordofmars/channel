@@ -33,7 +33,7 @@ CHANNEL_JWT_SECRET=dev-secret uv run uvicorn channel.api.main:app --port 8001 --
 VITE_API_BASE=http://localhost:8001 npm run dev
 ```
 
-For the full local stack (DynamoDB Local + API + Vite in one process tree) prefer `uv run inv dev` from the repo root — see CLAUDE.md §"Running the full stack locally". The bare `uvicorn` command above starts the API alone, which is enough for UI work that doesn't hit DynamoDB.
+The bare `uvicorn` command above starts the API **alone** — no DynamoDB. That is enough to boot the app and serve `/health`, but not much more: the Google login path writes its OAuth state to DynamoDB (`state_store.put_state`), and every `/api/*` route reads or writes the table, so an unauthenticated static render is about the limit. For real work on `/app/*` prefer `uv run inv dev` from the repo root, which brings up DynamoDB Local + API + Vite together and sets `CHANNEL_BYPASS_GOOGLE_AUTH=1` for the `?test_email=` shortcut — see CLAUDE.md §"Running the full stack locally".
 
 ## Authentication
 
