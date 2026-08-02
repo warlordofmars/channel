@@ -590,7 +590,8 @@ auto-titling of fresh chats via a Haiku one-shot Agent (Phase 7d).
   digests imply equal inputs; distinct users can never share a
   partition. `src/channel/agents/memory.py` owns the ONE
   implementation — `recall.py`, `tools/memory_tools.py`, `api/chats.py`
-  (session wipe) and `api/_debug.py` all import it, pinned by
+  (session wipe), `api/_debug.py` and `api/memory.py` (the #475 read
+  model) all import it, pinned by
   `test_one_shared_derivation_across_every_call_site`. Values are
   storage keys: golden vectors in `tests/unit/test_memory.py` pin them
   permanently, and changing one orphans that user's stored memories.
