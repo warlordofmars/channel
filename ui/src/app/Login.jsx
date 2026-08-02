@@ -4,7 +4,7 @@ import { useNavigate } from "react-router-dom";
 import ChannelMark from "../components/ChannelMark.jsx";
 import GoogleG from "./GoogleG.jsx";
 import { useChannelPrefs } from "../hooks/useChannelPrefs.js";
-import { saveSession } from "../lib/auth.js";
+import { saveRefreshToken, saveSession } from "../lib/auth.js";
 
 /**
  * Centered Google sign-in card. The prototype simulates auth with a 1.2s
@@ -23,8 +23,9 @@ import { saveSession } from "../lib/auth.js";
  *
  * When `window.channelDesktop?.isDesktop` is truthy (Electron renderer), the
  * button calls `window.channelDesktop.login()` directly via the contextBridge
- * IPC instead of redirecting to /auth/login. On success the returned JWT is
- * stored in localStorage and the user is navigated to /app.
+ * IPC instead of redirecting to /auth/login. That resolves to
+ * `{token, refreshToken}`: the access token goes to localStorage, the refresh
+ * token to the OS keychain (#297), and the user is navigated to /app.
  */
 export default function Login() {
   const { theme } = useChannelPrefs();
@@ -42,12 +43,20 @@ export default function Login() {
   async function handleDesktopLogin() {
     setError(null);
     try {
-      const token = await desktop.login();
-      // The desktop loopback hands back the access token only; its
-      // expiry comes from the token's own `exp` claim. Persisting the
-      // refresh token that rides the same redirect is #297's job (OS
-      // keychain via `safeStorage`), never localStorage.
+      const { token, refreshToken } = await desktop.login();
+      // The access token's expiry comes from its own `exp` claim, so
+      // `saveSession` needs nothing else. It throws on a malformed token,
+      // which is why it runs first: there is no point storing a refresh
+      // credential for a session that never started, and the throw lands
+      // in the catch below as an ordinary "Login failed."
       saveSession(token);
+      // The refresh token rides the same loopback redirect (#292) and
+      // goes to the OS keychain via `safeStorage` (#297) — never
+      // localStorage. Empty when the server minted no family (the
+      // desktop-dev and `?test_email=` bypasses deliberately mint none),
+      // in which case this clears any predecessor and the session simply
+      // re-auths hourly as it did before.
+      await saveRefreshToken(refreshToken);
       navigate("/app");
     } catch (err) {
       const code = err?.message;

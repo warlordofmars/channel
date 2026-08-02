@@ -1457,9 +1457,9 @@ describe("silent refresh", () => {
   });
 
   it("keeps a still-valid token when the refresh is refused", async () => {
-    // The desktop app (until #297) and bypass logins have no refresh
-    // credential; /auth/refresh answers 401 for them by design. Signing
-    // them out here would evict them EARLIER than doing nothing at all.
+    // Bypass logins, and desktop sessions signed in before #297, have no
+    // refresh credential; /auth/refresh answers 401 for them by design.
+    // Signing them out here would evict them EARLIER than doing nothing.
     const token = jwt(60);
     storeSession(token, 60_000);
     route({ ok: false, status: 401, json: () => Promise.resolve({}) });
@@ -1624,5 +1624,107 @@ describe("silent refresh", () => {
     await pending;
     expect(refreshCalls()).toHaveLength(0);
     expect(apiCalls()[0][1].headers.Authorization).toBe(`Bearer ${token}`);
+  });
+
+  // -------------------------------------------------------------------------
+  // Desktop body transport (#297)
+  // -------------------------------------------------------------------------
+
+  describe("desktop body transport", () => {
+    let keychain;
+
+    function installKeychain(stored) {
+      keychain = {
+        read: vi.fn().mockResolvedValue(stored),
+        write: vi.fn().mockResolvedValue(undefined),
+        clear: vi.fn().mockResolvedValue(undefined),
+      };
+      vi.stubGlobal("channelDesktop", { isDesktop: true, tokenStorage: keychain });
+      return keychain;
+    }
+
+    it("sends the keychain's refresh token in the request body", async () => {
+      // Electron cannot present the HttpOnly cookie, so the token the OS
+      // keychain is holding travels in the body instead. This is the whole
+      // reason a desktop session stops dying at the 1h access-token expiry.
+      installKeychain({ refresh_token: "rt-desktop" });
+      storeSession("stale", 60_000);
+      route(refreshOk({ access_token: ROTATED, expires_in: 3600, refresh_token: "rt-next" }));
+      const api = await freshApi();
+      await api.listModels();
+
+      const [, init] = refreshCalls()[0];
+      expect(JSON.parse(init.body)).toEqual({ refresh_token: "rt-desktop" });
+      expect(init.headers["Content-Type"]).toBe("application/json");
+      expect(init.headers["X-Channel-Refresh"]).toBeTruthy();
+      expect(apiCalls()[0][1].headers.Authorization).toBe(`Bearer ${ROTATED}`);
+    });
+
+    it("persists the rotated successor back to the keychain", async () => {
+      const k = installKeychain({ refresh_token: "rt-desktop" });
+      storeSession("stale", 60_000);
+      route(refreshOk({ access_token: ROTATED, expires_in: 3600, refresh_token: "rt-next" }));
+      const api = await freshApi();
+      await api.listModels();
+
+      expect(k.write).toHaveBeenCalledWith({ refresh_token: "rt-next" });
+      // ...and never into localStorage, where any script in the renderer
+      // could read a 30-day credential.
+      expect(JSON.stringify(storage)).not.toContain("rt-next");
+    });
+
+    it("stores the successor BEFORE the access token", async () => {
+      // `saveSession` throws on a malformed access token. The presented
+      // refresh token is already dead server-side by then, so doing the
+      // access token first would strand a session whose only remaining
+      // long-lived credential was never written anywhere.
+      const k = installKeychain({ refresh_token: "rt-desktop" });
+      storeSession("stale", 60_000);
+      route(refreshOk({ access_token: "not-a-jwt", expires_in: 3600, refresh_token: "rt-next" }));
+      const api = await freshApi();
+      await api.listModels();
+
+      expect(k.write).toHaveBeenCalledWith({ refresh_token: "rt-next" });
+    });
+
+    it("clears the keychain when a rotation comes back without a successor", async () => {
+      const k = installKeychain({ refresh_token: "rt-desktop" });
+      storeSession("stale", 60_000);
+      route(refreshOk({ access_token: ROTATED, expires_in: 3600 }));
+      const api = await freshApi();
+      await api.listModels();
+
+      expect(k.clear).toHaveBeenCalled();
+      expect(k.write).not.toHaveBeenCalled();
+    });
+
+    it("falls back to the bodyless cookie shape when the keychain is empty", async () => {
+      // A desktop session signed in before #297, or one minted by a
+      // bypass login that deliberately mints no refresh family.
+      installKeychain(null);
+      storeSession("stale", 60_000);
+      route(refreshOk({ access_token: ROTATED, expires_in: 3600 }));
+      const api = await freshApi();
+      await api.listModels();
+
+      const [, init] = refreshCalls()[0];
+      expect(init.body).toBeUndefined();
+      expect(init.headers["Content-Type"]).toBeUndefined();
+    });
+
+    it("still collapses concurrent callers onto ONE rotation", async () => {
+      // Desktop reads the keychain before rotating, which puts an extra
+      // await ahead of the fetch — but the single-flight promise is
+      // assigned synchronously, so nothing can slip in behind it. #290
+      // would read a second rotation as a reuse breach and revoke the
+      // whole device family.
+      installKeychain({ refresh_token: "rt-desktop" });
+      storeSession("stale", 60_000);
+      route(refreshOk({ access_token: ROTATED, expires_in: 3600, refresh_token: "rt-next" }));
+      const api = await freshApi();
+
+      await Promise.all([api.listModels(), api.listModels(), api.listModels()]);
+      expect(refreshCalls()).toHaveLength(1);
+    });
   });
 });
