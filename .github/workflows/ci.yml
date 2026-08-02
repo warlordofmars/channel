@@ -14,6 +14,38 @@ concurrency:
 permissions:
   contents: read
 
+# ── Package-install hardening (#441) ──────────────────────────────────────────
+#
+# npm — every install is `npm ci --ignore-scripts`: versions come from the
+# committed package-lock.json, and no dependency lifecycle script runs on the
+# runner. Globally-installed CLIs are pinned to an exact version. See the note
+# on "Install desktop deps" for why skipping lifecycle scripts is safe for the
+# Electron toolchain, which is the usual place --ignore-scripts bites.
+#
+# uv — UV_LOCKED below makes every uv invocation in this workflow assert the
+# committed uv.lock, and each `uv run` additionally passes `--no-sync
+# --no-build` so it can only execute, never install.
+#
+# `--no-build` deliberately does NOT appear on the `uv sync` install steps.
+# Those install this repo's own `channel` package from source (editable, with
+# its version derived from git by hatch-vcs), and uv refuses that combination:
+#
+#   error: Distribution `channel @ editable+.` can't be installed because it
+#          is marked as `--no-build` but has no binary distribution
+#
+# uv has no flag that exempts the first-party project from `--no-build`
+# (`--no-build-package` adds packages to the restriction rather than exempting
+# them), and the failure is identical for `uv sync`, `uv run` and
+# `uv pip install --editable .`. The part of that guarantee that actually
+# carries supply-chain risk — third-party packages — is asserted instead by
+# the "Assert dependencies install from wheels only" step in the `audit` job.
+env:
+  # Equivalent to passing `--locked` to every uv command in this workflow. Set
+  # here rather than only per-command so a newly added step cannot forget it,
+  # and because the `uv sync` steps cannot carry the flag inline without also
+  # re-raising the unavoidable `--no-build` finding described above.
+  UV_LOCKED: "1"
+
 # ── CI jobs (run on every push and PR) ────────────────────────────────────────
 
 jobs:
@@ -28,19 +60,21 @@ jobs:
           version: "latest"
 
       - name: Install dependencies
+        # `--no-build` is not applicable here — see the package-install
+        # hardening note at the top of this file.
         run: uv sync --all-extras
 
       - name: Ruff lint
-        run: uv run ruff check src tests
+        run: uv run --locked --no-sync --no-build ruff check src tests
 
       - name: Ruff format check
-        run: uv run ruff format --check src tests
+        run: uv run --locked --no-sync --no-build ruff format --check src tests
 
       - name: mypy
-        run: uv run mypy src/channel
+        run: uv run --locked --no-sync --no-build mypy src/channel
 
       - name: Copyright headers
-        run: uv run python scripts/check_copyright.py
+        run: uv run --locked --no-sync --no-build python scripts/check_copyright.py
 
 
   audit:
@@ -62,14 +96,27 @@ jobs:
         with:
           node-version: "20"
           cache: "npm"
-          cache-dependency-path: ui/package.json
+          cache-dependency-path: ui/package-lock.json
+
+      # Supply-chain tripwire for the `--no-build` gap described at the top of
+      # this file. Every dependency in uv.lock resolves to a wheel today, so no
+      # third-party build backend executes anywhere in this workflow. This step
+      # asserts that stays true: it plans a dependency-only install under
+      # `--no-build` and fails the moment a dependency stops shipping a wheel —
+      # which is the moment its build backend would start running on a runner.
+      # `--dry-run` neither creates nor mutates a virtualenv, so this has to
+      # run BEFORE the real install below to be meaningful.
+      - name: Assert dependencies install from wheels only
+        run: uv sync --locked --all-extras --group infra --no-build --no-install-project --dry-run
 
       - name: Install Python dependencies
+        # `--no-build` is not applicable here — see the package-install
+        # hardening note at the top of this file.
         run: uv sync --all-extras
 
       - name: Install Node dependencies
         working-directory: ui
-        run: npm install
+        run: npm ci --ignore-scripts
 
       - name: pip-audit
         # CVE-2026-3219 / CVE-2026-6357 / PYSEC-2026-196 all affect the pip
@@ -83,7 +130,7 @@ jobs:
         # Channel signs mgmt JWTs with HS256 (HMAC), never ECDSA, so the
         # vulnerable signing/keygen paths are unused at runtime; signature
         # verification is unaffected per the advisory.
-        run: uv run pip-audit --skip-editable --ignore-vuln CVE-2026-3219 --ignore-vuln CVE-2026-6357 --ignore-vuln PYSEC-2026-196 --ignore-vuln PYSEC-2026-1325
+        run: uv run --locked --no-sync --no-build pip-audit --skip-editable --ignore-vuln CVE-2026-3219 --ignore-vuln CVE-2026-6357 --ignore-vuln PYSEC-2026-196 --ignore-vuln PYSEC-2026-1325
 
       - name: npm audit
         working-directory: ui
@@ -141,16 +188,18 @@ jobs:
         # ``--group infra`` pulls aws-cdk-lib/constructs/cdk-nag so the
         # CDK-template assertion tests in tests/unit/test_channel_stack.py
         # can synth ChannelStack without ImportError.
+        # `--no-build` is not applicable here — see the package-install
+        # hardening note at the top of this file.
         run: uv sync --all-extras --group infra
 
       - name: Run unit tests with coverage
-        run: uv run pytest tests/unit -v --cov=src/channel --cov-report=xml:coverage-unit.xml
+        run: uv run --locked --no-sync --no-build pytest tests/unit -v --cov=src/channel --cov-report=xml:coverage-unit.xml
 
       - name: Write coverage summary
         if: always()
         run: |
           echo "## Unit Test Coverage" >> $GITHUB_STEP_SUMMARY
-          uv run coverage report --format=markdown >> $GITHUB_STEP_SUMMARY
+          uv run --locked --no-sync --no-build coverage report --format=markdown >> $GITHUB_STEP_SUMMARY
 
       - name: Upload unit coverage artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -177,6 +226,8 @@ jobs:
         # See note in unit-tests job — ``--group infra`` is needed for
         # the CDK-template assertion test that runs in this combined
         # unit + integration run.
+        # `--no-build` is not applicable here — see the package-install
+        # hardening note at the top of this file.
         run: uv sync --all-extras --group infra
 
       - name: Run combined unit + integration tests with coverage
@@ -187,13 +238,13 @@ jobs:
           AWS_DEFAULT_REGION: us-east-1
           CHANNEL_JWT_SECRET: test-secret
           CHANNEL_TABLE_NAME: channel-integration
-        run: uv run pytest tests/unit tests/integration -v --cov=src/channel --cov-report=xml:coverage-combined.xml --cov-fail-under=100
+        run: uv run --locked --no-sync --no-build pytest tests/unit tests/integration -v --cov=src/channel --cov-report=xml:coverage-combined.xml --cov-fail-under=100
 
       - name: Write coverage summary
         if: always()
         run: |
           echo "## Combined Test Coverage" >> $GITHUB_STEP_SUMMARY
-          uv run coverage report --format=markdown >> $GITHUB_STEP_SUMMARY
+          uv run --locked --no-sync --no-build coverage report --format=markdown >> $GITHUB_STEP_SUMMARY
 
       - name: Upload combined coverage artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -419,10 +470,10 @@ jobs:
         with:
           node-version: "20"
           cache: "npm"
-          cache-dependency-path: ui/package.json
+          cache-dependency-path: ui/package-lock.json
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci --ignore-scripts
 
       - name: Run vitest with coverage
         run: npm run test:coverage -- --reporter=verbose
@@ -432,7 +483,7 @@ jobs:
 
       - name: Build docs site
         working-directory: docs-site
-        run: npm install && npm run build
+        run: npm ci --ignore-scripts && npm run build
 
       - name: Write JS coverage summary
         if: always()
@@ -533,14 +584,24 @@ jobs:
         shell: bash
         run: |
           cd ui
-          npm ci
+          npm ci --ignore-scripts
           VITE_API_BASE=${{ steps.api-base.outputs.url }} npm run build
 
       - name: Install desktop deps
         shell: bash
+        # --ignore-scripts is safe for the Electron toolchain, which is the
+        # usual place it bites. `electron` 42 declares no lifecycle scripts
+        # at all — its `index.js` downloads the dev binary lazily on first
+        # `require`, and the packaging step below doesn't use that binary
+        # anyway (electron-builder fetches its own per-platform dist).
+        # `esbuild` finds its native binary through its optional
+        # `@esbuild/<platform>` dependency, and the only other install-script
+        # package in the tree, `fsevents`, is macOS-only, optional, and ships
+        # a prebuilt binding. Verified end to end locally: install →
+        # test:coverage → build:main → build:renderer → electron-builder.
         run: |
           cd desktop
-          npm ci
+          npm ci --ignore-scripts
 
       - name: Desktop unit tests + 100% coverage gate
         shell: bash
@@ -667,9 +728,11 @@ jobs:
           node-version: "20"
 
       - name: Install CDK
-        run: npm install -g aws-cdk
+        run: npm install -g --ignore-scripts aws-cdk@2.1134.0
 
       - name: Install Python dependencies
+        # `--no-build` is not applicable here — see the package-install
+        # hardening note at the top of this file.
         run: uv sync --group dev --group infra
 
       - name: Synth prod stack
@@ -801,12 +864,12 @@ jobs:
         shell: bash
         run: |
           cd ui
-          npm ci
+          npm ci --ignore-scripts
           VITE_API_BASE=https://${{ steps.env.outputs.domain }} npm run build
 
       - name: Install desktop deps
         working-directory: desktop
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       - name: Build + sign + notarise
         working-directory: desktop
@@ -980,7 +1043,7 @@ jobs:
         with:
           node-version: "20"
           cache: "npm"
-          cache-dependency-path: ui/package.json
+          cache-dependency-path: ui/package-lock.json
 
       - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
@@ -989,9 +1052,11 @@ jobs:
           aws-region: us-east-1
 
       - name: Install CDK
-        run: npm install -g aws-cdk
+        run: npm install -g --ignore-scripts aws-cdk@2.1134.0
 
       - name: Install Python dependencies
+        # `--no-build` is not applicable here — see the package-install
+        # hardening note at the top of this file.
         run: uv sync --group dev --group infra
 
       - name: Build React UI
@@ -1005,17 +1070,17 @@ jobs:
           # consistent with the deployed bundle in case the deploy
           # task ever drops the rebuild.
           VITE_RELEASE_CHANNEL: dev
-        run: npm install && npm run build
+        run: npm ci --ignore-scripts && npm run build
 
       - name: Build docs site
         working-directory: docs-site
-        run: npm install && npm run build
+        run: npm ci --ignore-scripts && npm run build
 
       - name: Deploy dev stack
         env:
           VITE_GA_MEASUREMENT_ID: ${{ secrets.VITE_GA_MEASUREMENT_ID }}
           VITE_RELEASE_CHANNEL: dev
-        run: uv run inv deploy --env dev
+        run: uv run --locked --no-sync --no-build inv deploy --env dev
 
       - name: Export stack URLs
         id: urls
@@ -1080,6 +1145,8 @@ jobs:
           version: "latest"
 
       - name: Install dependencies
+        # `--no-build` is not applicable here — see the package-install
+        # hardening note at the top of this file.
         run: uv sync --all-extras
 
       # The six per-suite e2e test files (test_auth_e2e.py, test_mcp_e2e.py,
@@ -1164,6 +1231,8 @@ jobs:
           version: "latest"
 
       - name: Install dependencies
+        # `--no-build` is not applicable here — see the package-install
+        # hardening note at the top of this file.
         run: uv sync --group dev
 
       - name: Infer version and create release
@@ -1171,7 +1240,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          VERSION=$(uv run inv version)
+          VERSION=$(uv run --locked --no-sync --no-build inv version)
           TAG="v$VERSION"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
@@ -1213,7 +1282,7 @@ jobs:
           # Prefer the curated CHANGELOG section as the release body; fall
           # back to auto-generated notes if no section exists yet (e.g. an
           # automated release for a version that wasn't pre-curated).
-          uv run python scripts/extract_changelog.py "$VERSION" > release-notes.md
+          uv run --locked --no-sync --no-build python scripts/extract_changelog.py "$VERSION" > release-notes.md
           if [ -s release-notes.md ]; then
             echo "Using curated CHANGELOG.md section as release body"
             gh release create "$TAG" --title "$TAG" --notes-file release-notes.md
@@ -1249,7 +1318,7 @@ jobs:
         with:
           node-version: "20"
           cache: "npm"
-          cache-dependency-path: ui/package.json
+          cache-dependency-path: ui/package-lock.json
 
       - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
@@ -1258,9 +1327,11 @@ jobs:
           aws-region: us-east-1
 
       - name: Install CDK
-        run: npm install -g aws-cdk
+        run: npm install -g --ignore-scripts aws-cdk@2.1134.0
 
       - name: Install Python dependencies
+        # `--no-build` is not applicable here — see the package-install
+        # hardening note at the top of this file.
         run: uv sync --group dev --group infra
 
       - name: Build React UI
@@ -1273,18 +1344,18 @@ jobs:
           # also the Download.jsx default when the var is unset, but
           # making it explicit keeps the per-env split visible in CI.
           VITE_RELEASE_CHANNEL: latest
-        run: npm install && npm run build
+        run: npm ci --ignore-scripts && npm run build
 
       - name: Build docs site
         working-directory: docs-site
-        run: npm install && npm run build
+        run: npm ci --ignore-scripts && npm run build
 
       - name: Deploy prod stack
         env:
           APP_VERSION: ${{ needs.release.outputs.version }}
           VITE_GA_MEASUREMENT_ID: ${{ secrets.VITE_GA_MEASUREMENT_ID }}
           VITE_RELEASE_CHANNEL: latest
-        run: uv run inv deploy --env prod
+        run: uv run --locked --no-sync --no-build inv deploy --env prod
 
       - name: Export stack URLs
         id: urls
@@ -1348,6 +1419,8 @@ jobs:
           version: "latest"
 
       - name: Install dependencies
+        # `--no-build` is not applicable here — see the package-install
+        # hardening note at the top of this file.
         run: uv sync --all-extras
 
       # All e2e tests require CHANNEL_BYPASS_GOOGLE_AUTH which is dev-only.
@@ -1422,12 +1495,14 @@ jobs:
           version: "latest"
 
       - name: Install dependencies
+        # `--no-build` is not applicable here — see the package-install
+        # hardening note at the top of this file.
         run: uv sync --group dev
 
       - name: Create back-merge PR
         env:
           GH_TOKEN: ${{ github.token }}
-        run: uv run inv back-merge
+        run: uv run --locked --no-sync --no-build inv back-merge
 
       - name: Check back-merge PR for conflicts
         id: conflict_check
