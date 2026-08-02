@@ -5,15 +5,17 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from channel.auth.tokens import decode_mgmt_jwt
+from channel.logging_config import fingerprint_id, set_client_id
 
 _bearer = HTTPBearer()
 
 
 def require_mgmt_user(
+    request: Request,
     credentials: HTTPAuthorizationCredentials = Depends(_bearer),
 ) -> dict[str, Any]:
     """Validate a management JWT and return its claims.
@@ -31,13 +33,30 @@ def require_mgmt_user(
     here: it propagates as a 500, consistent with how every other
     DDB-backed endpoint surfaces storage errors, and deliberately never
     degrades to "not revoked".
+
+    Side effect (#111): the authenticated caller's ``client_id`` is
+    published two ways so every log line of the request can carry it —
+    the ContextVar (read by the JSON formatter for lines emitted inside
+    this request's task) and ``request.state`` (read by the completion
+    line in ``api.main._log_requests``, which runs in the outer
+    middleware task where the ContextVar write is not visible). The
+    value is a :func:`fingerprint_id` digest, never the raw JWT ``sub``
+    — the sub is the user's email address, and log sinks are not a place
+    for PII. Set only after the decode succeeds, so a rejected token
+    never stamps an identity onto the request.
     """
     from jose import JWTError
 
     try:
-        return decode_mgmt_jwt(credentials.credentials)
+        claims = decode_mgmt_jwt(credentials.credentials)
     except JWTError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
+
+    if sub := claims.get("sub"):
+        client_id = fingerprint_id(str(sub))
+        request.state.client_id = client_id
+        set_client_id(client_id)
+    return claims
 
 
 def require_admin(

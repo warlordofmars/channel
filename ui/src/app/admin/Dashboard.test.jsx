@@ -73,6 +73,14 @@ function metricsBlock(overrides = {}) {
     "AssetLazyExpiryReapFailures",
     "ToolCallSuccesses",
     "ToolCallFailures",
+    // Request-level SLIs (#111).
+    "RequestCount",
+    "Request4xxCount",
+    "Request5xxCount",
+    "BedrockTokensIn",
+    "BedrockTokensOut",
+    "BedrockErrors",
+    "BedrockThrottles",
     "FollowupGenSuccesses",
     "FollowupGenFailures",
     "CSPViolations",
@@ -96,6 +104,8 @@ function summaryFixture() {
         MemoryToolWriteSuccesses: 15,
         MemoryToolRecallSuccesses: 8,
         MemoryToolRecallFailures: 2,
+        RequestCount: 4821,
+        Request5xxCount: 7,
       }),
     },
     "7d": {
@@ -169,6 +179,9 @@ describe("Dashboard", () => {
     // #400 tool tiles are separate from the hook tiles above.
     expect(today.getByText("15")).toBeTruthy(); // MemoryToolWriteSuccesses
     expect(today.getByText("80%")).toBeTruthy(); // tool recall: 8 / (8 + 2)
+    // #111 request SLIs — the card is no longer memory-hooks-only.
+    expect(today.getByText("4821")).toBeTruthy(); // RequestCount
+    expect(today.getByText("7")).toBeTruthy(); // Request5xxCount
 
     // Zero-denominator recall renders an em dash rather than "0%".
     const thirty = within(screen.getByTestId("rollup-30d"));
@@ -182,6 +195,8 @@ describe("Dashboard", () => {
     expect(today.getByText("Auto-titles")).toBeTruthy();
     expect(today.getByText("Tool saves")).toBeTruthy();
     expect(today.getByText("Tool recall")).toBeTruthy();
+    expect(today.getByText("Requests")).toBeTruthy();
+    expect(today.getByText("5xx responses")).toBeTruthy();
   });
 
   it("shows the loading state while the summary fetch is in flight", async () => {

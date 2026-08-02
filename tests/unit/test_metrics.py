@@ -524,3 +524,194 @@ def test_record_mcp_tool_result_truncated_signature_locks_out_dimensions():
 
     sig = inspect.signature(record_mcp_tool_result_truncated)
     assert list(sig.parameters.keys()) == []
+
+
+# ----------------------------------------------------------------
+# Request + Bedrock SLIs (#111)
+# ----------------------------------------------------------------
+
+
+def _batch_call(mock_batch):
+    """(metrics, dimension_sets) from a single ``_emit_batch`` await."""
+    mock_batch.assert_awaited_once()
+    args, kwargs = mock_batch.await_args
+    metrics = kwargs.get("metrics", args[0] if args else None)
+    dimension_sets = kwargs.get("dimension_sets", args[1] if len(args) > 1 else None)
+    return metrics, dimension_sets
+
+
+@pytest.mark.asyncio
+async def test_record_request_outcome_emits_count_and_latency():
+    from channel.metrics import record_request_outcome
+
+    with patch("channel.metrics._emit_batch", new=AsyncMock()) as mock_batch:
+        await record_request_outcome(route="/api/models", status_code=200, duration_ms=12.5)
+
+    metrics, _ = _batch_call(mock_batch)
+    assert metrics == [
+        ("RequestCount", 1.0, "Count"),
+        ("RequestLatencyMs", 12.5, "Milliseconds"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_record_request_outcome_latency_unit_is_milliseconds():
+    """The issue body parenthesised "Microseconds"; the ``Ms`` suffix, the
+    ``duration_ms`` log field and the existing ``StorageLatencyMs``
+    convention all say milliseconds. Pinned so the unit can't drift."""
+    from channel.metrics import record_request_outcome
+
+    with patch("channel.metrics._emit_batch", new=AsyncMock()) as mock_batch:
+        await record_request_outcome(route="/health", status_code=200, duration_ms=1.0)
+
+    metrics, _ = _batch_call(mock_batch)
+    assert dict((name, unit) for name, _v, unit in metrics)["RequestLatencyMs"] == "Milliseconds"
+
+
+@pytest.mark.asyncio
+async def test_record_request_outcome_counts_4xx_only_for_4xx():
+    from channel.metrics import record_request_outcome
+
+    with patch("channel.metrics._emit_batch", new=AsyncMock()) as mock_batch:
+        await record_request_outcome(route="/api/chats", status_code=404, duration_ms=3.0)
+
+    metrics, _ = _batch_call(mock_batch)
+    names = [name for name, _v, _u in metrics]
+    assert "Request4xxCount" in names
+    assert "Request5xxCount" not in names
+
+
+@pytest.mark.asyncio
+async def test_record_request_outcome_counts_5xx_only_for_5xx():
+    from channel.metrics import record_request_outcome
+
+    with patch("channel.metrics._emit_batch", new=AsyncMock()) as mock_batch:
+        await record_request_outcome(route="/api/chats", status_code=503, duration_ms=3.0)
+
+    metrics, _ = _batch_call(mock_batch)
+    names = [name for name, _v, _u in metrics]
+    assert "Request5xxCount" in names
+    assert "Request4xxCount" not in names
+
+
+@pytest.mark.asyncio
+async def test_record_request_outcome_emits_aggregate_and_route_dimension_sets():
+    from channel.metrics import ENVIRONMENT, record_request_outcome
+
+    with patch("channel.metrics._emit_batch", new=AsyncMock()) as mock_batch:
+        await record_request_outcome(route="/api/chats/{chat_id}", status_code=200, duration_ms=5.0)
+
+    _metrics, dimension_sets = _batch_call(mock_batch)
+    assert dimension_sets == [
+        {"Environment": ENVIRONMENT},
+        {"Environment": ENVIRONMENT, "Route": "/api/chats/{chat_id}"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_record_request_outcome_route_dimension_kill_switch(monkeypatch):
+    """``CHANNEL_REQUEST_ROUTE_DIMENSION_ENABLED=0`` drops the per-route
+    breakdown, leaving the aggregate series alarms and the admin readback
+    consume untouched."""
+    from channel.metrics import ENVIRONMENT, record_request_outcome
+
+    monkeypatch.setenv("CHANNEL_REQUEST_ROUTE_DIMENSION_ENABLED", "0")
+    with patch("channel.metrics._emit_batch", new=AsyncMock()) as mock_batch:
+        await record_request_outcome(route="/api/models", status_code=200, duration_ms=5.0)
+
+    _metrics, dimension_sets = _batch_call(mock_batch)
+    assert dimension_sets == [{"Environment": ENVIRONMENT}]
+
+
+def test_record_request_outcome_signature_locks_out_dimensions():
+    """``Route`` is the ONLY dimension this module permits, and it is
+    permitted solely because it is a build-time-bounded enum (the mounted
+    route templates + one fallback). The signature must therefore expose no
+    ``**dimensions`` escape hatch for a per-actor / per-chat value."""
+    from channel.metrics import record_request_outcome
+
+    sig = inspect.signature(record_request_outcome)
+    assert list(sig.parameters.keys()) == ["route", "status_code", "duration_ms"]
+    assert all(p.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD for p in sig.parameters.values())
+
+
+@pytest.mark.asyncio
+async def test_record_request_outcome_end_to_end_does_not_raise():
+    """Exercises the real ``_emit_batch`` (stdout sink outside Lambda)."""
+    from channel.metrics import record_request_outcome
+
+    await record_request_outcome(route="/health", status_code=200, duration_ms=1.0)
+
+
+@pytest.mark.asyncio
+async def test_record_bedrock_turn_success_emits_latency_and_tokens():
+    from channel.metrics import ENVIRONMENT, record_bedrock_turn
+
+    with patch("channel.metrics._emit_batch", new=AsyncMock()) as mock_batch:
+        await record_bedrock_turn(duration_ms=1500.0, input_tokens=100, output_tokens=42)
+
+    metrics, dimension_sets = _batch_call(mock_batch)
+    assert metrics == [
+        ("BedrockLatencyMs", 1500.0, "Milliseconds"),
+        ("BedrockTokensIn", 100.0, "Count"),
+        ("BedrockTokensOut", 42.0, "Count"),
+    ]
+    assert dimension_sets == [{"Environment": ENVIRONMENT}]
+
+
+@pytest.mark.asyncio
+async def test_record_bedrock_turn_non_throttle_error_counts_errors_only():
+    from channel.metrics import record_bedrock_turn
+
+    with patch("channel.metrics._emit_batch", new=AsyncMock()) as mock_batch:
+        await record_bedrock_turn(
+            duration_ms=10.0, input_tokens=0, output_tokens=0, error_code="bedrock_timeout"
+        )
+
+    metrics, _ = _batch_call(mock_batch)
+    names = [name for name, _v, _u in metrics]
+    assert "BedrockErrors" in names
+    assert "BedrockThrottles" not in names
+
+
+@pytest.mark.asyncio
+async def test_record_bedrock_turn_throttle_counts_both():
+    """The #391 ``bedrock_throttled`` classification finally becomes a
+    metric: a quota wall must be distinguishable from a bug."""
+    from channel.metrics import record_bedrock_turn
+
+    with patch("channel.metrics._emit_batch", new=AsyncMock()) as mock_batch:
+        await record_bedrock_turn(
+            duration_ms=10.0, input_tokens=0, output_tokens=0, error_code="bedrock_throttled"
+        )
+
+    metrics, _ = _batch_call(mock_batch)
+    names = [name for name, _v, _u in metrics]
+    assert names.count("BedrockErrors") == 1
+    assert names.count("BedrockThrottles") == 1
+
+
+def test_record_bedrock_turn_signature_locks_out_dimensions():
+    """``error_code`` is a branch selector, never a dimension — so the
+    ``_STREAM_ERROR_MAP`` code set can grow without multiplying metrics.
+    No ``**dimensions`` escape hatch, no per-actor / per-chat / per-model
+    parameter."""
+    from channel.metrics import record_bedrock_turn
+
+    sig = inspect.signature(record_bedrock_turn)
+    assert list(sig.parameters.keys()) == [
+        "duration_ms",
+        "input_tokens",
+        "output_tokens",
+        "error_code",
+    ]
+    assert sig.parameters["error_code"].default is None
+
+
+@pytest.mark.asyncio
+async def test_record_bedrock_turn_end_to_end_does_not_raise():
+    from channel.metrics import record_bedrock_turn
+
+    await record_bedrock_turn(
+        duration_ms=1.0, input_tokens=1, output_tokens=1, error_code="bedrock_throttled"
+    )

@@ -157,6 +157,30 @@ def test_memory_tool_counters_are_allowlisted() -> None:
     assert tool_counters.isdisjoint({"MemoryWriteSuccesses", "MemoryWriteFailures"})
 
 
+def test_request_and_bedrock_counters_are_allowlisted() -> None:
+    """#111: the request-level and Bedrock SLIs must be readable from the
+    admin dashboard, so it reflects real traffic rather than only
+    agent-internal hook activity."""
+    assert {
+        "RequestCount",
+        "Request4xxCount",
+        "Request5xxCount",
+        "BedrockTokensIn",
+        "BedrockTokensOut",
+        "BedrockErrors",
+        "BedrockThrottles",
+    }.issubset(set(_METRIC_ALLOWLIST))
+
+
+def test_latency_distributions_are_not_allowlisted() -> None:
+    """This endpoint hardcodes ``Stat: "Sum"``. Summing a latency
+    distribution yields a number with no meaning, so the ``*LatencyMs``
+    metrics deliberately stay off the allowlist — percentiles live on the
+    CloudWatch dashboard, which can name a statistic."""
+    assert "RequestLatencyMs" not in _METRIC_ALLOWLIST
+    assert "BedrockLatencyMs" not in _METRIC_ALLOWLIST
+
+
 def test_timeseries_accepts_memory_tool_metric(cloudwatch_stub: Any, frozen_now: datetime) -> None:
     """#400: a tool-driven counter is a valid timeseries metric (not a 422)."""
     cloudwatch_stub.add_response(

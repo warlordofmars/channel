@@ -17,6 +17,7 @@ import logging
 import math
 import os
 import re
+import time
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
@@ -72,6 +73,7 @@ from channel.mcp.transports import make_authenticated_transport
 from channel.mcp.url_guard import validate_mcp_server_url
 from channel.metrics import (
     record_auto_title_outcome,
+    record_bedrock_turn,
     record_chat_delete_asset_wipe_outcome,
     record_chat_delete_attachment_wipe_outcome,
     record_chat_delete_memory_wipe_outcome,
@@ -1327,6 +1329,11 @@ async def _stream_bedrock_reply(
     # (a) the guard's one-shot consume if the chain ran another tool
     # call during the cancellation window, or (b) the entry-time clear
     # at the top of this function on the NEXT turn for the same chat.
+    #
+    # #111 — wall clock for the BedrockLatencyMs SLI. Started here rather
+    # than at function entry so the measurement covers the model turn
+    # itself, not the DDB history load and MCP client construction above.
+    bedrock_t0 = time.monotonic()
     try:
         async for wrapped_kind, event in _events_with_keepalive(
             agent.stream_async(user_payload), keepalive_interval
@@ -1433,6 +1440,23 @@ async def _stream_bedrock_reply(
             input_tokens,
             output_tokens,
         )
+
+    # #111 — one BedrockLatencyMs / BedrockTokensIn / BedrockTokensOut
+    # datapoint per turn, plus BedrockErrors (+ BedrockThrottles) when the
+    # turn failed. Emitted here, after the empty-stream check has had its
+    # say, so an "empty terminal stream" counts as the failure it is. The
+    # client-disconnect path re-raises above and never reaches this line —
+    # a cancelled turn is not a Bedrock error. Fail-soft: a metrics
+    # problem must not turn a good turn into a broken one.
+    try:
+        await record_bedrock_turn(
+            duration_ms=(time.monotonic() - bedrock_t0) * 1000,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            error_code=stream_error[0] if stream_error is not None else None,
+        )
+    except Exception:
+        logger.warning("bedrock turn metric emission failed", exc_info=True)
 
     if stream_error is not None:
         code, user_safe_message, retryable = stream_error

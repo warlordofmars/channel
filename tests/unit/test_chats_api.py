@@ -5149,3 +5149,132 @@ def test_collect_code_exec_images_ignores_empty_images_list() -> None:
         sink,
     )
     assert sink == []
+
+
+# ----------------------------------------------------------------
+# Bedrock turn SLIs (#111)
+# ----------------------------------------------------------------
+
+
+@pytest.fixture
+def bedrock_metric_recorder(monkeypatch: pytest.MonkeyPatch):
+    """Capture ``record_bedrock_turn`` at the chats-module boundary."""
+    from unittest.mock import AsyncMock
+
+    recorded = AsyncMock()
+    monkeypatch.setattr("channel.api.chats.record_bedrock_turn", recorded)
+    return recorded
+
+
+def test_post_message_records_bedrock_turn_metrics_on_success(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, bedrock_metric_recorder
+) -> None:
+    """Every completed turn publishes latency + token counts, so the
+    CloudWatch Bedrock widgets have a denominator to divide by."""
+    _stub_storage_capturing_persistence(monkeypatch)
+    monkeypatch.setenv("CHANNEL_FOLLOWUPS_ENABLED", "0")
+
+    async def fake_stream(self, prompt):
+        yield {"event": {"contentBlockDelta": {"delta": {"text": "hello"}}}}
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+        yield {"event": {"metadata": {"usage": {"inputTokens": 77, "outputTokens": 5}}}}
+
+    class FakeAgent:
+        stream_async = fake_stream
+
+    monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
+
+    response = client.post(
+        "/api/chats/c1/messages",
+        json={"message": "hi", "model": "claude-sonnet-4-6"},
+    )
+    assert response.status_code == 200
+
+    bedrock_metric_recorder.assert_awaited_once()
+    call = bedrock_metric_recorder.await_args.kwargs
+    assert call["input_tokens"] == 77
+    assert call["output_tokens"] == 5
+    assert call["error_code"] is None
+    assert call["duration_ms"] >= 0
+
+
+def test_post_message_records_bedrock_turn_metrics_on_throttle(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, bedrock_metric_recorder
+) -> None:
+    """The #391 ``bedrock_throttled`` classification is forwarded verbatim
+    so ``BedrockThrottles`` separates a quota wall from a bug."""
+    _stub_storage_capturing_persistence(monkeypatch)
+    monkeypatch.setenv("CHANNEL_FOLLOWUPS_ENABLED", "0")
+
+    class ThrottlingException(Exception):
+        pass
+
+    async def fake_stream(self, prompt):
+        if False:  # pragma: no cover - only makes fake_stream an async gen
+            yield None
+        raise ThrottlingException("slow down")
+
+    class FakeAgent:
+        stream_async = fake_stream
+
+    monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
+
+    client.post("/api/chats/c1/messages", json={"message": "hi", "model": "claude-sonnet-4-6"})
+
+    bedrock_metric_recorder.assert_awaited_once()
+    assert bedrock_metric_recorder.await_args.kwargs["error_code"] == "bedrock_throttled"
+
+
+def test_post_message_records_empty_stream_as_a_bedrock_error(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, bedrock_metric_recorder
+) -> None:
+    """The 2026-06-06 shape (clean completion, zero output) is a failed
+    turn — it must land in ``BedrockErrors``, not be counted as healthy."""
+    _stub_storage_capturing_persistence(monkeypatch)
+    monkeypatch.setenv("CHANNEL_FOLLOWUPS_ENABLED", "0")
+
+    async def fake_stream(self, prompt):
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+
+    class FakeAgent:
+        stream_async = fake_stream
+
+    monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
+
+    client.post("/api/chats/c1/messages", json={"message": "hi", "model": "claude-sonnet-4-6"})
+
+    bedrock_metric_recorder.assert_awaited_once()
+    assert bedrock_metric_recorder.await_args.kwargs["error_code"] == "empty_response"
+
+
+def test_post_message_bedrock_metric_failure_does_not_break_the_stream(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fail-soft: a metrics problem must not turn a good turn into a
+    broken one."""
+    _stub_storage_capturing_persistence(monkeypatch)
+    monkeypatch.setenv("CHANNEL_FOLLOWUPS_ENABLED", "0")
+
+    async def fake_stream(self, prompt):
+        yield {"event": {"contentBlockDelta": {"delta": {"text": "hello"}}}}
+        yield {"event": {"messageStop": {"stopReason": "end_turn"}}}
+
+    class FakeAgent:
+        stream_async = fake_stream
+
+    monkeypatch.setattr("channel.api.chats.build_agent", lambda **_: FakeAgent())
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr(
+        "channel.api.chats.record_bedrock_turn",
+        AsyncMock(side_effect=RuntimeError("EMF sink unavailable")),
+    )
+
+    response = client.post(
+        "/api/chats/c1/messages",
+        json={"message": "hi", "model": "claude-sonnet-4-6"},
+    )
+    assert response.status_code == 200
+    events = _sse_events(response.text)
+    done = next(e for e in events if e["type"] == "done")
+    assert done["stop_reason"] == "end_turn"

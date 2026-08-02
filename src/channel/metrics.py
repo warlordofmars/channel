@@ -11,19 +11,69 @@ and writes metrics to stdout instead (no-op from a CloudWatch perspective).
 Usage:
     from channel.metrics import emit_metric
 
-    await emit_metric("ToolInvocations", operation="remember")
-    await emit_metric("ToolErrors", operation="remember")
-    await emit_metric("StorageLatencyMs", value=42.0, unit="Milliseconds", operation="remember")
+    await emit_metric("MemoryWriteSuccesses")
+    await emit_metric("RequestLatencyMs", value=42.0, unit="Milliseconds")
+
+Prefer one of the named ``record_*`` helpers below over a raw
+``emit_metric`` call: they are where the no-dimensions cardinality rule
+is enforced (and pinned by ``_signature_locks_out_dimensions`` tests in
+``tests/unit/test_metrics.py``).
 """
 
 from __future__ import annotations
 
 import os
+from collections.abc import Sequence
 
 from aws_embedded_metrics.logger.metrics_logger_factory import create_metrics_logger
 
 NAMESPACE = "Channel"
 ENVIRONMENT = os.environ.get("CHANNEL_ENV", os.environ.get("ENV", "local"))
+
+# Dimension value used when a request never matched a mounted FastAPI
+# route (404s, CORS preflights short-circuited by CORSMiddleware, probes
+# for `/wp-login.php`). Collapsing every unmatched URL to one bucket is
+# what makes the ``Route`` dimension provably bounded — see
+# :func:`record_request_outcome`.
+REQUEST_ROUTE_FALLBACK = "other"
+
+# Kill switch for the per-route dimension set (#111). The aggregate
+# ``{Environment}`` series — the one alarms and the admin readback consume
+# — is always emitted; this flag only controls the extra
+# ``{Environment, Route}`` breakdown, which multiplies the custom-metric
+# count by the number of routes that actually receive traffic. Default-on
+# per the issue; set to ``"0"`` if the CloudWatch custom-metric bill
+# outweighs the drill-down (CloudWatch Logs Insights can answer the same
+# question from the structured request log lines for free).
+_ROUTE_DIMENSION_ENV = "CHANNEL_REQUEST_ROUTE_DIMENSION_ENABLED"
+
+
+def _route_dimension_enabled() -> bool:
+    return os.environ.get(_ROUTE_DIMENSION_ENV, "1") == "1"
+
+
+async def _emit_batch(
+    metrics: Sequence[tuple[str, float, str]],
+    dimension_sets: Sequence[dict[str, str]],
+) -> None:
+    """Emit several metrics in ONE EMF flush under one or more dimension sets.
+
+    ``emit_metric`` is the single-metric / single-dimension-set workhorse;
+    this is its batching sibling, needed by the per-request and per-Bedrock-turn
+    recorders which emit 3-5 related values that must share a timestamp.
+    Multiple dimension sets let one value be published both as an aggregate
+    (``{Environment}``) and as a bounded breakdown (``{Environment, Route}``)
+    without a second flush.
+
+    Deliberately private: callers go through the named ``record_*`` helpers so
+    the dimension sets stay under this module's control (cardinality guard).
+    """
+    logger = create_metrics_logger()
+    logger.set_namespace(NAMESPACE)
+    logger.set_dimensions(*dimension_sets)  # type: ignore[arg-type]
+    for name, value, unit in metrics:
+        logger.put_metric(name, value, unit)
+    await logger.flush()
 
 
 async def emit_metric(
@@ -35,7 +85,7 @@ async def emit_metric(
     """Emit a single CloudWatch metric via EMF.
 
     Args:
-        name: Metric name (e.g. "ToolInvocations").
+        name: Metric name (e.g. "MemoryWriteSuccesses").
         value: Metric value (default 1.0).
         unit: CloudWatch unit string (default "Count").
         **dimensions: Arbitrary key=value dimension pairs added to the metric.
@@ -260,3 +310,102 @@ async def record_mcp_tool_result_truncated() -> None:
     *tool-schema* input; this one bounds *tool-result* input.
     """
     await emit_metric("MCPToolResultTruncated")
+
+
+async def record_request_outcome(route: str, status_code: int, duration_ms: float) -> None:
+    """Emit the per-request SLI counters for one handled HTTP request (#111).
+
+    Four metrics, one EMF flush:
+
+    * ``RequestCount`` — every request, the error-rate denominator.
+    * ``RequestLatencyMs`` — ``Milliseconds``. The issue body parenthesised
+      "Microseconds", which contradicts the ``Ms`` suffix, the ``duration_ms``
+      structured-log field this mirrors, and the existing ``StorageLatencyMs``
+      convention — milliseconds is the reading that makes all four agree.
+      Note this measures **time to response start**, not time to last byte:
+      Starlette's ``BaseHTTPMiddleware`` returns from ``call_next`` once
+      ``http.response.start`` arrives, so an SSE turn contributes its
+      time-to-first-byte, not its multi-minute stream duration. That is the
+      right shape for a latency SLI and is what makes a p99 threshold
+      meaningful on a service whose slowest route streams by design.
+    * ``Request4xxCount`` / ``Request5xxCount`` — emitted only for the class
+      that actually occurred, so a quiet service publishes no zero-valued
+      error series.
+
+    Cardinality
+    -----------
+    Two dimension sets: the aggregate ``{Environment}`` (what the CDK alarms
+    and the ``/api/admin/metrics/*`` readback consume — that endpoint pins the
+    dimension set exactly, so the aggregate is the one it can see), and the
+    optional ``{Environment, Route}`` breakdown.
+
+    ``route`` MUST be a **route template** (``/api/chats/{chat_id}``), never a
+    concrete URL path — the caller resolves it from the matched FastAPI route
+    and passes :data:`REQUEST_ROUTE_FALLBACK` when nothing matched, which
+    bounds the dimension at ``len(app.routes) + 1``. That bound is the whole
+    reason a dimension is permissible here at all: it is a fixed, build-time
+    enum, unlike the per-actor / per-chat dimensions every other counter in
+    this module refuses. The signature accepts no ``**dimensions`` so a future
+    caller cannot slip ``user_id`` alongside it.
+    """
+    metrics: list[tuple[str, float, str]] = [
+        ("RequestCount", 1.0, "Count"),
+        ("RequestLatencyMs", float(duration_ms), "Milliseconds"),
+    ]
+    if 400 <= status_code < 500:
+        metrics.append(("Request4xxCount", 1.0, "Count"))
+    elif status_code >= 500:
+        metrics.append(("Request5xxCount", 1.0, "Count"))
+
+    base = {"Environment": ENVIRONMENT}
+    dimension_sets = [base]
+    if _route_dimension_enabled():
+        dimension_sets.append({**base, "Route": route})
+    await _emit_batch(metrics, dimension_sets)
+
+
+async def record_bedrock_turn(
+    duration_ms: float,
+    input_tokens: int,
+    output_tokens: int,
+    error_code: str | None = None,
+) -> None:
+    """Emit the per-turn Bedrock SLIs for one streamed chat turn (#111).
+
+    Emitted for EVERY turn — success or failure — so the counters share a
+    denominator:
+
+    * ``BedrockLatencyMs`` — wall time of the Strands stream loop. Exactly one
+      datapoint per turn, which makes its ``SampleCount`` statistic the
+      turn count; the CDK Bedrock-error-rate alarm uses it as the denominator
+      rather than paying for a separate ``BedrockTurns`` counter.
+    * ``BedrockTokensIn`` / ``BedrockTokensOut`` — Bedrock's reported usage.
+      Zero on a failed turn, which is correct (nothing was billed to us for a
+      turn that never produced usage metadata).
+    * ``BedrockErrors`` — one per failed turn, whatever the classification.
+    * ``BedrockThrottles`` — the throttle subset. Split out because a
+      ``ThrottlingException`` storm is operationally distinct from a bug: it
+      is a quota wall, and the response is to switch model or raise the quota,
+      not to ship a fix. Before this counter existed the ``bedrock_throttled``
+      path from #391 was visible only as a log line.
+
+    Cardinality
+    -----------
+    One dimension set, ``{Environment}`` — no per-actor / per-chat / per-model
+    dimensions. ``error_code`` is a **branch selector**, not a dimension: it
+    picks which counter increments and never reaches CloudWatch, so the
+    ``_STREAM_ERROR_MAP`` code set can grow without multiplying metrics. The
+    per-code breakdown stays in the ``chat_stream_failed`` log line (which
+    already carries ``code=``), queryable via Logs Insights. The signature
+    accepts no ``**dimensions``.
+    """
+    metrics: list[tuple[str, float, str]] = [
+        ("BedrockLatencyMs", float(duration_ms), "Milliseconds"),
+        ("BedrockTokensIn", float(input_tokens), "Count"),
+        ("BedrockTokensOut", float(output_tokens), "Count"),
+    ]
+    if error_code is not None:
+        metrics.append(("BedrockErrors", 1.0, "Count"))
+        if error_code == "bedrock_throttled":
+            metrics.append(("BedrockThrottles", 1.0, "Count"))
+    await _emit_batch(metrics, [{"Environment": ENVIRONMENT}])
