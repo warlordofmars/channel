@@ -89,7 +89,14 @@ def _default_endpoint() -> str:
 os.environ.setdefault("AWS_ACCESS_KEY_ID", "local")
 os.environ.setdefault("AWS_SECRET_ACCESS_KEY", "local")
 os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
-os.environ.setdefault("DYNAMODB_ENDPOINT", _default_endpoint())
+# NOT ``setdefault(..., _default_endpoint())`` — Python evaluates call
+# arguments eagerly, so that form runs the port validation even when
+# DYNAMODB_ENDPOINT is already set, letting a malformed
+# CHANNEL_DYNAMO_PORT fail an ``inv`` run that never consults the port
+# at all. Guard the call instead, so the docstring's "only consulted
+# under a bare pytest invocation" is literally true.
+if "DYNAMODB_ENDPOINT" not in os.environ:
+    os.environ["DYNAMODB_ENDPOINT"] = _default_endpoint()
 os.environ.setdefault("CHANNEL_JWT_SECRET", "integration-test-secret")
 os.environ["CHANNEL_TABLE_NAME"] = RUN_TABLE_NAME
 
