@@ -21,6 +21,13 @@
 //   4. That the `env(safe-area-inset-*)` padding survives — it solves
 //      notch / home-indicator clearance, a different and already-correct
 //      problem that #467 must not regress.
+//   5. That the mobile `.home` block keeps BOTH of its anchors: the
+//      greeting's `flex-start` top anchor and the composer's
+//      `margin-top: auto` bottom anchor. This is the pair that actually
+//      fixed #467 — the on-device measurement found no viewport
+//      mismatch at all (`innerHeight` === `clientHeight` ===
+//      `visualViewport.height` === 793), just children stacked at the
+//      top of a correctly-sized container.
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -174,6 +181,92 @@ describe("standalone viewport correction (#467, reopened)", () => {
     // equally affected; the correct gate is the measured shortfall in
     // appViewport.js, not the viewport width.
     expect(mobileBlock()).not.toMatch(/var\(--app-vh\)/);
+  });
+});
+
+describe("mobile home layout — greeting top, composer bottom (#467)", () => {
+  /**
+   * Every `.home { ... }` rule body inside the ≤640px block. There is
+   * more than one — the layout rule here and the `env(safe-area-inset-*)`
+   * rule appended further down the same block — so this returns them all
+   * rather than picking one and silently asserting against the wrong half.
+   */
+  function mobileHomeRules() {
+    const bodies = [...mobileBlock().matchAll(/\.home\s*\{([^}]*)\}/g)].map(
+      (m) => m[1],
+    );
+    if (bodies.length === 0) {
+      throw new Error(
+        "no `.home { ... }` rule inside @media (max-width: 640px) — the " +
+          "mobile home layout was renamed or removed; see #467",
+      );
+    }
+    return bodies;
+  }
+
+  /** Body of the mobile block's `.home > .composer-wrap { ... }` rule. */
+  function mobileHomeComposerRule() {
+    const match = mobileBlock().match(
+      /\.home\s*>\s*\.composer-wrap\s*\{([^}]*)\}/,
+    );
+    if (!match) {
+      throw new Error(
+        "no `.home > .composer-wrap { ... }` rule inside " +
+          "@media (max-width: 640px) — the #467 bottom anchor was renamed " +
+          "or removed, which parks the composer in the upper third again",
+      );
+    }
+    return match[1];
+  }
+
+  it("keeps the greeting anchored to the top of the container", () => {
+    // `flex-start` is half the fix, not the bug: it is what stops the
+    // greeting drifting to the vertical centre. Reverting it to `center`
+    // would re-centre the whole stack and undo the 8vh anchor.
+    expect(mobileHomeRules().join("\n")).toMatch(
+      /justify-content:\s*flex-start/,
+    );
+  });
+
+  it("pushes the composer (and the quick actions after it) to the bottom", () => {
+    // `.home`'s children are `.greet` → `.composer-wrap` → `.quick`, so an
+    // auto top margin on the middle child absorbs every pixel of free
+    // space above it and carries `.quick` down with it. Without this the
+    // measured layout on a 793px iPhone ended at y=341 (#467).
+    expect(mobileHomeComposerRule()).toMatch(/margin-top:\s*auto/);
+  });
+
+  it("scopes the bottom anchor to .home so the chat view is untouched", () => {
+    // `.bottom-composer .composer-wrap` is already bottom-anchored by its
+    // own container; an unscoped `.composer-wrap { margin-top: auto }`
+    // would reach it (and ProjectDetail's composer) and push those around
+    // too. Every `.composer-wrap` rule carrying the auto margin must name
+    // `.home` in its selector.
+    const unscoped = [
+      ...css.matchAll(/([^{}]*\.composer-wrap[^{}]*)\{([^}]*)\}/g),
+    ].filter(
+      (m) => /margin-top:\s*auto/.test(m[2]) && !m[1].includes(".home"),
+    );
+    expect(unscoped.map((m) => m[1].trim())).toEqual([]);
+  });
+
+  it("keeps the home-indicator clearance beneath the bottomed composer", () => {
+    // Now that the composer sits at the bottom edge, this padding is what
+    // stands between it and the home indicator — #437's rule, unchanged,
+    // and load-bearing for a reason it was not originally written for.
+    expect(mobileHomeRules().join("\n")).toMatch(
+      /padding-bottom:\s*calc\(12px \+ env\(safe-area-inset-bottom\)\)/,
+    );
+  });
+
+  it("leaves the desktop .home rule centred and un-anchored", () => {
+    // The whole change lives inside the ≤640px block. The base rule must
+    // keep `justify-content: center`, and no top-level rule may carry the
+    // auto margin — either would move the desktop composer.
+    const base = css.match(/^\.home\s*\{([^}]*)\}/m);
+    expect(base).not.toBeNull();
+    expect(base[1]).toMatch(/justify-content:\s*center/);
+    expect(base[1]).not.toMatch(/margin-top:/);
   });
 });
 

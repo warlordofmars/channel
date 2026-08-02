@@ -1527,12 +1527,28 @@ html.is-electron-mac .sb-top {
   .main-top { display: none; }
 
   /* ----- home / greeting ----- */
-  /* Anchor the greeting near the top (not vertically centred) so the
-     composer + quick actions sit in the thumb zone, and let the
-     greeting wrap instead of overflowing a long first name. */
+  /* Two anchors, not one. The greeting sits near the top (8vh, rather
+     than the base rule's vertical centring) and wraps instead of
+     overflowing a long first name; the composer + quick actions are
+     pushed all the way down into the thumb zone by the `margin-top:
+     auto` below.
+
+     `justify-content: flex-start` on its own anchored *every* child to
+     the top, which is what #467 measured on an installed iOS PWA: on a
+     793px-tall screen the composer ended at y=341 with ~450px of empty
+     space beneath it — the upper third, the opposite of the thumb zone
+     this block has always claimed to target. */
   .home { padding: 8vh 12px 12px; justify-content: flex-start; }
   .greet { gap: 12px; margin-bottom: 22px; }
   .greet h1 { font-size: 28px; white-space: normal; }
+  /* `.home`'s children are `.greet` -> `.composer-wrap` -> `.quick`, so
+     an auto top margin on the middle one absorbs all the free space
+     above it and carries the quick-action row down with it. Scoped as a
+     child of `.home` so the conversation view's `.bottom-composer
+     .composer-wrap` — already bottom-anchored by its own container — is
+     untouched. The home-indicator clearance underneath comes from the
+     safe-area `padding-bottom` on `.home` further down this block. */
+  .home > .composer-wrap { margin-top: auto; }
 
   /* ----- composer fits a ~390px width ----- */
   .composer-wrap { max-width: none; }
