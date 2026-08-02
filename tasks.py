@@ -821,7 +821,13 @@ def deploy(ctx, env="prod"):
     release_channel = "latest" if env == "prod" else "dev"
     build_env = {**os.environ, "VITE_RELEASE_CHANNEL": release_channel}
     with ctx.cd(UI):
-        ctx.run("npm install --silent", hide=True)
+        # --ignore-scripts matches the workflow installs (#441). Without it
+        # the deploy path would re-run the very dependency lifecycle scripts
+        # `npm ci --ignore-scripts` just skipped in the CI job above. No
+        # dependency in ui/ needs one — the only install-script package in
+        # that tree is the optional, macOS-only `fsevents`, which ships a
+        # prebuilt binding.
+        ctx.run("npm install --ignore-scripts --silent", hide=True)
         ctx.run("npm run build", pty=True, env=build_env)
 
     with ctx.cd(INFRA):

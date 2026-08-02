@@ -62,14 +62,14 @@ jobs:
         with:
           node-version: "20"
           cache: "npm"
-          cache-dependency-path: ui/package.json
+          cache-dependency-path: ui/package-lock.json
 
       - name: Install Python dependencies
         run: uv sync --all-extras
 
       - name: Install Node dependencies
         working-directory: ui
-        run: npm install
+        run: npm ci --ignore-scripts
 
       - name: pip-audit
         # CVE-2026-3219 / CVE-2026-6357 / PYSEC-2026-196 all affect the pip
@@ -419,10 +419,10 @@ jobs:
         with:
           node-version: "20"
           cache: "npm"
-          cache-dependency-path: ui/package.json
+          cache-dependency-path: ui/package-lock.json
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci --ignore-scripts
 
       - name: Run vitest with coverage
         run: npm run test:coverage -- --reporter=verbose
@@ -432,7 +432,7 @@ jobs:
 
       - name: Build docs site
         working-directory: docs-site
-        run: npm install && npm run build
+        run: npm ci --ignore-scripts && npm run build
 
       - name: Write JS coverage summary
         if: always()
@@ -533,14 +533,24 @@ jobs:
         shell: bash
         run: |
           cd ui
-          npm ci
+          npm ci --ignore-scripts
           VITE_API_BASE=${{ steps.api-base.outputs.url }} npm run build
 
       - name: Install desktop deps
         shell: bash
+        # --ignore-scripts is safe for the Electron toolchain, which is the
+        # usual place it bites. `electron` 42 declares no lifecycle scripts
+        # at all — its `index.js` downloads the dev binary lazily on first
+        # `require`, and the packaging step below doesn't use that binary
+        # anyway (electron-builder fetches its own per-platform dist).
+        # `esbuild` finds its native binary through its optional
+        # `@esbuild/<platform>` dependency, and the only other install-script
+        # package in the tree, `fsevents`, is macOS-only, optional, and ships
+        # a prebuilt binding. Verified end to end locally: install →
+        # test:coverage → build:main → build:renderer → electron-builder.
         run: |
           cd desktop
-          npm ci
+          npm ci --ignore-scripts
 
       - name: Desktop unit tests + 100% coverage gate
         shell: bash
@@ -667,7 +677,7 @@ jobs:
           node-version: "20"
 
       - name: Install CDK
-        run: npm install -g aws-cdk
+        run: npm install -g --ignore-scripts aws-cdk@2.1134.0
 
       - name: Install Python dependencies
         run: uv sync --group dev --group infra
@@ -801,12 +811,12 @@ jobs:
         shell: bash
         run: |
           cd ui
-          npm ci
+          npm ci --ignore-scripts
           VITE_API_BASE=https://${{ steps.env.outputs.domain }} npm run build
 
       - name: Install desktop deps
         working-directory: desktop
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       - name: Build + sign + notarise
         working-directory: desktop
@@ -980,7 +990,7 @@ jobs:
         with:
           node-version: "20"
           cache: "npm"
-          cache-dependency-path: ui/package.json
+          cache-dependency-path: ui/package-lock.json
 
       - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
@@ -989,7 +999,7 @@ jobs:
           aws-region: us-east-1
 
       - name: Install CDK
-        run: npm install -g aws-cdk
+        run: npm install -g --ignore-scripts aws-cdk@2.1134.0
 
       - name: Install Python dependencies
         run: uv sync --group dev --group infra
@@ -1005,11 +1015,11 @@ jobs:
           # consistent with the deployed bundle in case the deploy
           # task ever drops the rebuild.
           VITE_RELEASE_CHANNEL: dev
-        run: npm install && npm run build
+        run: npm ci --ignore-scripts && npm run build
 
       - name: Build docs site
         working-directory: docs-site
-        run: npm install && npm run build
+        run: npm ci --ignore-scripts && npm run build
 
       - name: Deploy dev stack
         env:
@@ -1249,7 +1259,7 @@ jobs:
         with:
           node-version: "20"
           cache: "npm"
-          cache-dependency-path: ui/package.json
+          cache-dependency-path: ui/package-lock.json
 
       - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
@@ -1258,7 +1268,7 @@ jobs:
           aws-region: us-east-1
 
       - name: Install CDK
-        run: npm install -g aws-cdk
+        run: npm install -g --ignore-scripts aws-cdk@2.1134.0
 
       - name: Install Python dependencies
         run: uv sync --group dev --group infra
@@ -1273,11 +1283,11 @@ jobs:
           # also the Download.jsx default when the var is unset, but
           # making it explicit keeps the per-env split visible in CI.
           VITE_RELEASE_CHANNEL: latest
-        run: npm install && npm run build
+        run: npm ci --ignore-scripts && npm run build
 
       - name: Build docs site
         working-directory: docs-site
-        run: npm install && npm run build
+        run: npm ci --ignore-scripts && npm run build
 
       - name: Deploy prod stack
         env:

@@ -23,7 +23,7 @@ jobs:
         with:
           node-version: "20"
           cache: "npm"
-          cache-dependency-path: ui/package.json
+          cache-dependency-path: ui/package-lock.json
 
       - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
@@ -32,7 +32,7 @@ jobs:
           aws-region: us-east-1
 
       - name: Install CDK
-        run: npm install -g aws-cdk
+        run: npm install -g --ignore-scripts aws-cdk@2.1134.0
 
       - name: Install Python dependencies
         run: uv sync --group dev --group infra
@@ -41,11 +41,11 @@ jobs:
         working-directory: ui
         env:
           VITE_GA_MEASUREMENT_ID: ${{ secrets.VITE_GA_MEASUREMENT_ID }}
-        run: npm install && npm run build
+        run: npm ci --ignore-scripts && npm run build
 
       - name: Build docs site
         working-directory: docs-site
-        run: npm install && npm run build
+        run: npm ci --ignore-scripts && npm run build
 
       - name: Deploy
         env:
