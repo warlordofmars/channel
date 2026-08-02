@@ -245,10 +245,16 @@ the access JWT it renews has usually already expired.
   `refresh_token` on the body transport only.
 - **Rate limited to 5/min per token-family (#294)** — 429 with
   `Retry-After`, config `CHANNEL_REFRESH_RATE_LIMIT` /
-  `CHANNEL_REFRESH_RATE_LIMIT_WINDOW_SECONDS` (`0` disables). The scope
-  is the *credential*, never the client IP: a tight per-IP limit on a
-  session endpoint would sign out every user behind one NAT because one
-  machine looped. The bucket key is a process-local keyed digest of the
+  `CHANNEL_REFRESH_RATE_LIMIT_WINDOW_SECONDS`. `CHANNEL_REFRESH_RATE_LIMIT=0`
+  is the kill switch; everything else that would leave the limiter
+  *silently* ineffective is corrected back to the default with a warning
+  — a malformed or non-finite value, and any window under 1s (which
+  rolls between consecutive requests, so the limiter admits everything
+  while still reporting itself enabled). Disabling must be legible.
+
+  The scope is the *credential*, never the client IP: a tight per-IP
+  limit on a session endpoint would sign out every user behind one NAT
+  because one machine looped. The bucket key is a process-local keyed digest of the
   presented token — under hard rotation a family has exactly one live
   token, so that digest *is* the family's address, and a successful
   rotation hands the window to the successor's key (without that

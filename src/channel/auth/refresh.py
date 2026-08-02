@@ -202,6 +202,13 @@ _RATE_LIMIT_WINDOW_ENV = "CHANNEL_REFRESH_RATE_LIMIT_WINDOW_SECONDS"
 _DEFAULT_RATE_LIMIT = 5
 _DEFAULT_RATE_LIMIT_WINDOW_SECONDS = 60.0
 
+# Shortest window that can still limit anything. Below roughly a second
+# the window rolls between consecutive requests, so the limiter admits
+# everything — see :func:`_build_refresh_limiter`. A second is already
+# three orders of magnitude tighter than this endpoint's healthy
+# ~1/hour cadence, so nothing legitimate wants a smaller one.
+_MIN_RATE_LIMIT_WINDOW_SECONDS = 1.0
+
 _Number = TypeVar("_Number", int, float)
 
 
@@ -251,21 +258,35 @@ def _build_refresh_limiter() -> FixedWindowRateLimiter:
     the env → limiter wiring (notably the documented ``0`` kill switch)
     without reimporting the module.
 
-    A non-positive *window* is corrected rather than honoured. It parses
-    fine and is finite, but ``now - started_at >= window_seconds`` is
-    then true on every call, so the window rolls continuously and the
-    limiter admits everything — while still reporting ``enabled``, and
-    while ``RefreshRateLimited`` stays flat. A silently-off abuse damper
-    that looks identical to "no abuse" is the worst of the three
-    outcomes; the limit is disabled *legibly* via
-    ``CHANNEL_REFRESH_RATE_LIMIT=0`` instead. (A non-positive **limit**
-    is left alone: that is the documented kill switch.)
+    A *window* below :data:`_MIN_RATE_LIMIT_WINDOW_SECONDS` is corrected
+    rather than honoured. Such a value parses fine, is finite, and may
+    even be positive — but ``now - started_at >= window_seconds`` is then
+    true for practically any two consecutive requests, so the window
+    rolls continuously and the limiter admits everything while still
+    reporting ``enabled`` and leaving ``RefreshRateLimited`` flat. A
+    silently-off abuse damper that looks identical to "no abuse" is the
+    worst of the three outcomes; the limit is disabled *legibly* via
+    ``CHANNEL_REFRESH_RATE_LIMIT=0`` instead.
+
+    The floor is a floor rather than a ``> 0`` check because ``0`` is not
+    the only value with that shape: ``0.0001`` has it too, and is the
+    likelier operator slip of the two (unit confusion — someone thinking
+    in milliseconds). Rejecting only the exact zero would leave the
+    footgun loaded.
+
+    A non-positive **limit** is deliberately left alone: that is the
+    documented kill switch, and ``enabled`` reports it honestly, which is
+    exactly the property the window case lacks. An absurdly *large* limit
+    is likewise left alone — it is at least plausibly intentional, and it
+    fails in the same direction as the LRU eviction this module already
+    accepts (toward admitting traffic).
     """
 
     window = _env_number(_RATE_LIMIT_WINDOW_ENV, _DEFAULT_RATE_LIMIT_WINDOW_SECONDS, float)
-    if window <= 0:
+    if window < _MIN_RATE_LIMIT_WINDOW_SECONDS:
         logger.warning(
-            "auth.refresh ignoring non-positive %s=%r, using %r",
+            "auth.refresh ignoring sub-%rs %s=%r, using %r",
+            _MIN_RATE_LIMIT_WINDOW_SECONDS,
             _RATE_LIMIT_WINDOW_ENV,
             window,
             _DEFAULT_RATE_LIMIT_WINDOW_SECONDS,

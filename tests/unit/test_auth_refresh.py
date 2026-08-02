@@ -706,12 +706,16 @@ def test_env_number_rejects_values_that_parse_but_are_not_finite(monkeypatch, ra
     assert refresh_module._env_number("CHANNEL_TEST_KNOB", 60.0, float) == 60.0
 
 
-@pytest.mark.parametrize("raw", ["0", "-10", "0.0"])
-def test_a_non_positive_window_is_corrected_rather_than_honoured(consumed, monkeypatch, raw):
-    """A window of ``0`` rolls on every call, so the limiter would admit
-    everything while still reporting ``enabled`` and leaving
+@pytest.mark.parametrize("raw", ["0", "-10", "0.0", "0.0001", "1e-9", "0.999"])
+def test_a_sub_second_window_is_corrected_rather_than_honoured(consumed, monkeypatch, raw):
+    """Such a window rolls between consecutive calls, so the limiter would
+    admit everything while still reporting ``enabled`` and leaving
     ``RefreshRateLimited`` flat — a silently-off damper indistinguishable
-    from "no abuse". Disabling is legible via the limit, not the window."""
+    from "no abuse". Disabling is legible via the limit, not the window.
+
+    Parametrised past ``0`` deliberately: ``0.0001`` has the same shape
+    and is the likelier operator slip (unit confusion), so a bare
+    ``> 0`` guard would leave the footgun loaded."""
     monkeypatch.setenv("CHANNEL_REFRESH_RATE_LIMIT", "1")
     monkeypatch.setenv("CHANNEL_REFRESH_RATE_LIMIT_WINDOW_SECONDS", raw)
     monkeypatch.setattr(refresh_module, "_refresh_limiter", refresh_module._build_refresh_limiter())
