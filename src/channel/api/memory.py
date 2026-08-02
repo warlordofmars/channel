@@ -21,6 +21,10 @@ endpoints (#476 / #477 / #479) inherit one definition of a record.
   records oldest-first. ``records[].text`` is the FULL stored text; the
   ``recall_window.text_truncate`` cap is a recall-*injection* limit, not a
   storage limit, so truncating here would misrepresent what is stored.
+  ``records_truncated`` says whether the chat holds more events than the
+  per-session cap, so the oldest are missing from ``records`` — a hard cap
+  that reported nothing would be the same silent lie this surface exists
+  to stop.
 - ``summaries`` — the #245 rolling head summaries for the page's chats.
   Read-only, no ``record_id``: they are derived and regenerate whenever the
   history window slides, so offering a delete that silently reappears would
@@ -126,7 +130,7 @@ def _recall_enabled() -> bool:
     return os.environ.get("CHANNEL_RECALL_ENABLED", "1") == "1"
 
 
-def _encode_cursor(next_token: str) -> str:
+def _encode_cursor(next_token: str, actor_id: str) -> str:
     """Wrap AgentCore's ``nextToken`` in an opaque base64url-JSON envelope.
 
     The vendor token never appears raw in our contract — same reasoning as
@@ -135,26 +139,39 @@ def _encode_cursor(next_token: str) -> str:
     envelope is also what lets :func:`_decode_cursor` reject garbage as a
     400 instead of forwarding it to AgentCore for a ``ValidationException``
     (a 500).
+
+    The envelope is **bound to the actor it was minted for**, matching
+    ``chats._decode_cursor``'s chat-scoping and ``assets._decode_cursor``'s
+    owner-scoping: a foreign ``nextToken`` is a malformed request, not
+    something to hand to the vendor. The binding is a
+    :func:`fingerprint_id` digest, so the cursor stays opaque and doesn't
+    carry the caller's identity around in a query string.
     """
     return base64.urlsafe_b64encode(
-        json.dumps({"t": next_token}, separators=(",", ":")).encode()
+        json.dumps({"t": next_token, "a": fingerprint_id(actor_id)}, separators=(",", ":")).encode()
     ).decode()
 
 
-def _decode_cursor(cursor: str) -> str:
+def _decode_cursor(cursor: str, actor_id: str) -> str:
     """Inverse of :func:`_encode_cursor`. A corrupt cursor is a 400.
 
-    Three failure modes fold together: not valid base64url-JSON
+    Four failure modes fold together: not valid base64url-JSON
     (``ValueError`` — which covers ``UnicodeDecodeError`` — or
-    ``binascii.Error``), not an envelope dict, or an empty/non-string
-    token. The cursor is opaque to clients and only ever issued by this
-    endpoint, so any deviation is a malformed request.
+    ``binascii.Error``), not an envelope dict, an empty/non-string token,
+    or an actor binding that doesn't match the caller. The cursor is opaque
+    to clients and only ever issued by this endpoint for this actor, so any
+    deviation is a malformed request.
     """
     try:
         payload = json.loads(base64.urlsafe_b64decode(cursor.encode()))
     except (ValueError, binascii.Error) as exc:
         raise HTTPException(status_code=400, detail="invalid cursor") from exc
-    if not isinstance(payload, dict) or not isinstance(payload.get("t"), str) or not payload["t"]:
+    if (
+        not isinstance(payload, dict)
+        or not isinstance(payload.get("t"), str)
+        or not payload["t"]
+        or payload.get("a") != fingerprint_id(actor_id)
+    ):
         raise HTTPException(status_code=400, detail="invalid cursor")
     return payload["t"]
 
@@ -204,11 +221,13 @@ async def list_memory_records(
     nothing to page through.
     """
     user_id = claims["sub"]
-    next_token = _decode_cursor(cursor) if cursor else None
+    actor_id = sanitize_actor_id(user_id)
+    # Validated before any AgentCore call, so a malformed or foreign cursor
+    # is a locally-decided 400 rather than a vendor ValidationException (500).
+    next_token = _decode_cursor(cursor, actor_id) if cursor else None
 
     client = _agentcore_client()
     memory_id = await asyncio.to_thread(_memory_id_for_env)
-    actor_id = sanitize_actor_id(user_id)
 
     window = await recall_window_session_ids(client, memory_id=memory_id, actor_id=actor_id)
 
@@ -251,7 +270,7 @@ async def list_memory_records(
 
     groups: list[dict[str, Any]] = []
     for chat_row in verified:
-        records = await list_session_records(
+        records, truncated = await list_session_records(
             client,
             memory_id=memory_id,
             actor_id=actor_id,
@@ -270,6 +289,11 @@ async def list_memory_records(
                 "chat_title": chat_row.title,
                 "created_at": group_created_at(chat_row),
                 "records": [r.to_dict() for r in records],
+                # True when the chat holds more than the per-session event
+                # cap, so its OLDEST records aren't here. Reported rather
+                # than swallowed: a partial list presented as complete is
+                # exactly the silent lie this surface exists to stop (#227).
+                "records_truncated": truncated,
             }
         )
 
@@ -291,5 +315,5 @@ async def list_memory_records(
         "summaries": await _summaries_for(verified),
         "recall_window": recall_window(enabled=_recall_enabled()),
         "withheld_record_count": withheld_records,
-        "next_cursor": _encode_cursor(page_token) if page_token else None,
+        "next_cursor": _encode_cursor(page_token, actor_id) if page_token else None,
     }

@@ -43,7 +43,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
-import logging
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from typing import Any
@@ -59,8 +58,6 @@ from channel.agents.recall import (
 )
 from channel.agents.tools.memory_tools import _REMEMBER_PREFIX
 from channel.models import Chat
-
-logger = logging.getLogger(__name__)
 
 __all__ = [
     "KIND_CONVERSATION",
@@ -404,8 +401,14 @@ async def _list_events(
     memory_id: str,
     actor_id: str,
     session_id: str,
-) -> list[dict[str, Any]]:
-    """Newest-first events for one session, capped at :data:`MAX_EVENTS_PER_SESSION`."""
+) -> tuple[list[dict[str, Any]], bool]:
+    """Newest-first events for one session → ``(events, more_exist)``.
+
+    Capped at :data:`MAX_EVENTS_PER_SESSION`. ``more_exist`` is AgentCore's
+    own ``nextToken`` rather than a ``len(events) == cap`` heuristic — the
+    vendor is the authority on whether the session has more, and the
+    heuristic would false-positive on a session holding exactly the cap.
+    """
     resp = await asyncio.to_thread(
         client.list_events,
         memoryId=memory_id,
@@ -413,7 +416,7 @@ async def _list_events(
         sessionId=session_id,
         maxResults=MAX_EVENTS_PER_SESSION,
     )
-    return resp.get("events", [])
+    return resp.get("events", []), bool(resp.get("nextToken"))
 
 
 async def list_session_records(
@@ -423,8 +426,8 @@ async def list_session_records(
     actor_id: str,
     session_id: str,
     in_recall_window: bool,
-) -> list[MemoryRecord]:
-    """Every enumerable record in one session, oldest first.
+) -> tuple[list[MemoryRecord], bool]:
+    """Every enumerable record in one session → ``(records, truncated)``.
 
     ``used_in_recall`` is true when the session is one of the
     ``_RECALL_MAX_SESSIONS`` most recent (``in_recall_window``, from
@@ -437,8 +440,15 @@ async def list_session_records(
     Ordering: events are reversed to chronological (oldest first, matching
     ``recall._format_recall_addendum``) while payload entries keep their
     within-event order, so a turn still reads USER then ASSISTANT.
+
+    ``truncated`` is true when the session holds more than
+    :data:`MAX_EVENTS_PER_SESSION` events, so the OLDEST are not in
+    ``records``. It is returned rather than swallowed on principle: this
+    surface's whole argument is that a partial view presented as a complete
+    one is a silent lie (#227), and a hard cap that reports nothing would be
+    exactly that.
     """
-    events = await _list_events(
+    events, truncated = await _list_events(
         client, memory_id=memory_id, actor_id=actor_id, session_id=session_id
     )
     by_event: dict[int, list[MemoryRecord]] = {}
@@ -453,7 +463,8 @@ async def list_session_records(
                 used_in_recall=in_recall_window and pos < _RECALL_EVENTS_PER_SESSION,
             )
         )
-    return [record for pos in sorted(by_event, reverse=True) for record in by_event[pos]]
+    records = [record for pos in sorted(by_event, reverse=True) for record in by_event[pos]]
+    return records, truncated
 
 
 async def count_session_records(
@@ -471,8 +482,15 @@ async def count_session_records(
     content is not ours to return. The AgentCore response is transient
     within this call — never logged, never built into a
     :class:`MemoryRecord`, never sent to a client.
+
+    Counts only the capped page, same as :func:`list_session_records` — so
+    on a withheld session holding more than :data:`MAX_EVENTS_PER_SESSION`
+    events the count is a floor, not a total. That is the right direction:
+    it is a "this happened, and at least this much" alarm, and paging
+    another user's memory to get an exact figure would be the opposite of
+    the point.
     """
-    events = await _list_events(
+    events, _more = await _list_events(
         client, memory_id=memory_id, actor_id=actor_id, session_id=session_id
     )
     return sum(1 for _ in _iter_payload_texts(events))

@@ -409,6 +409,47 @@ def test_next_cursor_is_opaque_and_round_trips():
     assert page_call.kwargs["nextToken"] == "vendor-tok"
 
 
+def test_a_cursor_minted_for_another_caller_is_rejected():
+    # The cursor is bound to the actor it was minted for, matching
+    # ``chats._decode_cursor``'s chat-scoping: a foreign nextToken is a
+    # malformed request, not something to forward to AgentCore.
+    fake = _agentcore(
+        ["chat-a"], {"chat-a": [_event("e1", ("USER", "hi"))]}, next_token="vendor-tok"
+    )
+    cursor = _call(fake, {"chat-a": _chat("chat-a")}).json()["next_cursor"]
+
+    other = _agentcore([], {})
+    resp = _call(other, {}, params={"cursor": cursor}, headers=_headers(INTRUDER))
+
+    assert resp.status_code == 400
+    other.list_sessions.assert_not_called()
+
+
+def test_group_reports_when_a_chat_has_more_events_than_the_cap():
+    fake = MagicMock()
+    fake.list_sessions.return_value = {
+        "sessionSummaries": [
+            {"sessionId": "chat-a", "createdAt": datetime(2026, 7, 30, tzinfo=timezone.utc)}
+        ]
+    }
+    fake.list_events.return_value = {
+        "events": [_event("e1", ("USER", "newest kept"))],
+        "nextToken": "older-events-exist",
+    }
+
+    body = _call(fake, {"chat-a": _chat("chat-a")}).json()
+
+    assert body["groups"][0]["records_truncated"] is True
+
+
+def test_group_reports_no_truncation_for_a_short_chat():
+    fake = _agentcore(["chat-a"], {"chat-a": [_event("e1", ("USER", "hi"))]})
+
+    body = _call(fake, {"chat-a": _chat("chat-a")}).json()
+
+    assert body["groups"][0]["records_truncated"] is False
+
+
 def test_limit_is_forwarded_as_the_session_page_size():
     fake = _agentcore([], {})
 
@@ -433,6 +474,8 @@ def test_limit_is_validated(limit: Any):
         base64.urlsafe_b64encode(b'{"t": 7}').decode(),  # token isn't a string
         base64.urlsafe_b64encode(b'{"t": ""}').decode(),  # empty token
         base64.urlsafe_b64encode(b"\xff\xfe").decode(),  # not utf-8
+        base64.urlsafe_b64encode(b'{"t": "tok"}').decode(),  # no actor binding
+        base64.urlsafe_b64encode(b'{"t": "tok", "a": "deadbeefdeadbeef"}').decode(),  # wrong actor
     ],
 )
 def test_malformed_cursor_is_a_400_not_a_500(cursor: str):

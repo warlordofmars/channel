@@ -309,7 +309,7 @@ async def test_list_session_records_orders_chronologically_and_flags_the_window(
         ]
     }
 
-    records = await mr.list_session_records(
+    records, _truncated = await mr.list_session_records(
         client,
         memory_id=MEMORY_ID,
         actor_id=ACTOR_ID,
@@ -329,11 +329,31 @@ async def test_list_session_records_orders_chronologically_and_flags_the_window(
     )
 
 
+@pytest.mark.parametrize(
+    ("resp_extra", "expected"),
+    [({}, False), ({"nextToken": "more"}, True)],
+)
+async def test_list_session_records_reports_per_session_truncation(
+    resp_extra: dict[str, Any], expected: bool
+):
+    # Truncation comes from AgentCore's own nextToken, not a
+    # ``len(events) == cap`` heuristic that would false-positive on a
+    # session holding exactly the cap.
+    client = MagicMock()
+    client.list_events.return_value = {"events": [_event("e1", ("USER", "hi"))], **resp_extra}
+
+    _records, truncated = await mr.list_session_records(
+        client, memory_id=MEMORY_ID, actor_id=ACTOR_ID, session_id="c", in_recall_window=False
+    )
+
+    assert truncated is expected
+
+
 async def test_list_session_records_never_flags_a_session_outside_the_window():
     client = MagicMock()
     client.list_events.return_value = {"events": [_event("e1", ("USER", "hi"))]}
 
-    records = await mr.list_session_records(
+    records, _truncated = await mr.list_session_records(
         client,
         memory_id=MEMORY_ID,
         actor_id=ACTOR_ID,
@@ -349,7 +369,7 @@ async def test_list_session_records_returns_full_text_never_truncated():
     client = MagicMock()
     client.list_events.return_value = {"events": [_event("e1", ("USER", long_text))]}
 
-    records = await mr.list_session_records(
+    records, _truncated = await mr.list_session_records(
         client, memory_id=MEMORY_ID, actor_id=ACTOR_ID, session_id="c", in_recall_window=True
     )
 
@@ -367,7 +387,7 @@ async def test_list_session_records_skips_unusable_entries():
         ]
     }
 
-    records = await mr.list_session_records(
+    records, _truncated = await mr.list_session_records(
         client, memory_id=MEMORY_ID, actor_id=ACTOR_ID, session_id="c", in_recall_window=False
     )
 
@@ -389,7 +409,7 @@ async def test_list_session_records_normalises_timestamps(stamp: Any, expected: 
         del event["eventTimestamp"]
     client.list_events.return_value = {"events": [event]}
 
-    records = await mr.list_session_records(
+    records, _truncated = await mr.list_session_records(
         client, memory_id=MEMORY_ID, actor_id=ACTOR_ID, session_id="c", in_recall_window=False
     )
 
