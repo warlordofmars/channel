@@ -13,8 +13,7 @@ from __future__ import annotations
 
 import contextlib
 import os
-import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
 from uuid import uuid4
@@ -23,7 +22,11 @@ import boto3
 import pytest
 
 from channel._table_schema import provision
-from tests.integration._helpers import FakeS3
+from tests.integration._helpers import (
+    RUN_TABLE_PREFIX,
+    FakeS3,
+    is_abandoned_run_table,
+)
 
 # Hosts that are safe targets for the destructive drop+recreate in
 # starter_table. Anything else (including hostnames that merely contain
@@ -54,17 +57,11 @@ _SAFE_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "dynamodb-local"}
 #     ``channel._table_schema``, so a long-lived container can no longer
 #     serve a table whose schema predates a GSI addition (one was found
 #     13 days old, missing ``RefreshByUserIndex`` from #290).
-_TABLE_PREFIX = "channel-integration"
-_RUN_TABLE_RE = re.compile(rf"^{re.escape(_TABLE_PREFIX)}-[0-9a-f]{{8}}$")
-
-# A run killed without unwinding its fixtures (SIGKILL, crashed container)
-# leaks its table into a long-lived container. Sweep those at session
-# start — with a cutoff orders of magnitude longer than any plausible
-# suite run, so a *concurrently running* peer is never swept.
-_ABANDONED_TABLE_MAX_AGE = timedelta(hours=4)
-
+#
+# The naming constants and the sweep predicate live in ``_helpers`` so
+# they can be unit-tested — see ``tests/unit/test_integration_isolation.py``.
 RUN_TABLE_NAME = os.environ.get("CHANNEL_INTEGRATION_TABLE_NAME") or (
-    f"{_TABLE_PREFIX}-{uuid4().hex[:8]}"
+    f"{RUN_TABLE_PREFIX}-{uuid4().hex[:8]}"
 )
 
 
@@ -121,26 +118,27 @@ def _drop_table(dynamodb_resource: Any, name: str) -> None:
     table.wait_until_not_exists()
 
 
-def _sweep_abandoned_run_tables(dynamodb_resource: Any) -> None:
+def _sweep_abandoned_run_tables(dynamodb_resource: Any, current_table: str) -> None:
     """Drop per-run tables left behind by sessions that never unwound.
 
-    Only tables matching the generated ``channel-integration-<8 hex>``
-    shape are considered, and only once they are older than
-    :data:`_ABANDONED_TABLE_MAX_AGE` — a peer session running right now
-    is far younger than the cutoff, so this can never delete a live
-    run's table. Entirely best-effort: a peer sweeping the same table
-    concurrently, or a DynamoDB Local build that reports timestamps
-    oddly, must not fail anyone's suite.
+    Eligibility is decided by :func:`is_abandoned_run_table` (name shape
+    + age), which is unit-tested against the real names this container
+    holds. ``current_table`` is skipped unconditionally: with
+    ``CHANNEL_INTEGRATION_TABLE_NAME`` pinned to a hex-shaped name whose
+    table is already stale, sweeping it here would race the
+    ``_drop_table`` call that immediately follows — that one tolerates a
+    missing table, but not a ``ResourceInUseException`` from a table
+    already in ``DELETING``.
+
+    Entirely best-effort otherwise: a peer sweeping the same table
+    concurrently must not fail anyone's suite.
     """
-    cutoff = datetime.now(timezone.utc) - _ABANDONED_TABLE_MAX_AGE
+    now = datetime.now(timezone.utc)
     for table in dynamodb_resource.tables.all():
-        if not _RUN_TABLE_RE.match(table.name):
+        if table.name == current_table:
             continue
         with contextlib.suppress(Exception):
-            created = table.creation_date_time
-            if created.tzinfo is None:
-                created = created.replace(tzinfo=timezone.utc)
-            if created < cutoff:
+            if is_abandoned_run_table(table.name, table.creation_date_time, now):
                 table.delete()
 
 
@@ -183,7 +181,7 @@ def starter_table(dynamodb_resource: Any, table_name: str) -> Any:
             f"{sorted(_SAFE_LOCAL_HOSTS)}) before running the integration suite."
         )
 
-    _sweep_abandoned_run_tables(dynamodb_resource)
+    _sweep_abandoned_run_tables(dynamodb_resource, table_name)
     _drop_table(dynamodb_resource, table_name)
 
     provision(dynamodb_resource.meta.client, table_name)

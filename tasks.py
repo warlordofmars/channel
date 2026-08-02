@@ -59,7 +59,11 @@ def _resolve_dynamo_port(raw: str | None) -> int:
     An unparseable value raises rather than falling back to the default:
     a silent fallback would put the caller back on the shared container
     while they believe they are isolated — the exact confusion #466 is
-    about.
+    about. Note this resolves at **import** time, so a typo'd value
+    fails every invoke task (``inv --list`` included), not just the
+    DynamoDB ones. That blast radius is accepted deliberately: the
+    variable is opt-in, so a malformed one is always a mistake worth
+    surfacing immediately, and the message names the variable.
     """
     value = (raw or "").strip()
     if not value:
