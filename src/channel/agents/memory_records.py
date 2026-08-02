@@ -24,7 +24,10 @@ Three things it does, none of which belong in a router:
 Plus the two safety rails the read side needs:
 
 - :func:`resolve_owned_chats` — ownership verification against the **raw**
-  JWT sub, because the sanitized ``actorId`` is not injective (#474).
+  JWT sub. #485 made ``derive_actor_id`` injective, closing #474, but the
+  gate stays: a read boundary must not depend on a derivation's
+  properties, and it is what keeps this surface from inheriting the
+  *next* such bug.
 - :func:`encode_record_id` / :func:`decode_record_id` — opaque record ids
   that survive a URL path segment.
 
