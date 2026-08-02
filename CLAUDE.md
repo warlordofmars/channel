@@ -916,10 +916,17 @@ halves live in `desktop/main/window.js` + `desktop/preload/index.js`.
   `target="_blank"` and `window.open` (the MCP OAuth starts in
   `AddMCPServerModal` / `FeaturedMCPServers` / `Customize`) open in the
   system browser instead of an Electron window.
-- **Only `http:` / `https:` may reach `shell.openExternal`.** It
-  delegates to the OS handler, so passing `file:`, `javascript:`,
-  `smb:` or a custom scheme through would trade the stranded-window bug
-  for a launch-anything bug. Allowlist, never denylist.
+- **Only `http:` / `https:` may reach `shell.openExternal` *on a
+  renderer-supplied URL*.** `shell.openExternal` delegates to the OS
+  handler, so passing `file:`, `javascript:`, `smb:` or a custom scheme
+  through would trade the stranded-window bug for a launch-anything
+  bug. Allowlist, never denylist. Everything the guards hand over goes
+  via `openExternalIfSafe`, which is the only path to
+  `shell.openExternal` in `window.js`. The one call site *outside* that
+  funnel is `auth.js`, which builds its URL in the main process from
+  `CHANNEL_API_BASE` and never touches renderer input — if you add a
+  second such call site, either route it through `openExternalIfSafe`
+  or be equally sure the URL can't be attacker-influenced.
 - **The preload fails closed.** `window.js` passes the one permitted
   origin via `webPreferences.additionalArguments`, which lands in the
   renderer's `process.argv`; the preload exposes the bridge only when
