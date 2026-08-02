@@ -23,7 +23,7 @@ export function mockElectron(overrides = {}) {
         once: vi.fn(),
         hide: vi.fn(),
         show: vi.fn(),
-        webContents: { id: 1, on: vi.fn() },
+        webContents: { id: 1, on: vi.fn(), setWindowOpenHandler: vi.fn() },
         ...overrides.windowInstance,
       });
     }),

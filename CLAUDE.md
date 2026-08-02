@@ -569,12 +569,43 @@ auto-titling of fresh chats via a Haiku one-shot Agent (Phase 7d).
 - **`CHANNEL_AGENTCORE_MEMORY_NAME`** overrides the default name —
   useful for pointing a personal dev environment at a pre-existing
   Memory resource.
-- **`actorId = sanitize(jwt.sub)`** — one actor per Channel user.
-  Disallowed characters (anything outside `[a-zA-Z0-9_/-]`) are
-  replaced with `_` so email-form JWT subs (containing `@` and `.`)
-  satisfy AgentCore's regex. Per-workspace partitioning (per the
-  "workspaces are the tenancy root" product decision) will eventually
-  become `actorId = f"{workspace_id}/{user_id}"`.
+- **`actorId = derive_actor_id(jwt.sub)`** — one actor per Channel
+  user, and **the only partition this Memory resource has**, so the
+  derivation being injective is a cross-user isolation boundary, not
+  hygiene. Shape: `{label}-{sha256(jwt_sub)[:32]}` — a lossy,
+  human-legible label (disallowed chars → `_`, capped at 48, leading
+  non-alphanumerics stripped) for console readability, plus a
+  fixed-width digest that carries identity. Equal outputs imply equal
+  digests imply equal inputs; distinct users can never share a
+  partition. `src/channel/agents/memory.py` owns the ONE
+  implementation — `recall.py`, `tools/memory_tools.py`, `api/chats.py`
+  (session wipe) and `api/_debug.py` all import it, pinned by
+  `test_one_shared_derivation_across_every_call_site`. Values are
+  storage keys: golden vectors in `tests/unit/test_memory.py` pin them
+  permanently, and changing one orphans that user's stored memories.
+  Per-workspace partitioning (per the "workspaces are the tenancy root"
+  product decision) becomes
+  `derive_actor_id(f"{workspace_id}/{user_id}")` — the composite key
+  goes through the same function, never around it.
+  - **History (#474).** Until this landed, the derivation was a bare
+    `re.sub(r"[^a-zA-Z0-9_/-]", "_", jwt_sub)`, which is **not
+    injective**: `jc+work@x.com` and `jc_work@x.com` both yielded
+    `jc_work_x_com`, as did `a.b@x.com` / `a@b.x.com`. Colliding users
+    shared one memory store, so `AgentCoreRecallHook` would replay one
+    person's chat content into another's system prompt.
+  - **Migration: accept the loss, deliberately.** Memories written
+    under the old ids are orphaned rather than dual-read. A dual-read
+    fallback would have to *read the lossy partition*, which is exactly
+    the cross-user disclosure being fixed — it would keep the hole open
+    for the length of the fallback window. The loss is bounded (sign-in
+    is `ALLOWED_EMAILS`-gated, so the user set is tiny) and
+    self-clearing (`eventExpiryDuration=90` days), and it costs no chat
+    content: DynamoDB remains the source of truth and the current
+    chat's history is fed from there. What degrades is cross-chat
+    recall, until new events accumulate. Reversible if that turns out
+    wrong: `_legacy_lossy_actor_id` (same module) still computes the
+    old id, so an offline tool can find and copy-forward a legacy
+    partition after checking it isn't shared.
 - **`sessionId = chat_id`** — one AgentCore session per Channel chat.
   Chat ids are UUIDs so no sanitization needed.
 - **Failure mode**: log + EMF counter (`MemoryWriteFailures`) +
@@ -590,7 +621,11 @@ auto-titling of fresh chats via a Haiku one-shot Agent (Phase 7d).
   AgentCore Memory events for the chat's session (`ListEvents` +
   `DeleteEvent`). Failure is logged + counted
   (`ChatDeleteMemoryWipeFailures`) but does not fail the user-visible
-  delete — DDB is the source of truth for chat existence.
+  delete — DDB is the source of truth for chat existence. The wipe
+  targets the **current** `actorId`, so events written before the #474
+  derivation change are not reached by it and persist until the 90-day
+  `eventExpiryDuration` — an accepted consequence of the accept-the-loss
+  migration above, not an oversight.
 
 Dev-only `GET /api/_debug/memory/events?chat_id=...&limit=...` and
 `DELETE /api/_debug/memory/events?chat_id=...&event_id=...`
@@ -651,7 +686,7 @@ infra**.
   `memory_id` / `actor_id` / `session_id`. Appended to the tools list
   **inside `build_agent`** (not `chats._build_tool_registry`) where
   that context exists. Scoping reuses `actorId =
-  _sanitize_actor_id(jwt.sub)` — follows, does not pre-empt, the future
+  derive_actor_id(jwt.sub)` — follows, does not pre-empt, the future
   `{workspace_id}/{user_id}` scheme.
 - **Kill-switch** — `CHANNEL_MEMORY_TOOLS_ENABLED` (default `"1"`, same
   memory-family convention as `CHANNEL_RECALL_ENABLED` /
@@ -975,6 +1010,58 @@ deliberately never sets `CHANNEL_DESKTOP_DEV_EMAIL`, so real desktop
 sign-in on deployed dev routes through Google like any other browser flow.
 Gating the short-circuit on the bypass flag alone would silently
 auto-log-in every deployed-dev desktop user as the placeholder account.
+
+### Navigation boundary (#472)
+
+**The app window never leaves the app's own origin, and the
+`window.channelDesktop` bridge never attaches anywhere else.** Both
+halves live in `desktop/main/window.js` + `desktop/preload/index.js`.
+
+- **The app origin** is `${protocol}//${host}` of the URL the window
+  loads: `app://-` packaged, `http://localhost:5173` under
+  `inv desktop-dev`. Computed by `originOf()` — deliberately **not**
+  `URL.origin`, which returns the string `"null"` for any non-special
+  scheme in Node and would therefore collapse `app://-` and every other
+  custom-scheme URL into one bucket.
+- **`will-navigate` / `will-redirect`** `preventDefault()` anything
+  off-origin and hand it to the system browser. Neither fires for the
+  main process's own `loadURL`, nor for `history.pushState`, so the
+  initial load and React Router are untouched.
+- **`setWindowOpenHandler`** always returns `{ action: "deny" }` —
+  `target="_blank"` and `window.open` (the MCP OAuth starts in
+  `AddMCPServerModal` / `FeaturedMCPServers` / `Customize`) open in the
+  system browser instead of an Electron window.
+- **Only `http:` / `https:` may reach `shell.openExternal` *on a
+  renderer-supplied URL*.** `shell.openExternal` delegates to the OS
+  handler, so passing `file:`, `javascript:`, `smb:` or a custom scheme
+  through would trade the stranded-window bug for a launch-anything
+  bug. Allowlist, never denylist. Everything the guards hand over goes
+  via `openExternalIfSafe`, which is the only path to
+  `shell.openExternal` in `window.js`. The one call site *outside* that
+  funnel is `auth.js`, which builds its URL in the main process from
+  `CHANNEL_API_BASE` and never touches renderer input — if you add a
+  second such call site, either route it through `openExternalIfSafe`
+  or be equally sure the URL can't be attacker-influenced.
+- **The preload fails closed.** `window.js` passes the one permitted
+  origin via `webPreferences.additionalArguments`, which lands in the
+  renderer's `process.argv`; the preload exposes the bridge only when
+  `location.origin` matches. No flag, *more than one* flag, an origin
+  mismatch, or an opaque `"null"` origin all yield no bridge. This is
+  defence in depth — the navigation guards are the primary control.
+  (`additionalArguments` is preferred over `process.env`, which a
+  sandboxed preload *can* read, because it is scoped per window and
+  keeps the origin computed once, next to the `loadURL` that
+  establishes it.)
+- **Artifact downloads are unaffected.** `triggerBlobDownload` in
+  `ArtifactPanel.jsx` clicks a transient `<a download href="blob:…">`;
+  Chromium routes that to the download manager without firing
+  `will-navigate`, so the guard never sees it (verified against a live
+  Electron). Don't add `blob:` to the `shell.openExternal` allowlist to
+  "fix" a problem that doesn't exist — it would be a hole.
+- **The OAuth loopback is unaffected.** `auth.js` calls
+  `shell.openExternal` from the *main* process, which the guards never
+  intercept, and the callback is served to the system browser by the
+  loopback HTTP server — the app window never navigates during login.
 
 ### Why these decisions
 

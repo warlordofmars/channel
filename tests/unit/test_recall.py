@@ -9,6 +9,7 @@ import pytest
 from strands.hooks.events import BeforeInvocationEvent
 
 from channel.agents import recall as recall_module
+from channel.agents.memory import derive_actor_id
 from channel.agents.recall import (
     _RECALL_EVENT_TEXT_TRUNCATE,
     _RECALL_EVENTS_PER_SESSION,
@@ -305,7 +306,7 @@ async def test_hook_lists_sessions_and_events_excluding_current_chat():
     # ListSessions called once, scoped to actor.
     fake_client.list_sessions.assert_called_once_with(
         memoryId="m-1",
-        actorId="user_abc",
+        actorId=derive_actor_id("user_abc"),
     )
     # ListEvents called once per prior session, NOT for the current chat.
     assert fake_client.list_events.call_count == 2
@@ -643,7 +644,10 @@ async def test_preview_addendum_returns_block_and_records_without_caching():
     ]
     # Current chat is excluded from the ListEvents fan-out.
     fake_client.list_events.assert_called_once_with(
-        memoryId="m-1", actorId="u-abc", sessionId="prior-1", maxResults=_RECALL_EVENTS_PER_SESSION
+        memoryId="m-1",
+        actorId=derive_actor_id("u-abc"),
+        sessionId="prior-1",
+        maxResults=_RECALL_EVENTS_PER_SESSION,
     )
     # No cache pollution — inspection is a pure read.
     assert recall_module._recall_cache == {}
