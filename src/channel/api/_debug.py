@@ -31,7 +31,7 @@ from typing import Any
 import boto3
 from fastapi import APIRouter, Depends, Query
 
-from channel.agents.memory import _sanitize_actor_id, get_or_create_memory
+from channel.agents.memory import derive_actor_id, get_or_create_memory
 from channel.agents.recall import AgentCoreRecallHook
 from channel.api._auth import require_mgmt_user
 
@@ -66,7 +66,7 @@ async def list_memory_events(
     client = boto3.client("bedrock-agentcore")
     resp = client.list_events(
         memoryId=memory_id,
-        actorId=_sanitize_actor_id(claims["sub"]),
+        actorId=derive_actor_id(claims["sub"]),
         sessionId=chat_id,
         maxResults=limit,
     )
@@ -91,7 +91,7 @@ async def delete_memory_event(
     client = boto3.client("bedrock-agentcore")
     client.delete_event(
         memoryId=memory_id,
-        actorId=_sanitize_actor_id(claims["sub"]),
+        actorId=derive_actor_id(claims["sub"]),
         sessionId=chat_id,
         eventId=event_id,
     )
@@ -116,7 +116,7 @@ async def inspect_recall(
 
     Scoped to the caller's ``jwt.sub`` (same as the other _debug
     endpoints): even if the flag leaks on a real environment, one user
-    cannot inspect another's recall. The hook constructor sanitizes the
+    cannot inspect another's recall. The hook constructor derives the
     raw ``sub`` into the AgentCore ``actorId``.
 
     Reuses the hook's own fetch + formatting path via
@@ -144,7 +144,7 @@ async def inspect_recall(
     ]
     return {
         "chat_id": chat_id,
-        "actor_id": _sanitize_actor_id(claims["sub"]),
+        "actor_id": derive_actor_id(claims["sub"]),
         "recall_enabled": os.environ.get("CHANNEL_RECALL_ENABLED", "1") == "1",
         "block": block,
         "fragments": fragments,

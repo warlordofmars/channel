@@ -358,7 +358,7 @@ def test_endpoint_takes_no_actor_or_user_parameter():
 
     _call(fake, {"mine": _chat("mine")}, params={"actor_id": INTRUDER, "user_id": INTRUDER})
 
-    expected = memory_api._sanitize_actor_id(OWNER)
+    expected = memory_api.derive_actor_id(OWNER)
     for call in fake.list_sessions.call_args_list:
         assert call.kwargs["actorId"] == expected
 

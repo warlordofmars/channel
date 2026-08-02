@@ -53,7 +53,7 @@ the same forgery surface on the system-prompt side). Epic #129 decision 11.
 
 Two independent gates, deliberately not relying on each other:
 
-1. ``actorId = _sanitize_actor_id(claims["sub"])`` — no actor / user /
+1. ``actorId = derive_actor_id(claims["sub"])`` — no actor / user /
    workspace parameter exists on this endpoint, per the standing "agents
    swap tokens to switch context" product decision. When #283 makes
    ``actorId`` ``{workspace_id}/{user_id}``, no signature changes.
@@ -72,7 +72,7 @@ Two independent gates, deliberately not relying on each other:
    makes that derivation injective — which repairs gate 1 but does not
    make gate 2 redundant, because gate 2 is what keeps this endpoint from
    inheriting the *next* such bug. ``withheld_record_count`` is the
-   standing canary: once #485 lands it should read 0 in normal operation,
+   standing canary: with #485 landed it should read 0 in normal operation,
    and a non-zero value means either a partition anomaly or an orphaned
    session left by a failed chat-delete wipe. Both are worth knowing.
 
@@ -108,7 +108,7 @@ import boto3
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from channel import storage
-from channel.agents.memory import _sanitize_actor_id, get_or_create_memory
+from channel.agents.memory import derive_actor_id, get_or_create_memory
 from channel.agents.memory_records import (
     count_session_records,
     group_created_at,
@@ -240,7 +240,7 @@ async def list_memory_records(
     nothing to page through.
     """
     user_id = claims["sub"]
-    actor_id = _sanitize_actor_id(user_id)
+    actor_id = derive_actor_id(user_id)
     # Validated before any AgentCore call, so a malformed or foreign cursor
     # is a locally-decided 400 rather than a vendor ValidationException (500).
     next_token = _decode_cursor(cursor, actor_id) if cursor else None
