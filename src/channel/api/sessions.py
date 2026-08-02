@@ -28,16 +28,16 @@ other users' device ids.
 **Revoking a refresh family does not by itself kill an outstanding
 access token.** These routes revoke *refresh* rows, which stops a device
 minting further access tokens; a mgmt JWT already issued stays valid
-until its own ``exp`` unless its ``jti`` is denylisted (#240). That
-matters more than it sounds: ``MGMT_JWT_TTL_SECONDS`` is **30 days**
-today, and only returns to 1 hour when #291 lands. So the two routes
-differ deliberately:
+until its own ``exp`` unless its ``jti`` is denylisted (#240). Since
+#291 that ``exp`` is one hour out, not the 30 days it was — but "signed
+out" that takes up to an hour to mean anything is still not what the
+user asked for. So the two routes differ deliberately:
 
 * ``DELETE /api/me/sessions`` (all) **also denylists the caller's own
-  access token**, the same write ``/auth/logout`` performs. Without it,
-  a user who clicks "sign out everywhere" would stay signed in on the
-  device they clicked it from for up to 30 more days — which is the
-  opposite of what the button says.
+  access token**, the same write ``/auth/logout`` performs, which is
+  what makes "sign out everywhere" take effect on the device that
+  pressed it immediately rather than at the end of the access token's
+  remaining lifetime.
 * ``DELETE /api/me/sessions/{device_id}`` cannot do the equivalent for
   the target device: the mgmt JWT carries no ``device_id`` claim, so
   there is no way to map a device to the ``jti`` it holds. That device
@@ -228,8 +228,8 @@ def revoke_all_my_sessions(
     behaviour for a user who believes their account is compromised.
 
     The caller's own access token is denylisted too (#240), so the button
-    means what it says on the device that pressed it rather than leaving
-    it authenticated for the remainder of a 30-day TTL.
+    means what it says on the device that pressed it immediately, rather
+    than at the end of that token's remaining lifetime.
 
     **Ordering is retry-safety, not taste.** Refresh families first, then
     the denylist write. Both writes are idempotent, so a failure at any

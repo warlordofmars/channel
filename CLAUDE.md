@@ -238,11 +238,45 @@ the access JWT it renews has usually already expired.
 - Response: `{access_token, token_type: "bearer", expires_in}` plus
   `refresh_token` on the body transport only.
 
-Still to land in epic #241: the sessions API (#293), rate limiting + EMF
-counters (#294), the SPA's silent-refresh wrapper (#295), and desktop
-`safeStorage` persistence (#297). **Until #295 lands the SPA does not
-call this endpoint**, so a web session still ends at the 1h access-token
-expiry even though the refresh token it needs is now issued (#292).
+### `/api/me/sessions` (#293)
+
+`GET` lists the caller's live sessions — one entry per `device_id`,
+newest first, projected from the live refresh rows
+(`list_live_refresh_tokens`). A *session is a device*, not a refresh
+row: hard rotation burns through a chain of rows per device, so the
+route collapses live rows by `device_id` and shows the newest. `DELETE
+/api/me/sessions/{device_id}` ends one device
+(`revoke_device_refresh_tokens`); `DELETE /api/me/sessions` ends every
+device **and denylists the caller's own access token**, so "sign out
+everywhere" takes effect immediately on the device that pressed it
+rather than at that token's `exp` — the same pairing `/auth/logout`
+performs at single-device scope (#292). The per-device route can't do
+the equivalent for its target: the mgmt JWT still carries no `device_id`
+claim, so there is no way to map a device to the `jti` it holds. That
+would be a mint-path change and remains unbuilt.
+
+Neither `DELETE` clears the `channel_refresh` cookie. It doesn't need
+to: the server-side revoke is the authoritative one, and a browser
+presenting the now-dead cookie to `/auth/refresh` gets a 401 that clears
+it (see above). Clearing here would be cosmetic, and the cookie's
+`Path=/auth` doesn't reach `/api/*` on the request side anyway.
+
+Ownership is the JWT `sub` claim and a mismatch is **404, not 403**
+(`_load_owned_session` mirrors `_load_owned_chat`): lookups run inside
+the caller's own `REFRESH_USER#{sub}` index partition, so another user's
+`device_id` is indistinguishable from one that never existed. Both
+revoke routes write an audit event (`auth.session_revoke` /
+`auth.session_revoke_all`), like `/auth/logout`. The `DELETE`s return
+204 with no revoked-row count — a count would imply a post-condition the
+eventually-consistent index cannot promise (see the refresh-token entry
+under §DynamoDB single table design).
+
+Still to land in epic #241: rate limiting + EMF counters (#294), the
+SPA's silent-refresh wrapper (#295), and desktop `safeStorage`
+persistence (#297). **Until #295 lands the SPA does not call
+`/auth/refresh`**, so a web session still ends at the 1h access-token
+expiry even though the refresh token it needs is now issued (#292) —
+and the sessions list shows the one device the current login minted.
 
 ## DynamoDB single table design
 

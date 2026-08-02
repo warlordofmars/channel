@@ -346,8 +346,8 @@ def test_revoke_all_sessions_denylists_the_callers_own_access_token(
     store: _Store, as_user: Callable[..., TestClient]
 ) -> None:
     """Without this the user who pressed "sign out everywhere" stays
-    signed in on the device they pressed it from for the rest of the
-    access token's TTL — 30 days at today's MGMT_JWT_TTL_SECONDS."""
+    signed in on the device they pressed it from for the rest of that
+    access token's lifetime."""
     store.seed(_token("u-1", "laptop"))
 
     r = as_user("u-1", jti="jti-abc", exp=1_800_000_000).delete("/api/me/sessions", headers=_AUTH)
