@@ -73,7 +73,12 @@ describe("token storage — encrypted branch", () => {
     expect(raw.includes(Buffer.from("super-secret-value", "utf8"))).toBe(false);
   });
 
-  it("writes the file owner-only", async () => {
+  // POSIX only. Windows has no mode bits — NTFS ACLs are the equivalent
+  // control and Node reports a synthesised 0666 — so asserting 0600 there
+  // tests the platform, not the code. `userData` is already per-user on
+  // Windows; the encryption (DPAPI, keyed to the user account) is the
+  // protection that matters on that platform anyway.
+  it.skipIf(process.platform === "win32")("writes the file owner-only", async () => {
     const store = storage(fakeSafeStorage());
     await store.write({ refresh_token: "rt" });
     expect((await stat(filePath)).mode & 0o777).toBe(0o600);
