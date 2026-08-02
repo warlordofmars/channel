@@ -4,7 +4,7 @@
  * Token is read from localStorage via `lib/auth.js`.
  */
 
-import { clearSession, isTokenValid, loadSession, saveSession } from "./lib/auth.js";
+import { clearSession, isTokenValid, loadSession, readToken, saveSession } from "./lib/auth.js";
 
 const BASE = import.meta.env.VITE_API_BASE ?? "";
 
@@ -66,6 +66,13 @@ let refreshInFlight = null;
 let refreshBlockedUntil = 0;
 
 /**
+ * Whether the last failed refresh was *refused* by the server (4xx) as
+ * opposed to unreachable. Sticky until a refresh succeeds, so it still
+ * describes the last real answer while the cooldown short-circuits.
+ */
+let refreshRefused = false;
+
+/**
  * Perform the actual rotation.
  *
  * No request body: the web transport presents the `channel_refresh`
@@ -84,18 +91,41 @@ async function performRefresh() {
   });
   if (!response.ok) throw new ApiError("refreshSession", response.status);
   const body = await response.json();
-  if (!body.access_token) throw new ApiError("refreshSession", response.status);
   // `expires_in` is seconds from now; store an absolute local deadline.
   // A body `refresh_token` (the desktop transport) is deliberately NOT
   // persisted here — see the note in lib/auth.js on why localStorage
   // never holds one. #297 owns the desktop side.
-  saveSession(body.access_token, Date.now() + Number(body.expires_in ?? 0) * 1000);
+  //
+  // `saveSession` is the single validator for what may be persisted: it
+  // throws on a missing or malformed `access_token` rather than writing
+  // an unvalidated response body into browser storage, and that throw is
+  // caught below as an ordinary refresh failure.
+  //
+  // `expires_in` absent falls through to `saveSession`'s own `exp`-claim
+  // fallback rather than computing `Date.now() + 0` — which is truthy, so
+  // it would win the fallback and store an already-expired deadline,
+  // making the client re-rotate once per API call.
+  const ttl = Number(body.expires_in);
+  saveSession(body.access_token, ttl > 0 ? Date.now() + ttl * 1000 : 0);
+  refreshRefused = false;
   return body.access_token;
 }
 
-/** Arm the cooldown and report "no new token" to every awaiting caller. */
-function onRefreshRejected() {
+/**
+ * Arm the cooldown and report "no new token" to every awaiting caller.
+ *
+ * Records *why* it failed, because the two reasons deserve opposite
+ * treatment. A refusal (the server answered 4xx) is an authoritative
+ * "this credential is no good" and, once the access token is also dead,
+ * ends the session. Anything else — offline, DNS, TLS, a 5xx, a
+ * malformed body — says nothing about the credential, and destroying a
+ * recoverable session over a transient blip that happened to straddle
+ * expiry is precisely the class of spurious logout this whole change
+ * exists to remove.
+ */
+function onRefreshRejected(error) {
   refreshBlockedUntil = Date.now() + REFRESH_COOLDOWN_MS;
+  refreshRefused = error instanceof ApiError && error.status >= 400 && error.status < 500;
   return "";
 }
 
@@ -150,9 +180,14 @@ async function accessToken() {
   const refreshed = Date.now() < refreshBlockedUntil ? "" : await refreshAccessToken();
   if (refreshed) return refreshed;
   if (isTokenValid(token)) return token;
-
-  endSession();
-  return "";
+  if (refreshRefused) {
+    endSession();
+    return "";
+  }
+  // Unusable token, but the refresh endpoint was never reached, so the
+  // refresh cookie may well still be good. Keep local state and let this
+  // request fail on its own; a later attempt can still recover.
+  return token;
 }
 
 async function authHeader() {
@@ -340,11 +375,29 @@ export async function getAssetContent(chatId, assetId) {
 // killed server-side, the cookie could silently re-mint access tokens
 // after a "sign out". Same-origin deployments send it either way; this
 // covers a cross-origin `VITE_API_BASE`.
+//
+// This is the ONE authenticated call that deliberately does NOT go
+// through `authHeader()`. Two reasons, both load-bearing:
+//
+//  1. `Sidebar.signOut` fires this and then *synchronously* navigates
+//     away. `authHeader()` is now async and may await a whole refresh
+//     round trip, so the navigation would win the race and the request
+//     would never leave the tab — silently losing the server-side family
+//     revoke and the `jti` denylist write, which is the half of logout
+//     that actually ends the session. Reading the token synchronously
+//     keeps the `fetch` dispatched in the same tick, as it was before
+//     silent refresh existed.
+//  2. Rotating a token family one instant before revoking it is pure
+//     waste, and it would burn a rotation for nothing.
+//
+// An expired token here is fine: the endpoint's job is the revoke, and a
+// dead access token cannot be made deader.
 
 export async function logout() {
+  const token = readToken();
   const res = await fetch(`${BASE}/auth/logout`, {
     method: "POST",
-    headers: await authHeader(),
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
     credentials: "include",
   });
   if (!res.ok) throw new Error(`logout ${res.status}`);

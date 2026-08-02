@@ -47,6 +47,25 @@ export const LEGACY_TOKEN_KEY = "starter_mgmt_token";
 /** The shape `loadSession` returns when nothing usable is stored. */
 const NO_SESSION = { access_token: "", expires_at: 0 };
 
+/**
+ * Structural shape a value must have to be persisted as an access token:
+ * three non-empty base64/base64url segments.
+ *
+ * `saveSession` writes values that originate off-device — a
+ * `POST /auth/refresh` response body, and the token the desktop loopback
+ * hands back — so the write is only as trustworthy as its source. This
+ * check is the boundary that keeps a malformed or hostile response from
+ * being persisted as a credential and replayed on every subsequent
+ * request. It is a *structural* check, not an authenticity one: the
+ * signature is verified server-side on every call, and the SPA has no
+ * signing secret with which to do better.
+ *
+ * Both alphabets are admitted (`+/=` as well as `-_`) because a JWT is
+ * base64url but test fixtures and some encoders emit padded standard
+ * base64, and rejecting those would fail closed on well-formed input.
+ */
+const JWT_SHAPE = /^[A-Za-z0-9+/_=-]+\.[A-Za-z0-9+/_=-]+\.[A-Za-z0-9+/_=-]+$/;
+
 export function parseToken(token) {
   if (!token) return null;
   try {
@@ -135,13 +154,24 @@ export function readToken() {
  *
  * Deleting the legacy key here is what makes the #260 migration
  * one-way: after any write there is exactly one key in the jar.
+ *
+ * **Throws** on anything that isn't structurally a JWT (see
+ * `JWT_SHAPE`), storing nothing. Both callers already handle a throw
+ * correctly, which is why this refuses rather than returning a status
+ * nobody would check: in `api.js` the rejection lands on the
+ * silent-refresh failure path (fall back to the existing token, arm the
+ * cooldown), and in `Login.jsx` it lands in the existing catch that
+ * renders "Login failed."
  */
 export function saveSession(accessToken, expiresAt = 0) {
+  if (typeof accessToken !== "string" || !JWT_SHAPE.test(accessToken)) {
+    throw new TypeError("saveSession: refusing to store a malformed access token");
+  }
   localStorage.setItem(
     TOKEN_KEY,
     JSON.stringify({
       access_token: accessToken,
-      expires_at: expiresAt || expiryFromToken(accessToken),
+      expires_at: Number(expiresAt) || expiryFromToken(accessToken),
     }),
   );
   localStorage.removeItem(LEGACY_TOKEN_KEY);

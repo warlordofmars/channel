@@ -247,7 +247,12 @@ the access JWT it renews has usually already expired.
 - **One seam.** Every authenticated wrapper builds its headers through
   `authHeader()`, which is `async` and renews first. Adding a new
   endpoint wrapper inherits refresh automatically; a raw `fetch` with a
-  hand-rolled `Authorization` header does not.
+  hand-rolled `Authorization` header does not. **`logout()` is the one
+  deliberate exception** — it reads the token synchronously, because
+  `Sidebar.signOut` navigates away in the same tick and an awaited
+  refresh would let the navigation win, silently losing the family
+  revoke and the `jti` denylist write. Rotating a family an instant
+  before revoking it is waste besides.
 - **Single-flight is correctness, not optimisation.** #290 hard-rotates
   on every use and reads a re-presented token as an OAuth 2.1 reuse
   breach that revokes the whole device family. A page load fires several
@@ -258,21 +263,39 @@ the access JWT it renews has usually already expired.
   answers 401 both for a dead token and for a client with no refresh
   credential at all (desktop until #297, bypass logins, pre-#292
   sessions) — the latter is the epic's migration path. The still-valid
-  access token is used, with a 30s cooldown before retrying; the session
-  ends (`endSession()` — clear storage, route to `/app/login`) only once
-  the access token is genuinely unusable.
+  access token is used, with a 30s cooldown before retrying. The session
+  ends (`endSession()` — clear storage, route to `/app/login`) only when
+  the access token is unusable **and** the refresh was *refused* (a 4xx).
+  Anything else — offline, DNS, 5xx, malformed body — says nothing about
+  the credential, so local state survives and a later attempt can still
+  recover; destroying a good session over a blip that happened to
+  straddle expiry is the same spurious logout this change exists to
+  remove.
 
 Storage lives in `ui/src/lib/auth.js`: a JSON `{access_token,
 expires_at}` envelope under `channel_mgmt_token`, renewed when
 `expires_at` is within 5 minutes. **A refresh token never enters
 localStorage** — web uses the HttpOnly cookie, desktop will use the OS
-keychain (#297). Reads accept the pre-rename `starter_mgmt_token` key
+keychain (#297). `saveSession` refuses (throws) anything that is not
+structurally a JWT rather than writing an unvalidated `/auth/refresh`
+response body into browser storage; both callers already treat a throw
+as an ordinary failure. Reads accept the pre-rename `starter_mgmt_token` key
 and a bare-JWT value (the shape `/auth/callback`'s login page writes),
 deriving the deadline from the `exp` claim; every write goes to the new
 key and deletes the legacy one. That read order is only safe while
 nothing writes the legacy key, so `MGMT_TOKEN_STORAGE_KEY` in
 `mgmt_auth.py` and `TOKEN_KEY` in `lib/auth.js` must move together.
 Dropping the legacy fallback is a follow-up, one release out.
+
+**Two known gaps, both deliberate.** (1) Renewal fires only from
+`authHeader()`, i.e. on an API call — so `AuthGate` still bounces a
+*cold load* carrying an expired token to `/app/login` without trying the
+cookie. A session that stays open is kept alive indefinitely; one
+reopened after the access token died still re-authenticates. (2)
+Single-flight is per-document: two tabs share a cookie jar but not the
+in-flight promise, so a simultaneous multi-tab renewal can still trip
+#290's reuse detection. `navigator.locks` is the fix. Neither is a
+regression against the no-refresh-at-all status quo.
 
 ### `/api/me/sessions` (#293)
 

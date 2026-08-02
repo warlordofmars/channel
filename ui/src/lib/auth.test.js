@@ -143,13 +143,32 @@ describe("session storage", () => {
   });
 
   it("writes the new key and deletes the legacy one", () => {
+    const token = makeToken();
     storage[LEGACY_TOKEN_KEY] = "old";
-    saveSession("fresh", 12_345);
+    saveSession(token, 12_345);
     expect(JSON.parse(storage[TOKEN_KEY])).toEqual({
-      access_token: "fresh",
+      access_token: token,
       expires_at: 12_345,
     });
     expect(storage[LEGACY_TOKEN_KEY]).toBeUndefined();
+  });
+
+  it("refuses to store anything that isn't structurally a JWT", () => {
+    // `saveSession`'s inputs come from off-device: a /auth/refresh
+    // response body and the desktop loopback. Writing an unvalidated
+    // value here would persist it as a credential replayed on every
+    // later request, so the write is guarded rather than the callers.
+    for (const bad of ["", "not-a-jwt", "two.segments", "<script>alert(1)</script>", null, undefined, 42, { access_token: "x" }]) {
+      expect(() => saveSession(bad)).toThrow(TypeError);
+    }
+    expect(storage[TOKEN_KEY]).toBeUndefined();
+  });
+
+  it("leaves an existing session untouched when a bad write is refused", () => {
+    const good = makeToken();
+    saveSession(good);
+    expect(() => saveSession("garbage")).toThrow(TypeError);
+    expect(JSON.parse(storage[TOKEN_KEY]).access_token).toBe(good);
   });
 
   it("falls back to the token's exp when saved without an explicit expiry", () => {
@@ -159,7 +178,7 @@ describe("session storage", () => {
   });
 
   it("clears both keys so a legacy value cannot resurrect the session", () => {
-    storage[TOKEN_KEY] = JSON.stringify({ access_token: "a", expires_at: 1 });
+    storage[TOKEN_KEY] = JSON.stringify({ access_token: makeToken(), expires_at: 1 });
     storage[LEGACY_TOKEN_KEY] = "b";
     clearSession();
     expect(storage[TOKEN_KEY]).toBeUndefined();

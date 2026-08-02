@@ -36,7 +36,7 @@ import {
   submitFeedback,
   uploadToPresigned,
 } from "./api.js";
-import { LEGACY_TOKEN_KEY, TOKEN_KEY } from "./lib/auth.js";
+import { LEGACY_TOKEN_KEY, TOKEN_KEY, parseToken } from "./lib/auth.js";
 
 // A stored session that is nowhere near expiry, so `authHeader` takes the
 // fast path and never reaches the silent-refresh branch. Suites that mean
@@ -1334,6 +1334,11 @@ describe("silent refresh", () => {
     return `eyJhbGciOiJIUzI1NiJ9.${btoa(JSON.stringify({ exp, sub: "u@example.com" }))}.sig`;
   }
 
+  // What /auth/refresh hands back. Must be structurally a JWT — `saveSession`
+  // refuses to persist anything else rather than writing an unvalidated
+  // response body into browser storage.
+  const ROTATED = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJyb3RhdGVkIn0.sig";
+
   /** Store a session whose access token expires in `ms` from now. */
   function storeSession(token, ms) {
     storage[TOKEN_KEY] = JSON.stringify({ access_token: token, expires_at: Date.now() + ms });
@@ -1393,7 +1398,7 @@ describe("silent refresh", () => {
 
   it("refreshes inside the 5-minute skew window and sends the new token", async () => {
     storeSession("stale", 60_000);
-    route(refreshOk({ access_token: "rotated", token_type: "bearer", expires_in: 3600 }));
+    route(refreshOk({ access_token: ROTATED, token_type: "bearer", expires_in: 3600 }));
     const api = await freshApi();
     await api.listModels();
 
@@ -1407,9 +1412,9 @@ describe("silent refresh", () => {
     expect(init.body).toBeUndefined();
     expect(init.credentials).toBe("include");
 
-    expect(apiCalls()[0][1].headers.Authorization).toBe("Bearer rotated");
+    expect(apiCalls()[0][1].headers.Authorization).toBe(`Bearer ${ROTATED}`);
     const saved = JSON.parse(storage[TOKEN_KEY]);
-    expect(saved.access_token).toBe("rotated");
+    expect(saved.access_token).toBe(ROTATED);
     expect(saved.expires_at).toBeGreaterThan(Date.now() + 3_000_000);
   });
 
@@ -1418,7 +1423,7 @@ describe("silent refresh", () => {
     // re-presented token as a reuse breach that kills the device family,
     // so a second concurrent refresh would sign the user out.
     storeSession("stale", 60_000);
-    route(refreshOk({ access_token: "rotated", expires_in: 3600 }));
+    route(refreshOk({ access_token: ROTATED, expires_in: 3600 }));
     const api = await freshApi();
 
     await Promise.all([api.listModels(), api.listModels(), api.listModels(), api.listModels()]);
@@ -1426,13 +1431,13 @@ describe("silent refresh", () => {
     expect(refreshCalls()).toHaveLength(1);
     expect(apiCalls()).toHaveLength(4);
     for (const [, init] of apiCalls()) {
-      expect(init.headers.Authorization).toBe("Bearer rotated");
+      expect(init.headers.Authorization).toBe(`Bearer ${ROTATED}`);
     }
   });
 
   it("refreshes again once the stored deadline has moved on", async () => {
     storeSession("stale", 60_000);
-    route(refreshOk({ access_token: "rotated", expires_in: 3600 }));
+    route(refreshOk({ access_token: ROTATED, expires_in: 3600 }));
     const api = await freshApi();
     await api.listModels();
     await api.listModels();
@@ -1442,12 +1447,12 @@ describe("silent refresh", () => {
 
   it("migrates a legacy-key session onto the new key when it refreshes", async () => {
     storage[LEGACY_TOKEN_KEY] = jwt(60);
-    route(refreshOk({ access_token: "rotated", expires_in: 3600 }));
+    route(refreshOk({ access_token: ROTATED, expires_in: 3600 }));
     const api = await freshApi();
     await api.listModels();
 
     expect(refreshCalls()).toHaveLength(1);
-    expect(JSON.parse(storage[TOKEN_KEY]).access_token).toBe("rotated");
+    expect(JSON.parse(storage[TOKEN_KEY]).access_token).toBe(ROTATED);
     expect(storage[LEGACY_TOKEN_KEY]).toBeUndefined();
   });
 
@@ -1479,22 +1484,60 @@ describe("silent refresh", () => {
     expect(apiCalls()[0][1].headers.Authorization).toBeUndefined();
   });
 
-  it("treats a 200 with no access_token as a failed refresh", async () => {
-    storeSession(jwt(-60), -60_000);
+  it("refuses to persist a malformed access_token from a 200", async () => {
+    // Storage-poisoning guard: the response body is off-device input, so
+    // a non-JWT value is rejected rather than written and then replayed
+    // as a credential on every later request.
+    const token = jwt(60);
+    storeSession(token, 60_000);
+    route(refreshOk({ access_token: "<script>", expires_in: 3600 }));
+    const api = await freshApi();
+    await api.listModels();
+
+    expect(JSON.parse(storage[TOKEN_KEY]).access_token).toBe(token);
+    expect(apiCalls()[0][1].headers.Authorization).toBe(`Bearer ${token}`);
+    expect(assign).not.toHaveBeenCalled();
+  });
+
+  it("keeps local state when a 200 carries no access_token", async () => {
+    // A malformed body is a broken server, not an authoritative "your
+    // credential is no good" — only a 4xx refusal ends the session.
+    const token = jwt(-60);
+    storeSession(token, -60_000);
     route(refreshOk({ token_type: "bearer" }));
     const api = await freshApi();
     await api.listModels();
-    expect(assign).toHaveBeenCalledWith("/app/login");
+    expect(assign).not.toHaveBeenCalled();
+    expect(storage[TOKEN_KEY]).toBeDefined();
   });
 
-  it("defaults a missing expires_in to an immediate deadline", async () => {
-    // Degrades to "refresh again next call" rather than trusting an
-    // undated token forever.
-    storeSession("stale", 60_000);
-    route(refreshOk({ access_token: "rotated" }));
+  it("keeps local state when the refresh endpoint cannot be reached", async () => {
+    // A transient blip that happens to straddle expiry must not destroy a
+    // session whose refresh cookie is still perfectly good.
+    const token = jwt(-60);
+    storeSession(token, -60_000);
+    fetchMock.mockImplementation((url) =>
+      url === "/auth/refresh"
+        ? Promise.reject(new TypeError("Failed to fetch"))
+        : Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) }),
+    );
     const api = await freshApi();
     await api.listModels();
-    expect(JSON.parse(storage[TOKEN_KEY]).expires_at).toBeLessThanOrEqual(Date.now());
+
+    expect(assign).not.toHaveBeenCalled();
+    expect(JSON.parse(storage[TOKEN_KEY]).access_token).toBe(token);
+    expect(apiCalls()[0][1].headers.Authorization).toBe(`Bearer ${token}`);
+  });
+
+  it("falls back to the token's exp claim when expires_in is missing", async () => {
+    // Never `Date.now() + 0`: that is truthy, so it would win the fallback
+    // and store an already-dead deadline, re-rotating once per API call.
+    const rotated = jwt(3600);
+    storeSession("stale", 60_000);
+    route(refreshOk({ access_token: rotated }));
+    const api = await freshApi();
+    await api.listModels();
+    expect(JSON.parse(storage[TOKEN_KEY]).expires_at).toBe(parseToken(rotated).exp * 1000);
   });
 
   it("stops retrying for a cooldown after a refusal", async () => {
@@ -1539,5 +1582,24 @@ describe("silent refresh", () => {
     const api = await freshApi();
     await api.logout();
     expect(fetchMock.mock.calls[0][1].credentials).toBe("include");
+  });
+
+  it("logs out without refreshing first, and dispatches in the same tick", async () => {
+    // Sidebar.signOut fires logout() and then navigates synchronously. If
+    // logout awaited a refresh, the navigation would win and the request
+    // would never leave — silently losing the family revoke and the jti
+    // denylist write, which is the half of logout that ends the session.
+    // Rotating a family one instant before revoking it is waste anyway.
+    const token = jwt(60);
+    storeSession(token, 60_000);
+    route({ ok: true, status: 204, json: () => Promise.resolve({}) });
+    const api = await freshApi();
+
+    const pending = api.logout();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toBe("/auth/logout");
+    await pending;
+    expect(refreshCalls()).toHaveLength(0);
+    expect(apiCalls()[0][1].headers.Authorization).toBe(`Bearer ${token}`);
   });
 });
