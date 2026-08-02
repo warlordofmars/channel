@@ -250,13 +250,31 @@ def _build_refresh_limiter() -> FixedWindowRateLimiter:
     Extracted from the module-level assignment so a test can exercise
     the env → limiter wiring (notably the documented ``0`` kill switch)
     without reimporting the module.
+
+    A non-positive *window* is corrected rather than honoured. It parses
+    fine and is finite, but ``now - started_at >= window_seconds`` is
+    then true on every call, so the window rolls continuously and the
+    limiter admits everything — while still reporting ``enabled``, and
+    while ``RefreshRateLimited`` stays flat. A silently-off abuse damper
+    that looks identical to "no abuse" is the worst of the three
+    outcomes; the limit is disabled *legibly* via
+    ``CHANNEL_REFRESH_RATE_LIMIT=0`` instead. (A non-positive **limit**
+    is left alone: that is the documented kill switch.)
     """
+
+    window = _env_number(_RATE_LIMIT_WINDOW_ENV, _DEFAULT_RATE_LIMIT_WINDOW_SECONDS, float)
+    if window <= 0:
+        logger.warning(
+            "auth.refresh ignoring non-positive %s=%r, using %r",
+            _RATE_LIMIT_WINDOW_ENV,
+            window,
+            _DEFAULT_RATE_LIMIT_WINDOW_SECONDS,
+        )
+        window = _DEFAULT_RATE_LIMIT_WINDOW_SECONDS
 
     return FixedWindowRateLimiter(
         limit=_env_number(_RATE_LIMIT_ENV, _DEFAULT_RATE_LIMIT, int),
-        window_seconds=_env_number(
-            _RATE_LIMIT_WINDOW_ENV, _DEFAULT_RATE_LIMIT_WINDOW_SECONDS, float
-        ),
+        window_seconds=window,
     )
 
 

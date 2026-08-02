@@ -706,6 +706,24 @@ def test_env_number_rejects_values_that_parse_but_are_not_finite(monkeypatch, ra
     assert refresh_module._env_number("CHANNEL_TEST_KNOB", 60.0, float) == 60.0
 
 
+@pytest.mark.parametrize("raw", ["0", "-10", "0.0"])
+def test_a_non_positive_window_is_corrected_rather_than_honoured(consumed, monkeypatch, raw):
+    """A window of ``0`` rolls on every call, so the limiter would admit
+    everything while still reporting ``enabled`` and leaving
+    ``RefreshRateLimited`` flat — a silently-off damper indistinguishable
+    from "no abuse". Disabling is legible via the limit, not the window."""
+    monkeypatch.setenv("CHANNEL_REFRESH_RATE_LIMIT", "1")
+    monkeypatch.setenv("CHANNEL_REFRESH_RATE_LIMIT_WINDOW_SECONDS", raw)
+    monkeypatch.setattr(refresh_module, "_refresh_limiter", refresh_module._build_refresh_limiter())
+    box = consumed[1]
+    box["result"] = RefreshConsumeResult(outcome=RefreshConsumeOutcome.NOT_FOUND)
+
+    assert _post("junk").status_code == 401
+    throttled = _post("junk")
+    assert throttled.status_code == 429
+    assert throttled.headers["retry-after"] == "60"
+
+
 @pytest.mark.parametrize("raw", ["nan", "inf"])
 def test_a_non_finite_window_never_reaches_the_limiter(consumed, monkeypatch, raw):
     """End-to-end statement of the above: the throttled path still
