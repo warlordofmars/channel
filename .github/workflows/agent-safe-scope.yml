@@ -71,5 +71,11 @@ jobs:
         run: |
           set -euo pipefail
           # Use uv run so the script picks up the project's Python version
-          # and stdlib only (the script has no third-party deps).
-          uv run python scripts/check_agent_safe_scope.py --pr "$PR_NUMBER"
+          # (from .python-version) and stdlib only — the script has no
+          # third-party deps.
+          #
+          # --no-project means uv installs nothing at all: without it, uv
+          # would sync the whole project environment (~150 packages) just to
+          # run a stdlib script. --no-build then holds trivially, since there
+          # is no distribution to build (#441).
+          uv run --no-project --no-build python scripts/check_agent_safe_scope.py --pr "$PR_NUMBER"

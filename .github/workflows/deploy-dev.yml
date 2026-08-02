@@ -7,6 +7,11 @@ permissions:
   id-token: write
   contents: read
 
+# Equivalent to passing `--locked` to every uv command in this workflow —
+# see the package-install hardening note at the top of ci.yml (#441).
+env:
+  UV_LOCKED: "1"
+
 jobs:
   deploy-dev:
     name: CDK Deploy (dev)
@@ -35,6 +40,8 @@ jobs:
         run: npm install -g --ignore-scripts aws-cdk@2.1134.0
 
       - name: Install Python dependencies
+        # `--no-build` is not applicable here — see the package-install
+        # hardening note at the top of .github/workflows/ci.yml.
         run: uv sync --group dev --group infra
 
       - name: Build React UI
@@ -50,4 +57,4 @@ jobs:
       - name: Deploy
         env:
           VITE_GA_MEASUREMENT_ID: ${{ secrets.VITE_GA_MEASUREMENT_ID }}
-        run: uv run inv deploy --env dev
+        run: uv run --locked --no-sync --no-build inv deploy --env dev
