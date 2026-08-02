@@ -185,14 +185,13 @@ def _apply_history_token_budget(messages: list[Message]) -> tuple[list[Message],
     Walks newest-first so the most recent turns are always the ones that
     survive, then restores chronological order for Strands.
 
-    Returns ``(kept, window_slid)``. ``window_slid`` is True when older
-    turns may exist outside the returned window — either the budget
-    trimmed something, or the read hit ``_HISTORY_MAX_MESSAGES`` and
-    there could be more behind it. The second case can be a false
-    positive (a chat of exactly the cap length, all in budget); that
-    costs one bounded range query that comes back empty, and never a
-    Bedrock call, so it is deliberately not worth a second read to
-    resolve precisely.
+    Returns ``(kept, trimmed_by_budget)``. The flag reports ONLY whether
+    the token budget dropped turns — the other reason a window may have
+    slid (the read hitting ``_HISTORY_MAX_MESSAGES``) is the caller's to
+    determine, because it has to be read off the raw row count *before*
+    the regenerate path strips the trailing user turn. Keeping the two
+    signals separate is also what lets the truncation log line name which
+    one fired.
 
     At least one message always survives, even if that single message
     alone exceeds the budget — an empty window would strip the turn the
@@ -208,8 +207,7 @@ def _apply_history_token_budget(messages: list[Message]) -> tuple[list[Message],
         kept.append(msg)
         total += cost
     kept.reverse()
-    window_slid = len(kept) < len(messages) or len(messages) >= _HISTORY_MAX_MESSAGES
-    return kept, window_slid
+    return kept, len(kept) < len(messages)
 
 
 def _head_summary_enabled() -> bool:
@@ -1261,10 +1259,18 @@ async def _stream_bedrock_reply(
     # Strands doesn't see it twice (once in ``messages=`` history,
     # once via ``stream_async(user_message)``).
     prior_msgs = storage.list_recent_messages(chat.chat_id, limit=_HISTORY_MAX_MESSAGES)
+    # #245: whether the READ hit the row cap must be captured HERE, before
+    # the regenerate path strips the trailing user turn below — otherwise a
+    # full 500-row read looks like 499 and the cap arm could never fire on
+    # regenerate, silently skipping the counter and the summary pass for a
+    # ≥500-turn chat whose turns are short enough to fit the token budget.
+    hit_row_cap = len(prior_msgs) >= _HISTORY_MAX_MESSAGES
     if not persist_user and prior_msgs and prior_msgs[-1].role == MessageRole.USER:
         prior_msgs = prior_msgs[:-1]
+    rows_read = len(prior_msgs)
     # #245: size the window by the token envelope, not by a turn count.
-    prior_msgs, window_slid = _apply_history_token_budget(prior_msgs)
+    prior_msgs, trimmed_by_budget = _apply_history_token_budget(prior_msgs)
+    window_slid = trimmed_by_budget or hit_row_cap
     prior_messages = _to_strands_messages(prior_msgs)
     # Sort key of the oldest turn still verbatim in context — the upper
     # (exclusive) bound of the not-yet-summarised range. Only meaningful
@@ -1279,11 +1285,20 @@ async def _stream_bedrock_reply(
     if window_slid:
         # The truncation used to be completely silent — that silence is
         # what made #227 a multi-week mystery. Log + count it (#245).
+        # ``reason`` distinguishes the two arms: the token budget actually
+        # trimming turns, versus the read hitting the row cap (which is a
+        # MAY-have-slid signal and can be a false positive on a chat of
+        # exactly the cap length). Without it an operator can't tell a real
+        # truncation from the cap's conservative guess.
         logger.info(
-            "history_window_truncated chat_id=%s loaded=%d budget_tokens=%d summarized=%s",
+            "history_window_truncated chat_id=%s reason=%s window=%d rows_read=%d "
+            "budget_tokens=%d max_messages=%d summarized=%s",
             chat.chat_id,
+            "token_budget" if trimmed_by_budget else "row_cap",
             len(prior_msgs),
+            rows_read,
             _HISTORY_TOKEN_BUDGET,
+            _HISTORY_MAX_MESSAGES,
             head_summary is not None,
         )
         await record_history_window_truncated()

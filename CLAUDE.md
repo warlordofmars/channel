@@ -645,7 +645,9 @@ window this section decides).
   `max_tokens`). Bounded at `_HEAD_SUMMARY_MAX_MESSAGES_PER_PASS = 100`
   turns per pass; a chat that jumps far past the budget converges over
   successive turns as `covers_through` walks forward. **In-budget chats
-  are a strict no-op** — no range query, no Bedrock call.
+  do no summarisation work** — no range query, no Bedrock call. (The
+  `get_chat_summary` point-read is unconditional per turn while the
+  kill-switch is on: injection needs it before the stream starts.)
 - **Injection** — the summary is appended to the system prompt at
   agent-build time (`build_agent(head_summary=...)`) under
   `## Earlier in this conversation`, which places it **before** the

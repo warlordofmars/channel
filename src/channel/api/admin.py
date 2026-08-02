@@ -97,6 +97,13 @@ _METRIC_ALLOWLIST = (
     "MemoryToolRecallFailures",
     "AutoTitleSuccesses",
     "AutoTitleFailures",
+    # Long-chat context (#245): how often the history window truncates,
+    # and the health of the rolling head-summary pass that backfills the
+    # dropped turns. ``HistoryWindowTruncated`` is the signal #227 spent
+    # weeks lacking — it belongs on the dashboard, not just in logs.
+    "HistoryWindowTruncated",
+    "HeadSummarySuccesses",
+    "HeadSummaryFailures",
     "ChatDeleteMemoryWipeSuccesses",
     "ChatDeleteMemoryWipeFailures",
     "FollowupGenSuccesses",

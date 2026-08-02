@@ -5724,9 +5724,14 @@ def test_apply_history_token_budget_keeps_at_least_one_message() -> None:
     assert slid is False
 
 
-def test_apply_history_token_budget_flags_the_row_cap() -> None:
-    """Hitting ``_HISTORY_MAX_MESSAGES`` counts as a possibly-slid window
-    even when nothing was trimmed by the budget."""
+def test_apply_history_token_budget_reports_only_the_budget_arm() -> None:
+    """The flag is the TOKEN-BUDGET signal alone.
+
+    The other reason a window may have slid — the read hitting
+    ``_HISTORY_MAX_MESSAGES`` — is the caller's to determine, because it
+    has to be read off the raw row count before the regenerate path
+    strips the trailing user turn.
+    """
 
     from channel.api.chats import _HISTORY_MAX_MESSAGES, _apply_history_token_budget
 
@@ -5741,6 +5746,98 @@ def test_apply_history_token_budget_flags_the_row_cap() -> None:
         )
         for i in range(_HISTORY_MAX_MESSAGES)
     ]
-    kept, slid = _apply_history_token_budget(msgs)
+    kept, trimmed_by_budget = _apply_history_token_budget(msgs)
     assert len(kept) == _HISTORY_MAX_MESSAGES
-    assert slid is True
+    assert trimmed_by_budget is False
+
+
+def test_regenerate_still_detects_the_row_cap_after_stripping_the_user_turn(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: the row-cap arm must be read BEFORE the regenerate
+    strip.
+
+    Regenerate drops the trailing user turn from the loaded history. If
+    the cap check ran after that, a full ``_HISTORY_MAX_MESSAGES`` read
+    would look like ``cap - 1`` and the arm could never fire — so a
+    ≥500-turn chat of short turns (which fits the token budget) would
+    silently skip both the truncation counter and the summary pass.
+    """
+
+    from channel.api.chats import _HISTORY_MAX_MESSAGES
+
+    history = _history(_HISTORY_MAX_MESSAGES)
+    # Trailing turn must be a USER turn — that's what regenerate strips.
+    assert history[-1].role == MessageRole.ASSISTANT
+    history[-1] = Message(
+        chat_id="c1",
+        msg_id="m-last",
+        role=MessageRole.USER,
+        text="regenerate me",
+        model=None,
+        created_at="t9999",
+    )
+    _stub_storage_with_history(monkeypatch, history)
+    monkeypatch.setattr(
+        "channel.api.chats.storage.delete_last_assistant_message",
+        lambda _cid: None,
+    )
+
+    fired: list[int] = []
+
+    async def fake_counter() -> None:
+        fired.append(1)
+
+    monkeypatch.setattr("channel.api.chats.record_history_window_truncated", fake_counter)
+    monkeypatch.setattr("channel.api.chats.build_agent", _fake_streaming_agent_factory({}))
+
+    response = client.post(
+        "/api/chats/c1/regenerate",
+        json={"model": "claude-sonnet-4-6"},
+    )
+    assert response.status_code == 200
+    assert fired == [1]
+
+
+@pytest.mark.parametrize(
+    ("history", "expected_reason"),
+    [
+        (_history(60, chars=8_000), "token_budget"),
+        (_history(500), "row_cap"),
+    ],
+    ids=["budget-trim", "row-cap"],
+)
+def test_truncation_log_names_which_arm_fired(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    history: list[Message],
+    expected_reason: str,
+) -> None:
+    """The log line must distinguish a real budget trim from the row
+    cap's conservative may-have-slid guess — otherwise an operator can't
+    tell a genuine truncation from a false positive.
+
+    Mocks the module logger rather than using ``caplog`` for the same
+    reason as ``test_post_message_stream_heartbeat_logs_when_enabled``:
+    the channel logger sets ``propagate = False``.
+    """
+
+    from unittest.mock import MagicMock  # noqa: PLC0415
+
+    _stub_storage_with_history(monkeypatch, history)
+    mock_logger = MagicMock()
+    monkeypatch.setattr("channel.api.chats.logger", mock_logger)
+    monkeypatch.setattr("channel.api.chats.build_agent", _fake_streaming_agent_factory({}))
+
+    assert _drive_one_turn(client).status_code == 200
+
+    call = next(
+        c
+        for c in mock_logger.info.call_args_list
+        if c.args[0].startswith("history_window_truncated")
+    )
+    template = call.args[0]
+    assert "reason=%s" in template
+    assert "budget_tokens=%d" in template
+    assert "max_messages=%d" in template
+    assert call.args[2] == expected_reason
