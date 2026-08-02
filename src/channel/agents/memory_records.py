@@ -144,9 +144,12 @@ def decode_record_id(record_id: str) -> tuple[str, str, int]:
     try:
         raw = base64.urlsafe_b64decode(padded.encode()).decode()
     except (ValueError, binascii.Error) as exc:
-        # ``binascii.Error`` and ``UnicodeDecodeError`` both subclass
-        # ValueError; named explicitly to match the ``chats.py`` cursor
-        # precedent and keep the intent readable.
+        # The tuple is deliberately redundant: both concrete failures here —
+        # ``binascii.Error`` (not base64) and ``UnicodeDecodeError`` (not
+        # UTF-8) — already subclass ``ValueError``, so ``except ValueError``
+        # alone would catch them. Naming them says what can actually go
+        # wrong instead of leaving the next reader to work it out, and
+        # mirrors the ``chats.py`` cursor precedent.
         raise ValueError("malformed record_id") from exc
     parts = raw.split(_RECORD_ID_SEP)
     if len(parts) != _RECORD_ID_FIELDS or not all(parts) or not parts[2].isdigit():

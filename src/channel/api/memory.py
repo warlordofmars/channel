@@ -267,14 +267,17 @@ async def list_memory_records(
         owned: dict[str, Chat] = {chat_id: chat}
         page_token: str | None = None
     else:
-        summaries, page_token = await list_sessions_page(
+        # ``session_summaries``, not ``summaries`` — the response's
+        # ``summaries`` field is the #245 chat head summaries, a completely
+        # different thing. These are AgentCore ListSessions rows.
+        session_summaries, page_token = await list_sessions_page(
             client,
             memory_id=memory_id,
             actor_id=actor_id,
             limit=limit,
             next_token=next_token,
         )
-        session_ids = [s["sessionId"] for s in summaries if s.get("sessionId")]
+        session_ids = [s["sessionId"] for s in session_summaries if s.get("sessionId")]
         # Ownership gate — see §Scoping. Sessions that fail it never reach
         # the enumeration below.
         owned = await asyncio.to_thread(resolve_owned_chats, session_ids, user_id=user_id)
