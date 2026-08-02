@@ -853,8 +853,9 @@ def test_desktop_callback_carries_the_refresh_token_in_the_loopback_query(
     location = resp.headers["location"]
     assert "refresh_token=raw-refresh-1" in location
     assert "token=" in location
-    # The cookie transport is the web flow's alone.
-    assert "set-cookie" not in resp.headers
+    # The cookie transport is the web flow's alone — and any cookie a
+    # previous web login left in this browser is cleared, not inherited.
+    assert _cleared(resp)
 
 
 def test_callback_survives_a_refresh_mint_failure(monkeypatch, failing_refresh_mint):
@@ -864,7 +865,9 @@ def test_callback_survives_a_refresh_mint_failure(monkeypatch, failing_refresh_m
 
     assert resp.status_code == 200
     assert "localStorage.setItem" in resp.text
-    assert "set-cookie" not in resp.headers
+    # No cookie is set — and a stale one is actively cleared, see
+    # test_failed_mint_clears_a_stale_refresh_cookie.
+    assert "raw-refresh" not in resp.headers.get("set-cookie", "")
 
 
 def test_desktop_callback_survives_a_refresh_mint_failure(monkeypatch, failing_refresh_mint):
@@ -930,4 +933,105 @@ def test_test_email_bypass_mints_no_refresh_token(bypass_env, monkeypatch, minte
 
     assert resp.status_code == 200
     assert minted_refresh_tokens == []
+    # Mints nothing — but still clears, so it cannot inherit the
+    # previous account's family (test_test_email_bypass_clears_a_stale_
+    # refresh_cookie pins that half).
+    assert "raw-refresh" not in resp.headers.get("set-cookie", "")
+
+
+# ----------------------------------------------------------------
+# Invariant: a login-completing response sets OR clears the refresh
+# cookie — never leaves a previous account's behind (#292 review)
+# ----------------------------------------------------------------
+
+
+def _cleared(resp) -> bool:
+    """True if the response expires the refresh cookie."""
+    set_cookie = resp.headers.get("set-cookie", "")
+    return f"{REFRESH_COOKIE_NAME}=" in set_cookie and "Max-Age=0" in set_cookie
+
+
+def test_failed_mint_clears_a_stale_refresh_cookie(monkeypatch, failing_refresh_mint):
+    """Otherwise B's browser silently keeps A's live refresh family.
+
+    ``/auth/refresh`` is unauthenticated by design, so identity comes
+    from whichever cookie is presented — leaving a stale one is a
+    cross-account session leak, not just untidiness.
+    """
+
+    resp = _google_login(monkeypatch)
+
+    assert resp.status_code == 200
+    assert _cleared(resp)
+
+
+def test_test_email_bypass_clears_a_stale_refresh_cookie(bypass_env, monkeypatch):
+    """The bypass mints nothing, so it must clear rather than leave A's cookie."""
+
+    monkeypatch.setenv("ALLOWED_EMAILS", "[]")
+    bypass_env("1")
+
+    resp = _client.get("/auth/login?test_email=e2e@test.com")
+
+    assert resp.status_code == 200
+    assert _cleared(resp)
+
+
+def test_desktop_callback_clears_the_web_transports_cookie(monkeypatch):
+    """Desktop carries its token in the query string; the two must not cross."""
+
+    resp = _google_login(
+        monkeypatch, record={"desktop_callback": "http://127.0.0.1:54321/callback"}
+    )
+
+    assert resp.status_code == 302
+    assert _cleared(resp)
+
+
+def test_starting_a_new_login_does_not_disturb_an_existing_session(monkeypatch):
+    """The redirect *to* Google is not a login completion — an abandoned
+    sign-in attempt must not sign the user out of the session they have."""
+
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "x")
+    monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "y")
+
+    resp = _client.get("/auth/login")
+
+    assert resp.status_code == 302
+    assert "accounts.google.com" in resp.headers["location"]
     assert "set-cookie" not in resp.headers
+
+
+def test_bypass_login_after_a_real_login_cannot_inherit_the_first_session(
+    bypass_env, monkeypatch, minted_refresh_tokens
+):
+    """The concrete cross-identity repro, end to end in one client.
+
+    Sign in as A through Google (jar now holds A's refresh family), then
+    take the ``?test_email=`` shortcut as B. Before the fix the cookie
+    survived, so the next ``/auth/refresh`` would have handed back an
+    access token for **A** while localStorage held B's.
+    """
+
+    client = TestClient(app, base_url="https://testserver", follow_redirects=False)
+
+    monkeypatch.setattr(
+        "channel.auth.state_store.consume_state",
+        lambda s: {"PK": f"MGMT_STATE#{s}", "SK": "META"},
+    )
+    monkeypatch.setattr("channel.auth.mgmt_auth.exchange_google_code", _async_return("id_token"))
+    monkeypatch.setattr(
+        "channel.auth.mgmt_auth.verify_google_id_token",
+        _async_return({"email": "a@example.com", "email_verified": True, "name": "A"}),
+    )
+    monkeypatch.setattr("channel.auth.mgmt_auth.is_email_allowed", lambda e: True)
+    monkeypatch.setattr("channel.auth.mgmt_auth.is_admin_email", lambda e: False)
+
+    client.get("/auth/callback", params={"code": "c", "state": "F" * 43})
+    assert client.cookies.get(REFRESH_COOKIE_NAME)  # A's family is in the jar
+
+    monkeypatch.setenv("ALLOWED_EMAILS", "[]")
+    bypass_env("1")
+    client.get("/auth/login?test_email=b@example.com")
+
+    assert client.cookies.get(REFRESH_COOKIE_NAME) is None

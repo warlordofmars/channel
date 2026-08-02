@@ -37,10 +37,10 @@ import html
 import os
 import re
 import secrets
-from typing import Any
+from typing import Any, TypeVar
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from channel.auth import state_store
@@ -58,6 +58,10 @@ from channel.storage import mint_refresh_token
 
 router = APIRouter(tags=["mgmt-auth"])
 logger = get_logger(__name__)
+
+# Preserves the concrete response type through ``_finish_login`` so the
+# route signatures keep saying HTMLResponse / RedirectResponse.
+_ResponseT = TypeVar("_ResponseT", bound=Response)
 
 # Entropy for the server-side opaque device id. Epic #241 Q2 settled
 # this in favour of a server-generated opaque value over anything
@@ -155,6 +159,45 @@ def make_mgmt_user(email: str, display_name: str) -> dict[str, Any]:
     }
 
 
+def _finish_login(response: _ResponseT, minted: tuple[str, RefreshToken] | None) -> _ResponseT:
+    """Attach this login's refresh cookie — or clear whatever was there.
+
+    **Every login-completing response must go through here**, including
+    the ones that mint nothing. ``POST /auth/refresh`` is unauthenticated
+    by design (the access token it renews has usually expired), so the
+    cookie *is* the identity: the endpoint trusts ``row.user_id`` of
+    whatever cookie arrives. A login that leaves a previous account's
+    cookie untouched therefore hands the new user the old user's
+    session on the next refresh.
+
+    That is reachable on any deployed non-prod stack, where
+    ``CHANNEL_BYPASS_GOOGLE_AUTH=1`` is always set: sign in as A through
+    Google, then hit ``/auth/login?test_email=b@example.com``.
+    localStorage holds B's access token while the jar still holds A's
+    30-day refresh family — and the next refresh returns an access token
+    for **A**. The fail-soft mint path has the same shape in prod (A
+    signs in, B signs in on the same browser, minting hits a storage
+    blip, B silently retains A's family).
+
+    Clearing costs nothing when no cookie exists, so the invariant is
+    cheap to hold unconditionally. The desktop transports pass
+    ``minted=None`` deliberately: they carry the token in the loopback
+    query string, and the browser that ran the OAuth dance is the user's
+    *default* browser, which may well be holding a web session's cookie.
+    """
+
+    from channel.auth.refresh import (  # noqa: PLC0415
+        clear_refresh_cookie,
+        set_refresh_cookie,
+    )
+
+    if minted is None:
+        clear_refresh_cookie(response)
+    else:
+        set_refresh_cookie(response, minted[0], minted[1].absolute_expires_at)
+    return response
+
+
 def _mint_session_refresh_token(email: str, display_name: str) -> tuple[str, RefreshToken] | None:
     """Mint this login's first refresh token, or ``None`` if minting failed.
 
@@ -210,7 +253,10 @@ async def mgmt_login(request: Request) -> RedirectResponse:
     if _BYPASS and test_email:
         user = make_mgmt_user(test_email, test_email.split("@")[0])
         token = issue_mgmt_jwt(user)
-        return _html_redirect(token)  # type: ignore[return-value]
+        # Mints nothing (see the module docstring on why the bypass stays
+        # capped at the 1h access token) — so it must clear, or the jar
+        # keeps the previous account's refresh family. See _finish_login.
+        return _finish_login(_html_redirect(token), None)  # type: ignore[return-value]
 
     desktop_callback = request.query_params.get("desktop_callback")
     caller_state = request.query_params.get("state")
@@ -239,7 +285,7 @@ async def mgmt_login(request: Request) -> RedirectResponse:
             user = make_mgmt_user(dev_email, dev_email.split("@")[0])
             token = issue_mgmt_jwt(user)
             qs = urlencode({"token": token, "state": caller_state})
-            return RedirectResponse(f"{validated}?{qs}", status_code=302)
+            return _finish_login(RedirectResponse(f"{validated}?{qs}", status_code=302), None)
         state = caller_state
         payload["desktop_callback"] = validated
     else:
@@ -314,15 +360,11 @@ async def mgmt_callback(
             # string, so this adds no transport the flow did not have.
             params["refresh_token"] = minted[0]
         qs = urlencode(params)
-        return RedirectResponse(f"{desktop_callback}?{qs}", status_code=302)
+        # ``None`` even though minting succeeded: the loopback query
+        # string is this transport's carrier, and the browser running the
+        # OAuth dance may still hold a *web* session's cookie for a
+        # different account. Clearing keeps the two transports from
+        # crossing.
+        return _finish_login(RedirectResponse(f"{desktop_callback}?{qs}", status_code=302), None)
 
-    response = _html_redirect(token)
-    if minted is not None:
-        # Imported here, not at module scope: ``channel.auth.refresh``
-        # imports ``make_mgmt_user`` from this module, so a top-level
-        # import would close the cycle. The cookie's definition belongs
-        # with the endpoint that rotates it; only the call site lives here.
-        from channel.auth.refresh import set_refresh_cookie  # noqa: PLC0415
-
-        set_refresh_cookie(response, minted[0], minted[1].absolute_expires_at)
-    return response
+    return _finish_login(_html_redirect(token), minted)
