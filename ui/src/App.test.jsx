@@ -4,6 +4,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App.jsx";
 import { TOKEN_KEY } from "./lib/auth.js";
 import { __resetChannelPrefsForTest } from "./hooks/useChannelPrefs.js";
+import {
+  LAYOUT_DEBUG_STORAGE_KEY,
+  toggleLayoutDebugArmed,
+} from "./components/LayoutDebug.jsx";
+import { fireEvent } from "@testing-library/react";
 
 function makeToken({ expOffsetSeconds = 3600, role = "user" } = {}) {
   const exp = Math.floor(Date.now() / 1000) + expOffsetSeconds;
@@ -252,5 +257,46 @@ describe("App routing", () => {
     window.history.pushState({}, "", "/?__layout-debug=1");
     await act(async () => render(<App />));
     expect(screen.getByRole("region", { name: /layout debug/i })).toBeTruthy();
+  });
+
+  it("also mounts it from the persisted gesture flag, with no param (#504)", async () => {
+    // The gesture gate is the only one reachable inside an installed iOS
+    // PWA, where the URL can't carry a query parameter at all.
+    storage[LAYOUT_DEBUG_STORAGE_KEY] = "1";
+
+    await act(async () => render(<App />));
+
+    expect(window.location.search).toBe("");
+    expect(screen.getByRole("region", { name: /layout debug/i })).toBeTruthy();
+  });
+
+  it("can be closed from inside the mounted readout (#504)", async () => {
+    // Against the real tree, not a hand-called toggle: `.layout-debug`
+    // covers the whole viewport at z-index 9999, so the brand mark is
+    // unreachable once armed and the Close button is the only exit an
+    // installed PWA has.
+    storage[LAYOUT_DEBUG_STORAGE_KEY] = "1";
+    await act(async () => render(<App />));
+    expect(screen.getByRole("region", { name: /layout debug/i })).toBeTruthy();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /^close$/i }));
+    });
+
+    expect(screen.queryByRole("region", { name: /layout debug/i })).toBeNull();
+    expect(storage[LAYOUT_DEBUG_STORAGE_KEY]).toBeUndefined();
+  });
+
+  it("picks the gesture up live, without a reload (#504)", async () => {
+    // A standalone PWA has no address bar and no reload control, so the
+    // toggle has to land on the mounted tree.
+    await act(async () => render(<App />));
+    expect(screen.queryByRole("region", { name: /layout debug/i })).toBeNull();
+
+    await act(async () => { toggleLayoutDebugArmed(); });
+    expect(screen.getByRole("region", { name: /layout debug/i })).toBeTruthy();
+
+    await act(async () => { toggleLayoutDebugArmed(); });
+    expect(screen.queryByRole("region", { name: /layout debug/i })).toBeNull();
   });
 });

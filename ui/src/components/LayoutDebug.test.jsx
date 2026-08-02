@@ -3,17 +3,29 @@ import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import LayoutDebug, {
   CHAIN_PROPS,
+  LAYOUT_DEBUG_EVENT,
   LAYOUT_DEBUG_PARAM,
+  LAYOUT_DEBUG_STORAGE_KEY,
+  LAYOUT_DEBUG_TAP_COUNT,
+  LAYOUT_DEBUG_TAP_WINDOW_MS,
   SAFE_AREA_SIDES,
   collectChain,
   collectSnapshot,
   describeElement,
+  disarmLayoutDebug,
   elementLabel,
   findChainRoot,
+  isLayoutDebugArmed,
+  isLayoutDebugParamRequested,
   isLayoutDebugRequested,
   matchesDisplayMode,
   readSafeAreaInsets,
   round,
+  __resetLayoutDebugFallbackForTest,
+  subscribeLayoutDebug,
+  toggleLayoutDebugArmed,
+  useLayoutDebugRequested,
+  useLayoutDebugTapGesture,
 } from "./LayoutDebug.jsx";
 import { APP_VH_ATTRIBUTE, APP_VH_PROPERTY } from "../lib/appViewport.js";
 
@@ -59,7 +71,26 @@ afterEach(() => {
   window.history.pushState({}, "", "/");
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+  localStorage.removeItem(LAYOUT_DEBUG_STORAGE_KEY);
+  __resetLayoutDebugFallbackForTest();
 });
+
+/** Stand-in for Shell's brand mark — the gesture's only real call site. */
+function TapHarness() {
+  const onTap = useLayoutDebugTapGesture();
+  return <span data-testid="brand" onPointerDown={onTap} />;
+}
+
+/** Renders whatever the reactive gate currently reports. */
+function GateHarness() {
+  const requested = useLayoutDebugRequested();
+  return <span data-testid="gate">{String(requested)}</span>;
+}
+
+function tapBrand(times) {
+  const brand = screen.getByTestId("brand");
+  for (let i = 0; i < times; i += 1) fireEvent.pointerDown(brand);
+}
 
 describe("isLayoutDebugRequested", () => {
   it("is true only for the exact opt-in value", () => {
@@ -303,5 +334,279 @@ describe("<LayoutDebug />", () => {
       "resize",
       expect.any(Function),
     );
+  });
+});
+
+describe("the persisted gesture gate (#504)", () => {
+  it("is armed only by the exact stored value", () => {
+    expect(isLayoutDebugArmed()).toBe(false);
+
+    localStorage.setItem(LAYOUT_DEBUG_STORAGE_KEY, "0");
+    expect(isLayoutDebugArmed()).toBe(false);
+
+    localStorage.setItem(LAYOUT_DEBUG_STORAGE_KEY, "1");
+    expect(isLayoutDebugArmed()).toBe(true);
+  });
+
+  it("reads as disarmed rather than throwing when storage is blocked", () => {
+    // Safari with site data blocked throws on access. This runs during
+    // App's render, so a throw would white-screen the app.
+    vi.stubGlobal("localStorage", {
+      getItem: vi.fn(function blockedRead() {
+        throw new Error("SecurityError");
+      }),
+      setItem: vi.fn(),
+      removeItem: vi.fn(),
+    });
+
+    expect(isLayoutDebugArmed()).toBe(false);
+    expect(localStorage.getItem).toHaveBeenCalledWith(LAYOUT_DEBUG_STORAGE_KEY);
+  });
+
+  it("ORs with the query parameter so the desktop path still works", () => {
+    localStorage.setItem(LAYOUT_DEBUG_STORAGE_KEY, "1");
+    expect(isLayoutDebugParamRequested()).toBe(false);
+    expect(isLayoutDebugRequested()).toBe(true);
+
+    localStorage.removeItem(LAYOUT_DEBUG_STORAGE_KEY);
+    window.history.pushState({}, "", `/app?${LAYOUT_DEBUG_PARAM}=1`);
+    expect(isLayoutDebugParamRequested()).toBe(true);
+    expect(isLayoutDebugRequested()).toBe(true);
+  });
+
+  it("toggles the stored flag and announces every change", () => {
+    const heard = vi.fn();
+    window.addEventListener(LAYOUT_DEBUG_EVENT, heard);
+
+    expect(toggleLayoutDebugArmed()).toBe(true);
+    expect(localStorage.getItem(LAYOUT_DEBUG_STORAGE_KEY)).toBe("1");
+
+    expect(toggleLayoutDebugArmed()).toBe(false);
+    expect(localStorage.getItem(LAYOUT_DEBUG_STORAGE_KEY)).toBeNull();
+    expect(heard).toHaveBeenCalledTimes(2);
+
+    window.removeEventListener(LAYOUT_DEBUG_EVENT, heard);
+  });
+
+  it("really arms for the page's life when the write is refused", () => {
+    // A blocked write leaves nothing for the next read to find, so
+    // without the in-memory fallback the gate would report disarmed an
+    // instant after the gesture reported success (Copilot, PR #505).
+    const heard = vi.fn();
+    window.addEventListener(LAYOUT_DEBUG_EVENT, heard);
+    const setItem = vi.fn(function blockedWrite() {
+      throw new Error("QuotaExceededError");
+    });
+    const removeItem = vi.fn();
+    vi.stubGlobal("localStorage", {
+      getItem: vi.fn(function readsEmpty() {
+        return null;
+      }),
+      setItem,
+      removeItem,
+    });
+
+    expect(toggleLayoutDebugArmed()).toBe(true);
+    expect(setItem).toHaveBeenCalledTimes(1);
+    expect(heard).toHaveBeenCalledTimes(1);
+    // The gate agrees, even though storage holds nothing.
+    expect(isLayoutDebugArmed()).toBe(true);
+    expect(isLayoutDebugRequested()).toBe(true);
+
+    // And the gesture still disarms from the fallback.
+    expect(toggleLayoutDebugArmed()).toBe(false);
+    expect(isLayoutDebugArmed()).toBe(false);
+
+    window.removeEventListener(LAYOUT_DEBUG_EVENT, heard);
+  });
+
+  it("hands authority back to storage once a write succeeds", () => {
+    vi.stubGlobal("localStorage", {
+      getItem: vi.fn(function readsEmpty() {
+        return null;
+      }),
+      setItem: vi.fn(function blockedWrite() {
+        throw new Error("QuotaExceededError");
+      }),
+      removeItem: vi.fn(),
+    });
+    expect(toggleLayoutDebugArmed()).toBe(true);
+    expect(isLayoutDebugArmed()).toBe(true);
+
+    // Storage recovers: the successful write clears the fallback, so a
+    // stale in-memory value can't outlive the condition that caused it.
+    vi.unstubAllGlobals();
+    expect(toggleLayoutDebugArmed()).toBe(false);
+    expect(localStorage.getItem(LAYOUT_DEBUG_STORAGE_KEY)).toBeNull();
+    expect(isLayoutDebugArmed()).toBe(false);
+  });
+});
+
+describe("subscribeLayoutDebug", () => {
+  it("fires on this tab's toggle and on another tab's storage write", () => {
+    const onChange = vi.fn();
+    const unsubscribe = subscribeLayoutDebug(onChange);
+
+    window.dispatchEvent(new Event(LAYOUT_DEBUG_EVENT));
+    window.dispatchEvent(new Event("storage"));
+    expect(onChange).toHaveBeenCalledTimes(2);
+
+    unsubscribe();
+    window.dispatchEvent(new Event(LAYOUT_DEBUG_EVENT));
+    window.dispatchEvent(new Event("storage"));
+    expect(onChange).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("useLayoutDebugRequested", () => {
+  it("re-renders on toggle, so arming needs no reload", () => {
+    render(<GateHarness />);
+    expect(screen.getByTestId("gate").textContent).toBe("false");
+
+    act(() => { toggleLayoutDebugArmed(); });
+    expect(screen.getByTestId("gate").textContent).toBe("true");
+
+    act(() => { toggleLayoutDebugArmed(); });
+    expect(screen.getByTestId("gate").textContent).toBe("false");
+  });
+});
+
+describe("useLayoutDebugTapGesture", () => {
+  it("toggles on the full tap count and ignores anything short of it", () => {
+    render(<TapHarness />);
+
+    tapBrand(LAYOUT_DEBUG_TAP_COUNT - 1);
+    expect(isLayoutDebugArmed()).toBe(false);
+
+    tapBrand(1);
+    expect(isLayoutDebugArmed()).toBe(true);
+
+    // The counter resets on toggle, so disarming needs a full gesture.
+    tapBrand(LAYOUT_DEBUG_TAP_COUNT - 1);
+    expect(isLayoutDebugArmed()).toBe(true);
+
+    tapBrand(1);
+    expect(isLayoutDebugArmed()).toBe(false);
+  });
+
+  it("drops taps that fall outside the window", () => {
+    vi.useFakeTimers();
+    render(<TapHarness />);
+
+    tapBrand(LAYOUT_DEBUG_TAP_COUNT - 1);
+    act(() => { vi.advanceTimersByTime(LAYOUT_DEBUG_TAP_WINDOW_MS + 1); });
+
+    // The stale taps are discarded, so this run starts from zero.
+    tapBrand(LAYOUT_DEBUG_TAP_COUNT - 1);
+    expect(isLayoutDebugArmed()).toBe(false);
+
+    tapBrand(1);
+    expect(isLayoutDebugArmed()).toBe(true);
+
+    vi.useRealTimers();
+  });
+});
+
+describe("disarmLayoutDebug", () => {
+  it("clears the persisted flag", () => {
+    localStorage.setItem(LAYOUT_DEBUG_STORAGE_KEY, "1");
+
+    disarmLayoutDebug();
+
+    expect(localStorage.getItem(LAYOUT_DEBUG_STORAGE_KEY)).toBeNull();
+    expect(isLayoutDebugRequested()).toBe(false);
+  });
+
+  it("also strips the query parameter, since the gate is an OR", () => {
+    // Clearing only the flag would leave `?__layout-debug=1` mounting
+    // the readout forever — the URL gate can add but never subtract.
+    window.history.pushState({}, "", `/app?keep=yes&${LAYOUT_DEBUG_PARAM}=1#frag`);
+    localStorage.setItem(LAYOUT_DEBUG_STORAGE_KEY, "1");
+
+    disarmLayoutDebug();
+
+    expect(isLayoutDebugParamRequested()).toBe(false);
+    expect(isLayoutDebugRequested()).toBe(false);
+    // Only the debug parameter goes — the rest of the URL is preserved,
+    // so closing the readout doesn't disturb the page being measured.
+    expect(window.location.pathname).toBe("/app");
+    expect(window.location.search).toBe("?keep=yes");
+    expect(window.location.hash).toBe("#frag");
+  });
+
+  it("preserves the router's own history state while stripping it", () => {
+    // React Router v6 stores `{ usr, key, idx }` in `history.state`.
+    // Replacing it with `{}` would drop the state `useLocation()`
+    // exposes and the index the router tracks its position with — and
+    // the popstate below tells the router to re-read exactly that
+    // (Copilot, PR #505).
+    const routerState = { usr: { from: "/app/artifacts" }, key: "abc123", idx: 3 };
+    window.history.pushState(routerState, "", `/app?${LAYOUT_DEBUG_PARAM}=1`);
+
+    disarmLayoutDebug();
+
+    expect(window.history.state).toEqual(routerState);
+    expect(isLayoutDebugParamRequested()).toBe(false);
+  });
+
+  it("tells React Router the URL moved, so no view can put it back", () => {
+    // `replaceState` is invisible to the router, whose location snapshot
+    // would keep the parameter. Views that build their next URL from
+    // that snapshot — Artifacts' `openRow` does `new URLSearchParams(
+    // params)` — would then re-add it on the next navigation and
+    // remount the readout (code-reviewer, PR #505).
+    const popped = vi.fn();
+    window.addEventListener("popstate", popped);
+    window.history.pushState({}, "", `/app?${LAYOUT_DEBUG_PARAM}=1`);
+
+    disarmLayoutDebug();
+
+    expect(popped).toHaveBeenCalledTimes(1);
+    window.removeEventListener("popstate", popped);
+  });
+
+  it("stays quiet when there was no parameter to strip", () => {
+    // Nothing moved, so nothing to announce — the persisted-flag path
+    // must not churn the router on every Close in the PWA.
+    const popped = vi.fn();
+    window.addEventListener("popstate", popped);
+    localStorage.setItem(LAYOUT_DEBUG_STORAGE_KEY, "1");
+
+    disarmLayoutDebug();
+
+    expect(popped).not.toHaveBeenCalled();
+    window.removeEventListener("popstate", popped);
+  });
+
+  it("announces the change so the mount site re-renders", () => {
+    const heard = vi.fn();
+    window.addEventListener(LAYOUT_DEBUG_EVENT, heard);
+
+    disarmLayoutDebug();
+
+    expect(heard).toHaveBeenCalledTimes(1);
+    window.removeEventListener(LAYOUT_DEBUG_EVENT, heard);
+  });
+});
+
+describe("<LayoutDebug /> Close button", () => {
+  it("unmounts the readout from inside — the only exit on a phone", () => {
+    // `.layout-debug` is fixed/inset-0/z-index-9999 over an opaque
+    // background, so the armed readout covers the brand mark and the
+    // five-tap gesture can never undo itself. Without this control,
+    // arming on a phone is a one-way trip (code-reviewer, PR #505).
+    mountComposerFixture();
+    setViewport({ windowHeight: 852, layoutHeight: 756 });
+    localStorage.setItem(LAYOUT_DEBUG_STORAGE_KEY, "1");
+    render(<GateHarness />);
+    expect(screen.getByTestId("gate").textContent).toBe("true");
+
+    render(<LayoutDebug />);
+    act(() => {
+      fireEvent.click(screen.getByRole("button", { name: /^close$/i }));
+    });
+
+    expect(localStorage.getItem(LAYOUT_DEBUG_STORAGE_KEY)).toBeNull();
+    expect(screen.getByTestId("gate").textContent).toBe("false");
   });
 });
