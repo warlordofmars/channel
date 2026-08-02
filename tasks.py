@@ -544,6 +544,13 @@ def worktree_setup(ctx):
     ``deploy`` / ``desktop_dev`` precedent — so re-running on an already-prepared
     checkout is fast and non-destructive (``npm ci`` wipes ``node_modules`` on
     every run, the wrong shape for a re-runnable prep task).
+
+    Also deliberately omits the ``--ignore-scripts`` that CI's installs and
+    ``deploy`` carry (#441). That flag hardens *CI runners* against a
+    compromised dependency's lifecycle script; a developer worktree already
+    runs this repo's own code, so the threat model doesn't apply, and leaving
+    scripts enabled keeps local setup working if a future dependency genuinely
+    needs its postinstall for dev tooling. Don't "fix" the inconsistency.
     """
     ctx.run("uv sync --all-extras --group infra", pty=True)
     ctx.run(f"cd {UI} && npm install", pty=True)
