@@ -252,7 +252,7 @@ def check_blockers(ctx, json=False, fix=False, repo=None, limit=None):
     if repo:
         # ctx.run goes through a shell — quote the caller-supplied values.
         cmd += f" --repo {shlex.quote(repo)}"
-    if limit:
+    if limit is not None:
         cmd += f" --limit {shlex.quote(str(limit))}"
     # warn=True so a findings exit (1) reports the backlog state instead of
     # raising invoke's UnexpectedExit traceback over the report.

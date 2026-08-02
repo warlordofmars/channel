@@ -237,9 +237,15 @@ def test_parse_blockers_ignores_fenced_code_blocks() -> None:
     assert sweep.parse_blockers(body) == [12]
 
 
-def test_strip_code_replaces_spans_with_a_space() -> None:
-    assert sweep.strip_code("a `x` b").strip() == "a   b".strip()
+def test_strip_code_replaces_spans_with_a_non_whitespace_sentinel() -> None:
+    assert sweep.strip_code("a `x` b") == f"a {sweep._CODE_SENTINEL} b"
     assert "999" not in sweep.strip_code("``Blocked by #999``")
+
+
+def test_stripping_a_code_span_cannot_splice_a_new_phrase() -> None:
+    """`blocked\\s+by` spans newlines, so a whitespace replacement would join these."""
+    assert sweep.parse_blockers("the API is blocked `foo` by #12 on Tuesdays") == []
+    assert sweep.parse_blockers("blocked\n\n```\nsnippet\n```\n\nby #12") == []
 
 
 def test_status_labels_filters_to_the_status_namespace() -> None:

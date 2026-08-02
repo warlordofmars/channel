@@ -95,6 +95,12 @@ _REF_RE = re.compile(r"#(\d+)")
 # reports the issue as blocked on its own examples.
 _CODE_SPAN_RE = re.compile(r"```.*?```|``.*?``|`[^`]*`", re.DOTALL)
 
+#: What a stripped code span leaves behind. Deliberately NOT whitespace:
+#: `blocked\s+by` spans newlines, so substituting a space would let
+#: "is blocked `x` by #12" collapse into a phrase nobody wrote. A
+#: non-whitespace, non-`#`, non-digit sentinel can't join either side.
+_CODE_SENTINEL = "\x00"
+
 #: GraphQL error type that means "this number is not an issue or PR here".
 #: Expected and handled (it is exactly the dangling-ref finding); every other
 #: error type is a genuine failure.
@@ -165,10 +171,10 @@ def resolve_repo(explicit: str | None = None) -> str:
 def strip_code(body: str) -> str:
     """Blank out fenced blocks and inline code spans.
 
-    Replaces each span with a space rather than deleting it, so the surrounding
-    prose can't be spliced into a phrase that wasn't written.
+    Each span becomes :data:`_CODE_SENTINEL` rather than being deleted, so the
+    prose on either side can't be spliced into a phrase that wasn't written.
     """
-    return _CODE_SPAN_RE.sub(" ", body)
+    return _CODE_SPAN_RE.sub(_CODE_SENTINEL, body)
 
 
 def parse_blockers(body: str | None) -> list[int]:
