@@ -4,6 +4,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { __resetChannelPrefsForTest } from "../hooks/useChannelPrefs.js";
 import { TOKEN_KEY } from "../lib/auth.js";
+import {
+  LAYOUT_DEBUG_STORAGE_KEY,
+  LAYOUT_DEBUG_TAP_COUNT,
+} from "../components/LayoutDebug.jsx";
 
 const mockCreateChat = vi.fn();
 const mockUseChats = vi.fn();
@@ -216,5 +220,50 @@ describe("Shell", () => {
     await waitFor(() =>
       expect(container.querySelector(".sb.mobile-open")).toBeNull()
     );
+  });
+  // ── #504: the brand mark's five-tap layout-debug gesture ──────────────
+  // Temporary; removal tracked by #503. It exists because a query
+  // parameter is unreachable inside an installed iOS PWA, which is the
+  // only environment where #467 reproduces.
+
+  it("leaves the brand mark decorative — hidden, unfocusable, no role", () => {
+    const { container } = render(
+      <MemoryRouter><Shell><div /></Shell></MemoryRouter>
+    );
+    const brand = container.querySelector(".mobile-topbar-brand");
+
+    expect(brand.getAttribute("aria-hidden")).toBe("true");
+    expect(brand.tagName).toBe("SPAN");
+    expect(brand.hasAttribute("tabindex")).toBe(false);
+    expect(brand.hasAttribute("role")).toBe(false);
+    // No inline styling either — the gesture must not advertise itself.
+    expect(brand.getAttribute("style")).toBeNull();
+  });
+
+  it("arms the layout readout after five taps on the brand mark (#504)", () => {
+    const { container } = render(
+      <MemoryRouter><Shell><div /></Shell></MemoryRouter>
+    );
+    const brand = container.querySelector(".mobile-topbar-brand");
+
+    for (let i = 0; i < LAYOUT_DEBUG_TAP_COUNT - 1; i += 1) {
+      fireEvent.pointerDown(brand);
+    }
+    expect(storage[LAYOUT_DEBUG_STORAGE_KEY]).toBeUndefined();
+
+    fireEvent.pointerDown(brand);
+    expect(storage[LAYOUT_DEBUG_STORAGE_KEY]).toBe("1");
+  });
+
+  it("disarms it again on a second full gesture (#504)", () => {
+    const { container } = render(
+      <MemoryRouter><Shell><div /></Shell></MemoryRouter>
+    );
+    const brand = container.querySelector(".mobile-topbar-brand");
+
+    for (let i = 0; i < LAYOUT_DEBUG_TAP_COUNT * 2; i += 1) {
+      fireEvent.pointerDown(brand);
+    }
+    expect(storage[LAYOUT_DEBUG_STORAGE_KEY]).toBeUndefined();
   });
 });

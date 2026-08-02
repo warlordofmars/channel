@@ -1,5 +1,11 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
-import React, { useCallback, useEffect, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import {
   APP_VH_ATTRIBUTE,
   APP_VH_PROPERTY,
@@ -24,9 +30,20 @@ import {
  *
  * ## Contract
  *
- * Rendered only when the URL carries `?__layout-debug=1`, and the gate
- * lives in the *caller* (`App.jsx`), so without the parameter this
- * component never mounts: no state, no listeners, no DOM, no measuring.
+ * Two gates, OR'd — see `isLayoutDebugRequested`. Both live in the
+ * *caller* (`App.jsx`), so with neither armed this component never
+ * mounts: no state, no listeners, no DOM, no measuring.
+ *
+ * 1. `?__layout-debug=1` on the URL — the desktop-browser path.
+ * 2. A `localStorage` flag toggled by five taps within two seconds on
+ *    the mobile top bar's brand mark (#504). **A query parameter can
+ *    never be set inside an installed iOS PWA** — Add-to-Home-Screen
+ *    drops it (the manifest's `start_url` wins), tapping a link opens
+ *    the default browser instead of the standalone window, and there
+ *    is no address bar to type into. Since the PWA is the only place
+ *    #467 reproduces, the readout needs a gate reachable from inside
+ *    the running app. The flag persists, so it survives navigation and
+ *    relaunch; repeating the gesture disarms it.
  *
  * **It deliberately ships in the production bundle** rather than behind
  * `import.meta.env.DEV`. The bug exists only in the *installed* PWA,
@@ -52,6 +69,23 @@ import {
 
 /** Query parameter that arms the readout. */
 export const LAYOUT_DEBUG_PARAM = "__layout-debug";
+
+/** `localStorage` key holding the gesture-armed state (#504). */
+export const LAYOUT_DEBUG_STORAGE_KEY = "channel:layout-debug";
+
+/** Window event announcing a change to the armed state. */
+export const LAYOUT_DEBUG_EVENT = "channel:layout-debug-change";
+
+/**
+ * Taps required to toggle, and the window they must all land in.
+ *
+ * Five-within-two-seconds is deliberate enough that no ordinary use of
+ * the top bar reaches it — the brand mark is not a control, so the only
+ * stray taps it sees are single mis-hits aimed at the hamburger beside
+ * it — while still being describable in one sentence over the phone.
+ */
+export const LAYOUT_DEBUG_TAP_COUNT = 5;
+export const LAYOUT_DEBUG_TAP_WINDOW_MS = 2000;
 
 /** Insets read from the probe, in the order they are displayed. */
 export const SAFE_AREA_SIDES = ["top", "right", "bottom", "left"];
@@ -102,8 +136,95 @@ export const CHAIN_ROOT_SELECTORS = [
 ];
 
 /** True when the current URL asks for the readout. */
-export function isLayoutDebugRequested() {
+export function isLayoutDebugParamRequested() {
   return new URLSearchParams(window.location.search).get(LAYOUT_DEBUG_PARAM) === "1";
+}
+
+/**
+ * True when the tap gesture has armed the readout.
+ *
+ * Storage access is guarded because this runs during `App`'s render:
+ * Safari with site data blocked throws on `localStorage`, and a throw
+ * here would take the whole app down rather than one debug readout.
+ */
+export function isLayoutDebugArmed() {
+  try {
+    return localStorage.getItem(LAYOUT_DEBUG_STORAGE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+/** Either gate — the URL parameter or the persisted tap-gesture flag. */
+export function isLayoutDebugRequested() {
+  return isLayoutDebugParamRequested() || isLayoutDebugArmed();
+}
+
+/**
+ * Flip the persisted flag and announce it. Returns the new state.
+ *
+ * The announcement is a plain window event rather than a React context
+ * so the gesture's owner (`Shell`) and the readout's mount site (`App`)
+ * stay decoupled — `App` is above the router, `Shell` is well below it.
+ */
+export function toggleLayoutDebugArmed() {
+  const armed = !isLayoutDebugArmed();
+  try {
+    if (armed) localStorage.setItem(LAYOUT_DEBUG_STORAGE_KEY, "1");
+    else localStorage.removeItem(LAYOUT_DEBUG_STORAGE_KEY);
+  } catch {
+    // Storage unavailable. The toggle still fires for this page life —
+    // it just won't survive a relaunch, which beats swallowing the tap.
+  }
+  window.dispatchEvent(new Event(LAYOUT_DEBUG_EVENT));
+  return armed;
+}
+
+/**
+ * Notify `onChange` whenever either gate may have moved. `storage`
+ * covers the other-tab case; the custom event covers this one.
+ */
+export function subscribeLayoutDebug(onChange) {
+  window.addEventListener(LAYOUT_DEBUG_EVENT, onChange);
+  window.addEventListener("storage", onChange);
+  return function unsubscribeLayoutDebug() {
+    window.removeEventListener(LAYOUT_DEBUG_EVENT, onChange);
+    window.removeEventListener("storage", onChange);
+  };
+}
+
+/**
+ * `isLayoutDebugRequested` as reactive state, so arming the readout
+ * takes effect immediately instead of on the next reload — there is no
+ * way to reload a standalone PWA without killing the app.
+ */
+export function useLayoutDebugRequested() {
+  return useSyncExternalStore(subscribeLayoutDebug, isLayoutDebugRequested);
+}
+
+/**
+ * Handler that toggles the readout after `LAYOUT_DEBUG_TAP_COUNT` taps
+ * inside `LAYOUT_DEBUG_TAP_WINDOW_MS`.
+ *
+ * Timestamps in a ref rather than a reset timer: nothing is scheduled,
+ * so an abandoned half-gesture costs nothing and there is no timeout to
+ * tear down. Stale taps are dropped on the next tap instead.
+ */
+export function useLayoutDebugTapGesture() {
+  const taps = useRef([]);
+  return useCallback(function onLayoutDebugTap() {
+    const now = Date.now();
+    const recent = taps.current.filter(function withinWindow(at) {
+      return now - at < LAYOUT_DEBUG_TAP_WINDOW_MS;
+    });
+    recent.push(now);
+    if (recent.length < LAYOUT_DEBUG_TAP_COUNT) {
+      taps.current = recent;
+      return;
+    }
+    taps.current = [];
+    toggleLayoutDebugArmed();
+  }, []);
 }
 
 /** One decimal place — enough to expose sub-pixel gaps, short enough to read. */
