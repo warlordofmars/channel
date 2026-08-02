@@ -167,6 +167,18 @@ describe("token storage — read failure modes all answer null", () => {
     expect(warn.mock.calls[0][0]).toContain("could not be decrypted");
   });
 
+  it("refuses an unrecognised format tag instead of guessing plaintext", async () => {
+    // A corrupted first byte, or a format a future build writes and this
+    // one predates. Reading it as UTF-8 JSON would degrade to null two
+    // steps later with no signal at all.
+    await writeFile(filePath, Buffer.concat([Buffer.from([0x7f]), Buffer.from('{"refresh_token":"rt"}')]));
+    const safeStorage = fakeSafeStorage();
+
+    expect(await storage(safeStorage).read()).toBeNull();
+    expect(safeStorage.decryptString).not.toHaveBeenCalled();
+    expect(warn.mock.calls[0][0]).toContain("unrecognised format tag 0x7f");
+  });
+
   it("returns null when the decrypted payload is not JSON", async () => {
     await writeFile(filePath, Buffer.concat([Buffer.from([TAG_PLAINTEXT]), Buffer.from("{oops")]));
     expect(await storage(fakeSafeStorage()).read()).toBeNull();

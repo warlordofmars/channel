@@ -1036,11 +1036,13 @@ focus roughly hourly.
 
 - **`desktop/main/token-storage.js`** wraps `safeStorage` over
   `userData/auth.bin`, written `0600`. File format is one tag byte then
-  the payload: `0x01` + ciphertext, or `0x00` + UTF-8 JSON. The tag is
-  load-bearing — `isEncryptionAvailable()` describes the *machine*, not
-  the file, so a reader cannot infer the payload's form from its own
-  environment. It also makes the clear-text → encrypted upgrade free:
-  `write` re-decides every call, and desktop rotates hourly.
+  the payload: `0x01` + ciphertext, or `0x00` + UTF-8 JSON, with any
+  other leading byte refused (warn + `null`) rather than guessed at as
+  plaintext. The tag is load-bearing — `isEncryptionAvailable()`
+  describes the *machine*, not the file, so a reader cannot infer the
+  payload's form from its own environment. It also makes the clear-text
+  → encrypted upgrade free: `write` re-decides every call, and desktop
+  rotates hourly.
 - **`isEncryptionAvailable() === false`** (Linux with no libsecret
   provider) falls back to clear text with a loud `console.warn` naming
   the path. Refusing to persist instead would restore the hourly

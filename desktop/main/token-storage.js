@@ -18,6 +18,11 @@
  *     0x01 <safeStorage ciphertext>   encrypted
  *     0x00 <utf-8 JSON>               clear-text fallback
  *
+ * Those two tags are an allowlist, not a boolean: any other leading byte
+ * is refused with a warning rather than optimistically read as
+ * plaintext, so a corrupted first byte or a format this build predates
+ * fails loudly instead of degrading to an unexplained re-login.
+ *
  * The tag is what makes the two forms interchangeable *at rest*.
  * `isEncryptionAvailable()` is a property of the machine at a moment in
  * time, not of the file — a Linux user who installs gnome-keyring after
@@ -108,18 +113,33 @@ export function createTokenStorage({ filePath, safeStorage, warn }) {
 
     const payload = raw.subarray(1);
     let json;
-    try {
-      json =
-        raw[0] === TAG_ENCRYPTED
-          ? safeStorage.decryptString(payload)
-          : payload.toString("utf8");
-    } catch {
-      // Encrypted payload we can no longer decrypt: the keychain entry
-      // was revoked, the file moved between machines, or encryption
-      // stopped being available. Re-login is the only recovery.
+    if (raw[0] === TAG_ENCRYPTED) {
+      try {
+        json = safeStorage.decryptString(payload);
+      } catch {
+        // Encrypted payload we can no longer decrypt: the keychain entry
+        // was revoked, the file moved between machines, or encryption
+        // stopped being available. Re-login is the only recovery.
+        warn(
+          "[channel] stored desktop credentials could not be decrypted — " +
+            "signing in again will replace them.",
+        );
+        return null;
+      }
+    } else if (raw[0] === TAG_PLAINTEXT) {
+      json = payload.toString("utf8");
+    } else {
+      // Explicit allowlist rather than "anything that isn't encrypted is
+      // plaintext". An unknown tag means a corrupted first byte or a
+      // format this build predates, and reading either as UTF-8 JSON
+      // degrades to `null` further down *silently* — same outcome for the
+      // user, no signal for whoever has to explain it. Refusing a
+      // credential file we do not recognise is also the fail-closed
+      // direction.
       warn(
-        "[channel] stored desktop credentials could not be decrypted — " +
-          "signing in again will replace them.",
+        `[channel] stored desktop credentials carry an unrecognised format tag 0x${raw[0]
+          .toString(16)
+          .padStart(2, "0")} — ignoring them; signing in again will replace them.`,
       );
       return null;
     }
