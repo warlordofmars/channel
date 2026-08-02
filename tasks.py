@@ -68,7 +68,12 @@ def _resolve_dynamo_port(raw: str | None) -> int:
     value = (raw or "").strip()
     if not value:
         return DYNAMO_LOCAL_PORT
-    if not value.isdigit() or not 1 <= int(value) <= 65535:
+    # ``isascii()`` matters: ``str.isdigit()`` alone accepts non-ASCII
+    # numerals, and ``int()`` happily converts them — so "٥" (Arabic-Indic
+    # five) and "８１２３" (fullwidth) would sail through as ports 5 and
+    # 8123. ``isdecimal()`` is not enough either; it accepts both. A port
+    # is ASCII digits or it is not a port.
+    if not (value.isascii() and value.isdigit()) or not 1 <= int(value) <= 65535:
         raise ValueError(f"CHANNEL_DYNAMO_PORT must be a TCP port number, got {raw!r}")
     return int(value)
 

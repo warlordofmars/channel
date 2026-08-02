@@ -89,7 +89,11 @@ def _default_endpoint() -> str:
     port = os.environ.get("CHANNEL_DYNAMO_PORT", "").strip()
     if not port:
         return "http://localhost:8000"
-    if not port.isdigit() or not 1 <= int(port) <= 65535:
+    # ASCII digits only — see the matching note in ``tasks._resolve_dynamo_port``.
+    # Here the stakes are slightly higher: the raw string is interpolated
+    # straight into the URL, so a non-ASCII numeral would yield
+    # ``http://localhost:٥`` rather than a wrong-but-valid port.
+    if not (port.isascii() and port.isdigit()) or not 1 <= int(port) <= 65535:
         raise ValueError(f"CHANNEL_DYNAMO_PORT must be a TCP port number, got {port!r}")
     return f"http://localhost:{port}"
 

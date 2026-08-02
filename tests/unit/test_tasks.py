@@ -200,7 +200,23 @@ def test_dynamo_port_tolerates_surrounding_whitespace():
     assert _resolve_dynamo_port("  8123  ") == 8123
 
 
-@pytest.mark.parametrize("raw", ["eight-thousand", "80.80", "-1", "0", "65536"])
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "eight-thousand",
+        "80.80",
+        "-1",
+        "0",
+        "65536",
+        # Non-ASCII numerals. str.isdigit() accepts all three and int()
+        # converts the latter two, so a naive check would silently yield
+        # ports 5 and 8123. str.isdecimal() also accepts them — only an
+        # ASCII check rejects them.
+        "²",  # superscript two
+        "٥",  # Arabic-Indic five
+        "８１２３",  # fullwidth 8123
+    ],
+)
 def test_dynamo_port_rejects_non_port_values(raw):
     """A typo'd port must raise, never silently fall back.
 

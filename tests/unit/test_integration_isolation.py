@@ -155,6 +155,10 @@ def _import_conftest(**env_overrides: str | None) -> subprocess.CompletedProcess
         capture_output=True,
         text=True,
         check=False,
+        # A bare import should take well under a second. Bounding it means
+        # a hypothetical hang fails this test fast instead of burning the
+        # whole CI job's timeout.
+        timeout=60,
     )
 
 
