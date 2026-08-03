@@ -22,7 +22,15 @@
     <meta name="theme-color" content="#15120f" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <!-- No apple-mobile-web-app-status-bar-style (#516). `black-translucent`
+         moves the standalone web view's origin to y=0 so it draws under the
+         status bar, but iOS does NOT grow the view to compensate: measured on
+         an installed PWA it stayed 793pt tall on an 852pt screen, so the 59pt
+         gained at the top was lost as dead screen below the page — unpaintable
+         by any CSS, which is why #508 / #510 made the composer flush at 793 and
+         a band still remained. Without the meta iOS lays the same 793pt view
+         out at 59 → 852 and it reaches the bottom edge. Re-adding this tag
+         reintroduces that band. -->
     <meta name="apple-mobile-web-app-title" content="Channel" />
 
     <!-- Google Analytics 4 — gated on the consent banner. Only loads when
