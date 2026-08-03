@@ -409,8 +409,21 @@ describe("mobile conversation composer flush to the bottom edge (#467, #509)", (
     // bottom padding in `app.css` and asking which selector owns it
     // means no rule can escape by having a selector shape a
     // rule-shaped pattern didn't anticipate.
+    //
+    // The declaration pattern deliberately requires NO terminating `;`.
+    // #508's form ended in `\);` and CSS lets the last declaration in a
+    // block drop its semicolon, so re-adding the rule as
+    // `{ padding-bottom: calc(8px + env(safe-area-inset-bottom)) }` slipped
+    // past it — verified against #508's guard, which stayed green. Nothing
+    // in the repo would have caught the formatting either: `ui` lints only
+    // `.js`/`.jsx`, with no prettier or stylelint anywhere. Excluding `}`
+    // from the spans is what makes dropping the terminator safe — without
+    // it a match could run past the end of its own rule and be attributed
+    // to the wrong selector.
     const insetComposers = [
-      ...css.matchAll(/padding-bottom:\s*calc\([^;]*safe-area-inset-bottom[^;]*\);/g),
+      ...css.matchAll(
+        /padding-bottom:\s*calc\([^;}]*safe-area-inset-bottom[^;}]*\)/g,
+      ),
     ]
       .map((m) => selectorOfRuleAt(m.index))
       .flatMap((selectorList) => selectorList.split(","))
