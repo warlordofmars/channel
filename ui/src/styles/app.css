@@ -1629,23 +1629,20 @@ html.is-electron-mac .sb-top {
      reached y=793, but `.composer` stopped at y=745, leaving a 48px
      strip of empty page under the rounded box.
 
-     So the clearance moves inside the surface instead — 0 on the
-     container, and the same `calc()` on the composer below. The
-     surface reaches the screen edge; its contents still clear the
-     indicator by exactly as much as before. Side insets are unchanged
-     and still additive. */
+     So the container takes no bottom inset at all and the surface
+     reaches the screen edge. #508 first re-paid the clearance *inside*
+     the surface (`.bottom-composer .composer { padding-bottom: calc(8px
+     + env(...)) }`), but on device that rendered as 42px of empty grey
+     inside the rounded box — the box read as padded rather than as
+     sitting at the bottom — so #509 dropped it: `.composer` keeps only
+     its plain mobile `8px`. The controls therefore end ~8px above the
+     screen bottom, inside the home-indicator region. That is deliberate
+     and matches the reference app; do not re-add clearance here. Side
+     insets are unchanged and still additive. */
   .bottom-composer {
     padding-bottom: 0;
     padding-left: calc(12px + env(safe-area-inset-left));
     padding-right: calc(12px + env(safe-area-inset-right));
-  }
-  /* 8px is the mobile `.composer` bottom padding from the block above,
-     so the controls keep their existing spacing and gain only the
-     indicator clearance. Scoped to `.bottom-composer` because ChatHome's
-     composer lives inside `.home`, which carries its own additive
-     bottom inset (above) and is not flush to the screen edge. */
-  .bottom-composer .composer {
-    padding-bottom: calc(8px + env(safe-area-inset-bottom));
   }
 
   /* ----- secondary views: gutters, card grids, tables (Tier 3 of #125, #468) -----

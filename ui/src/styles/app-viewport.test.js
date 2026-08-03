@@ -28,13 +28,16 @@
 //      were rejected on-device; this pins the mobile block out of that
 //      property entirely.
 //   6. That the mobile conversation composer is flush to the bottom
-//      edge — no bottom padding on `.bottom-composer`, with the
-//      home-indicator clearance moved inside `.bottom-composer
-//      .composer` so the surface reaches y=viewport-height while its
-//      contents still clear the indicator. Measured on an installed
-//      iOS PWA (393x793, inset 34px): `.bottom-composer` already ended
-//      at 793 but `.composer` stopped at 745, and that 48px strip of
-//      bare canvas is the gap #467 is actually about.
+//      edge — no bottom padding on `.bottom-composer`, and no rule
+//      re-adding the home-indicator inset inside the composer's own
+//      surface either. Measured on an installed iOS PWA (393x793,
+//      inset 34px): `.bottom-composer` already ended at 793 but
+//      `.composer` stopped at 745, and that 48px strip of bare canvas
+//      is the gap #467 is actually about. #508 fixed it by moving the
+//      clearance inside the surface, which just relocated the empty
+//      strip *into* the box as 42px of grey, so #509 dropped the
+//      clearance outright — the controls now sit ~8px above the screen
+//      bottom, inside the home-indicator region, deliberately.
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -143,12 +146,12 @@ function selectorOfRuleAt(i) {
  * `selector.includes(".home")` also matches `.home-row` and `.homepage`,
  * because `-` and alphanumerics are all valid class-name characters. The
  * negative lookahead is what makes this a token match rather than a substring
- * match, and it matters in both directions below: the un-split-group guard
- * uses it to *select* rules, where a substring match would flag an unrelated
- * `.home-row` rule (noisy, but safe); the inner-clearance guard uses it to
- * *exclude* them, where a substring match would silently skip a
- * `.not-bottom-composer .composer` rule — a false negative, which is the
- * unsafe direction.
+ * match. The un-split-group guard below uses it to *select* rules, where a
+ * substring match would flag an unrelated `.home-row` rule — noisy, but safe.
+ * (#508 had a second call site that used it to *exclude* rules, the unsafe
+ * direction, where a substring match would silently skip a
+ * `.not-bottom-composer .composer` rule; #509 removed the exclusion along
+ * with the rule it exempted.)
  */
 function usesClass(selector, className) {
   return new RegExp(`\\.${className}(?![\\w-])`).test(selector);
@@ -330,7 +333,7 @@ describe("mobile home layout — vertically centred as one group (#467)", () => 
   });
 });
 
-describe("mobile conversation composer flush to the bottom edge (#467)", () => {
+describe("mobile conversation composer flush to the bottom edge (#467, #509)", () => {
   /**
    * Every `.bottom-composer { ... }` rule body inside the ≤640px block —
    * the gutter rule and the `env(safe-area-inset-*)` rule appended
@@ -386,30 +389,34 @@ describe("mobile conversation composer flush to the bottom edge (#467)", () => {
     expect(effectiveBottomPadding()).toBe("0");
   });
 
-  it("moves the home-indicator clearance inside the composer's surface", () => {
-    // Same 34px of clearance as before, just paid from inside the box:
-    // 8px is the mobile `.composer` bottom padding, so the controls keep
-    // their existing spacing and gain only the inset.
-    expect(mobileBlock()).toMatch(
-      /\.bottom-composer\s+\.composer\s*\{[^}]*padding-bottom:\s*calc\(8px \+ env\(safe-area-inset-bottom\)\)/,
-    );
-  });
-
-  it("scopes the inner clearance so ChatHome's composer is untouched", () => {
-    // A bare `.composer { padding-bottom: calc(... + env(...)) }` would
-    // reach ChatHome's composer (inside `.home`) and ProjectDetail's,
-    // neither of which sits at the screen edge — they would grow a
-    // stray 34px of internal padding for nothing.
-    const unscoped = [
+  it("re-adds no inset inside the surface, so the box holds no empty band", () => {
+    // #508 first moved the clearance inside the surface, as
+    // `.bottom-composer .composer { padding-bottom: calc(8px + env(...)) }`.
+    // On the device that measures 42px, and it renders as 42px of empty
+    // grey inside the rounded box — the box reads as padded rather than
+    // as sitting at the bottom (#509). So the clearance is gone: the
+    // composer keeps only its plain mobile `8px`, and the controls end
+    // ~8px above the screen bottom, inside the home-indicator region.
+    // That is the requested geometry; re-adding clearance "for safety"
+    // is the exact regression this pins.
+    //
+    // This subsumes #508's separate ChatHome-scoping guard. That one
+    // allowed the inset on a `.bottom-composer`-scoped rule and rejected
+    // it anywhere else; the surviving `.composer` rule with a bottom
+    // inset is now *none*, so the filter drops the exclusion and the
+    // check gets strictly stricter. Declaration-first and file-wide for
+    // the same reason it was before: starting from every safe-area
+    // bottom padding in `app.css` and asking which selector owns it
+    // means no rule can escape by having a selector shape a
+    // rule-shaped pattern didn't anticipate.
+    const insetComposers = [
       ...css.matchAll(/padding-bottom:\s*calc\([^;]*safe-area-inset-bottom[^;]*\);/g),
     ]
       .map((m) => selectorOfRuleAt(m.index))
       .flatMap((selectorList) => selectorList.split(","))
       .map((selector) => selector.trim())
-      .filter(
-        (s) => /\.composer$/.test(s) && !usesClass(s, "bottom-composer"),
-      );
-    expect(unscoped).toEqual([]);
+      .filter((s) => /\.composer$/.test(s));
+    expect(insetComposers).toEqual([]);
   });
 
   it("leaves the desktop strip's bottom gutter alone", () => {
@@ -427,12 +434,12 @@ describe("safe-area insets survive the viewport change (#425 / #437)", () => {
     // env(...))` rather than `max()`, so the layout's own spacing is kept
     // on top of the inset.
     //
-    // The bottom inset the conversation composer takes is asserted by the
-    // flush-to-the-edge block above, not here: #467 moved it from
-    // `.bottom-composer` (`14px + inset`) onto `.bottom-composer .composer`
-    // (`8px + inset`). The clearance survives — it is paid from inside the
-    // surface now — so what this block still owns is `.home`'s copy, the
-    // one container inset that did not move.
+    // The conversation composer takes no bottom inset at all any more —
+    // #467/#508 moved it from `.bottom-composer` (`14px + inset`) onto
+    // `.bottom-composer .composer` (`8px + inset`), and #509 dropped it.
+    // Its absence is asserted by the flush-to-the-edge block above, not
+    // here; what this block still owns is `.home`'s copy, the one
+    // container inset that never moved.
     expect(mobile).toMatch(/height:\s*calc\(52px \+ env\(safe-area-inset-top\)\)/);
     expect(mobile).toMatch(
       /padding-bottom:\s*calc\(12px \+ env\(safe-area-inset-bottom\)\)/,
