@@ -241,12 +241,18 @@ describe("mobile home layout — greeting top, composer bottom (#467)", () => {
    * text between the previous brace of either kind and the `{` that opens
    * the rule.
    *
-   * Walking back to the nearest brace (rather than regex-matching a whole
-   * rule) is what keeps this correct for a rule nested in an at-rule: for
-   * the FIRST rule inside `@media ... {` the preceding brace is the media
-   * block's own `{`, so the slice is still just the selector. A
-   * `([^{}]*)\{` style match instead swallows the at-rule prelude and
-   * loses the selector entirely.
+   * This exists because the guard below searches from the *declaration*
+   * outwards — it starts at every `margin-top: auto` and asks which
+   * selector owns it — rather than from a selector known to mention
+   * `.composer-wrap`. Inverting the search is the point: a rule carrying
+   * the auto margin cannot escape the check by having a selector shape
+   * the pattern didn't anticipate. Recovering the owner then needs a
+   * brace walk rather than a rule-shaped regex.
+   *
+   * Walking back to the nearest brace of EITHER kind is what keeps that
+   * correct for a rule nested in an at-rule: for the first rule inside
+   * `@media ... {` the preceding brace is the media block's own `{`, so
+   * the slice is still just the selector.
    */
   function selectorOfRuleAt(i) {
     const open = css.lastIndexOf("{", i);
@@ -269,6 +275,11 @@ describe("mobile home layout — greeting top, composer bottom (#467)", () => {
     // masking vector is real and was verified by hand against the earlier
     // whole-prelude form of this check. (A comment mentioning `.home` is
     // not a vector: `css` is comment-stripped at the top of the file.)
+    //
+    // `split(",")` is selector-list-naive — it would also split inside
+    // `:is(.home, .convo) > .composer-wrap`. `app.css` uses no `:is()` or
+    // `:where()` today, and the failure direction is safe: it would flag a
+    // correct rule rather than pass a broken one.
     const unscoped = [...css.matchAll(/margin-top:\s*auto/g)]
       .map((m) => selectorOfRuleAt(m.index))
       .flatMap((selectorList) => selectorList.split(","))
