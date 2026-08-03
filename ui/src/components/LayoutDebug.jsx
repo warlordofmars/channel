@@ -91,6 +91,19 @@ export const LAYOUT_DEBUG_TAP_WINDOW_MS = 2000;
 export const SAFE_AREA_SIDES = ["top", "right", "bottom", "left"];
 
 /**
+ * Viewport edge markers (#511) — thickness and the two colours.
+ *
+ * These are the one place in the codebase that deliberately hardcodes a
+ * colour instead of reaching for a `--token`. The markers are a *ruler*,
+ * not chrome: their whole job is to be unmistakable in a screenshot, so
+ * they must be a colour that appears nowhere else in either theme and
+ * must not change when the theme does. A token would fail both tests.
+ * They leave with the rest of this file under #503.
+ */
+export const EDGE_MARKER_THICKNESS_PX = 4;
+export const EDGE_MARKER_COLORS = { top: "#00ffff", bottom: "#ff00ff" };
+
+/**
  * Computed properties reported for each element in the chain.
  *
  * Chosen to answer "which box stops short, and why": the sizing inputs
@@ -373,8 +386,23 @@ export function matchesDisplayMode(mode) {
   return window.matchMedia(`(display-mode: ${mode})`).matches;
 }
 
+/**
+ * Where the fixed overlay layer actually lands (#511).
+ *
+ * The overlay is `position: fixed; inset: 0`, so its own rect *is* the
+ * layout viewport — reporting it turns the readout into a ruler that
+ * measures itself. Called with `undefined` on the very first render
+ * (the ref has nothing in it until after mount), so it degrades to a
+ * label rather than throwing; the post-mount re-measure fills it in.
+ */
+export function describeOverlayRect(el) {
+  if (!el) return "(not mounted)";
+  const rect = el.getBoundingClientRect();
+  return `top=${round(rect.top)} bottom=${round(rect.bottom)} height=${round(rect.height)}`;
+}
+
 /** Everything the readout renders, gathered in one pass. */
-export function collectSnapshot() {
+export function collectSnapshot(overlayEl) {
   const { windowHeight, layoutHeight } = measureAppViewport();
   const viewport = window.visualViewport;
   const root = document.documentElement;
@@ -389,6 +417,9 @@ export function collectSnapshot() {
       ["visualViewport.offsetTop", viewport ? `${round(viewport.offsetTop)}` : "(absent)"],
       ["visualViewport.scale", viewport ? `${viewport.scale}` : "(absent)"],
       ["screen.height", `${window.screen.height}`],
+      ["screen.availHeight", `${window.screen.availHeight}`],
+      ["screen.height − innerHeight", `${window.screen.height - windowHeight}`],
+      ["overlay rect", describeOverlayRect(overlayEl)],
       ["devicePixelRatio", `${window.devicePixelRatio}`],
       ["navigator.standalone", `${navigator.standalone}`],
       ["display-mode: standalone", `${matchesDisplayMode("standalone")}`],
@@ -402,10 +433,47 @@ export function collectSnapshot() {
   };
 }
 
+/**
+ * A solid bar pinned to one edge of the viewport (#511).
+ *
+ * `position: fixed`, not `absolute`, for two reasons that happen to
+ * coincide here: the overlay is itself `fixed; inset: 0` so the two
+ * anchor to the same box, and the overlay is a scroll container
+ * (`overflow-y: auto`), where an absolutely positioned child would be
+ * placed against the *scrollable content* and slide out of sight the
+ * moment the chain readout is scrolled. Fixed keeps the bar on the
+ * viewport edge no matter where the content sits — which is the only
+ * thing that makes a screenshot of it worth taking. There is no
+ * transformed ancestor to trap it.
+ *
+ * Styles are inline rather than in `app.css` because this ships and
+ * leaves with the component (#503) and the issue's scope is this file.
+ */
+export function EdgeMarker({ edge }) {
+  return (
+    <div
+      data-testid={`layout-debug-edge-${edge}`}
+      data-edge={edge}
+      aria-hidden="true"
+      style={{
+        position: "fixed",
+        left: 0,
+        right: 0,
+        [edge]: 0,
+        height: `${EDGE_MARKER_THICKNESS_PX}px`,
+        background: EDGE_MARKER_COLORS[edge],
+        pointerEvents: "none",
+        zIndex: 1,
+      }}
+    />
+  );
+}
+
 export default function LayoutDebug() {
+  const overlay = useRef(null);
   const [snapshot, setSnapshot] = useState(collectSnapshot);
   const refresh = useCallback(function refreshSnapshot() {
-    setSnapshot(collectSnapshot());
+    setSnapshot(collectSnapshot(overlay.current));
   }, []);
   // Re-measure once after mount (the router subtree is in the DOM by
   // then, so the composer exists), and on every viewport change —
@@ -424,7 +492,14 @@ export default function LayoutDebug() {
     };
   }, [refresh]);
   return (
-    <div className="layout-debug" role="region" aria-label="Layout debug readout">
+    <div
+      className="layout-debug"
+      role="region"
+      aria-label="Layout debug readout"
+      ref={overlay}
+    >
+      <EdgeMarker edge="top" />
+      <EdgeMarker edge="bottom" />
       <div className="layout-debug-head">
         <span className="layout-debug-title">LAYOUT DEBUG · #467 · temporary</span>
         <span className="layout-debug-actions">

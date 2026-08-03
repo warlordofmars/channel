@@ -3,6 +3,8 @@ import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import LayoutDebug, {
   CHAIN_PROPS,
+  EDGE_MARKER_COLORS,
+  EDGE_MARKER_THICKNESS_PX,
   LAYOUT_DEBUG_EVENT,
   LAYOUT_DEBUG_PARAM,
   LAYOUT_DEBUG_STORAGE_KEY,
@@ -12,6 +14,7 @@ import LayoutDebug, {
   collectChain,
   collectSnapshot,
   describeElement,
+  describeOverlayRect,
   disarmLayoutDebug,
   elementLabel,
   findChainRoot,
@@ -263,6 +266,28 @@ describe("collectSnapshot", () => {
     expect(rowValue(snapshot, "visualViewport.height")).toBe("653.3");
     expect(rowValue(snapshot, "visualViewport.scale")).toBe("1");
   });
+
+  it("reports the screen-vs-viewport gap and the overlay's own rect (#511)", () => {
+    // The affected device's numbers: a 852pt screen reporting a 793pt
+    // window, short by exactly one 59pt top inset.
+    vi.stubGlobal("screen", { height: 852, availHeight: 851 });
+    setViewport({ windowHeight: 793, layoutHeight: 793 });
+    const overlay = document.createElement("div");
+    overlay.getBoundingClientRect = () => ({ top: 0, bottom: 793, height: 793 });
+
+    const snapshot = collectSnapshot(overlay);
+
+    expect(rowValue(snapshot, "screen.height")).toBe("852");
+    expect(rowValue(snapshot, "screen.availHeight")).toBe("851");
+    expect(rowValue(snapshot, "screen.height − innerHeight")).toBe("59");
+    expect(rowValue(snapshot, "overlay rect")).toBe("top=0 bottom=793 height=793");
+  });
+
+  it("degrades the overlay rect to a label before the ref is attached", () => {
+    // How `useState(collectSnapshot)` calls it on the very first render.
+    expect(rowValue(collectSnapshot(), "overlay rect")).toBe("(not mounted)");
+    expect(describeOverlayRect(null)).toBe("(not mounted)");
+  });
 });
 
 describe("<LayoutDebug />", () => {
@@ -280,6 +305,54 @@ describe("<LayoutDebug />", () => {
     expect(screen.getByText(/chain: div\.composer → html/)).toBeTruthy();
     expect(screen.getByText("div.bottom-composer")).toBeTruthy();
     expect(screen.getByText("html")).toBeTruthy();
+  });
+
+  it("pins a distinctly-coloured marker to each viewport edge (#511)", () => {
+    render(<LayoutDebug />);
+
+    const overlay = screen.getByRole("region", { name: /layout debug/i });
+    const top = screen.getByTestId("layout-debug-edge-top");
+    const bottom = screen.getByTestId("layout-debug-edge-bottom");
+
+    for (const marker of [top, bottom]) {
+      expect(overlay.contains(marker)).toBe(true);
+      // Fixed, not absolute — the overlay scrolls, and an absolutely
+      // positioned bar would slide out of the screenshot with it.
+      expect(marker.style.position).toBe("fixed");
+      expect(marker.style.height).toBe(`${EDGE_MARKER_THICKNESS_PX}px`);
+      expect(marker.style.left).toBe("0px");
+      expect(marker.style.right).toBe("0px");
+      // Above the readout's own content, and never swallowing a tap.
+      expect(marker.style.zIndex).toBe("1");
+      expect(marker.style.pointerEvents).toBe("none");
+    }
+
+    expect(top.style.top).toBe("0px");
+    expect(top.style.bottom).toBe("");
+    expect(bottom.style.bottom).toBe("0px");
+    expect(bottom.style.top).toBe("");
+    // Two colours used nowhere else, and not the same as each other —
+    // jsdom normalises hex to rgb().
+    expect(top.style.background).toBe("rgb(0, 255, 255)");
+    expect(bottom.style.background).toBe("rgb(255, 0, 255)");
+    expect(EDGE_MARKER_COLORS.top).not.toBe(EDGE_MARKER_COLORS.bottom);
+  });
+
+  it("reports the overlay root's own rect once mounted (#511)", () => {
+    // jsdom has no layout, so every rect is zero — give the overlay a
+    // distinct one so the assertion proves the ref points at the fixed
+    // layer rather than passing on a coincidence of zeroes.
+    vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(
+      function fakeRect() {
+        return this.classList.contains("layout-debug")
+          ? { top: 0, bottom: 793, height: 793 }
+          : { top: 0, bottom: 0, height: 0 };
+      },
+    );
+
+    render(<LayoutDebug />);
+
+    expect(screen.getByText("top=0 bottom=793 height=793")).toBeTruthy();
   });
 
   it("re-measures on demand", () => {
