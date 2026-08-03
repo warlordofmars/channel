@@ -1573,11 +1573,19 @@ html.is-electron-mac .sb-top {
      parallel edit to the rules above (e.g. PR #430's `.home` padding dedup)
      rebases cleanly.
 
-     index.html sets `viewport-fit=cover` +
-     `apple-mobile-web-app-status-bar-style: black-translucent`, so an
-     installed standalone window draws *under* the notch / Dynamic Island and
-     the home indicator. Without the insets below, the hamburger sits behind
-     the status bar and the composer behind the home indicator.
+     index.html sets `viewport-fit=cover`, so an installed standalone window
+     draws edge-to-edge and the insets below are what keep content clear of
+     the notch / Dynamic Island and the home indicator.
+
+     It deliberately does NOT set
+     `apple-mobile-web-app-status-bar-style: black-translucent` (#516/#517).
+     That meta moved the web view's origin to y=0 so it drew *under* the
+     status bar, but iOS never grew the view to compensate — it stayed
+     `screen.height - 59` tall, so the 59px gained at the top was lost at the
+     bottom and the composer stopped 59px short of the screen edge. Measured
+     on device: with the meta, `env(safe-area-inset-top)` read 59px and the
+     viewport sat at 0->793 of an 852px screen; without it, the inset reads 0
+     and the same 793px viewport sits at 59->852, flush. Do not re-add it.
 
      Every rule is additive — `calc(<existing gutter> + env(...))` — rather
      than `max(<gutter>, env(...))`. Both clear the unsafe region, but `max()`
@@ -1640,7 +1648,15 @@ html.is-electron-mac .sb-top {
      and matches the reference app; do not re-add clearance here. Side
      insets are unchanged and still additive. */
   .bottom-composer {
-    padding-bottom: 0;
+    /* Clear the home indicator. Chosen on-device from a live A/B of
+       0 / 12 / 24 / 34 / 48px once #517 fixed the viewport position and the
+       box genuinely reached the screen edge — 34px matches the Claude iOS
+       app. Expressed as the inset itself rather than a flat `34px` so it
+       resolves to 0 on devices with no home indicator instead of parking
+       dead space there. The gap belongs out here rather than inside
+       `.composer`, which keeps its tight 8px so no empty grey band
+       reappears inside the rounded box (#509). */
+    padding-bottom: env(safe-area-inset-bottom);
     padding-left: calc(12px + env(safe-area-inset-left));
     padding-right: calc(12px + env(safe-area-inset-right));
   }

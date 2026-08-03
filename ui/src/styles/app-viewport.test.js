@@ -385,8 +385,16 @@ describe("mobile conversation composer flush to the bottom edge (#467, #509)", (
     return value;
   }
 
-  it("leaves no bottom padding on the strip, so the surface reaches the edge", () => {
-    expect(effectiveBottomPadding()).toBe("0");
+  it("clears the home indicator beneath the strip (#518)", () => {
+    // #510 drove this to 0 while the viewport was still mis-positioned and
+    // the box stopped 59px short of the screen anyway. #517 fixed the
+    // position, at which point flush read as *too* flush. 34px was picked
+    // on-device from a live A/B of 0/12/24/34/48px, matching the Claude
+    // iOS app. Pinned as the inset expression, not a flat `34px`: a fixed
+    // value would park 34px of dead space on devices with no home
+    // indicator, where the inset resolves to 0. The clearance stays out
+    // here rather than inside `.composer`, which the next test pins.
+    expect(effectiveBottomPadding()).toBe("env(safe-area-inset-bottom)");
   });
 
   it("re-adds no inset inside the surface, so the box holds no empty band", () => {
