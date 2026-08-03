@@ -138,6 +138,23 @@ function selectorOfRuleAt(i) {
 }
 
 /**
+ * Does `selector` use `className` as a whole class token?
+ *
+ * `selector.includes(".home")` also matches `.home-row` and `.homepage`,
+ * because `-` and alphanumerics are all valid class-name characters. The
+ * negative lookahead is what makes this a token match rather than a substring
+ * match, and it matters in both directions below: the un-split-group guard
+ * uses it to *select* rules, where a substring match would flag an unrelated
+ * `.home-row` rule (noisy, but safe); the inner-clearance guard uses it to
+ * *exclude* them, where a substring match would silently skip a
+ * `.not-bottom-composer .composer` rule — a false negative, which is the
+ * unsafe direction.
+ */
+function usesClass(selector, className) {
+  return new RegExp(`\\.${className}(?![\\w-])`).test(selector);
+}
+
+/**
  * The bottom component of a `padding` shorthand value.
  *
  * CSS shorthand arity: 1 value sets all four sides; 2 is `<block> <inline>`,
@@ -289,7 +306,7 @@ describe("mobile home layout — vertically centred as one group (#467)", () => 
       .map((m) => selectorOfRuleAt(m.index))
       .flatMap((selectorList) => selectorList.split(","))
       .map((selector) => selector.trim())
-      .filter((s) => s.includes(".home"));
+      .filter((s) => usesClass(s, "home"));
     expect(homeAnchors).toEqual([]);
   });
 
@@ -389,7 +406,9 @@ describe("mobile conversation composer flush to the bottom edge (#467)", () => {
       .map((m) => selectorOfRuleAt(m.index))
       .flatMap((selectorList) => selectorList.split(","))
       .map((selector) => selector.trim())
-      .filter((s) => /\.composer$/.test(s) && !s.includes(".bottom-composer"));
+      .filter(
+        (s) => /\.composer$/.test(s) && !usesClass(s, "bottom-composer"),
+      );
     expect(unscoped).toEqual([]);
   });
 
