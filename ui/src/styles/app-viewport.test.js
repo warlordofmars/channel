@@ -137,6 +137,24 @@ function selectorOfRuleAt(i) {
   return css.slice(prev + 1, open);
 }
 
+/**
+ * The bottom component of a `padding` shorthand value.
+ *
+ * CSS shorthand arity: 1 value sets all four sides; 2 is `<block> <inline>`,
+ * so the first is also the bottom; 3 and 4 both put the bottom third.
+ *
+ * The whitespace split is `calc()`-naive — `calc(1px + 1px)` would split into
+ * three tokens. No `padding` shorthand in `app.css` uses `calc()` today (every
+ * safe-area rule uses longhands precisely so the inset is legible), and the
+ * failure direction is safe: a mis-split yields a token that isn't the
+ * expected value, so the caller's assertion fails on a rule it could not read
+ * rather than passing one it should have caught.
+ */
+function shorthandBottom(value) {
+  const parts = value.trim().split(/\s+/);
+  return parts.length >= 3 ? parts[2] : parts[0];
+}
+
 describe(".stage viewport height (#467)", () => {
   it("declares 100vh before 100dvh so the fallback resolves correctly", () => {
     const heights = [...stageRule().matchAll(/height:\s*([^;]+);/g)].map(
@@ -320,14 +338,35 @@ describe("mobile conversation composer flush to the bottom edge (#467)", () => {
     return bodies;
   }
 
+  /**
+   * The *effective* `padding-bottom` on `.bottom-composer` at ≤640px.
+   *
+   * Deliberately resolved rather than read off one declaration. Two rules in
+   * the block set this side — the gutter shorthand (`padding: 0 12px 14px`)
+   * and the safe-area longhand (`padding-bottom: 0`) — at equal specificity,
+   * so the winner is whichever comes last in source order. A guard that
+   * matched only `padding-bottom:` would miss the shorthand entirely and go
+   * green off the longhand alone; move the shorthand below the safe-area
+   * sub-block and the rendered value would silently regress to `14px` with
+   * the test none the wiser. Walking every declaration of either form, in
+   * order, is what makes the assertion independent of that ordering.
+   */
+  function effectiveBottomPadding() {
+    let value = null;
+    for (const body of mobileBottomComposerRules()) {
+      // `padding(-bottom)?:` cannot match `padding-left:` / `-right:` /
+      // `-top:` — the optional group fails and the `:` then meets a `-`.
+      for (const [, longhand, raw] of body.matchAll(
+        /(?:^|;)\s*padding(-bottom)?:\s*([^;]+)/g,
+      )) {
+        value = longhand ? raw.trim() : shorthandBottom(raw);
+      }
+    }
+    return value;
+  }
+
   it("leaves no bottom padding on the strip, so the surface reaches the edge", () => {
-    // Last declaration wins at equal specificity, and the safe-area
-    // sub-block is appended last — so the effective value is the final
-    // `padding-bottom` any `.bottom-composer` rule in the block declares.
-    const declared = [
-      ...mobileBottomComposerRules().join("\n").matchAll(/padding-bottom:\s*([^;]+);/g),
-    ].map((m) => m[1].trim());
-    expect(declared.at(-1)).toBe("0");
+    expect(effectiveBottomPadding()).toBe("0");
   });
 
   it("moves the home-indicator clearance inside the composer's surface", () => {
