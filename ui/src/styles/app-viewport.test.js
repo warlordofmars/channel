@@ -21,13 +21,20 @@
 //   4. That the `env(safe-area-inset-*)` padding survives — it solves
 //      notch / home-indicator clearance, a different and already-correct
 //      problem that #467 must not regress.
-//   5. That the mobile `.home` block keeps BOTH of its anchors: the
-//      greeting's `flex-start` top anchor and the composer's
-//      `margin-top: auto` bottom anchor. This is the pair that actually
-//      fixed #467 — the on-device measurement found no viewport
-//      mismatch at all (`innerHeight` === `clientHeight` ===
-//      `visualViewport.height` === 793), just children stacked at the
-//      top of a correctly-sized container.
+//   5. That the mobile `.home` block declares no `justify-content` of
+//      its own, so the empty state keeps the base rule's vertical
+//      centring. Two earlier #467 attempts overrode it (`flex-start`,
+//      then `flex-start` + an auto top margin on the composer) and both
+//      were rejected on-device; this pins the mobile block out of that
+//      property entirely.
+//   6. That the mobile conversation composer is flush to the bottom
+//      edge — no bottom padding on `.bottom-composer`, with the
+//      home-indicator clearance moved inside `.bottom-composer
+//      .composer` so the surface reaches y=viewport-height while its
+//      contents still clear the indicator. Measured on an installed
+//      iOS PWA (393x793, inset 34px): `.bottom-composer` already ended
+//      at 793 but `.composer` stopped at 745, and that 48px strip of
+//      bare canvas is the gap #467 is actually about.
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -92,6 +99,42 @@ function mobileBlock() {
     }
   }
   throw new Error("unterminated @media (max-width: 640px) block");
+}
+
+/**
+ * Selector prelude of the rule containing character offset `i` — the text
+ * between the previous brace of either kind and the `{` that opens the rule.
+ *
+ * This exists because the two scoping guards below search from the
+ * *declaration* outwards — they start at every matching declaration and ask
+ * which selector owns it — rather than from a selector known to mention the
+ * class of interest. Inverting the search is the point: a rule carrying the
+ * declaration cannot escape the check by having a selector shape the pattern
+ * didn't anticipate. Recovering the owner then needs a brace walk rather than
+ * a rule-shaped regex.
+ *
+ * Walking back to the nearest brace of EITHER kind is what keeps that correct
+ * for a rule nested in an at-rule: for the first rule inside `@media ... {`
+ * the preceding brace is the media block's own `{`, so the slice is still
+ * just the selector.
+ *
+ * Callers split the result on commas and judge each compound selector on its
+ * own, so a grouped rule (`.home .greet, .composer-wrap { ... }`) cannot
+ * borrow a class from a sibling in the list to pass — that masking vector is
+ * real and was verified by hand against an earlier whole-prelude form of the
+ * check. (A comment naming the class is not a vector: `css` is
+ * comment-stripped above.) `split(",")` is selector-list-naive — it would
+ * also split inside `:is(.home, .convo) > .composer-wrap`. `app.css` uses no
+ * `:is()` or `:where()` today, and the failure direction is safe: it flags a
+ * correct rule rather than passing a broken one.
+ */
+function selectorOfRuleAt(i) {
+  const open = css.lastIndexOf("{", i);
+  const prev = Math.max(
+    css.lastIndexOf("{", open - 1),
+    css.lastIndexOf("}", open - 1),
+  );
+  return css.slice(prev + 1, open);
 }
 
 describe(".stage viewport height (#467)", () => {
@@ -184,7 +227,7 @@ describe("standalone viewport correction (#467, reopened)", () => {
   });
 });
 
-describe("mobile home layout — greeting top, composer bottom (#467)", () => {
+describe("mobile home layout — vertically centred as one group (#467)", () => {
   /**
    * Every `.home { ... }` rule body inside the ≤640px block. There is
    * more than one — the layout rule here and the `env(safe-area-inset-*)`
@@ -204,94 +247,38 @@ describe("mobile home layout — greeting top, composer bottom (#467)", () => {
     return bodies;
   }
 
-  /** Body of the mobile block's `.home > .composer-wrap { ... }` rule. */
-  function mobileHomeComposerRule() {
-    const match = mobileBlock().match(
-      /\.home\s*>\s*\.composer-wrap\s*\{([^}]*)\}/,
-    );
-    if (!match) {
-      throw new Error(
-        "no `.home > .composer-wrap { ... }` rule inside " +
-          "@media (max-width: 640px) — the #467 bottom anchor was renamed " +
-          "or removed, which parks the composer in the upper third again",
-      );
-    }
-    return match[1];
-  }
-
-  it("keeps the greeting anchored to the top of the container", () => {
-    // `flex-start` is half the fix, not the bug: it is what stops the
-    // greeting drifting to the vertical centre. Reverting it to `center`
-    // would re-centre the whole stack and undo the 8vh anchor.
-    expect(mobileHomeRules().join("\n")).toMatch(
-      /justify-content:\s*flex-start/,
-    );
+  it("never overrides the base rule's vertical centring", () => {
+    // The wanted layout is the centred stack the base rule already
+    // produces, so the mobile block's job is to stay out of this
+    // property entirely. Asserting the *absence* of any
+    // `justify-content` — rather than the presence of `center` — is what
+    // makes this catch the next variant too: `flex-start`, `flex-end`
+    // and `space-between` would each fail without needing to be named.
+    expect(mobileHomeRules().join("\n")).not.toMatch(/justify-content:/);
   });
 
-  it("pushes the composer (and the quick actions after it) to the bottom", () => {
-    // `.home`'s children are `.greet` → `.composer-wrap` → `.quick`, so an
-    // auto top margin on the middle child absorbs every pixel of free
-    // space above it and carries `.quick` down with it. Without this the
-    // measured layout on a 793px iPhone ended at y=341 (#467).
-    expect(mobileHomeComposerRule()).toMatch(/margin-top:\s*auto/);
-  });
-
-  /**
-   * Selector prelude of the rule containing character offset `i` — the
-   * text between the previous brace of either kind and the `{` that opens
-   * the rule.
-   *
-   * This exists because the guard below searches from the *declaration*
-   * outwards — it starts at every `margin-top: auto` and asks which
-   * selector owns it — rather than from a selector known to mention
-   * `.composer-wrap`. Inverting the search is the point: a rule carrying
-   * the auto margin cannot escape the check by having a selector shape
-   * the pattern didn't anticipate. Recovering the owner then needs a
-   * brace walk rather than a rule-shaped regex.
-   *
-   * Walking back to the nearest brace of EITHER kind is what keeps that
-   * correct for a rule nested in an at-rule: for the first rule inside
-   * `@media ... {` the preceding brace is the media block's own `{`, so
-   * the slice is still just the selector.
-   */
-  function selectorOfRuleAt(i) {
-    const open = css.lastIndexOf("{", i);
-    const prev = Math.max(
-      css.lastIndexOf("{", open - 1),
-      css.lastIndexOf("}", open - 1),
-    );
-    return css.slice(prev + 1, open);
-  }
-
-  it("scopes the bottom anchor to .home so the chat view is untouched", () => {
-    // `.bottom-composer .composer-wrap` is already bottom-anchored by its
-    // own container; an unscoped `.composer-wrap { margin-top: auto }`
-    // would reach it (and ProjectDetail's composer) and push those around
-    // too. Every selector carrying the auto margin must name `.home`.
-    //
-    // The prelude is split on commas and each compound selector judged on
-    // its own, so a grouped rule (`.home .greet, .composer-wrap { ... }`)
-    // cannot borrow the `.home` from a sibling in the list to pass — that
-    // masking vector is real and was verified by hand against the earlier
-    // whole-prelude form of this check. (A comment mentioning `.home` is
-    // not a vector: `css` is comment-stripped at the top of the file.)
-    //
-    // `split(",")` is selector-list-naive — it would also split inside
-    // `:is(.home, .convo) > .composer-wrap`. `app.css` uses no `:is()` or
-    // `:where()` today, and the failure direction is safe: it would flag a
-    // correct rule rather than pass a broken one.
-    const unscoped = [...css.matchAll(/margin-top:\s*auto/g)]
+  it("keeps the greeting and the composer in one un-split group", () => {
+    // An auto margin on any child of `.home` absorbs the free space that
+    // the centring is made of, splitting the stack: the greeting rides
+    // to the top and the composer to the bottom. That was PR #507's
+    // `.home > .composer-wrap { margin-top: auto }`, rejected on-device.
+    // The check is file-wide and declaration-first — it starts from
+    // every `margin-top: auto` in `app.css` and rejects the ones a
+    // `.home` selector owns — so a differently-shaped selector
+    // (`.home .quick`, `.home > *`) cannot slip past a `.composer-wrap`
+    // -shaped pattern.
+    const homeAnchors = [...css.matchAll(/margin-top:\s*auto/g)]
       .map((m) => selectorOfRuleAt(m.index))
       .flatMap((selectorList) => selectorList.split(","))
       .map((selector) => selector.trim())
-      .filter((s) => s.includes(".composer-wrap") && !s.includes(".home"));
-    expect(unscoped).toEqual([]);
+      .filter((s) => s.includes(".home"));
+    expect(homeAnchors).toEqual([]);
   });
 
-  it("keeps the home-indicator clearance beneath the bottomed composer", () => {
-    // Now that the composer sits at the bottom edge, this padding is what
-    // stands between it and the home indicator — #437's rule, unchanged,
-    // and load-bearing for a reason it was not originally written for.
+  it("keeps the home-indicator clearance under the centred stack", () => {
+    // ChatHome's composer lives inside `.home`, not `.bottom-composer`,
+    // so — unlike the conversation composer below — it is not flush to
+    // the screen edge and still takes its clearance from the container.
     expect(mobileHomeRules().join("\n")).toMatch(
       /padding-bottom:\s*calc\(12px \+ env\(safe-area-inset-bottom\)\)/,
     );
@@ -299,12 +286,79 @@ describe("mobile home layout — greeting top, composer bottom (#467)", () => {
 
   it("leaves the desktop .home rule centred and un-anchored", () => {
     // The whole change lives inside the ≤640px block. The base rule must
-    // keep `justify-content: center`, and no top-level rule may carry the
+    // keep `justify-content: center`, and no top-level rule may carry an
     // auto margin — either would move the desktop composer.
     const base = css.match(/^\.home\s*\{([^}]*)\}/m);
     expect(base).not.toBeNull();
     expect(base[1]).toMatch(/justify-content:\s*center/);
     expect(base[1]).not.toMatch(/margin-top:/);
+  });
+});
+
+describe("mobile conversation composer flush to the bottom edge (#467)", () => {
+  /**
+   * Every `.bottom-composer { ... }` rule body inside the ≤640px block —
+   * the gutter rule and the `env(safe-area-inset-*)` rule appended
+   * further down the same block. Returned in source order, because which
+   * declaration wins here is a cascade question.
+   */
+  function mobileBottomComposerRules() {
+    // `\s*\{` immediately after the class is what keeps the descendant
+    // rules (`.bottom-composer .composer`, `.bottom-composer
+    // .composer-wrap`) out of this list — their selectors continue past
+    // the class rather than opening a block.
+    const bodies = [
+      ...mobileBlock().matchAll(/\.bottom-composer\s*\{([^}]*)\}/g),
+    ].map((m) => m[1]);
+    if (bodies.length === 0) {
+      throw new Error(
+        "no `.bottom-composer { ... }` rule inside @media (max-width: 640px) " +
+          "— the mobile conversation composer strip was renamed or removed; " +
+          "see #467",
+      );
+    }
+    return bodies;
+  }
+
+  it("leaves no bottom padding on the strip, so the surface reaches the edge", () => {
+    // Last declaration wins at equal specificity, and the safe-area
+    // sub-block is appended last — so the effective value is the final
+    // `padding-bottom` any `.bottom-composer` rule in the block declares.
+    const declared = [
+      ...mobileBottomComposerRules().join("\n").matchAll(/padding-bottom:\s*([^;]+);/g),
+    ].map((m) => m[1].trim());
+    expect(declared.at(-1)).toBe("0");
+  });
+
+  it("moves the home-indicator clearance inside the composer's surface", () => {
+    // Same 34px of clearance as before, just paid from inside the box:
+    // 8px is the mobile `.composer` bottom padding, so the controls keep
+    // their existing spacing and gain only the inset.
+    expect(mobileBlock()).toMatch(
+      /\.bottom-composer\s+\.composer\s*\{[^}]*padding-bottom:\s*calc\(8px \+ env\(safe-area-inset-bottom\)\)/,
+    );
+  });
+
+  it("scopes the inner clearance so ChatHome's composer is untouched", () => {
+    // A bare `.composer { padding-bottom: calc(... + env(...)) }` would
+    // reach ChatHome's composer (inside `.home`) and ProjectDetail's,
+    // neither of which sits at the screen edge — they would grow a
+    // stray 34px of internal padding for nothing.
+    const unscoped = [
+      ...css.matchAll(/padding-bottom:\s*calc\([^;]*safe-area-inset-bottom[^;]*\);/g),
+    ]
+      .map((m) => selectorOfRuleAt(m.index))
+      .flatMap((selectorList) => selectorList.split(","))
+      .map((selector) => selector.trim())
+      .filter((s) => /\.composer$/.test(s) && !s.includes(".bottom-composer"));
+    expect(unscoped).toEqual([]);
+  });
+
+  it("leaves the desktop strip's bottom gutter alone", () => {
+    // The base rule is what desktop renders; #467 is a ≤640px change.
+    const base = css.match(/^\.bottom-composer\s*\{([^}]*)\}/m);
+    expect(base).not.toBeNull();
+    expect(base[1]).toMatch(/padding:\s*0 24px 18px/);
   });
 });
 
@@ -314,9 +368,16 @@ describe("safe-area insets survive the viewport change (#425 / #437)", () => {
     // The four rules #437 added, each still additive — `calc(<gutter> +
     // env(...))` rather than `max()`, so the layout's own spacing is kept
     // on top of the inset.
+    //
+    // The bottom inset the conversation composer takes is asserted by the
+    // flush-to-the-edge block above, not here: #467 moved it from
+    // `.bottom-composer` (`14px + inset`) onto `.bottom-composer .composer`
+    // (`8px + inset`). The clearance survives — it is paid from inside the
+    // surface now — so what this block still owns is `.home`'s copy, the
+    // one container inset that did not move.
     expect(mobile).toMatch(/height:\s*calc\(52px \+ env\(safe-area-inset-top\)\)/);
     expect(mobile).toMatch(
-      /padding-bottom:\s*calc\(14px \+ env\(safe-area-inset-bottom\)\)/,
+      /padding-bottom:\s*calc\(12px \+ env\(safe-area-inset-bottom\)\)/,
     );
     expect(mobile).toMatch(/padding-top:\s*env\(safe-area-inset-top\)/);
     expect(mobile).toMatch(/padding-left:\s*env\(safe-area-inset-left\)/);
