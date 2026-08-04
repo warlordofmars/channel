@@ -176,6 +176,65 @@ def test_record_memory_tool_recall_outcome_signature_locks_out_dimensions():
     assert param.annotation == "bool"
 
 
+# ----------------------------------------------------------------
+# Account-export counter (#476) — one deliberate whole-account read,
+# kept off every other memory counter so it can't move a hook-health
+# line on the admin dashboard.
+# ----------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_record_memory_export_outcome_success_emits_success_counter():
+    from channel.metrics import record_memory_export_outcome
+
+    with patch("channel.metrics.emit_metric", new=AsyncMock()) as mock_emit:
+        await record_memory_export_outcome(success=True)
+    mock_emit.assert_awaited_once_with("MemoryExportSuccesses")
+
+
+@pytest.mark.asyncio
+async def test_record_memory_export_outcome_failure_emits_failure_counter():
+    from channel.metrics import record_memory_export_outcome
+
+    with patch("channel.metrics.emit_metric", new=AsyncMock()) as mock_emit:
+        await record_memory_export_outcome(success=False)
+    mock_emit.assert_awaited_once_with("MemoryExportFailures")
+
+
+def test_record_memory_export_outcome_does_not_touch_the_other_memory_counters():
+    """The export must be legible on its own line, not folded into hook or
+    tool health — same isolation argument #400 made for the tool counters."""
+    from channel.metrics import record_memory_export_outcome
+
+    with patch("channel.metrics.emit_metric", new=AsyncMock()) as mock_emit:
+        import asyncio
+
+        asyncio.run(record_memory_export_outcome(success=True))
+        asyncio.run(record_memory_export_outcome(success=False))
+    emitted = {call.args[0] for call in mock_emit.await_args_list}
+    assert emitted == {"MemoryExportSuccesses", "MemoryExportFailures"}
+    assert not emitted & {
+        "MemoryWriteSuccesses",
+        "MemoryWriteFailures",
+        "MemoryToolRecallSuccesses",
+        "MemoryToolRecallFailures",
+        "RecallSuccesses",
+        "RecallFailures",
+    }
+
+
+def test_record_memory_export_outcome_signature_locks_out_dimensions():
+    """No kwargs path for a future caller to slip a per-actor dimension —
+    nor a record-count one, which would be unbounded in a different way."""
+    from channel.metrics import record_memory_export_outcome
+
+    sig = inspect.signature(record_memory_export_outcome)
+    assert list(sig.parameters.keys()) == ["success"]
+    param = sig.parameters["success"]
+    assert param.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+    assert param.annotation == "bool"
+
+
 @pytest.mark.asyncio
 async def test_record_auto_title_outcome_success_emits_success_counter():
     from channel.metrics import record_auto_title_outcome
