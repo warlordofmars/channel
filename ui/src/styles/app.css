@@ -1637,16 +1637,22 @@ html.is-electron-mac .sb-top {
      reached y=793, but `.composer` stopped at y=745, leaving a 48px
      strip of empty page under the rounded box.
 
-     So the container takes no bottom inset at all and the surface
-     reaches the screen edge. #508 first re-paid the clearance *inside*
-     the surface (`.bottom-composer .composer { padding-bottom: calc(8px
-     + env(...)) }`), but on device that rendered as 42px of empty grey
-     inside the rounded box — the box read as padded rather than as
-     sitting at the bottom — so #509 dropped it: `.composer` keeps only
-     its plain mobile `8px`. The controls therefore end ~8px above the
-     screen bottom, inside the home-indicator region. That is deliberate
-     and matches the reference app; do not re-add clearance here. Side
-     insets are unchanged and still additive. */
+     Where the clearance lives has moved twice, so the current split is
+     deliberate. #508 first re-paid it *inside* the surface
+     (`.bottom-composer .composer { padding-bottom: calc(8px + env(...)) }`),
+     but on device that rendered as 42px of empty grey inside the rounded
+     box — the box read as padded rather than as sitting at the bottom —
+     so #509 dropped it, and `.composer` keeps only its plain mobile `8px`.
+     #510 then drove the container's bottom inset to 0 as well, which was
+     right at the time: the viewport was still mis-positioned and the box
+     stopped 59px short of the screen edge regardless.
+
+     #517 fixed that position, at which point flush read as *too* flush,
+     so #518 restored the inset **here on the container** —
+     `env(safe-area-inset-bottom)`, chosen on device against 0/12/24/34/48px.
+     Net: the gap is below the surface, never inside it. Do not re-pay it
+     inside `.composer`; that is the #509 regression. Side insets are
+     unchanged and still additive. */
   .bottom-composer {
     /* Clear the home indicator. Chosen on-device from a live A/B of
        0 / 12 / 24 / 34 / 48px once #517 fixed the viewport position and the
