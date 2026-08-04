@@ -26,7 +26,7 @@ from strands.models import BedrockModel
 from strands.types.content import Messages
 
 from channel.agents.memory import AgentCoreMemoryHook, get_or_create_memory
-from channel.agents.recall import AgentCoreRecallHook
+from channel.agents.recall import AgentCoreRecallHook, defuse_forged_headings
 from channel.agents.tool_hooks import (
     ChainState,
     ModelVisibilityAddendumHook,
@@ -384,7 +384,9 @@ def build_agent(
     load-bearing than fragments of other chats, so it reads first.
     Injected here rather than via a hook because the text is already
     on the request path (a DDB point-read in ``_stream_bedrock_reply``);
-    a hook would buy nothing but an extra async seam.
+    a hook would buy nothing but an extra async seam. It is run through
+    :func:`~channel.agents.recall.defuse_forged_headings` first so the
+    gist cannot forge a sibling system-prompt section (#465).
 
     ``effort`` is the SPA's "Response effort" tier (low / medium / high
     / max). When supplied it overrides ``max_tokens`` via
@@ -411,8 +413,15 @@ def build_agent(
         max_tokens = max_tokens_for_effort(effort)
     resolved_system_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
     if head_summary:
+        # #465: the summary is model output derived from attacker-
+        # influenced chat turns, appended as the BODY of a system-prompt
+        # section. Defuse forged headings so it can only ever read as
+        # content under HEAD_SUMMARY_HEADING, never as a sibling section.
+        # Same helper the recall hook applies to its own block — the two
+        # injection sites are deliberately kept symmetric.
         resolved_system_prompt = (
-            f"{resolved_system_prompt}\n\n{HEAD_SUMMARY_HEADING}\n\n{head_summary}"
+            f"{resolved_system_prompt}\n\n{HEAD_SUMMARY_HEADING}\n\n"
+            f"{defuse_forged_headings(head_summary)}"
         )
     bedrock = BedrockModel(
         model_id=resolve_model_id(model_id),

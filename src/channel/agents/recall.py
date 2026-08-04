@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime as _dt
 from datetime import timezone as _tz
@@ -48,6 +49,62 @@ _RECALL_EVENT_TEXT_TRUNCATE: int = 120
 # Sentinel used as the sort-key default when a session has no ``createdAt``.
 # Using ``datetime.min`` (tz-aware) ensures datetime objects compare correctly.
 _EPOCH = _dt(1970, 1, 1, tzinfo=_tz.utc)
+
+# --- #465: structural (heading) forgery defusal -------------------------
+#
+# Both blocks appended to the system prompt — this module's
+# ``## What we've talked about before`` and ``chat_agent``'s
+# ``## Earlier in this conversation`` — are a TRUSTED heading followed by
+# an UNTRUSTED body. Markdown has no nesting, so a body line that itself
+# starts a heading reads as a SIBLING section of the prompt rather than
+# as content under its own heading: structural injection, the complement
+# to the lexical delimiter forgery ``_defuse_titler_delimiters`` already
+# handles on the titler/summariser input side (#256 Layer 1).
+#
+# ATX form (``## Fake section``). Deliberately looser than CommonMark in
+# BOTH directions, because the reader here is an LLM rather than a
+# parser and the rules that make a construct inert on a rendered page do
+# not make it inert in a prompt:
+#   - no space required after the ``#`` run — a model reads ``#Fake``
+#     as a heading even though CommonMark does not;
+#   - any leading indent, not CommonMark's 0-3 — at 4+ spaces a parser
+#     sees an indented code block, but a model still sees a heading.
+# The cost of that over-reach is cosmetic (``#1`` → ``1``) in a block
+# that is already an explicitly lossy gist.
+_FORGED_ATX_HEADING_RE = re.compile(r"^[ \t]*#+[ \t]*", re.MULTILINE)
+
+# Setext form — a line of only ``=`` or ``-`` promotes the line ABOVE it
+# to a heading. An ATX-only filter misses this entirely, which is why it
+# is defused too. Bounded at 2+ characters: a lone ``-`` is far more
+# likely to be a stray dash or an empty list item in recalled prose than
+# a forgery attempt, and blanking it would be pure mangling. The match is
+# unconditional on what precedes the line, so it also blanks thematic
+# breaks (``---`` after a blank line) — harmless over-reach, since such a
+# line carries no content to lose.
+_FORGED_SETEXT_UNDERLINE_RE = re.compile(r"^[ \t]*[=-]{2,}[ \t]*$", re.MULTILINE)
+
+
+def defuse_forged_headings(text: str) -> str:
+    """Neutralise forged Markdown headings in untrusted system-prompt body
+    text (#465).
+
+    Shared by BOTH system-prompt injection sites — this module's recall
+    addendum and ``chat_agent.build_agent``'s head-summary block — so the
+    two cannot drift apart, which is the point of the issue. Applied to
+    the untrusted BODY only, never to the trusted heading the formatter
+    emits itself.
+
+    Mirrors :func:`chat_agent._defuse_titler_delimiters`: strip the
+    structural marker, keep the words. ``## Fake section`` becomes the
+    inert line ``Fake section`` rather than a forged sibling section of
+    the system prompt.
+
+    It lives here rather than next to ``_defuse_titler_delimiters``
+    purely because of import direction — ``chat_agent`` imports this
+    module, so the reverse would be a cycle. Don't "tidy" it back.
+    """
+    text = _FORGED_ATX_HEADING_RE.sub("", text)
+    return _FORGED_SETEXT_UNDERLINE_RE.sub("", text)
 
 
 def _iso_date(value: Any) -> str:
@@ -97,7 +154,9 @@ def _format_recall_addendum(records: list[dict[str, Any]]) -> str:
     Returns the empty string if no records have usable text.
     Defensive: payload entries missing ``conversational.content.text``
     or with empty text are silently skipped so a malformed AgentCore
-    response can't corrupt the system prompt.
+    response can't corrupt the system prompt. Each quoted turn is run
+    through :func:`defuse_forged_headings` first, so a recalled turn
+    cannot forge a sibling section of the system prompt (#465).
     """
     if not records:
         return ""
@@ -124,6 +183,11 @@ def _format_recall_addendum(records: list[dict[str, Any]]) -> str:
             if not text:
                 continue
             role_label = _RECALL_ROLE_MAP.get(role_raw, role_raw or "?")
+            # Defuse BEFORE the cap, matching the #256 order in
+            # ``build_titler_prompt``. Safe either way — truncation only
+            # removes trailing characters, so it can't reintroduce a
+            # heading the defusal just stripped.
+            text = defuse_forged_headings(text)
             if len(text) > _RECALL_EVENT_TEXT_TRUNCATE:
                 text = text[:_RECALL_EVENT_TEXT_TRUNCATE] + "..."
             group["bullets"].append(f"- {role_label}: {text}")
