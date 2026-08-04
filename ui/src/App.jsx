@@ -1,6 +1,7 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
 import React, { useEffect } from "react";
-import { BrowserRouter, Outlet, Route, Routes } from "react-router-dom";
+import { BrowserRouter, Outlet, Route, Routes, useNavigate } from "react-router-dom";
+import { setSessionEndNavigator } from "./api.js";
 import AuthGate from "./components/AuthGate.jsx";
 import ErrorBoundary from "./components/ErrorBoundary.jsx";
 import { startAppViewportSync } from "./lib/appViewport.js";
@@ -32,6 +33,41 @@ import Product from "./marketing/pages/Product.jsx";
 
 
 /**
+ * Effect cleanup for {@link SessionEndNavigator}, at module scope so the
+ * effect registers a stable reference rather than a fresh closure per run.
+ */
+function unregisterSessionEndNavigator() {
+  setSessionEndNavigator(null);
+}
+
+/**
+ * Hands `api.js` this router's `navigate`, so a session that ends
+ * mid-visit redirects in-app instead of reloading the document (#483).
+ *
+ * `endSession` is a plain module function and cannot call `useNavigate()`
+ * itself, so something inside the router has to pass it down; this
+ * component is that one line. It renders nothing and sits directly under
+ * `BrowserRouter` rather than inside a route element, because it must
+ * outlive every individual route: `endSession` fires from `api.js` on any
+ * screen that talks to the API, and a registrant scoped to one route
+ * would be unmounted — and therefore unregistered — for the others.
+ *
+ * Unregistering on unmount is not tidiness. `api.js` cannot tell a live
+ * `navigate` from one belonging to a torn-down router, and the latter
+ * silently does nothing; clearing the slot is what makes `endSession`
+ * fall back to its hard navigation in that window instead of leaving the
+ * user on a page whose session it just destroyed.
+ */
+function SessionEndNavigator() {
+  const navigate = useNavigate();
+  useEffect(function registerNavigator() {
+    setSessionEndNavigator(navigate);
+    return unregisterSessionEndNavigator;
+  }, [navigate]);
+  return null;
+}
+
+/**
  * Layout for every authenticated `/app/*` route. Mounts the AuthGate +
  * ChatsProvider exactly once so the chat-list hook instance persists
  * across route navigations (no double-fetch when moving between
@@ -60,6 +96,7 @@ export default function App() {
   return (
     <ErrorBoundary>
       <BrowserRouter>
+        <SessionEndNavigator />
         <Routes>
           {/* Marketing — public */}
           <Route path="/"          element={<Home />} />
