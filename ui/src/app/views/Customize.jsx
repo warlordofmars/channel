@@ -11,6 +11,7 @@ import Icon from "../../components/Icon.jsx";
 import { useChannelPrefs } from "../../hooks/useChannelPrefs.js";
 import AddMCPServerModal from "../AddMCPServerModal.jsx";
 import FeaturedMCPServers from "../FeaturedMCPServers.jsx";
+import MemorySection from "./MemorySection.jsx";
 import { EFFORTS, cachedModels, loadModels, mergeWithDisplayMeta } from "../data.js";
 
 // Five accent hues. Co-located here because nothing else in the app reads
@@ -420,6 +421,8 @@ export default function Customize() {
             </div>
           </div>
         </div>
+        <MemorySection />
+
         <AddMCPServerModal
           open={showAddMCP}
           onClose={() => setShowAddMCP(false)}
