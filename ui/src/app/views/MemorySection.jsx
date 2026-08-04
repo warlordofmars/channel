@@ -115,10 +115,17 @@ export default function MemorySection() {
   const [loadingMore, setLoadingMore] = useState(false);
   const [kindFilter, setKindFilter] = useState("all");
 
-  // `loadMore` lives outside an effect and so has no cleanup — this keeps
-  // its promise handlers from setting state after the user navigates away
-  // mid-fetch.
+  // `loadMore` lives outside an effect and so has no cleanup — these two
+  // refs are what stand in for one. `mountedRef` drops a page that lands
+  // after the user navigates away; `epochRef` drops one that belongs to a
+  // list that no longer exists, which is the narrower race: clicking "Load
+  // more" and then clearing the chat scope within the same round trip would
+  // otherwise concatenate the old scope's page onto the new one.
+  //
+  // `loadFirstPage` needs neither — React runs its cleanup on an unmount AND
+  // on a `chatFilter` change, so the `cancelled` closure below covers both.
   const mountedRef = useRef(true);
+  const epochRef = useRef(0);
   useEffect(function trackMounted() {
     mountedRef.current = true;
     return function markUnmounted() {
@@ -129,7 +136,11 @@ export default function MemorySection() {
   useEffect(
     function loadFirstPage() {
       let cancelled = false;
+      epochRef.current += 1;
       setStatus("loading");
+      // A `loadMore` in flight for the previous scope will be dropped by the
+      // epoch check, so nothing else will clear its pending flag.
+      setLoadingMore(false);
       listMemoryRecords({ limit: PAGE_LIMIT, chatId: chatFilter })
         .then(function onFirstPage(page) {
           if (cancelled) return;
@@ -153,10 +164,11 @@ export default function MemorySection() {
   function loadMore() {
     // The button renders only while `cursor` is non-null and is `disabled`
     // while a page is in flight, so re-entrancy can't happen.
+    const epoch = epochRef.current;
     setLoadingMore(true);
     listMemoryRecords({ limit: PAGE_LIMIT, cursor, chatId: chatFilter })
       .then(function onMore(page) {
-        if (!mountedRef.current) return;
+        if (!mountedRef.current || epochRef.current !== epoch) return;
         setGroups(function appendGroups(prev) {
           return prev.concat(page.groups);
         });
@@ -169,7 +181,7 @@ export default function MemorySection() {
         /* transient — keep the list + the button so the user can retry */
       })
       .finally(function settle() {
-        if (mountedRef.current) setLoadingMore(false);
+        if (mountedRef.current && epochRef.current === epoch) setLoadingMore(false);
       });
   }
 

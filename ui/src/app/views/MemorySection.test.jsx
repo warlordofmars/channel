@@ -465,6 +465,39 @@ describe("MemorySection", () => {
       expect(screen.queryByRole("alert")).toBeNull();
     });
 
+    it("drops a load-more page for a chat scope the user already cleared", async () => {
+      api.listMemoryRecords.mockResolvedValueOnce(
+        page({ groups: [group({ chat_title: "Scoped chat" })], next_cursor: "cur-1" }),
+      );
+      await renderReady("/app/customize?chat_id=chat-1");
+
+      // Page 2 of the scoped list is still in flight…
+      let resolveStale;
+      api.listMemoryRecords.mockReturnValueOnce(
+        new Promise((resolve) => {
+          resolveStale = resolve;
+        }),
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+
+      // …when the user drops the scope, which reloads page 1 for every chat.
+      api.listMemoryRecords.mockResolvedValueOnce(
+        page({ groups: [group({ chat_id: "chat-2", chat_title: "Every chat" })] }),
+      );
+      fireEvent.click(screen.getByRole("button", { name: /Showing one chat/ }));
+      await waitFor(() => expect(screen.getByLabelText("Every chat")).toBeTruthy());
+
+      await act(async () => {
+        resolveStale(page({ groups: [group({ chat_id: "chat-3", chat_title: "Stale page" })] }));
+      });
+
+      // The stale page belongs to a list that no longer exists.
+      expect(screen.queryByLabelText("Stale page")).toBeNull();
+      expect(screen.getByLabelText("Every chat")).toBeTruthy();
+      // …and its settle must not resurrect a "Load more" the new page retired.
+      expect(screen.queryByRole("button", { name: /Load more|Loading…/ })).toBeNull();
+    });
+
     it("drops a load-more page that lands after the view is gone", async () => {
       api.listMemoryRecords.mockResolvedValueOnce(
         page({ groups: [group()], next_cursor: "cur-1" }),
