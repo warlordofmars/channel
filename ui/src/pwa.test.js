@@ -100,11 +100,18 @@ describe("index.html PWA wiring", () => {
   it("declares standalone display and theme colour", () => {
     expect(meta("apple-mobile-web-app-capable")).toBe("yes");
     expect(meta("mobile-web-app-capable")).toBe("yes");
-    expect(meta("apple-mobile-web-app-status-bar-style")).toBe("black-translucent");
     expect(meta("apple-mobile-web-app-title")).toBe("Channel");
     // Must agree with the manifest, which the token test below pins to
     // the dark --canvas value.
     expect(meta("theme-color")).toBe(manifest.theme_color);
+  });
+
+  it("sets no apple-mobile-web-app-status-bar-style (#516)", () => {
+    // `black-translucent` starts the standalone web view at y=0 without iOS
+    // growing it to the full screen height, so the height gained under the
+    // status bar is lost as unpaintable screen below the page. Absence is the
+    // fix — any value here (translucent or not) is a regression.
+    expect(meta("apple-mobile-web-app-status-bar-style")).toBeUndefined();
   });
 });
 

@@ -363,7 +363,8 @@ describe("mobile conversation composer flush to the bottom edge (#467, #509)", (
    *
    * Deliberately resolved rather than read off one declaration. Two rules in
    * the block set this side — the gutter shorthand (`padding: 0 12px 14px`)
-   * and the safe-area longhand (`padding-bottom: 0`) — at equal specificity,
+   * and the safe-area longhand (`padding-bottom: env(safe-area-inset-bottom)`,
+   * #518) — at equal specificity,
    * so the winner is whichever comes last in source order. A guard that
    * matched only `padding-bottom:` would miss the shorthand entirely and go
    * green off the longhand alone; move the shorthand below the safe-area
@@ -385,8 +386,16 @@ describe("mobile conversation composer flush to the bottom edge (#467, #509)", (
     return value;
   }
 
-  it("leaves no bottom padding on the strip, so the surface reaches the edge", () => {
-    expect(effectiveBottomPadding()).toBe("0");
+  it("clears the home indicator beneath the strip (#518)", () => {
+    // #510 drove this to 0 while the viewport was still mis-positioned and
+    // the box stopped 59px short of the screen anyway. #517 fixed the
+    // position, at which point flush read as *too* flush. 34px was picked
+    // on-device from a live A/B of 0/12/24/34/48px, matching the Claude
+    // iOS app. Pinned as the inset expression, not a flat `34px`: a fixed
+    // value would park 34px of dead space on devices with no home
+    // indicator, where the inset resolves to 0. The clearance stays out
+    // here rather than inside `.composer`, which the next test pins.
+    expect(effectiveBottomPadding()).toBe("env(safe-area-inset-bottom)");
   });
 
   it("re-adds no inset inside the surface, so the box holds no empty band", () => {
@@ -447,12 +456,13 @@ describe("safe-area insets survive the viewport change (#425 / #437)", () => {
     // env(...))` rather than `max()`, so the layout's own spacing is kept
     // on top of the inset.
     //
-    // The conversation composer takes no bottom inset at all any more —
-    // #467/#508 moved it from `.bottom-composer` (`14px + inset`) onto
-    // `.bottom-composer .composer` (`8px + inset`), and #509 dropped it.
-    // Its absence is asserted by the flush-to-the-edge block above, not
-    // here; what this block still owns is `.home`'s copy, the one
-    // container inset that never moved.
+    // The conversation composer's bottom inset has moved around and is
+    // asserted by the block above, not here: #508 shifted it from
+    // `.bottom-composer` (`14px + inset`) onto `.bottom-composer
+    // .composer` (`8px + inset`), #509 dropped that, #510 zeroed the
+    // container too, and #518 restored it on the container as a bare
+    // `env(safe-area-inset-bottom)`. What this block still owns is
+    // `.home`'s copy, the one container inset that never moved.
     expect(mobile).toMatch(/height:\s*calc\(52px \+ env\(safe-area-inset-top\)\)/);
     expect(mobile).toMatch(
       /padding-bottom:\s*calc\(12px \+ env\(safe-area-inset-bottom\)\)/,
