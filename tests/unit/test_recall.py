@@ -381,8 +381,8 @@ def test_bold_wrapper_cannot_smuggle_a_forged_heading_past_both_passes():
         # forged label keeps its structural force, but neither a "\n"
         # split nor re.MULTILINE's ^ recognises one as a line start.
         ("bare carriage return", "\r"),
-        ("line separator U+2028", " "),
-        ("next line U+0085", ""),
+        ("line separator U+2028", "\u2028"),
+        ("next line U+0085", "\u0085"),
         ("vertical tab U+000B", "\x0b"),
         ("form feed U+000C", "\x0c"),
     ],
