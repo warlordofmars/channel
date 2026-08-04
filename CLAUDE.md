@@ -352,6 +352,20 @@ load-bearing and each has a test that fails without it:
 - **No flash on the common path.** A usable token returns the children
   on the first render with no state and no effect — which matters
   precisely because "every render" includes every navigation.
+- **The hold is bounded** (`RENEWAL_HOLD_MS`, 8s). A renewal that never
+  answers — a stalled connection, not a refusal — falls through to the
+  login page rather than holding an empty screen until the browser's own
+  fetch timeout. Falling through neither cancels the renewal (the
+  promise is `api.js`'s shared single-flight slot; aborting it would
+  sabotage every concurrent API call) nor counts as a credential
+  verdict, so local state survives.
+
+Note this gives the per-document single-flight gap below a **second
+trigger**: renewal can now start from a route navigation, not only from
+an API call. It does not widen the gap — within a document every caller
+still collapses onto the one promise, and across documents there was
+never any protection — but a two-tab race is now reachable from
+navigation alone.
 
 Until #520 this was filed here as a deliberate, "status-quo-neutral"
 cold-load gap. That framing was wrong twice over: the gate is

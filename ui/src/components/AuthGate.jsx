@@ -7,6 +7,28 @@ import { isTokenValid, readToken } from "../lib/auth.js";
 const LOGIN_ROUTE = "/app/login";
 
 /**
+ * How long to hold before falling through to the login page anyway.
+ *
+ * Without this, a `/auth/refresh` that never answers — a stalled
+ * connection on flaky mobile, which is precisely the failure class the
+ * 401-only rule enumerates, and precisely the platform #520 was reported
+ * on — would hold the empty state until the browser's own fetch timeout,
+ * a limit measured in minutes and not guaranteed to exist at all. That
+ * would trade an unwanted bounce for a blank screen, which is worse:
+ * before #520 the user at least reached a login page they could act on.
+ *
+ * Generous rather than tight, because the alternative it defers is a
+ * full Google round trip: a renewal normally lands well inside a second,
+ * so anything still outstanding at eight is not about to arrive.
+ *
+ * Falling through does **not** cancel the renewal. The promise belongs
+ * to `api.js`'s single-flight slot and is shared with every concurrent
+ * API call, so aborting it here would sabotage them; it runs on, and if
+ * it was a 401 the session still ends by the one path allowed to end it.
+ */
+const RENEWAL_HOLD_MS = 8_000;
+
+/**
  * The neutral hold rendered *only* while a renewal is genuinely in
  * flight.
  *
@@ -82,6 +104,13 @@ function SessionPending() {
  *    children on the first render with no state, no effect and no
  *    pending markup, which matters because "every render" includes every
  *    navigation.
+ *
+ * And one property that is not a constraint but a consequence of adding
+ * a hold at all: the hold is **bounded** (`RENEWAL_HOLD_MS`), so a
+ * renewal that never answers falls through to the login page instead of
+ * holding an empty screen at the mercy of the browser's own fetch
+ * timeout. Before #520 the user at least reached a page they could act
+ * on; that must not regress.
  */
 export default function AuthGate({ children }) {
   const token = readToken();
@@ -102,11 +131,16 @@ export default function AuthGate({ children }) {
     // counter. `ensureAccessToken` resolves on both outcomes and reports
     // the result through storage, so one settler serves both arms of the
     // `then` — including the case where it ended the session itself.
+    // Whichever of the renewal and the hold timer arrives first wins;
+    // the second is a no-op, since re-recording the same token is a
+    // state write React bails out of rather than a re-render.
     function settle() {
       if (live) setSettledFor(token);
     }
+    const holdTimer = setTimeout(settle, RENEWAL_HOLD_MS);
     function abandon() {
       live = false;
+      clearTimeout(holdTimer);
     }
     ensureAccessToken().then(settle, settle);
     return abandon;

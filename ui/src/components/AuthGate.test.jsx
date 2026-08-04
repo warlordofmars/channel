@@ -265,6 +265,38 @@ describe("AuthGate", () => {
     expect(api.ensureAccessToken).toHaveBeenCalledTimes(1);
   });
 
+  it("falls through to login when the refresh never answers at all", async () => {
+    // A stalled connection is not a refusal — `ensureAccessToken` simply
+    // never settles. Holding the empty state until the browser's own
+    // fetch timeout (minutes, if it exists) would trade an unwanted
+    // bounce for a blank screen, which is worse than the behaviour this
+    // change replaced. Fake timers go up BEFORE render because the hold
+    // timer is scheduled in the mount effect.
+    vi.useFakeTimers();
+    try {
+      const expired = makeToken({ expOffsetSeconds: -3600 });
+      storage[TOKEN_KEY] = expired;
+      // Never settles.
+      api.ensureAccessToken.mockReturnValue(deferred().promise);
+
+      await act(async () => {
+        render(<Harness />);
+      });
+      expect(screen.getByTestId("auth-pending")).toBeTruthy();
+
+      await act(async () => {
+        vi.advanceTimersByTime(8_000);
+      });
+
+      expect(screen.getByTestId("login")).toBeTruthy();
+      // Falling through is not a verdict on the credential, so the
+      // session survives for a later attempt to recover.
+      expect(storage[TOKEN_KEY]).toBe(expired);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("ignores a refresh that lands after the gate has unmounted", async () => {
     storage[TOKEN_KEY] = makeToken({ expOffsetSeconds: -3600 });
     const held = deferred();
