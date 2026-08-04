@@ -4,7 +4,6 @@ import { useLocation, useNavigate } from "react-router-dom";
 import Sidebar from "./Sidebar.jsx";
 import ChannelMark from "../components/ChannelMark.jsx";
 import Icon from "../components/Icon.jsx";
-import { useLayoutDebugTapGesture } from "../components/LayoutDebug.jsx";
 import { useChannelPrefs } from "../hooks/useChannelPrefs.js";
 import { useChats } from "../hooks/ChatsContext.jsx";
 
@@ -45,14 +44,6 @@ export default function Shell({ children }) {
   const navigate = useNavigate();
   const location = useLocation();
   const { chats } = useChats();
-  // TEMPORARY (#504, removal tracked by #503): five taps on the brand
-  // mark toggle the #467 layout readout. The mark stays a decorative
-  // `aria-hidden` span with no focus, no role and no cursor change —
-  // giving a debug easter egg an accessible name would advertise it to
-  // every screen-reader user, and `?__layout-debug=1` remains the
-  // keyboard-reachable path. `pointerdown` rather than `click` because
-  // iOS runs double-tap-to-zoom over rapid taps, which eats clicks.
-  const handleBrandTap = useLayoutDebugTapGesture();
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
   }, [theme]);
@@ -108,11 +99,7 @@ export default function Shell({ children }) {
               >
                 <Icon name="menu" size={22} />
               </button>
-              <span
-                className="mobile-topbar-brand"
-                aria-hidden="true"
-                onPointerDown={handleBrandTap}
-              >
+              <span className="mobile-topbar-brand" aria-hidden="true">
                 <ChannelMark size={22} />
               </span>
             </div>
