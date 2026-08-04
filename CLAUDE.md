@@ -69,7 +69,7 @@ channel/
 │   │   │   ├── useChatStream.js     # SSE chat stream: history load, send, abort, status/error
 │   │   │   └── ChatsContext.jsx     # ChatsProvider + useChats() — single useChatList instance app-wide
 │   │   ├── components/
-│   │   │   ├── AuthGate.jsx       # Redirects /app/* visits to /app/login when no JWT
+│   │   │   ├── AuthGate.jsx       # Gates /app/*: renews an expired JWT once, else → /app/login
 │   │   │   ├── ChannelMark.jsx    # Brand mark SVG (rounded square + two bars)
 │   │   │   ├── ErrorBoundary.jsx  # Token-styled error fallback
 │   │   │   ├── Icon.jsx           # 24×24 stroke icon set
@@ -285,7 +285,12 @@ the access JWT it renews has usually already expired.
   `Sidebar.signOut` navigates away in the same tick and an awaited
   refresh would let the navigation win, silently losing the family
   revoke and the `jti` denylist write. Rotating a family an instant
-  before revoking it is waste besides.
+  before revoking it is waste besides. `authHeader()` is a thin wrapper
+  over **`ensureAccessToken()`**, which is the actual seam and the only
+  export of it: `AuthGate` awaits that directly (#520, below) rather
+  than reaching for `refreshAccessToken`, so the skew, the cooldown, the
+  single-flight collapse and the 401-only rule below have exactly one
+  implementation between them.
 - **Single-flight is correctness, not optimisation.** #290 hard-rotates
   on every use and reads a re-presented token as an OAuth 2.1 reuse
   breach that revokes the whole device family. A page load fires several
@@ -325,22 +330,48 @@ nothing writes the legacy key, so `MGMT_TOKEN_STORAGE_KEY` in
 `mgmt_auth.py` and `TOKEN_KEY` in `lib/auth.js` must move together.
 Dropping the legacy fallback is a follow-up, one release out.
 
-**Two known gaps, both deliberate — but they differ in kind.**
+**The route gate renews too (#520).** `AuthGate` awaits `api.js`'s
+`ensureAccessToken()` before it redirects, and renders a neutral hold
+while that one attempt is in flight. It is not a second refresh path —
+`ensureAccessToken` is the same seam `authHeader()` uses, so the
+single-flight promise, the 30s post-refusal cooldown and the 401-only
+rule are inherited rather than restated. Three properties are
+load-bearing and each has a test that fails without it:
 
-1. Renewal fires only from `authHeader()`, i.e. on an API call — so
-   `AuthGate` still bounces a *cold load* carrying an expired token to
-   `/app/login` without trying the cookie. A session left open is kept
-   alive indefinitely; one reopened after the access token died still
-   re-authenticates. This one **is** status-quo-neutral — a no-op
-   against a world with no refresh at all.
-2. Single-flight is per-document: two tabs share a cookie jar but not
+- **The gate is evaluated on every render**, not once per load —
+  `AppLayout` mounts it above the `Outlet`, so every in-app navigation
+  re-runs it. It therefore records the token an attempt has resolved
+  for (`settledFor`) and makes **one attempt per expired-token episode,
+  not one per render**; a navigation-heavy minute must not fire N
+  rotations, because #290 answers a re-presented token by revoking the
+  device family. A remount is a new episode, bounded by the cooldown.
+- **A stored-but-unusable token is the only shape worth a round trip.**
+  No token at all still redirects synchronously, matching
+  `ensureAccessToken`'s own no-session short-circuit, so a visitor who
+  never signed in costs no request and sees no hold.
+- **No flash on the common path.** A usable token returns the children
+  on the first render with no state and no effect — which matters
+  precisely because "every render" includes every navigation.
+
+Until #520 this was filed here as a deliberate, "status-quo-neutral"
+cold-load gap. That framing was wrong twice over: the gate is
+render-time rather than load-time, so the dominant path was an ordinary
+in-session navigation about an hour after sign-in (no reload, no
+relaunch); and it was invisible server-side, since the client redirected
+without issuing a request — dev CloudWatch over a six-hour window showed
+zero `/api/*` 401s and two *successful* cookie-transport refreshes
+alongside two fresh sign-ins.
+
+**One known gap remains, and it is deliberate.**
+
+1. Single-flight is per-document: two tabs share a cookie jar but not
    the in-flight promise, so a simultaneous multi-tab renewal can trip
    #290's reuse detection and revoke the whole family — signing the user
    out *everywhere*. `consume_refresh_token`'s own docstring names
    "single-flight in the SPA" as the mitigation for exactly this, so the
    server relies on a guarantee the SPA currently provides only per-tab.
-   Unlike gap 1 this is **not** status-quo-neutral: it introduces a
-   failure mode that cannot occur today. The race is narrow — both tabs
+   This is **not** status-quo-neutral: it introduces a failure mode that
+   cannot occur without silent refresh. The race is narrow — both tabs
    must cross the skew window within one round trip — which is why it
    ships, but `navigator.locks.request` should close it soon (#495).
    **Desktop (#297) does not widen it in the obvious way**: every
