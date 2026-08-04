@@ -94,6 +94,45 @@ describe("App routing", () => {
   });
 
 
+  // The give-up path used to hard-navigate, which reloads the document:
+  // a jarring flash in a browser tab, and in the Electron window a blank
+  // white repaint of unstyled HTML that also steals focus (#483). These
+  // two cover the registration seam from the router's side — `api.js`
+  // owns the redirect itself, and `api.test.js` covers it there.
+
+  it("hands api.js this router's navigate, so a dead session redirects in-app (#483)", async () => {
+    storage[TOKEN_KEY] = makeToken();
+    window.history.pushState({}, "", "/app");
+    await act(async () => render(<App />));
+    expect(screen.getByRole("heading", { level: 1 }).textContent).toMatch(/back at it/i);
+
+    const { endSession } = await import("./api.js");
+    await act(async () => endSession());
+
+    // React Router moved; the document did not. jsdom implements no
+    // `location.assign`, so the pre-#483 hard navigation would have left
+    // the URL — and the rendered tree — sitting on /app.
+    expect(window.location.pathname).toBe("/app/login");
+    expect(screen.getByRole("heading", { name: /sign in to channel/i })).toBeTruthy();
+  });
+
+  it("unregisters on unmount, so a torn-down router cannot swallow the redirect (#483)", async () => {
+    storage[TOKEN_KEY] = makeToken();
+    window.history.pushState({}, "", "/app");
+    let view;
+    await act(async () => { view = render(<App />); });
+    await act(async () => view.unmount());
+
+    // `api.js` cannot tell a live `navigate` from one belonging to an
+    // unmounted router, so leaving the slot filled would strand the user.
+    const assign = vi.fn();
+    vi.stubGlobal("location", { assign });
+    const { endSession } = await import("./api.js");
+    endSession();
+
+    expect(assign).toHaveBeenCalledWith("/app/login");
+  });
+
   it("/app/c/r1 renders the Conversation component (not the placeholder)", async () => {
     storage[TOKEN_KEY] = makeToken();
     window.history.pushState({}, "", "/app/c/r1");

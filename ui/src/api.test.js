@@ -1600,6 +1600,121 @@ describe("silent refresh", () => {
     expect(assign).toHaveBeenCalledWith("/app/login");
   });
 
+  // -------------------------------------------------------------------------
+  // Soft session-end redirect (#483)
+  // -------------------------------------------------------------------------
+  //
+  // Every test here asserts BOTH halves: that the intended redirect fired
+  // AND that the other one did not. "A redirect happened" alone would pass
+  // against the pre-#483 code, which always hard-navigated — the whole
+  // defect is *which* mechanism runs, since only `location.assign` tears
+  // the document down (the Electron white flash + focus steal).
+
+  describe("session-end redirect", () => {
+    it("routes through a registered navigator and never touches the document", async () => {
+      const navigate = vi.fn();
+      storage[TOKEN_KEY] = JSON.stringify({ access_token: "a", expires_at: 1 });
+      const api = await freshApi();
+      api.setSessionEndNavigator(navigate);
+
+      api.endSession();
+
+      expect(navigate).toHaveBeenCalledWith("/app/login", { replace: true });
+      // The load-bearing half: no full-document navigation. `replace`
+      // matters too — a destroyed session must not sit on the history
+      // stack for Back to return to.
+      expect(assign).not.toHaveBeenCalled();
+    });
+
+    it("clears local state BEFORE it navigates", async () => {
+      // Ordering is unchanged from the hard-navigation version, and a
+      // router-aware gate can re-render synchronously inside `navigate`;
+      // it must never observe a session that is already over as live.
+      let storedAtNavigate;
+      const navigate = vi.fn(function captureStorage() {
+        storedAtNavigate = storage[TOKEN_KEY];
+      });
+      storage[TOKEN_KEY] = JSON.stringify({ access_token: "a", expires_at: 1 });
+      storage[LEGACY_TOKEN_KEY] = "b";
+      const api = await freshApi();
+      api.setSessionEndNavigator(navigate);
+
+      api.endSession();
+
+      expect(navigate).toHaveBeenCalled();
+      expect(storedAtNavigate).toBeUndefined();
+      expect(storage[LEGACY_TOKEN_KEY]).toBeUndefined();
+    });
+
+    it("gives up softly on the real path — a dead token plus a refused refresh", async () => {
+      // The reported symptom arrives here, not via a direct `endSession`
+      // call: `authHeader` -> `ensureAccessToken` hits the 401-only rule
+      // and gives up mid-session. #291's 1h TTL makes it hourly.
+      const navigate = vi.fn();
+      storeSession(jwt(-60), -60_000);
+      route({ ok: false, status: 401, json: () => Promise.resolve({}) });
+      const api = await freshApi();
+      api.setSessionEndNavigator(navigate);
+
+      await api.listModels();
+
+      expect(navigate).toHaveBeenCalledWith("/app/login", { replace: true });
+      expect(assign).not.toHaveBeenCalled();
+      expect(storage[TOKEN_KEY]).toBeUndefined();
+    });
+
+    it("hard-navigates when nothing has registered", async () => {
+      // Load-bearing fallback: `endSession` can fire before any component
+      // mounts. Reaching the login page the ugly way beats not reaching it.
+      storage[TOKEN_KEY] = JSON.stringify({ access_token: "a", expires_at: 1 });
+      const api = await freshApi();
+
+      api.endSession();
+
+      expect(assign).toHaveBeenCalledWith("/app/login");
+    });
+
+    it("hard-navigates again once the navigator is unregistered", async () => {
+      // The registrant unregisters on unmount, because `api.js` cannot
+      // tell a live `navigate` from one belonging to a torn-down router.
+      const navigate = vi.fn();
+      const api = await freshApi();
+      api.setSessionEndNavigator(navigate);
+      api.setSessionEndNavigator(null);
+
+      api.endSession();
+
+      expect(navigate).not.toHaveBeenCalled();
+      expect(assign).toHaveBeenCalledWith("/app/login");
+    });
+
+    it("degrades to the document when the registration is not callable", async () => {
+      // Nothing validates the registration, because the fallback below
+      // already covers it: a bad registrant loses the soft redirect, not
+      // the redirect.
+      const api = await freshApi();
+      api.setSessionEndNavigator("/app/login");
+
+      expect(() => api.endSession()).not.toThrow();
+      expect(assign).toHaveBeenCalledWith("/app/login");
+    });
+
+    it("falls back to the document when the navigator throws", async () => {
+      // `ensureAccessToken` and `useChatStream` both treat `endSession` as
+      // infallible, so an escaping error would skip the redirect AND break
+      // the caller. A torn-down router must degrade, not detonate.
+      const navigate = vi.fn(function deadRouter() {
+        throw new Error("router unmounted");
+      });
+      const api = await freshApi();
+      api.setSessionEndNavigator(navigate);
+
+      expect(() => api.endSession()).not.toThrow();
+      expect(navigate).toHaveBeenCalled();
+      expect(assign).toHaveBeenCalledWith("/app/login");
+    });
+  });
+
   it("sends the refresh cookie with the logout revoke", async () => {
     storeSession("live", HOUR_MS);
     fetchMock.mockResolvedValue({ ok: true, status: 204 });

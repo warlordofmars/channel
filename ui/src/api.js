@@ -192,13 +192,83 @@ function refreshAccessToken() {
 }
 
 /**
+ * The router's `navigate`, once a router-aware component has handed it
+ * over. `null` until then — see {@link setSessionEndNavigator}.
+ */
+let sessionEndNavigator = null;
+
+/**
+ * Register the in-app navigation {@link endSession} should use, or pass
+ * `null` to unregister.
+ *
+ * **Why a registration seam at all (#483).** `endSession` is a plain
+ * module function called from `ensureAccessToken` and from
+ * `useChatStream`'s 401 branch, so it cannot call `useNavigate()` — hooks
+ * only run inside a rendering component. Handing the router's `navigate`
+ * *in* is what lets one module-level function perform a client-side route
+ * change; the alternative (synthesising a `popstate` so the router
+ * notices a `pushState`) would couple this module to the router's
+ * internal history bookkeeping for no gain.
+ *
+ * The registered function is called as `navigate(to, options)` — React
+ * Router's own signature, so `useNavigate()`'s return value can be
+ * registered directly with no adapter. `replace` is used deliberately: a
+ * session that has just been destroyed must not stay on the history
+ * stack, or Back returns to a route the user can no longer load.
+ *
+ * Registration is last-write-wins and expected exactly once per router
+ * instance, which is why the registrant must unregister on unmount —
+ * a `navigate` belonging to an unmounted router would silently do
+ * nothing, and this module cannot tell a live one from a dead one.
+ *
+ * Nothing is validated here on purpose. A `typeof` guard would be
+ * unobservable: {@link endSession} already routes anything that is not a
+ * working navigator to the same hard-navigation fallback, so the guard
+ * could neither change an outcome nor be pinned by a test.
+ */
+export function setSessionEndNavigator(navigate) {
+  sessionEndNavigator = navigate;
+}
+
+/**
  * Give up on the session: clear local state and route to the login page.
  *
  * The single place the SPA gives up on a session, so the "hard reload vs.
  * soft in-app redirect" question (#483) has exactly one site to change.
+ *
+ * **Soft when it can be, hard when it must be.** A registered navigator
+ * routes in-app: the SPA stays mounted, so nothing re-downloads and
+ * nothing repaints from scratch. `location.assign` tears the document
+ * down and rebuilds it, which in a browser tab is a jarring reload and in
+ * the Electron window is a white flash of unstyled HTML that also steals
+ * focus from whatever app the user had switched to — the reported
+ * symptom, made hourly by #291's 1h access-token TTL.
+ *
+ * The hard navigation stays as the fallback rather than being deleted.
+ * `endSession` can fire before any component has mounted, or after the
+ * registrant unmounted, and in those windows a soft redirect has nowhere
+ * to go; doing nothing would strand a user whose session was just
+ * destroyed on a page that can no longer load anything. Reaching the
+ * login page the ugly way beats not reaching it. That is also why a
+ * navigator which *throws* falls through here instead of propagating:
+ * `endSession`'s callers (`ensureAccessToken`, `useChatStream`) treat it
+ * as infallible, so an escaping error would both skip the redirect and
+ * break the caller.
+ *
+ * Ordering is load-bearing and unchanged: local state is cleared BEFORE
+ * either redirect, so a router-aware gate re-rendering as a synchronous
+ * consequence of `navigate` already reads empty storage.
  */
 export function endSession() {
   clearSession();
+  if (sessionEndNavigator) {
+    try {
+      sessionEndNavigator(LOGIN_ROUTE, { replace: true });
+      return;
+    } catch {
+      /* dead router — fall through to the document navigation below */
+    }
+  }
   globalThis.location.assign(LOGIN_ROUTE);
 }
 
