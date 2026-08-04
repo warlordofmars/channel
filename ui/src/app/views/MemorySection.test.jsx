@@ -134,7 +134,10 @@ describe("MemorySection", () => {
       );
       await renderReady();
       const lead = screen.getByText(/Channel stores everything below/);
-      expect(lead.textContent).toContain("up to 1 turn from each of your 1 most recent chat,");
+      expect(lead.textContent).toContain("up to 1 turn from your most recent chat,");
+      // The singular drops the count rather than printing "your 1 most
+      // recent chat" — a number with nothing to count against.
+      expect(lead.textContent).not.toContain("1 most recent");
     });
 
     it("says nothing is being recalled when the hook is switched off", async () => {

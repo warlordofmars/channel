@@ -75,11 +75,18 @@ function recallSentence(window) {
       "so none of it is being loaded into new chats."
     );
   }
+  // "each of your 1 most recent chat" is accurate but reads badly, and the
+  // caps are configuration — the point of this sentence is that it stays
+  // true AND legible whatever `recall.py` is set to, so the singular gets
+  // its own phrasing rather than a count that has nothing to count against.
+  const scope =
+    window.max_sessions === 1
+      ? "your most recent chat"
+      : `each of your ${window.max_sessions} most recent chats`;
   return (
     "Channel stores everything below. When you start a new chat it loads a " +
     `short extract — up to ${window.events_per_session} ` +
-    `${plural(window.events_per_session, "turn")} from each of your ` +
-    `${window.max_sessions} most recent ${plural(window.max_sessions, "chat")}, ` +
+    `${plural(window.events_per_session, "turn")} from ${scope}, ` +
     `each trimmed to ${window.text_truncate} characters — ordered by ` +
     `${window.ordering}, not by relevance.`
   );
