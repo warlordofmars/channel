@@ -730,6 +730,15 @@ def test_export_sets_the_attachment_download_headers():
     assert resp.headers["content-type"].startswith("application/json")
 
 
+def test_export_is_never_cached():
+    # Same rule as /api/me/prefs and /api/me/sessions, with more at stake:
+    # without no-store Chromium heuristic-caches the response, leaving a
+    # whole account's chat history in an on-disk HTTP cache.
+    fake = _export_agentcore([([], None)], {})
+
+    assert _export_call(fake, {}).headers["cache-control"] == "no-store"
+
+
 def test_export_of_an_empty_account_is_valid_not_an_error():
     fake = _export_agentcore([([], None)], {})
 
@@ -739,6 +748,9 @@ def test_export_of_an_empty_account_is_valid_not_an_error():
     body = resp.json()
     assert (body["memory_records"], body["chat_summaries"], body["chats"]) == ([], [], [])
     assert body["manifest"]["truncated_chat_ids"] == []
+    # Empty is not the same as incomplete — an account with no data has
+    # been exported in full.
+    assert body["manifest"]["complete"] is True
 
 
 def test_export_omits_summaries_for_chats_that_have_none():
@@ -815,6 +827,57 @@ def test_export_reports_chats_whose_memory_history_was_truncated():
     body = _export_call(fake, {"chat-a": _chat("chat-a")}).json()
 
     assert body["manifest"]["truncated_chat_ids"] == ["chat-a"]
+    # A truncated chat means the file is not the whole account, and the
+    # file has to say so — a log line doesn't travel with a download.
+    assert body["manifest"]["complete"] is False
+
+
+def test_export_manifest_reports_complete_on_a_full_walk():
+    fake = _export_agentcore([(["chat-a"], None)], {"chat-a": [_event("e1", ("USER", "hi"))]})
+
+    body = _export_call(
+        fake,
+        {"chat-a": _chat("chat-a")},
+        list_messages=MagicMock(return_value=([_message("hello")], None)),
+    ).json()
+
+    assert body["manifest"]["complete"] is True
+
+
+def test_export_manifest_reports_incomplete_when_a_walk_hits_the_page_cap(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # A paginator still handing back a token at the ceiling. The cap is
+    # shrunk rather than simulating 200 real pages.
+    monkeypatch.setattr(memory_api, "_EXPORT_MAX_PAGES", 1)
+    fake = _export_agentcore(
+        [(["chat-a"], "tok-2"), (["chat-b"], None)],
+        {"chat-a": [_event("e1", ("USER", "hi"))]},
+    )
+
+    body = _export_call(fake, {"chat-a": _chat("chat-a")}).json()
+
+    assert body["manifest"]["complete"] is False
+    # The partial data is still returned — truncating is the lesser evil,
+    # claiming completeness is not.
+    assert [r["text"] for r in body["memory_records"]] == ["hi"]
+
+
+def test_export_is_incomplete_when_a_message_walk_hits_the_page_cap(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # Incompleteness anywhere — including inside one chat's messages —
+    # makes the whole file incomplete.
+    monkeypatch.setattr(memory_api, "_EXPORT_MAX_PAGES", 1)
+    fake = _export_agentcore([([], None)], {})
+
+    body = _export_call(
+        fake,
+        {"chat-a": _chat("chat-a")},
+        list_messages=MagicMock(return_value=([_message("first")], {"SK": "more"})),
+    ).json()
+
+    assert body["manifest"]["complete"] is False
 
 
 # ── scoping ───────────────────────────────────────────────────────────────
@@ -985,7 +1048,8 @@ async def test_paginate_stops_at_the_page_cap_and_says_so(monkeypatch: pytest.Mo
     """A paginator that never terminates must not burn the Lambda timeout.
 
     Truncating here is the lesser evil, but a silent truncation would be
-    exactly the lie this surface exists to stop — hence the log line.
+    exactly the lie this surface exists to stop — hence both the log line
+    and the ``drained=False`` the manifest is built from.
     """
     fake_logger = MagicMock()
     monkeypatch.setattr(memory_api, "logger", fake_logger)
@@ -993,12 +1057,21 @@ async def test_paginate_stops_at_the_page_cap_and_says_so(monkeypatch: pytest.Mo
     async def _never_ends(token: Any) -> tuple[list[int], str]:
         return [1], "always-more"
 
-    items = await memory_api._paginate(_never_ends, what="sessions")
+    items, drained = await memory_api._paginate(_never_ends, what="sessions")
 
     assert len(items) == memory_api._EXPORT_MAX_PAGES
+    assert drained is False
     fmt, what, pages = fake_logger.warning.call_args.args
     assert fmt.startswith("memory.export_page_cap_hit")
     assert (what, pages) == ("sessions", memory_api._EXPORT_MAX_PAGES)
+
+
+@pytest.mark.asyncio
+async def test_paginate_reports_drained_when_the_walk_finishes():
+    async def _one_page(token: Any) -> tuple[list[int], None]:
+        return [1, 2], None
+
+    assert await memory_api._paginate(_one_page, what="chats") == ([1, 2], True)
 
 
 def test_export_route_is_mounted_under_the_api_prefix():

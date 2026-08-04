@@ -113,11 +113,13 @@ The ``manifest`` is what makes the file self-describing a year later: it
 carries the live ``recall_window`` caps and the note that only the
 ``used_in_recall`` slice is ever loaded into a new conversation, so a
 reader can tell stored-but-unused from actually-used without reading this
-repo. It also carries ``truncated_chat_ids`` — the chats whose AgentCore
-history exceeded ``MAX_EVENTS_PER_SESSION``, so their oldest records are
-absent. Reporting that is the same principle as ``records_truncated`` on
-``/records``: a partial export presented as complete is worse than a
-partial export that says so.
+repo. It also answers "is this everything?" outright: ``complete`` is false
+whenever any walk stopped short, and ``truncated_chat_ids`` names the chats
+whose AgentCore history exceeded ``MAX_EVENTS_PER_SESSION`` so their oldest
+records are absent. Both live in the *file* rather than only in a log line,
+because a log line does not travel with a download — same principle as
+``records_truncated`` on ``/records``: a partial export presented as
+complete is worse than a partial export that says so.
 
 One synchronous JSON response, not a job plus a presigned URL. Current
 volumes fit the Lambda response budget; speculative export infrastructure
@@ -431,8 +433,8 @@ _T = TypeVar("_T")
 
 async def _paginate(
     fetch: Callable[[Any], Awaitable[tuple[list[_T], Any]]], *, what: str
-) -> list[_T]:
-    """Drain a ``(page, next_token)`` paginator to completion.
+) -> tuple[list[_T], bool]:
+    """Drain a ``(page, next_token)`` paginator → ``(items, drained)``.
 
     One helper for all three walks (AgentCore sessions, DynamoDB chats,
     DynamoDB messages) because they differ only in their fetch closure, and
@@ -440,9 +442,12 @@ async def _paginate(
     takes the previous token (``None`` first) and returns the next page
     with the token after it.
 
-    Exiting through the ``for``/``else`` means the ceiling was reached with
-    a token still outstanding — the one case where the result is
-    incomplete, so it is logged rather than returned as if whole.
+    Falling out of the loop means the ceiling was reached with a token still
+    outstanding, so ``drained`` is false. It is **returned**, not just
+    logged: a log line does not travel with a downloaded file, and an
+    incomplete export that renders as a complete one is precisely the silent
+    lie this surface exists to stop. The caller propagates it to
+    ``manifest.complete``.
     """
     items: list[_T] = []
     token: Any = None
@@ -450,9 +455,9 @@ async def _paginate(
         page, token = await fetch(token)
         items.extend(page)
         if not token:
-            return items
+            return items, True
     logger.warning("memory.export_page_cap_hit what=%s pages=%d", what, _EXPORT_MAX_PAGES)
-    return items
+    return items, False
 
 
 async def _export_memory_records(
@@ -462,14 +467,15 @@ async def _export_memory_records(
     actor_id: str,
     user_id: str,
     window: set[str],
-) -> tuple[list[dict[str, Any]], list[str]]:
-    """Every enumerable memory record the caller owns → ``(records, truncated)``.
+) -> tuple[list[dict[str, Any]], list[str], bool]:
+    """Owned memory records → ``(records, truncated, drained)``.
 
     The same enumeration ``/records`` serves, drained across every
     ``ListSessions`` page instead of one, and flattened: the export is a
     file, so each record carries its own ``chat_id`` rather than being
     nested under a group. ``truncated`` lists the sessions whose history
-    exceeded ``MAX_EVENTS_PER_SESSION``.
+    exceeded ``MAX_EVENTS_PER_SESSION``; ``drained`` is false if the session
+    walk hit the page ceiling.
 
     The ownership gate is the same one §Scoping describes, and it matters
     more here than on ``/records``: this response is a downloadable file, so
@@ -478,7 +484,7 @@ async def _export_memory_records(
     counted per-record — that would cost one ``ListEvents`` per foreign
     session to enrich an alarm that fires on ``> 0`` either way.
     """
-    session_summaries = await _paginate(
+    session_summaries, drained = await _paginate(
         lambda tok: list_sessions_page(
             client,
             memory_id=memory_id,
@@ -516,7 +522,7 @@ async def _export_memory_records(
             fingerprint_id(user_id),
             withheld,
         )
-    return records, truncated_chat_ids
+    return records, truncated_chat_ids, drained
 
 
 def _message_page(chat_id: str, token: Any) -> Awaitable[tuple[list[Message], Any]]:
@@ -530,8 +536,10 @@ def _message_page(chat_id: str, token: Any) -> Awaitable[tuple[list[Message], An
     )
 
 
-async def _export_chats(user_id: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
-    """The caller's chats with their messages → ``(chats, summaries, message_count)``.
+async def _export_chats(
+    user_id: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int, bool]:
+    """Chats + messages → ``(chats, summaries, message_count, drained)``.
 
     ``include_archived=True``: an archived chat is still the user's data,
     and the export carries the flag so the distinction survives rather than
@@ -542,8 +550,12 @@ async def _export_chats(user_id: str) -> tuple[list[dict[str, Any]], list[dict[s
     per-chat point reads. They belong in the export at all because they are
     injected into their chat's system prompt on *every* turn, which makes
     them more load-bearing than most AgentCore records.
+
+    ``drained`` is the AND over the chat walk and every per-chat message
+    walk — one incomplete walk anywhere makes the whole export incomplete,
+    which is what ``manifest.complete`` has to answer.
     """
-    chats = await _paginate(
+    chats, drained = await _paginate(
         lambda tok: asyncio.to_thread(
             storage.list_chats_for_user,
             user_id,
@@ -562,7 +574,10 @@ async def _export_chats(user_id: str) -> tuple[list[dict[str, Any]], list[dict[s
         # called from inside ``_paginate`` while the loop variable is still
         # live, so late binding would be correct today and wrong the first
         # time this loop changes shape (ruff's B023 says the same).
-        messages = await _paginate(partial(_message_page, chat.chat_id), what="messages")
+        messages, messages_drained = await _paginate(
+            partial(_message_page, chat.chat_id), what="messages"
+        )
+        drained = drained and messages_drained
         message_count += len(messages)
         exported.append(
             {
@@ -586,7 +601,7 @@ async def _export_chats(user_id: str) -> tuple[list[dict[str, Any]], list[dict[s
                     "updated_at": summary.updated_at,
                 }
             )
-    return exported, summaries, message_count
+    return exported, summaries, message_count, drained
 
 
 async def _build_export(user_id: str) -> tuple[dict[str, Any], str]:
@@ -611,14 +626,14 @@ async def _build_export(user_id: str) -> tuple[dict[str, Any], str]:
         else set()
     )
 
-    records, truncated_chat_ids = await _export_memory_records(
+    records, truncated_chat_ids, records_drained = await _export_memory_records(
         client,
         memory_id=memory_id,
         actor_id=actor_id,
         user_id=user_id,
         window=window,
     )
-    chats, summaries, message_count = await _export_chats(user_id)
+    chats, summaries, message_count, chats_drained = await _export_chats(user_id)
 
     now = datetime.now(timezone.utc)
     payload = {
@@ -627,6 +642,12 @@ async def _build_export(user_id: str) -> tuple[dict[str, Any], str]:
             "actor_id": actor_id,
             "schema_version": _EXPORT_SCHEMA_VERSION,
             "recall_window": recall_window(enabled=recall_enabled),
+            # The single answer to "is this everything?", because a log line
+            # does not travel with a downloaded file. False when a walk hit
+            # the page ceiling OR a chat's memory history exceeded the
+            # per-session cap; ``truncated_chat_ids`` says which chats, and
+            # the page-cap case additionally logs ``export_page_cap_hit``.
+            "complete": records_drained and chats_drained and not truncated_chat_ids,
             "truncated_chat_ids": truncated_chat_ids,
             "note": _EXPORT_NOTE,
         },
@@ -668,6 +689,12 @@ async def export_account_data(
     ``Content-Disposition: attachment`` so a browser saves the file instead
     of rendering it — which also keeps this attacker-influenced text out of
     a top-level document context, reinforced by ``nosniff``.
+
+    ``no-store`` for the same reason ``/api/me/prefs`` and
+    ``/api/me/sessions`` set it, with rather more at stake: without it
+    Chromium (browser and Electron renderer alike) heuristic-caches the
+    response, leaving a whole account's data — every chat message the user
+    has ever sent — sitting in an on-disk HTTP cache.
     """
     try:
         payload, export_date = await _build_export(claims["sub"])
@@ -682,6 +709,7 @@ async def export_account_data(
         content=payload,
         headers={
             "Content-Disposition": f'attachment; filename="channel-export-{export_date}.json"',
+            "Cache-Control": "no-store",
             "X-Content-Type-Options": "nosniff",
         },
     )
