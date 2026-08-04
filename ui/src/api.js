@@ -215,12 +215,33 @@ export function endSession() {
  * exactly those users five minutes *earlier* than the status quo. So
  * the still-valid token is used, and the session only ends once it is
  * genuinely unusable.
+ *
+ * **Exported for `AuthGate` (#520), which is the only caller outside
+ * this module.** `AuthGate` used to redirect to `/app/login` the instant
+ * a render saw an expired token, without ever reaching this function —
+ * so an in-session navigation an hour after sign-in bounced the user to
+ * Google while a live 30-day refresh cookie sat unused, and dev
+ * CloudWatch recorded zero `/api/*` 401s because no request was ever
+ * issued. The gate now awaits this instead of deciding for itself, which
+ * is deliberately *not* the same as exporting `refreshAccessToken`: this
+ * is the seam that already owns the whole policy — the pre-expiry skew,
+ * the post-refusal cooldown, the single-flight collapse, and above all
+ * the 401-only rule below. A second entry point into the rotation would
+ * be a second place for those four to drift, and #290 punishes the
+ * single-flight one by revoking the entire device family.
+ *
+ * Callers get back "the token to use, or `''` if there is none"; they do
+ * not get, and do not need, the reason. `""` means either that there was
+ * no session to begin with or that the session has just been ended here,
+ * and both answer the same question the same way.
  */
-async function accessToken() {
+export async function ensureAccessToken() {
   const { access_token: token, expires_at: expiresAt } = loadSession();
   // No session at all: let the request go out unauthenticated and 401.
   // AuthGate owns the redirect for that case; competing with it here
-  // would race two navigations on a cold load.
+  // would race two navigations on a cold load. AuthGate short-circuits
+  // on the same condition before it ever awaits this, so a visitor who
+  // has never signed in costs no `/auth/refresh` round trip either.
   if (!token) return "";
   if (expiresAt - Date.now() >= REFRESH_SKEW_MS) return token;
 
@@ -238,7 +259,7 @@ async function accessToken() {
 }
 
 async function authHeader() {
-  const token = await accessToken();
+  const token = await ensureAccessToken();
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
