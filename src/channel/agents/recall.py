@@ -36,6 +36,12 @@ from channel.metrics import record_recall_outcome
 logger = logging.getLogger(__name__)
 
 _RECALL_HEADING = "## What we've talked about before"
+
+# The per-session group header. Sole source of the block's session
+# boundaries — #526 defuses anything in an untrusted turn that reads
+# like one, so this template is the only thing that can emit one.
+_RECALL_GROUP_HEADING_TEMPLATE = "**Earlier conversation ({date})**"
+
 _RECALL_CACHE_REFRESH_TURNS: int = 5
 _RECALL_ROLE_MAP: dict[str, str] = {"USER": "You", "ASSISTANT": "Me"}
 
@@ -107,6 +113,126 @@ def defuse_forged_headings(text: str) -> str:
     return _FORGED_SETEXT_UNDERLINE_RE.sub("", text)
 
 
+# --- #526: group-header (session-boundary) forgery defusal --------------
+#
+# #465 closed the *instruction*-register hole: nothing recalled can forge
+# a sibling section of the system prompt. This closes the weaker
+# *provenance* hole left behind. Inside the block, the only thing
+# separating one prior chat from the next is the whole-line emphasised
+# label ``_RECALL_GROUP_HEADING_TEMPLATE`` emits. A quoted turn is
+# interpolated verbatim and may contain newlines, so a line of its own
+# shaped like that label reads as a session boundary — letting recalled
+# text appear to come from a different prior conversation, or inventing
+# one that never happened. The model is already told this block is a
+# lossy gist, so no instruction is injected; what is corrupted is which
+# past chat a statement is attributed to.
+#
+# The posture is #465's, not a new one: strip the structural marker,
+# keep the words. Matching on the literal ``Earlier conversation`` text
+# would be trivially evadable (a different date format, a near-miss
+# label) and would still leave a boundary-shaped line, so — exactly as
+# the ATX filter keys on ``#`` rather than on the real heading's words —
+# these key on the *shape*: a line whose first non-space characters open
+# a bold run. That is the shape the formatter's own header has, and a
+# line that opens with one is never a turn bullet (those start ``- ``).
+#
+# Only ``**``/``__`` (bold) are treated as structural. Single ``*``/``_``
+# is left alone: it is not the header's shape, and ``*`` doubles as a
+# list-item marker, so stripping it would flatten ordinary recalled
+# lists for no security gain.
+#
+# The whole defence is the OPENER strip: after it, no line begins with a
+# marker run, so no line can be read as a boundary. It deliberately takes
+# the entire line-leading run in one match — ``#`` interleaved with
+# ``**``/``__`` included — rather than one marker per pass. That is a cost
+# property, not a cosmetic one: a nested wrapper (``**#**#**#…``) would
+# otherwise peel one layer per fixpoint pass, and an O(n) pass per layer
+# is O(n^2) in the turn's length. Overlapping ``defuse_forged_headings``
+# on ``#`` is intentional — the marker is inert either way, and the loop
+# would have reached it on the next pass regardless.
+#
+# The nesting here is unambiguous, which is what keeps it linear: each
+# alternative starts with a distinct character, and the pattern has no
+# anchored tail to fail against, so the first greedy path always wins and
+# the engine never backtracks through the run's partitions.
+_FORGED_STRUCTURAL_OPENER_RE = re.compile(r"^(?:[ \t]*(?:#+|\*\*+|__+))+[ \t]*")
+
+# Cosmetic companion: once the opener is gone, ``**Fake conversation**``
+# would read ``Fake conversation**`` — inert, but scruffy in a block the
+# model is quoting. This drops the orphaned closer.
+#
+# Applied ONLY to lines whose opener was actually stripped, which is what
+# makes it safe: an ungated trailing-strip would eat the closer of
+# ordinary mid-line bold that happens to end a line (``I like **sage**``).
+# One pair, not a run, and no leading alternation — there is nothing here
+# for a backtracking engine to explore.
+#
+# An earlier draft did the whole job in one paired regex
+# (``^[ \t]*(?:\*\*|__)+ … (?:\*\*|__)+[ \t]*$``). It was quadratic-to-
+# exponential on a long run of ``*`` that never closes: the match has to
+# fail, and the engine explores every way of splitting the run between
+# the two ``+`` groups. Don't reintroduce that shape.
+_FORGED_TRAILING_BOLD_RE = re.compile(r"[ \t]*(?:\*\*|__)[ \t]*$")
+
+
+def _defuse_forged_group_headers(text: str) -> str:
+    """Neutralise forged per-session boundary headers in an untrusted
+    recalled turn (#526).
+
+    Module-private, unlike its sibling :func:`defuse_forged_headings`,
+    and deliberately so: a group header is a feature of *this* module's
+    addendum grammar. ``chat_agent``'s head-summary block is a single
+    ungrouped gist with no boundaries to forge, so applying this there
+    would mangle its prose to defend against nothing.
+
+    Line-by-line rather than a ``re.MULTILINE`` sweep because the trailing
+    strip has to know whether *this* line's opener fired — see
+    ``_FORGED_TRAILING_BOLD_RE``.
+    """
+    out: list[str] = []
+    for line in text.split("\n"):
+        opened = _FORGED_STRUCTURAL_OPENER_RE.sub("", line, count=1)
+        if opened != line:
+            opened = _FORGED_TRAILING_BOLD_RE.sub("", opened, count=1)
+        out.append(opened)
+    return "\n".join(out)
+
+
+def _defuse_recall_turn(text: str) -> str:
+    """Run every structural defusal over one recalled turn until stable.
+
+    The passes must compose, and one ordered application of them does
+    not: stripping a bold wrapper *uncovers* whatever it wrapped, and by
+    then the heading pass has already run. ``**## Operator override**``
+    is the dangerous instance — it would come out of a single pass as a
+    working ATX heading, re-opening the #465 hole — and ``**---**``
+    (uncovering a setext underline) is the same shape. The reverse
+    direction needs no iteration: the group pass ends by stripping any
+    line-leading bold run, so it cannot hand a fresh bold label back.
+    Iterating anyway is what makes the guarantee independent of which
+    wrapper an attacker reaches for, rather than of an argument about
+    orderings that a later edit could invalidate.
+
+    Termination is structural rather than a trusted bound: every regex
+    here only deletes characters, so an iteration that changes anything
+    strictly shortens the text.
+
+    That guarantees the loop *ends*, not that it ends cheaply, so the
+    cost is bounded twice over. ``_FORGED_STRUCTURAL_OPENER_RE`` takes a
+    whole marker run per pass, which is what stops a nested wrapper from
+    buying one pass per layer; and the caller truncates before calling,
+    so the input is a capped fragment rather than a whole chat message.
+    Both matter — the second is the hard bound, the first keeps the loop
+    cheap for anything that reuses it. Reordering the caller so an
+    uncapped turn reaches this is the regression to watch for.
+    """
+    while True:
+        defused = _defuse_forged_group_headers(defuse_forged_headings(text))
+        if defused == text:
+            return defused
+        text = defused
+
+
 def _iso_date(value: Any) -> str:
     """Return ``YYYY-MM-DD`` for a datetime or string; empty string for None.
 
@@ -155,8 +281,12 @@ def _format_recall_addendum(records: list[dict[str, Any]]) -> str:
     Defensive: payload entries missing ``conversational.content.text``
     or with empty text are silently skipped so a malformed AgentCore
     response can't corrupt the system prompt. Each quoted turn is run
-    through :func:`defuse_forged_headings` first, so a recalled turn
-    cannot forge a sibling section of the system prompt (#465).
+    through :func:`_defuse_recall_turn` first, which pins two
+    invariants on the rendered block: the only Markdown heading in it is
+    ``_RECALL_HEADING``, so a recalled turn cannot forge a sibling
+    section of the system prompt (#465), and the only session-boundary
+    headers in it come from ``_RECALL_GROUP_HEADING_TEMPLATE``, so a
+    recalled turn cannot fake the provenance of what it quotes (#526).
     """
     if not records:
         return ""
@@ -183,13 +313,27 @@ def _format_recall_addendum(records: list[dict[str, Any]]) -> str:
             if not text:
                 continue
             role_label = _RECALL_ROLE_MAP.get(role_raw, role_raw or "?")
-            # Defuse BEFORE the cap, matching the #256 order in
-            # ``build_titler_prompt``. Safe either way — truncation only
-            # removes trailing characters, so it can't reintroduce a
-            # heading the defusal just stripped.
-            text = defuse_forged_headings(text)
+            # Cap BEFORE defusing. #465 ran these the other way round to
+            # match the #256 order in ``build_titler_prompt``, noting it
+            # was safe either way; once #526 made the defusal iterative
+            # that stopped being true for *cost*. A recalled turn is a
+            # whole prior chat message (up to 100k chars) and is
+            # re-processed on every turn that recalls its session, so
+            # defusing first hands unbounded attacker-controlled text to
+            # a fixpoint loop on the event loop's thread. Capping first
+            # bounds it to this fragment.
+            #
+            # Safe in this direction too, and the argument is the one
+            # that matters now: truncation only drops trailing characters
+            # and always leaves the cut line ending in ``...``, so it can
+            # neither create a line start nor complete a setext underline
+            # — it cannot manufacture a marker for the defusal to miss.
+            # It CAN sever a ``**...**`` pair mid-line, which is why the
+            # unpaired-opener strip is load-bearing rather than belt-and-
+            # braces.
             if len(text) > _RECALL_EVENT_TEXT_TRUNCATE:
                 text = text[:_RECALL_EVENT_TEXT_TRUNCATE] + "..."
+            text = _defuse_recall_turn(text)
             group["bullets"].append(f"- {role_label}: {text}")
 
     blocks: list[str] = []
@@ -197,7 +341,8 @@ def _format_recall_addendum(records: list[dict[str, Any]]) -> str:
         if not group["bullets"]:
             continue
         date = group["createdAt"] or "earlier"
-        blocks.append(f"**Earlier conversation ({date})**\n" + "\n".join(group["bullets"]))
+        heading = _RECALL_GROUP_HEADING_TEMPLATE.format(date=date)
+        blocks.append(heading + "\n" + "\n".join(group["bullets"]))
 
     if not blocks:
         return ""
