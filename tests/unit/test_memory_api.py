@@ -20,9 +20,10 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 from datetime import datetime, timezone
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -40,7 +41,7 @@ from channel.api import memory as memory_api  # noqa: E402
 from channel.api.main import app  # noqa: E402
 from channel.auth.tokens import issue_mgmt_jwt  # noqa: E402
 from channel.logging_config import fingerprint_id  # noqa: E402
-from channel.models import Chat, ChatSummary  # noqa: E402
+from channel.models import Chat, ChatSummary, Message, MessageRole  # noqa: E402
 
 client = TestClient(app)
 
@@ -540,3 +541,538 @@ def test_memory_id_falls_back_when_env_is_unset(monkeypatch: pytest.MonkeyPatch)
 
 def test_router_is_mounted_under_the_api_prefix():
     assert "/api/memory/records" in {route.path for route in app.routes}
+
+
+# ══ GET /api/memory/export (#476) ═════════════════════════════════════════
+#
+# The full account export behind the Privacy page's standing promise. The
+# tests that matter most are the completeness ones (a walk that stopped at
+# page one would be a silent lie) and the ownership one (this response is a
+# downloadable file, so a leak leaks wherever the file goes).
+
+EXPORT_URL = "/api/memory/export"
+
+
+def _message(text: str, *, role: str = "user", created_at: str = "2026-07-30T12:00:00+00:00"):
+    return Message(
+        chat_id="chat-a",
+        msg_id=f"m-{text}",
+        role=MessageRole(role),
+        text=text,
+        created_at=created_at,
+    )
+
+
+def _export_agentcore(
+    pages: list[tuple[list[str], str | None]],
+    events: dict[str, list[dict[str, Any]]],
+) -> MagicMock:
+    """A fake AgentCore whose ``ListSessions`` actually paginates.
+
+    ``pages`` is ``[(session_ids, next_token), ...]``. The un-paginated
+    recall-window probe (no ``maxResults``) always gets the first page,
+    mirroring ``recall_window_session_ids``, which reads one page by design.
+    """
+    by_token: dict[str | None, dict[str, Any]] = {}
+    previous: str | None = None
+    for session_ids, next_token in pages:
+        by_token[previous] = {
+            "sessionSummaries": [
+                {"sessionId": sid, "createdAt": datetime(2026, 7, 30, tzinfo=timezone.utc)}
+                for sid in session_ids
+            ],
+            **({"nextToken": next_token} if next_token else {}),
+        }
+        previous = next_token
+
+    fake = MagicMock()
+    fake.list_sessions.side_effect = lambda **kw: (
+        by_token[kw.get("nextToken")] if "maxResults" in kw else by_token[None]
+    )
+    fake.list_events.side_effect = lambda **kw: {"events": events.get(kw["sessionId"], [])}
+    return fake
+
+
+def _export_call(
+    fake: MagicMock,
+    owned: dict[str, Chat] | None = None,
+    *,
+    list_chats: Any = None,
+    list_messages: Any = None,
+    summaries: dict[str, ChatSummary] | None = None,
+    put_audit: Any = None,
+    headers: dict[str, str] | None = None,
+    params: dict[str, Any] | None = None,
+):
+    """Drive ``GET /api/memory/export`` with every AWS seam mocked.
+
+    ``owned`` doubles as the ``get_chat_by_id`` table (the ownership gate)
+    and, unless ``list_chats`` overrides it, as the chat rows the DynamoDB
+    walk returns — newest first, as ``list_chats_for_user`` orders them.
+    """
+    owned = owned or {}
+    if list_chats is None:
+        rows = sorted(owned.values(), key=lambda c: c.created_at, reverse=True)
+        list_chats = MagicMock(return_value=(rows, None))
+    if list_messages is None:
+        list_messages = MagicMock(return_value=([], None))
+    with (
+        patch.object(memory_api, "_agentcore_client", return_value=fake),
+        patch.object(memory_api, "_memory_id_for_env", return_value="mem-1"),
+        patch("channel.storage.get_chat_by_id", owned.get),
+        patch("channel.storage.list_chats_for_user", list_chats),
+        patch("channel.storage.list_messages", list_messages),
+        patch("channel.storage.get_chat_summary", (summaries or {}).get),
+        patch("channel.storage.put_audit_event", put_audit or MagicMock(return_value={})),
+    ):
+        return client.get(EXPORT_URL, params=params or {}, headers=headers or _headers())
+
+
+# ── auth ──────────────────────────────────────────────────────────────────
+
+
+def test_export_requires_a_mgmt_jwt():
+    assert client.get(EXPORT_URL).status_code in (401, 403)
+
+
+def test_export_rejects_a_garbage_bearer_token():
+    assert client.get(EXPORT_URL, headers={"Authorization": "Bearer nope"}).status_code == 401
+
+
+# ── shape ─────────────────────────────────────────────────────────────────
+
+
+def test_export_returns_memory_records_summaries_and_chats():
+    fake = _export_agentcore(
+        [(["chat-a"], None)],
+        {"chat-a": [_event("e1", ("USER", "i love sage"), ("ASSISTANT", "noted"))]},
+    )
+    summary = ChatSummary(
+        chat_id="chat-a",
+        text="earlier: sage green",
+        covers_through="MSG#2026-07-30#m1",
+        updated_at="2026-07-30T12:00:00+00:00",
+    )
+
+    resp = _export_call(
+        fake,
+        {"chat-a": _chat("chat-a")},
+        list_messages=MagicMock(
+            return_value=([_message("hello"), _message("hi", role="assistant")], None)
+        ),
+        summaries={"chat-a": summary},
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert [(r["role"], r["kind"], r["chat_id"]) for r in body["memory_records"]] == [
+        ("USER", "conversation", "chat-a"),
+        ("ASSISTANT", "conversation", "chat-a"),
+    ]
+    assert all(r["used_in_recall"] for r in body["memory_records"])
+    assert body["chat_summaries"] == [
+        {
+            "chat_id": "chat-a",
+            "text": "earlier: sage green",
+            "covers_through": "MSG#2026-07-30#m1",
+            "updated_at": "2026-07-30T12:00:00+00:00",
+        }
+    ]
+    [chat] = body["chats"]
+    assert (chat["chat_id"], chat["title"], chat["archived"]) == ("chat-a", "title-chat-a", False)
+    assert [(m["role"], m["text"]) for m in chat["messages"]] == [
+        ("user", "hello"),
+        ("assistant", "hi"),
+    ]
+
+
+def test_export_manifest_is_self_describing():
+    fake = _export_agentcore([([], None)], {})
+
+    manifest = _export_call(fake, {}).json()["manifest"]
+
+    assert manifest["schema_version"] == memory_api._EXPORT_SCHEMA_VERSION
+    assert manifest["actor_id"] == memory_api.derive_actor_id(OWNER)
+    assert manifest["recall_window"] == {
+        "max_sessions": _RECALL_MAX_SESSIONS,
+        "events_per_session": _RECALL_EVENTS_PER_SESSION,
+        "text_truncate": _RECALL_EVENT_TEXT_TRUNCATE,
+        "ordering": "recency",
+        "enabled": True,
+    }
+    # The one sentence that stops a reader mistaking "stored" for "recalled".
+    assert "used_in_recall" in manifest["note"]
+    assert datetime.fromisoformat(manifest["exported_at"]).tzinfo is not None
+
+
+def test_export_manifest_never_re_literals_the_recall_caps():
+    # The caps must come from recall.py's own constants — a hand-copied
+    # number would make the manifest a lie the first time a cap moves.
+    fake = _export_agentcore([([], None)], {})
+
+    window = _export_call(fake, {}).json()["manifest"]["recall_window"]
+
+    assert window["max_sessions"] == _RECALL_MAX_SESSIONS
+    assert window["events_per_session"] == _RECALL_EVENTS_PER_SESSION
+
+
+def test_export_sets_the_attachment_download_headers():
+    fake = _export_agentcore([([], None)], {})
+
+    resp = _export_call(fake, {})
+
+    disposition = resp.headers["content-disposition"]
+    assert disposition.startswith("attachment; ")
+    assert re.fullmatch(
+        r'attachment; filename="channel-export-\d{4}-\d{2}-\d{2}\.json"', disposition
+    )
+    assert resp.headers["x-content-type-options"] == "nosniff"
+    assert resp.headers["content-type"].startswith("application/json")
+
+
+def test_export_is_never_cached():
+    # Same rule as /api/me/prefs and /api/me/sessions, with more at stake:
+    # without no-store Chromium heuristic-caches the response, leaving a
+    # whole account's chat history in an on-disk HTTP cache.
+    fake = _export_agentcore([([], None)], {})
+
+    assert _export_call(fake, {}).headers["cache-control"] == "no-store"
+
+
+def test_export_of_an_empty_account_is_valid_not_an_error():
+    fake = _export_agentcore([([], None)], {})
+
+    resp = _export_call(fake, {})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert (body["memory_records"], body["chat_summaries"], body["chats"]) == ([], [], [])
+    assert body["manifest"]["truncated_chat_ids"] == []
+    # Empty is not the same as incomplete — an account with no data has
+    # been exported in full.
+    assert body["manifest"]["complete"] is True
+
+
+def test_export_omits_summaries_for_chats_that_have_none():
+    fake = _export_agentcore([([], None)], {})
+
+    body = _export_call(fake, {"chat-a": _chat("chat-a")}, summaries={}).json()
+
+    assert body["chat_summaries"] == []
+    assert [c["chat_id"] for c in body["chats"]] == ["chat-a"]
+
+
+# ── completeness (the whole point of an export) ───────────────────────────
+
+
+def test_export_walks_every_session_page():
+    fake = _export_agentcore(
+        [(["chat-a"], "tok-2"), (["chat-b"], None)],
+        {
+            "chat-a": [_event("e1", ("USER", "from page one"))],
+            "chat-b": [_event("e1", ("USER", "from page two"))],
+        },
+    )
+
+    body = _export_call(fake, {"chat-a": _chat("chat-a"), "chat-b": _chat("chat-b")}).json()
+
+    assert [r["text"] for r in body["memory_records"]] == ["from page one", "from page two"]
+
+
+def test_export_walks_every_chat_page():
+    list_chats = MagicMock(
+        side_effect=[([_chat("chat-a")], {"SK": "cursor"}), ([_chat("chat-b")], None)]
+    )
+    fake = _export_agentcore([([], None)], {})
+
+    body = _export_call(fake, {}, list_chats=list_chats).json()
+
+    assert [c["chat_id"] for c in body["chats"]] == ["chat-a", "chat-b"]
+    assert list_chats.call_args_list[1].kwargs["cursor"] == {"SK": "cursor"}
+
+
+def test_export_walks_every_message_page():
+    list_messages = MagicMock(
+        side_effect=[([_message("first")], {"SK": "cursor"}), ([_message("second")], None)]
+    )
+    fake = _export_agentcore([([], None)], {})
+
+    body = _export_call(fake, {"chat-a": _chat("chat-a")}, list_messages=list_messages).json()
+
+    assert [m["text"] for m in body["chats"][0]["messages"]] == ["first", "second"]
+    assert list_messages.call_args_list[1].kwargs["cursor"] == {"SK": "cursor"}
+
+
+def test_export_includes_archived_chats():
+    # An archived chat is still the user's data; the flag is exported so the
+    # distinction survives rather than the rows vanishing.
+    archived = _chat("chat-a").model_copy(update={"archived": True})
+    list_chats = MagicMock(return_value=([archived], None))
+    fake = _export_agentcore([([], None)], {})
+
+    body = _export_call(fake, {}, list_chats=list_chats).json()
+
+    assert body["chats"][0]["archived"] is True
+    assert list_chats.call_args.kwargs["include_archived"] is True
+
+
+def test_export_reports_chats_whose_memory_history_was_truncated():
+    fake = _export_agentcore([(["chat-a"], None)], {})
+    fake.list_events.side_effect = None
+    fake.list_events.return_value = {
+        "events": [_event("e1", ("USER", "newest kept"))],
+        "nextToken": "older-events-exist",
+    }
+
+    body = _export_call(fake, {"chat-a": _chat("chat-a")}).json()
+
+    assert body["manifest"]["truncated_chat_ids"] == ["chat-a"]
+    # A truncated chat means the file is not the whole account, and the
+    # file has to say so — a log line doesn't travel with a download.
+    assert body["manifest"]["complete"] is False
+
+
+def test_export_manifest_reports_complete_on_a_full_walk():
+    fake = _export_agentcore([(["chat-a"], None)], {"chat-a": [_event("e1", ("USER", "hi"))]})
+
+    body = _export_call(
+        fake,
+        {"chat-a": _chat("chat-a")},
+        list_messages=MagicMock(return_value=([_message("hello")], None)),
+    ).json()
+
+    assert body["manifest"]["complete"] is True
+
+
+def test_export_manifest_reports_incomplete_when_a_walk_hits_the_page_cap(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # A paginator still handing back a token at the ceiling. The cap is
+    # shrunk rather than simulating 200 real pages.
+    monkeypatch.setattr(memory_api, "_EXPORT_MAX_PAGES", 1)
+    fake = _export_agentcore(
+        [(["chat-a"], "tok-2"), (["chat-b"], None)],
+        {"chat-a": [_event("e1", ("USER", "hi"))]},
+    )
+
+    body = _export_call(fake, {"chat-a": _chat("chat-a")}).json()
+
+    assert body["manifest"]["complete"] is False
+    # The partial data is still returned — truncating is the lesser evil,
+    # claiming completeness is not.
+    assert [r["text"] for r in body["memory_records"]] == ["hi"]
+
+
+def test_export_is_incomplete_when_a_message_walk_hits_the_page_cap(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # Incompleteness anywhere — including inside one chat's messages —
+    # makes the whole file incomplete.
+    monkeypatch.setattr(memory_api, "_EXPORT_MAX_PAGES", 1)
+    fake = _export_agentcore([([], None)], {})
+
+    body = _export_call(
+        fake,
+        {"chat-a": _chat("chat-a")},
+        list_messages=MagicMock(return_value=([_message("first")], {"SK": "more"})),
+    ).json()
+
+    assert body["manifest"]["complete"] is False
+
+
+# ── scoping ───────────────────────────────────────────────────────────────
+
+
+def test_export_withholds_sessions_the_caller_does_not_own():
+    fake = _export_agentcore(
+        [(["mine", "theirs"], None)],
+        {
+            "mine": [_event("e1", ("USER", "my message"))],
+            "theirs": [_event("e1", ("USER", "their secret"))],
+        },
+    )
+    chats = {"mine": _chat("mine"), "theirs": _chat("theirs", user_id=INTRUDER)}
+
+    body = _export_call(fake, chats, list_chats=MagicMock(return_value=([], None))).json()
+
+    assert [r["text"] for r in body["memory_records"]] == ["my message"]
+    serialized = json.dumps(body)
+    assert "their secret" not in serialized
+    assert "theirs" not in serialized
+
+
+def test_export_withholding_is_logged_as_the_partition_canary(monkeypatch: pytest.MonkeyPatch):
+    fake_logger = MagicMock()
+    monkeypatch.setattr(memory_api, "logger", fake_logger)
+    fake = _export_agentcore([(["theirs"], None)], {"theirs": [_event("e1", ("USER", "secret"))]})
+
+    _export_call(fake, {"theirs": _chat("theirs", user_id=INTRUDER)})
+
+    fmt, user_hash, sessions = fake_logger.warning.call_args.args
+    assert fmt.startswith("memory.export_sessions_withheld")
+    assert sessions == 1
+    # The raw sub is an email — fingerprinted, never logged raw.
+    assert user_hash == fingerprint_id(OWNER)
+
+
+def test_export_logs_nothing_on_a_clean_partition(monkeypatch: pytest.MonkeyPatch):
+    fake_logger = MagicMock()
+    monkeypatch.setattr(memory_api, "logger", fake_logger)
+    fake = _export_agentcore([(["mine"], None)], {"mine": [_event("e1", ("USER", "hi"))]})
+
+    _export_call(fake, {"mine": _chat("mine")})
+
+    fake_logger.warning.assert_not_called()
+
+
+def test_export_scopes_to_the_token_claim_alone():
+    fake = _export_agentcore([(["mine"], None)], {"mine": [_event("e1", ("USER", "hi"))]})
+
+    _export_call(fake, {"mine": _chat("mine")})
+
+    expected = memory_api.derive_actor_id(OWNER)
+    for call in fake.list_sessions.call_args_list:
+        assert call.kwargs["actorId"] == expected
+
+
+def test_export_ignores_a_rogue_actor_parameter():
+    # Scope comes from the token claim only ("agents swap tokens to switch
+    # context"); there is no actor / user parameter, so a supplied one must
+    # be ignored rather than honoured.
+    fake = _export_agentcore([(["mine"], None)], {"mine": [_event("e1", ("USER", "hi"))]})
+
+    _export_call(
+        fake,
+        {"mine": _chat("mine")},
+        params={"actor_id": INTRUDER, "user_id": INTRUDER},
+    )
+
+    expected = memory_api.derive_actor_id(OWNER)
+    for call in fake.list_sessions.call_args_list:
+        assert call.kwargs["actorId"] == expected
+
+
+# ── recall kill-switch ────────────────────────────────────────────────────
+
+
+def test_export_flags_nothing_as_recalled_while_the_kill_switch_is_off(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("CHANNEL_RECALL_ENABLED", "0")
+    fake = _export_agentcore([(["chat-a"], None)], {"chat-a": [_event("e1", ("USER", "hi"))]})
+
+    body = _export_call(fake, {"chat-a": _chat("chat-a")}).json()
+
+    assert body["manifest"]["recall_window"]["enabled"] is False
+    assert [r["used_in_recall"] for r in body["memory_records"]] == [False]
+    # The window probe is skipped entirely — only the paged drain runs.
+    assert all("maxResults" in c.kwargs for c in fake.list_sessions.call_args_list)
+
+
+# ── audit trail ───────────────────────────────────────────────────────────
+
+
+def test_export_writes_an_audit_event_with_counts_only():
+    put_audit = MagicMock(return_value={})
+    fake = _export_agentcore(
+        [(["chat-a"], None)], {"chat-a": [_event("e1", ("USER", "secret sauce"))]}
+    )
+    summary = ChatSummary(
+        chat_id="chat-a", text="gist", covers_through="MSG#1", updated_at="2026-07-30T12:00:00Z"
+    )
+
+    _export_call(
+        fake,
+        {"chat-a": _chat("chat-a")},
+        list_messages=MagicMock(return_value=([_message("hello")], None)),
+        summaries={"chat-a": summary},
+        put_audit=put_audit,
+    )
+
+    kwargs = put_audit.call_args.kwargs
+    assert kwargs["event_type"] == "memory.exported"
+    assert kwargs["actor_id"] == OWNER
+    assert kwargs["details"] == {
+        "memory_records": 1,
+        "chat_summaries": 1,
+        "chats": 1,
+        "messages": 1,
+    }
+    # An audit row is a trail, not a second copy of the data it records.
+    serialized = json.dumps(kwargs["details"])
+    assert "secret sauce" not in serialized
+    assert "hello" not in serialized
+    assert "gist" not in serialized
+
+
+def test_export_fails_closed_when_the_audit_write_fails():
+    # Nothing has been disclosed yet, so the export refuses rather than
+    # handing over a whole account with no compliance trail.
+    put_audit = MagicMock(side_effect=RuntimeError("ddb down"))
+    fake = _export_agentcore([([], None)], {})
+
+    with pytest.raises(RuntimeError, match="ddb down"):
+        _export_call(fake, {}, put_audit=put_audit)
+
+
+# ── metrics ───────────────────────────────────────────────────────────────
+
+
+def test_export_emits_the_success_counter():
+    fake = _export_agentcore([([], None)], {})
+
+    with patch.object(memory_api, "record_memory_export_outcome", new=AsyncMock()) as counter:
+        _export_call(fake, {})
+
+    counter.assert_awaited_once_with(success=True)
+
+
+def test_export_emits_the_failure_counter_and_re_raises():
+    fake = _export_agentcore([([], None)], {})
+    fake.list_sessions.side_effect = RuntimeError("agentcore down")
+
+    with (
+        patch.object(memory_api, "record_memory_export_outcome", new=AsyncMock()) as counter,
+        pytest.raises(RuntimeError, match="agentcore down"),
+    ):
+        _export_call(fake, {})
+
+    counter.assert_awaited_once_with(success=False)
+
+
+# ── pagination backstop ───────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_paginate_stops_at_the_page_cap_and_says_so(monkeypatch: pytest.MonkeyPatch):
+    """A paginator that never terminates must not burn the Lambda timeout.
+
+    Truncating here is the lesser evil, but a silent truncation would be
+    exactly the lie this surface exists to stop — hence both the log line
+    and the ``drained=False`` the manifest is built from.
+    """
+    fake_logger = MagicMock()
+    monkeypatch.setattr(memory_api, "logger", fake_logger)
+
+    async def _never_ends(token: Any) -> tuple[list[int], str]:
+        return [1], "always-more"
+
+    items, drained = await memory_api._paginate(_never_ends, what="sessions")
+
+    assert len(items) == memory_api._EXPORT_MAX_PAGES
+    assert drained is False
+    fmt, what, pages = fake_logger.warning.call_args.args
+    assert fmt.startswith("memory.export_page_cap_hit")
+    assert (what, pages) == ("sessions", memory_api._EXPORT_MAX_PAGES)
+
+
+@pytest.mark.asyncio
+async def test_paginate_reports_drained_when_the_walk_finishes():
+    async def _one_page(token: Any) -> tuple[list[int], None]:
+        return [1, 2], None
+
+    assert await memory_api._paginate(_one_page, what="chats") == ([1, 2], True)
+
+
+def test_export_route_is_mounted_under_the_api_prefix():
+    assert EXPORT_URL in {route.path for route in app.routes}
