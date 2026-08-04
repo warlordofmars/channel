@@ -206,7 +206,18 @@ export default function MemorySection() {
       return group.records.length > 0;
     });
 
-  const storesNothing = groups.length === 0 && summaries.length === 0;
+  // "Nothing stored yet" is a claim about the whole store, so withheld
+  // records have to count — `withheld_record_count > 0` means records DO
+  // exist, they just couldn't be matched to one of the caller's chats.
+  // Reassuring a user that their store is empty while the note directly
+  // above it says otherwise would be exactly the silent lie this panel
+  // exists to stop.
+  const storesNothing = groups.length === 0 && summaries.length === 0 && withheld === 0;
+  // Distinct from the above: the store has records, but this kind filter
+  // matches none of them. Gated on `groups.length` rather than
+  // `!storesNothing` so a page of summaries-only chats — or a withheld-only
+  // page — doesn't claim a filter hid something it never had.
+  const filteredToNothing = groups.length > 0 && visibleGroups.length === 0;
 
   return (
     <div className="set-group">
@@ -257,7 +268,7 @@ export default function MemorySection() {
             </p>
           )}
 
-          {!storesNothing && visibleGroups.length === 0 && (
+          {filteredToNothing && (
             <p className="mem-empty">No stored records of this kind.</p>
           )}
 

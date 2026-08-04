@@ -213,6 +213,20 @@ describe("MemorySection", () => {
       expect(screen.getByText(/its oldest aren't listed/)).toBeTruthy();
     });
 
+    it("never claims the store is empty while records are being withheld", async () => {
+      // Records exist — they just couldn't be matched to one of the caller's
+      // chats — so the reassurance would contradict the note above it.
+      api.listMemoryRecords.mockResolvedValueOnce(
+        page({ withheld_record_count: 2 }),
+      );
+      await renderReady();
+
+      expect(screen.getByRole("status").textContent).toContain("At least 2 stored records");
+      expect(screen.queryByText(/Nothing stored yet/)).toBeNull();
+      // Nor is this a filter result — no filter hid anything.
+      expect(screen.queryByText("No stored records of this kind.")).toBeNull();
+    });
+
     it("flags withheld records as the read-boundary canary", async () => {
       api.listMemoryRecords.mockResolvedValueOnce(
         page({ groups: [group()], withheld_record_count: 1 }),
@@ -262,6 +276,9 @@ describe("MemorySection", () => {
       expect(within(section).getByText(/removed when the chat is deleted/)).toBeTruthy();
       expect(within(section).getByText("They discussed deployment.")).toBeTruthy();
       expect(within(section).getByText("Long thread")).toBeTruthy();
+      // A summaries-only page has no records for a filter to hide.
+      expect(screen.queryByText("No stored records of this kind.")).toBeNull();
+      expect(screen.queryByText(/Nothing stored yet/)).toBeNull();
     });
 
     it("falls back to the chat id for an untitled summarised chat", async () => {
