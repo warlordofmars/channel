@@ -826,3 +826,35 @@ export async function getAsset(chatId, assetId) {
   if (!response.ok) throw new ApiError("getAsset", response.status);
   return response.json();
 }
+
+// ---- Memory records (#475, epic #129) -------------------------------------
+//
+// The read half of "what Channel remembers" (#479), backing the Customize
+// panel. Returns `{groups, summaries, recall_window, withheld_record_count,
+// next_cursor}` — `groups` newest-chat-first with each chat's records
+// oldest-first, `summaries` the #245 read-only rolling head summaries, and
+// `recall_window` the LIVE caps read from `recall.py`. Render every number
+// in the panel from that envelope; a hand-copied `5` becomes a lie the first
+// time the cap moves.
+//
+// `limit` counts CHATS per page, not records. PAGINATION RULE: page on
+// `next_cursor` (null = exhausted), NEVER on `groups.length` — a chat whose
+// events carry no text yields no group, so a page can come back short while
+// the cursor is still live. `chatId` scopes the response to one chat and
+// always comes back with a null cursor; an id the caller doesn't own is a
+// 404 (not 403 — chat existence isn't leaked). A malformed or foreign
+// cursor is a 400 (`ApiError` with `status === 400`) — restart from page 1.
+//
+// Record and summary `text` is DATA: render it as plain text, never through
+// `renderMarkdown.jsx` (epic #129 decision 11 — see MemorySection.jsx).
+
+export async function listMemoryRecords({ cursor = null, limit = 10, chatId = null } = {}) {
+  const qs = new URLSearchParams({ limit: String(limit) });
+  if (cursor) qs.set("cursor", cursor);
+  if (chatId) qs.set("chat_id", chatId);
+  const response = await fetch(`${BASE}/api/memory/records?${qs}`, {
+    headers: await authHeader(),
+  });
+  if (!response.ok) throw new ApiError("listMemoryRecords", response.status);
+  return response.json();
+}
