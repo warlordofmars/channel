@@ -132,6 +132,34 @@ already been applied, so failing the response would claim a sign-out
 didn't happen when it did. Here nothing has been disclosed yet, so the
 export can fail closed and keep the invariant that every whole-account
 read left a trail. The caller sees a 5xx and can retry.
+
+## A caller with no memory partition (#527)
+
+Applies to both endpoints. An AgentCore actor partition is created lazily
+by the first memory *write*, so a user who has signed in but never had a
+chat turn has none, and every AgentCore read against them raises
+``ResourceNotFoundException``. Both endpoints answer that as **empty**,
+because it is: no partition means no records. The decision is made once, in
+``memory_records._agentcore_read``, so ``/records`` and ``/export`` cannot
+drift apart on it.
+
+Until #527 it was a **500 on both**, for exactly the users most likely to
+be asking what Channel knows about them — someone who has just signed up
+and gone straight to the Privacy page's export link.
+
+The narrowness is the point, and it is a data-integrity property rather
+than a style preference: only that one error code is absorbed, and every
+other AgentCore failure still surfaces as a 5xx. An export that reported
+"you have no memories" because AgentCore was throttling or refusing would
+be a claim about the user's own data that this module has no basis to
+make — and worse than the 500 it replaced, because a 500 is legible as a
+failure while a confident empty file is not. Same reasoning as
+``records_truncated`` and ``manifest.complete``: never present an unknown
+or partial result as a complete one.
+
+``manifest.complete`` therefore stays true for a partition-less user. It
+answers "did I get everything there is?", not "is there anything?" — the
+walks did finish, and there genuinely was nothing to walk.
 """
 
 from __future__ import annotations

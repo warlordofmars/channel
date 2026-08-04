@@ -26,6 +26,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from botocore.exceptions import ClientError
 from fastapi.testclient import TestClient
 
 os.environ.setdefault("CHANNEL_JWT_SECRET", "test-secret-for-unit-tests")
@@ -1076,3 +1077,163 @@ async def test_paginate_reports_drained_when_the_walk_finishes():
 
 def test_export_route_is_mounted_under_the_api_prefix():
     assert EXPORT_URL in {route.path for route in app.routes}
+
+
+# ══ A caller with no memory partition (#527) ══════════════════════════════
+#
+# Both endpoints returned 500 to every user who had signed in but never
+# chatted: an AgentCore actor partition is created lazily by the first
+# memory WRITE, so those users have none and every read raises
+# ``ResourceNotFoundException``.
+#
+# These tests make the mocked client RAISE. The suite already had
+# ``test_export_of_an_empty_account_is_valid_not_an_error``, whose mock
+# RETURNS an empty page — and that is exactly why this shipped twice: a
+# returning mock cannot tell "no actor" from "empty actor", which is the
+# distinction that was broken. Each 200 assertion below is paired with one
+# proving a DIFFERENT ``ClientError`` still produces a 500, because an
+# over-broad handler would trade a visible failure for a confident, wrong
+# "you have no memories" — on an export, a data-integrity claim we cannot
+# stand behind.
+
+#: A client that surfaces 5xx as a response instead of re-raising, so the
+#: status code a caller would actually receive is what gets asserted.
+error_client = TestClient(app, raise_server_exceptions=False)
+
+NO_PARTITION = "ResourceNotFoundException"
+
+
+def _agentcore_raising(code: str) -> MagicMock:
+    """A fake AgentCore where every read raises ``code``.
+
+    ``botocore.errorfactory.ResourceNotFoundException`` is generated from
+    the service model at runtime and subclasses ``ClientError`` with this
+    response shape, so the base class with the right code drives the same
+    branch the vendor exception would.
+    """
+    error = ClientError({"Error": {"Code": code, "Message": "Actor x not found"}}, "ListSessions")
+    fake = MagicMock()
+    fake.list_sessions.side_effect = error
+    fake.list_events.side_effect = error
+    return fake
+
+
+@pytest.mark.parametrize("params", [{}, {"chat_id": "chat-a"}])
+def test_records_for_a_user_with_no_memory_partition_is_empty_not_an_error(
+    params: dict[str, Any],
+):
+    """The bug: a signed-in user who has never chatted got a 500.
+
+    Both shapes are covered because they take different AgentCore paths —
+    the unfiltered page enumerates sessions, while ``?chat_id=`` skips
+    straight to ``ListEvents`` on a chat the caller owns.
+    """
+    fake = _agentcore_raising(NO_PARTITION)
+
+    resp = _call(fake, {"chat-a": _chat("chat-a")}, params=params)
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["groups"] == []
+    assert body["summaries"] == []
+    assert body["withheld_record_count"] == 0
+    assert body["next_cursor"] is None
+    # The window is still reported honestly — the caps are real, the caller
+    # simply has nothing sitting in them.
+    assert body["recall_window"]["max_sessions"] == _RECALL_MAX_SESSIONS
+
+
+def test_records_is_still_empty_with_the_recall_kill_switch_off(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """With recall disabled the recall probe is skipped, so ``ListSessions``
+    inside ``list_sessions_page`` is the FIRST AgentCore call — a fix
+    confined to the probe would leave this path 500ing."""
+    monkeypatch.setenv("CHANNEL_RECALL_ENABLED", "0")
+    fake = _agentcore_raising(NO_PARTITION)
+
+    resp = _call(fake, {})
+
+    assert resp.status_code == 200
+    assert resp.json()["groups"] == []
+    assert resp.json()["recall_window"]["enabled"] is False
+
+
+@pytest.mark.parametrize("code", ["ThrottlingException", "AccessDeniedException"])
+def test_records_still_500s_when_agentcore_fails_for_any_other_reason(code: str):
+    """The narrowness that makes the empty answer trustworthy."""
+    fake = _agentcore_raising(code)
+
+    with (
+        patch.object(memory_api, "_agentcore_client", return_value=fake),
+        patch.object(memory_api, "_memory_id_for_env", return_value="mem-1"),
+        patch("channel.storage.get_chat_by_id", {}.get),
+        patch("channel.storage.get_chat_summary", {}.get),
+    ):
+        resp = error_client.get(URL, headers=_headers())
+
+    assert resp.status_code == 500
+
+
+def test_export_for_a_user_with_no_memory_partition_is_empty_not_an_error():
+    """The Privacy page's promise, for the account most likely to test it:
+    brand new, no chats, straight to "export my data"."""
+    fake = _agentcore_raising(NO_PARTITION)
+
+    resp = _export_call(fake, {})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["memory_records"] == []
+    assert body["chat_summaries"] == []
+    assert body["chats"] == []
+    # ``complete`` answers "did I get everything there is?", not "is there
+    # anything?" — the walks finished and there was nothing to walk.
+    assert body["manifest"]["complete"] is True
+    assert body["manifest"]["truncated_chat_ids"] == []
+
+
+def test_export_of_an_empty_partition_still_writes_its_audit_row():
+    # An export that discloses nothing is still a whole-account read, and
+    # the trail is what makes that claim checkable later.
+    put_audit = MagicMock(return_value={})
+
+    _export_call(_agentcore_raising(NO_PARTITION), {}, put_audit=put_audit)
+
+    assert put_audit.call_args.kwargs["event_type"] == "memory.exported"
+    assert put_audit.call_args.kwargs["details"]["memory_records"] == 0
+
+
+@pytest.mark.parametrize("code", ["ThrottlingException", "AccessDeniedException"])
+def test_export_still_500s_when_agentcore_fails_for_any_other_reason(code: str):
+    """The one that matters most: a downloadable file asserting "you have no
+    memories" during an AgentCore outage would be a data-integrity claim
+    this endpoint has no basis to make."""
+    fake = _agentcore_raising(code)
+
+    with (
+        patch.object(memory_api, "_agentcore_client", return_value=fake),
+        patch.object(memory_api, "_memory_id_for_env", return_value="mem-1"),
+        patch("channel.storage.get_chat_by_id", {}.get),
+        patch("channel.storage.list_chats_for_user", MagicMock(return_value=([], None))),
+        patch("channel.storage.list_messages", MagicMock(return_value=([], None))),
+        patch("channel.storage.get_chat_summary", {}.get),
+        patch("channel.storage.put_audit_event", MagicMock(return_value={})),
+    ):
+        resp = error_client.get(EXPORT_URL, headers=_headers())
+
+    assert resp.status_code == 500
+
+
+def test_export_counts_a_failed_agentcore_read_as_a_failed_export():
+    """The failure counter must not be skipped by the new handler — an
+    absorbed missing partition is a success, anything else is not."""
+    fake = _agentcore_raising("ThrottlingException")
+
+    with (
+        patch.object(memory_api, "record_memory_export_outcome", new=AsyncMock()) as counter,
+        pytest.raises(ClientError),
+    ):
+        _export_call(fake, {})
+
+    counter.assert_awaited_once_with(success=False)
