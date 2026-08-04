@@ -257,6 +257,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   accepts any non-empty credentials), but it also masked the developer's
   real AWS credentials from Bedrock. Now ambient credentials flow
   through; DDB Local still works.
+- `GET /api/memory/records` and `GET /api/memory/export` no longer 500 for
+  a signed-in user who has never had a chat turn (#527). An AgentCore
+  actor partition is created lazily by the first memory *write*, so those
+  users have none, and every read against them raised
+  `ResourceNotFoundException`. Both endpoints now answer with an empty
+  result — no partition means no records — via a shared
+  `memory_records._agentcore_read` seam so `/records` and `/export` can't
+  drift apart on it. Only that one AgentCore error code is absorbed; any
+  other failure (throttling, access denied, a service fault) still
+  surfaces as a 5xx, since an export claiming "you have no memories"
+  during an AgentCore outage would be a data-integrity claim the endpoint
+  has no basis to make.
 - Swapped Opus 4.7 for Opus 4.6 across the model allowlist, IAM grants,
   and SPA defaults. Opus 4.7 requires contacting AWS Sales for account
   enablement, which is not a realistic prerequisite for a dev iteration

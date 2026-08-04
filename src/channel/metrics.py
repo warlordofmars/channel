@@ -156,6 +156,31 @@ async def record_memory_tool_recall_outcome(success: bool) -> None:
     await emit_metric(metric)
 
 
+async def record_memory_export_outcome(success: bool) -> None:
+    """Emit a CloudWatch counter for one ``GET /api/memory/export`` (#476).
+
+    Kept SEPARATE from every other memory counter for the same reason #400
+    split the tool counters off the hook counters: an export is a rare,
+    deliberate, whole-account read, and folding it into
+    ``MemoryWriteSuccesses`` / ``MemoryToolRecallSuccesses`` would let one
+    user pressing "download my data" move a hook-health line on the admin
+    dashboard. A separate counter also makes "how often is the Privacy
+    page's export promise actually used" answerable without a log query.
+
+    ``success=False`` covers any failure that reaches the client as a 5xx —
+    an AgentCore or DynamoDB read that raised, or the audit write that
+    refused (the export fails closed rather than disclosing data it could
+    not record; see ``api/memory.py``).
+
+    Counter-only — same cardinality-risk rationale as
+    :func:`record_memory_write_outcome`. No per-actor dimension, and
+    deliberately no record/chat *count* dimension either: volume belongs in
+    the audit event's ``details``, which is already written per export.
+    """
+    metric = "MemoryExportSuccesses" if success else "MemoryExportFailures"
+    await emit_metric(metric)
+
+
 async def record_auto_title_outcome(success: bool) -> None:
     """Emit a CloudWatch counter for one auto-title attempt.
 
