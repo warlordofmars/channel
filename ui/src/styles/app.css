@@ -1413,6 +1413,96 @@ html.is-electron-mac .sb-top {
 }
 .mcp-pill:hover { background: var(--canvas); }
 
+/* ---------- "What Channel remembers" (#479, epic #129) ----------
+   Read-only memory panel inside /app/customize. Self-contained block;
+   every colour is a token from channel.css.
+
+   The prose classes below carry their own type scale rather than reusing
+   `.hint`: that rule is scoped `.set-row .hint`, so a `.hint` sitting
+   directly under `.set-group` — as this panel's notes do — inherits body
+   size and reads as content instead of annotation. */
+.mem-lead {
+  margin: 0 0 12px;
+  font-size: 12.5px; line-height: 1.55; color: var(--ink-soft);
+}
+.mem-note {
+  margin: 8px 0 0;
+  font-size: 12.5px; line-height: 1.55; color: var(--ink-soft);
+}
+.mem-empty {
+  margin: 14px 0 0;
+  font-size: 13.5px; color: var(--ink-soft);
+}
+
+.mem-filters {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 9px;
+  margin: 14px 0;
+}
+.mem-chatfilter {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 6px 12px;
+  border: 1px solid var(--border); border-radius: var(--r-pill);
+  background: var(--raised); color: var(--ink-soft);
+  font-family: var(--font-mono); font-size: 12px; font-weight: 600;
+  cursor: pointer;
+  transition: border-color .12s, color .12s;
+}
+.mem-chatfilter:hover { border-color: var(--ink-faint); color: var(--ink); }
+
+.mem-group { margin-bottom: 18px; }
+.mem-group-head {
+  display: flex; align-items: center; gap: 6px;
+  margin: 0 0 8px;
+  font-size: 12.5px; font-weight: 600; color: var(--ink-soft);
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+
+.mem-record {
+  padding: 12px 14px; margin-bottom: 7px;
+  background: var(--raised);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-md);
+}
+.mem-record-meta {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  margin-bottom: 6px;
+}
+.mem-kind {
+  font-size: 11px; font-weight: 600; font-family: var(--font-mono);
+  color: var(--accent-ink); background: var(--accent-soft);
+  padding: 3px 8px; border-radius: var(--r-pill);
+}
+.mem-role { font-size: 12px; font-weight: 600; color: var(--ink); }
+.mem-time { font-size: 12px; color: var(--ink-faint); font-family: var(--font-mono); }
+.mem-badge {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 11px; font-weight: 600; font-family: var(--font-mono);
+  color: var(--ink-soft);
+  border: 1px solid var(--border);
+  padding: 2px 8px; border-radius: var(--r-pill);
+}
+
+/* `pre-wrap` is what makes the stored bytes legible without a Markdown
+   pass — see the render-site comment in MemorySection.jsx (#465). */
+.mem-text {
+  margin: 0;
+  font-size: 13.5px; line-height: 1.55; color: var(--ink);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.mem-loadmore {
+  display: block; margin: 14px auto 0; padding: 8px 18px;
+  border: 1px solid var(--border); border-radius: var(--r-pill);
+  background: var(--raised); color: var(--ink);
+  font-family: var(--font-sans); font-size: 13px; font-weight: 600;
+  cursor: pointer;
+  transition: border-color .12s, background .12s;
+}
+.mem-loadmore:hover { border-color: var(--ink-faint); background: var(--raised-2); }
+.mem-loadmore:disabled { opacity: 0.6; cursor: default; }
+
 /* ============================================================
    MOBILE — responsive chat-app layout (Tier 1 of #125, issue #425)
 

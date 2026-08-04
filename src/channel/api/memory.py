@@ -92,6 +92,74 @@ isn't leaked.
 No caching. The recall hook's 5-turn cache exists to keep a hot path off
 the network; this is admin-style usage, and a stale "what do you remember
 about me" list is worse than a slow one.
+
+## ``GET /api/memory/export`` (#476)
+
+The other half of the Privacy page's standing promise — "you can export or
+delete your data at any time" — which shipped to production before anything
+implemented it.
+
+**"Your data" is not "your AgentCore events",** so this is a full *account*
+export: ``memory_records`` (the same read model ``/records`` serves),
+``chat_summaries`` (#245 head summaries) and ``chats`` with their messages.
+Every collection is walked to completion rather than paged, because an
+export that silently stopped at page one would be the same silent lie the
+rest of this module exists to stop. Both scoping gates above apply
+unchanged — actor partition, then per-session ownership against the raw
+JWT sub — so a foreign session in the partition is dropped here exactly as
+it is there.
+
+The ``manifest`` is what makes the file self-describing a year later: it
+carries the live ``recall_window`` caps and the note that only the
+``used_in_recall`` slice is ever loaded into a new conversation, so a
+reader can tell stored-but-unused from actually-used without reading this
+repo. It also answers "is this everything?" outright: ``complete`` is false
+whenever any walk stopped short, and ``truncated_chat_ids`` names the chats
+whose AgentCore history exceeded ``MAX_EVENTS_PER_SESSION`` so their oldest
+records are absent. Both live in the *file* rather than only in a log line,
+because a log line does not travel with a download — same principle as
+``records_truncated`` on ``/records``: a partial export presented as
+complete is worse than a partial export that says so.
+
+One synchronous JSON response, not a job plus a presigned URL. Current
+volumes fit the Lambda response budget; speculative export infrastructure
+is its own issue if that stops being true.
+
+**The audit write fails the request** (``memory.exported``, counts only —
+never record text). That is deliberately the *opposite* call from
+``sessions._audit_revocation``, which is best-effort: there the action has
+already been applied, so failing the response would claim a sign-out
+didn't happen when it did. Here nothing has been disclosed yet, so the
+export can fail closed and keep the invariant that every whole-account
+read left a trail. The caller sees a 5xx and can retry.
+
+## A caller with no memory partition (#527)
+
+Applies to both endpoints. An AgentCore actor partition is created lazily
+by the first memory *write*, so a user who has signed in but never had a
+chat turn has none, and every AgentCore read against them raises
+``ResourceNotFoundException``. Both endpoints answer that as **empty**,
+because it is: no partition means no records. The decision is made once, in
+``memory_records._agentcore_read``, so ``/records`` and ``/export`` cannot
+drift apart on it.
+
+Until #527 it was a **500 on both**, for exactly the users most likely to
+be asking what Channel knows about them — someone who has just signed up
+and gone straight to the Privacy page's export link.
+
+The narrowness is the point, and it is a data-integrity property rather
+than a style preference: only that one error code is absorbed, and every
+other AgentCore failure still surfaces as a 5xx. An export that reported
+"you have no memories" because AgentCore was throttling or refusing would
+be a claim about the user's own data that this module has no basis to
+make — and worse than the 500 it replaced, because a 500 is legible as a
+failure while a confident empty file is not. Same reasoning as
+``records_truncated`` and ``manifest.complete``: never present an unknown
+or partial result as a complete one.
+
+``manifest.complete`` therefore stays true for a partition-less user. It
+answers "did I get everything there is?", not "is there anything?" — the
+walks did finish, and there genuinely was nothing to walk.
 """
 
 from __future__ import annotations
@@ -102,10 +170,14 @@ import binascii
 import json
 import logging
 import os
-from typing import Any
+from collections.abc import Awaitable, Callable
+from datetime import datetime, timezone
+from functools import partial
+from typing import Any, TypeVar
 
 import boto3
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import JSONResponse
 
 from channel import storage
 from channel.agents.memory import derive_actor_id, get_or_create_memory
@@ -121,7 +193,8 @@ from channel.agents.memory_records import (
 from channel.api._auth import require_mgmt_user
 from channel.api.chats import _load_owned_chat
 from channel.logging_config import fingerprint_id
-from channel.models import Chat
+from channel.metrics import record_memory_export_outcome
+from channel.models import Chat, Message
 
 logger = logging.getLogger(__name__)
 
@@ -350,3 +423,321 @@ async def list_memory_records(
         "withheld_record_count": withheld_records,
         "next_cursor": _encode_cursor(page_token, actor_id) if page_token else None,
     }
+
+
+# ── Full account export (#476) ────────────────────────────────────────────
+
+#: Bumped when the export's SHAPE changes in a way a reader must notice —
+#: a field removed or re-meaning, not a field added. It exists so a file
+#: found on a disk in a year identifies its own vintage.
+_EXPORT_SCHEMA_VERSION = 1
+
+#: Page sizes for the three walks. Larger than the interactive
+#: ``/records`` page because nobody is reading this incrementally: the
+#: whole account is materialised before a byte is written, so the only
+#: thing page size buys is fewer round trips.
+_EXPORT_SESSION_PAGE_SIZE = 50
+_EXPORT_CHAT_PAGE_SIZE = 50
+_EXPORT_MESSAGE_PAGE_SIZE = 100
+
+#: Ceiling on pages per walk — a backstop against a paginator that keeps
+#: handing back the same token, which in a synchronous Lambda handler is
+#: not a slow response but a burnt function timeout. Set far above any
+#: plausible real account (200 × 100 = 20 000 messages in one chat), and a
+#: walk that hits it logs rather than silently truncating.
+_EXPORT_MAX_PAGES = 200
+
+#: Verbatim in the manifest. The single sentence that stops a reader
+#: mistaking "Channel stored this" for "Channel reads this every turn" —
+#: the confusion #227 was, and the reason every record carries
+#: ``used_in_recall``.
+_EXPORT_NOTE = (
+    "Channel stores every record below, but only the slice marked "
+    "used_in_recall is loaded into a new conversation."
+)
+
+_T = TypeVar("_T")
+
+
+async def _paginate(
+    fetch: Callable[[Any], Awaitable[tuple[list[_T], Any]]], *, what: str
+) -> tuple[list[_T], bool]:
+    """Drain a ``(page, next_token)`` paginator → ``(items, drained)``.
+
+    One helper for all three walks (AgentCore sessions, DynamoDB chats,
+    DynamoDB messages) because they differ only in their fetch closure, and
+    a single drain is a single place for the page ceiling to live. ``fetch``
+    takes the previous token (``None`` first) and returns the next page
+    with the token after it.
+
+    Falling out of the loop means the ceiling was reached with a token still
+    outstanding, so ``drained`` is false. It is **returned**, not just
+    logged: a log line does not travel with a downloaded file, and an
+    incomplete export that renders as a complete one is precisely the silent
+    lie this surface exists to stop. The caller propagates it to
+    ``manifest.complete``.
+    """
+    items: list[_T] = []
+    token: Any = None
+    for _ in range(_EXPORT_MAX_PAGES):
+        page, token = await fetch(token)
+        items.extend(page)
+        if not token:
+            return items, True
+    logger.warning("memory.export_page_cap_hit what=%s pages=%d", what, _EXPORT_MAX_PAGES)
+    return items, False
+
+
+async def _export_memory_records(
+    client: Any,
+    *,
+    memory_id: str,
+    actor_id: str,
+    user_id: str,
+    window: set[str],
+) -> tuple[list[dict[str, Any]], list[str], bool]:
+    """Owned memory records → ``(records, truncated, drained)``.
+
+    The same enumeration ``/records`` serves, drained across every
+    ``ListSessions`` page instead of one, and flattened: the export is a
+    file, so each record carries its own ``chat_id`` rather than being
+    nested under a group. ``truncated`` lists the sessions whose history
+    exceeded ``MAX_EVENTS_PER_SESSION``; ``drained`` is false if the session
+    walk hit the page ceiling.
+
+    The ownership gate is the same one §Scoping describes, and it matters
+    more here than on ``/records``: this response is a downloadable file, so
+    a foreign session leaking into it leaks into wherever that file ends up.
+    Withheld sessions are logged (the standing partition canary) but not
+    counted per-record — that would cost one ``ListEvents`` per foreign
+    session to enrich an alarm that fires on ``> 0`` either way.
+    """
+    session_summaries, drained = await _paginate(
+        lambda tok: list_sessions_page(
+            client,
+            memory_id=memory_id,
+            actor_id=actor_id,
+            limit=_EXPORT_SESSION_PAGE_SIZE,
+            next_token=tok,
+        ),
+        what="sessions",
+    )
+    session_ids = list(
+        dict.fromkeys(s["sessionId"] for s in session_summaries if s.get("sessionId"))
+    )
+    owned = await asyncio.to_thread(resolve_owned_chats, session_ids, user_id=user_id)
+
+    records: list[dict[str, Any]] = []
+    truncated_chat_ids: list[str] = []
+    for session_id in session_ids:
+        if session_id not in owned:
+            continue
+        session_records, truncated = await list_session_records(
+            client,
+            memory_id=memory_id,
+            actor_id=actor_id,
+            session_id=session_id,
+            in_recall_window=session_id in window,
+        )
+        if truncated:
+            truncated_chat_ids.append(session_id)
+        records.extend({**record.to_dict(), "chat_id": session_id} for record in session_records)
+
+    withheld = len(session_ids) - len(owned)
+    if withheld:
+        logger.warning(
+            "memory.export_sessions_withheld user_hash=%s sessions=%d",
+            fingerprint_id(user_id),
+            withheld,
+        )
+    return records, truncated_chat_ids, drained
+
+
+def _message_page(chat_id: str, token: Any) -> Awaitable[tuple[list[Message], Any]]:
+    """One page of a chat's messages, oldest first — a :func:`_paginate` fetcher.
+
+    Module-level (rather than a closure inside the chat loop) so ``chat_id``
+    binds at ``partial`` time and mypy can see the signature.
+    """
+    return asyncio.to_thread(
+        storage.list_messages, chat_id, limit=_EXPORT_MESSAGE_PAGE_SIZE, cursor=token
+    )
+
+
+async def _export_chats(
+    user_id: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int, bool]:
+    """Chats + messages → ``(chats, summaries, message_count, drained)``.
+
+    ``include_archived=True``: an archived chat is still the user's data,
+    and the export carries the flag so the distinction survives rather than
+    the rows vanishing. Newest chat first, matching ``list_chats_for_user``
+    and the sidebar.
+
+    Head summaries (#245) are collected in the same pass because they are
+    per-chat point reads. They belong in the export at all because they are
+    injected into their chat's system prompt on *every* turn, which makes
+    them more load-bearing than most AgentCore records.
+
+    ``drained`` is the AND over the chat walk and every per-chat message
+    walk — one incomplete walk anywhere makes the whole export incomplete,
+    which is what ``manifest.complete`` has to answer.
+    """
+    chats, drained = await _paginate(
+        lambda tok: asyncio.to_thread(
+            storage.list_chats_for_user,
+            user_id,
+            limit=_EXPORT_CHAT_PAGE_SIZE,
+            cursor=tok,
+            include_archived=True,
+        ),
+        what="chats",
+    )
+
+    exported: list[dict[str, Any]] = []
+    summaries: list[dict[str, Any]] = []
+    message_count = 0
+    for chat in chats:
+        # ``partial`` rather than a closure over ``chat``: the fetcher is
+        # called from inside ``_paginate`` while the loop variable is still
+        # live, so late binding would be correct today and wrong the first
+        # time this loop changes shape (ruff's B023 says the same).
+        messages, messages_drained = await _paginate(
+            partial(_message_page, chat.chat_id), what="messages"
+        )
+        drained = drained and messages_drained
+        message_count += len(messages)
+        exported.append(
+            {
+                "chat_id": chat.chat_id,
+                "title": chat.title,
+                "created_at": chat.created_at,
+                "archived": chat.archived,
+                "messages": [
+                    {"role": m.role.value, "text": m.text, "created_at": m.created_at}
+                    for m in messages
+                ],
+            }
+        )
+        summary = await asyncio.to_thread(storage.get_chat_summary, chat.chat_id)
+        if summary is not None:
+            summaries.append(
+                {
+                    "chat_id": summary.chat_id,
+                    "text": summary.text,
+                    "covers_through": summary.covers_through,
+                    "updated_at": summary.updated_at,
+                }
+            )
+    return exported, summaries, message_count, drained
+
+
+async def _build_export(user_id: str) -> tuple[dict[str, Any], str]:
+    """Assemble the export document → ``(payload, export_date)``.
+
+    Separate from the route so the route is only the metric wrapper and the
+    download headers, and so every read *and* the audit write sit inside one
+    try/except that can count a failure exactly once.
+    """
+    actor_id = derive_actor_id(user_id)
+    client = _agentcore_client()
+    memory_id = await asyncio.to_thread(_memory_id_for_env)
+
+    # Identical short-circuit to ``/records``: a disabled hook injects
+    # nothing, so no record can honestly be flagged ``used_in_recall`` and
+    # the extra ListSessions is wasted. The manifest reports the same
+    # ``enabled`` flag, so the file can never contradict itself.
+    recall_enabled = _recall_enabled()
+    window: set[str] = (
+        await recall_window_session_ids(client, memory_id=memory_id, actor_id=actor_id)
+        if recall_enabled
+        else set()
+    )
+
+    records, truncated_chat_ids, records_drained = await _export_memory_records(
+        client,
+        memory_id=memory_id,
+        actor_id=actor_id,
+        user_id=user_id,
+        window=window,
+    )
+    chats, summaries, message_count, chats_drained = await _export_chats(user_id)
+
+    now = datetime.now(timezone.utc)
+    payload = {
+        "manifest": {
+            "exported_at": now.isoformat(),
+            "actor_id": actor_id,
+            "schema_version": _EXPORT_SCHEMA_VERSION,
+            "recall_window": recall_window(enabled=recall_enabled),
+            # The single answer to "is this everything?", because a log line
+            # does not travel with a downloaded file. False when a walk hit
+            # the page ceiling OR a chat's memory history exceeded the
+            # per-session cap; ``truncated_chat_ids`` says which chats, and
+            # the page-cap case additionally logs ``export_page_cap_hit``.
+            "complete": records_drained and chats_drained and not truncated_chat_ids,
+            "truncated_chat_ids": truncated_chat_ids,
+            "note": _EXPORT_NOTE,
+        },
+        "memory_records": records,
+        "chat_summaries": summaries,
+        "chats": chats,
+    }
+
+    # Counts only — never record text. An audit row is a compliance trail,
+    # not a second copy of the data it is recording, and this trail has a
+    # 365-day TTL against content that a delete (#478) is meant to remove.
+    await asyncio.to_thread(
+        storage.put_audit_event,
+        event_type="memory.exported",
+        actor_id=user_id,
+        details={
+            "memory_records": len(records),
+            "chat_summaries": len(summaries),
+            "chats": len(chats),
+            "messages": message_count,
+        },
+    )
+    return payload, now.strftime("%Y-%m-%d")
+
+
+@router.get(
+    "/export",
+    responses={200: {"description": "Full account data export as a JSON download"}},
+)
+async def export_account_data(
+    claims: dict[str, Any] = Depends(require_mgmt_user),
+) -> JSONResponse:
+    """Download everything Channel holds for the caller.
+
+    No actor / user parameter, by the same rule as ``/records``: scope comes
+    from the token claim ("agents swap tokens to switch context"), so there
+    is nothing to tamper with.
+
+    ``Content-Disposition: attachment`` so a browser saves the file instead
+    of rendering it — which also keeps this attacker-influenced text out of
+    a top-level document context, reinforced by ``nosniff``.
+
+    ``no-store`` for the same reason ``/api/me/prefs`` and
+    ``/api/me/sessions`` set it, with rather more at stake: without it
+    Chromium (browser and Electron renderer alike) heuristic-caches the
+    response, leaving a whole account's data — every chat message the user
+    has ever sent — sitting in an on-disk HTTP cache.
+    """
+    try:
+        payload, export_date = await _build_export(claims["sub"])
+    except Exception:
+        # Anything that reaches the client as a 5xx counts as a failed
+        # export, the audit write included — see the module docstring on
+        # why that one is allowed to fail the request.
+        await record_memory_export_outcome(success=False)
+        raise
+    await record_memory_export_outcome(success=True)
+    return JSONResponse(
+        content=payload,
+        headers={
+            "Content-Disposition": f'attachment; filename="channel-export-{export_date}.json"',
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )

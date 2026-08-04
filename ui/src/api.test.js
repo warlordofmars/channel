@@ -21,6 +21,7 @@ import {
   listChatAssets,
   listChats,
   listMCPServers,
+  listMemoryRecords,
   listModels,
   logout,
   patchChat,
@@ -1726,5 +1727,77 @@ describe("silent refresh", () => {
       await Promise.all([api.listModels(), api.listModels(), api.listModels()]);
       expect(refreshCalls()).toHaveLength(1);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Memory records (#475, epic #129) — backs the "What Channel remembers" panel
+// ---------------------------------------------------------------------------
+
+describe("memory records API client", () => {
+  let fetchMock;
+
+  beforeEach(() => {
+    localStorage.setItem(TOKEN_KEY, liveSession("test-token"));
+    fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  afterEach(() => {
+    localStorage.removeItem(TOKEN_KEY);
+    vi.unstubAllGlobals();
+  });
+
+  const emptyPage = {
+    groups: [],
+    summaries: [],
+    recall_window: {
+      max_sessions: 5,
+      events_per_session: 2,
+      text_truncate: 120,
+      ordering: "recency",
+      enabled: true,
+    },
+    withheld_record_count: 0,
+    next_cursor: null,
+  };
+
+  it("GETs /api/memory/records with auth and the default chats-per-page limit", async () => {
+    fetchMock.mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(emptyPage) });
+    const data = await listMemoryRecords();
+    const [url, opts] = fetchMock.mock.calls[0];
+    expect(url).toBe("/api/memory/records?limit=10");
+    expect(opts.headers.Authorization).toBe("Bearer test-token");
+    expect(data).toEqual(emptyPage);
+  });
+
+  it("carries the cursor and the chat scope in the query string", async () => {
+    fetchMock.mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(emptyPage) });
+    await listMemoryRecords({ limit: 25, cursor: "cur-1", chatId: "chat-7" });
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "/api/memory/records?limit=25&cursor=cur-1&chat_id=chat-7",
+    );
+  });
+
+  it("throws ApiError carrying the status on a malformed cursor (400)", async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 400,
+      json: () => Promise.resolve({ detail: "invalid cursor" }),
+    });
+    const err = await listMemoryRecords({ cursor: "bad" }).catch((e) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err.status).toBe(400);
+  });
+
+  it("throws ApiError 404 when the chat scope names a chat the caller doesn't own", async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 404,
+      json: () => Promise.resolve({ detail: "Chat not found" }),
+    });
+    const err = await listMemoryRecords({ chatId: "someone-elses" }).catch((e) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err.status).toBe(404);
   });
 });

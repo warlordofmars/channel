@@ -215,12 +215,33 @@ export function endSession() {
  * exactly those users five minutes *earlier* than the status quo. So
  * the still-valid token is used, and the session only ends once it is
  * genuinely unusable.
+ *
+ * **Exported for `AuthGate` (#520), which is the only caller outside
+ * this module.** `AuthGate` used to redirect to `/app/login` the instant
+ * a render saw an expired token, without ever reaching this function —
+ * so an in-session navigation an hour after sign-in bounced the user to
+ * Google while a live 30-day refresh cookie sat unused, and dev
+ * CloudWatch recorded zero `/api/*` 401s because no request was ever
+ * issued. The gate now awaits this instead of deciding for itself, which
+ * is deliberately *not* the same as exporting `refreshAccessToken`: this
+ * is the seam that already owns the whole policy — the pre-expiry skew,
+ * the post-refusal cooldown, the single-flight collapse, and above all
+ * the 401-only rule below. A second entry point into the rotation would
+ * be a second place for those four to drift, and #290 punishes the
+ * single-flight one by revoking the entire device family.
+ *
+ * Callers get back "the token to use, or `''` if there is none"; they do
+ * not get, and do not need, the reason. `""` means either that there was
+ * no session to begin with or that the session has just been ended here,
+ * and both answer the same question the same way.
  */
-async function accessToken() {
+export async function ensureAccessToken() {
   const { access_token: token, expires_at: expiresAt } = loadSession();
   // No session at all: let the request go out unauthenticated and 401.
   // AuthGate owns the redirect for that case; competing with it here
-  // would race two navigations on a cold load.
+  // would race two navigations on a cold load. AuthGate short-circuits
+  // on the same condition before it ever awaits this, so a visitor who
+  // has never signed in costs no `/auth/refresh` round trip either.
   if (!token) return "";
   if (expiresAt - Date.now() >= REFRESH_SKEW_MS) return token;
 
@@ -238,7 +259,7 @@ async function accessToken() {
 }
 
 async function authHeader() {
-  const token = await accessToken();
+  const token = await ensureAccessToken();
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
@@ -824,5 +845,37 @@ export async function getAsset(chatId, assetId) {
     headers: await authHeader(),
   });
   if (!response.ok) throw new ApiError("getAsset", response.status);
+  return response.json();
+}
+
+// ---- Memory records (#475, epic #129) -------------------------------------
+//
+// The read half of "what Channel remembers" (#479), backing the Customize
+// panel. Returns `{groups, summaries, recall_window, withheld_record_count,
+// next_cursor}` — `groups` newest-chat-first with each chat's records
+// oldest-first, `summaries` the #245 read-only rolling head summaries, and
+// `recall_window` the LIVE caps read from `recall.py`. Render every number
+// in the panel from that envelope; a hand-copied `5` becomes a lie the first
+// time the cap moves.
+//
+// `limit` counts CHATS per page, not records. PAGINATION RULE: page on
+// `next_cursor` (null = exhausted), NEVER on `groups.length` — a chat whose
+// events carry no text yields no group, so a page can come back short while
+// the cursor is still live. `chatId` scopes the response to one chat and
+// always comes back with a null cursor; an id the caller doesn't own is a
+// 404 (not 403 — chat existence isn't leaked). A malformed or foreign
+// cursor is a 400 (`ApiError` with `status === 400`) — restart from page 1.
+//
+// Record and summary `text` is DATA: render it as plain text, never through
+// `renderMarkdown.jsx` (epic #129 decision 11 — see MemorySection.jsx).
+
+export async function listMemoryRecords({ cursor = null, limit = 10, chatId = null } = {}) {
+  const qs = new URLSearchParams({ limit: String(limit) });
+  if (cursor) qs.set("cursor", cursor);
+  if (chatId) qs.set("chat_id", chatId);
+  const response = await fetch(`${BASE}/api/memory/records?${qs}`, {
+    headers: await authHeader(),
+  });
+  if (!response.ok) throw new ApiError("listMemoryRecords", response.status);
   return response.json();
 }

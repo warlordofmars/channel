@@ -5,6 +5,21 @@ import { MemoryRouter } from "react-router-dom";
 
 vi.mock("../../api.js", () => ({
   listModels: vi.fn(),
+  listMemoryRecords: vi.fn(() =>
+    Promise.resolve({
+      groups: [],
+      summaries: [],
+      recall_window: {
+        max_sessions: 5,
+        events_per_session: 2,
+        text_truncate: 120,
+        ordering: "recency",
+        enabled: true,
+      },
+      withheld_record_count: 0,
+      next_cursor: null,
+    }),
+  ),
   listMCPServers: vi.fn(() => Promise.resolve({ servers: [] })),
   patchMCPServer: vi.fn(() => Promise.resolve()),
   deleteMCPServer: vi.fn(() => Promise.resolve()),

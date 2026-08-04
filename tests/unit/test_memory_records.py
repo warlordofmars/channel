@@ -28,6 +28,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from botocore.exceptions import ClientError
 
 from channel.agents import memory_records as mr
 from channel.agents.memory import _META_PREFIX
@@ -432,6 +433,134 @@ async def test_count_session_records_counts_without_returning_text():
     # Three usable entries; the return type carries no content at all.
     assert count == 3
     assert isinstance(count, int)
+
+
+# ── missing actor partition (#527) ────────────────────────────────────────
+#
+# The bug these pin: an actor partition is created lazily by the first
+# memory WRITE, so a signed-in user who has never chatted has none and
+# every read raises ``ResourceNotFoundException``. Both endpoints 500ed.
+#
+# The mocks here RAISE. A mock that returns ``[]`` is what let this ship
+# twice — it makes "no actor" and "empty actor" indistinguishable, which is
+# precisely the distinction that was broken. Each absorbing test is paired
+# with one asserting a DIFFERENT ``ClientError`` still propagates: silently
+# reporting "you have no memories" during an AgentCore outage would be a
+# data-integrity claim the product cannot stand behind, and an over-broad
+# handler is the obvious wrong fix.
+
+
+def _client_error(code: str, operation: str) -> ClientError:
+    """A botocore ``ClientError`` shaped like AgentCore's own.
+
+    ``botocore.errorfactory.ResourceNotFoundException`` is generated from
+    the service model at runtime and subclasses ``ClientError`` carrying
+    this exact response shape, so constructing the base class with the code
+    exercises the same branch the vendor exception would.
+    """
+    return ClientError(
+        {"Error": {"Code": code, "Message": f"Actor {ACTOR_ID} not found"}}, operation
+    )
+
+
+def _raising_client(code: str, operation: str) -> MagicMock:
+    client = MagicMock()
+    client.list_sessions.side_effect = _client_error(code, operation)
+    client.list_events.side_effect = _client_error(code, operation)
+    return client
+
+
+async def test_recall_window_session_ids_reads_a_missing_actor_as_no_window():
+    client = _raising_client("ResourceNotFoundException", "ListSessions")
+
+    assert (
+        await mr.recall_window_session_ids(client, memory_id=MEMORY_ID, actor_id=ACTOR_ID) == set()
+    )
+
+
+async def test_recall_window_session_ids_still_raises_on_any_other_client_error():
+    client = _raising_client("ThrottlingException", "ListSessions")
+
+    with pytest.raises(ClientError) as caught:
+        await mr.recall_window_session_ids(client, memory_id=MEMORY_ID, actor_id=ACTOR_ID)
+
+    assert caught.value.response["Error"]["Code"] == "ThrottlingException"
+
+
+async def test_list_sessions_page_reads_a_missing_actor_as_one_empty_page():
+    # Reachable independently of the recall probe: with
+    # CHANNEL_RECALL_ENABLED=0 this is the page's FIRST AgentCore call.
+    client = _raising_client("ResourceNotFoundException", "ListSessions")
+
+    assert await mr.list_sessions_page(
+        client, memory_id=MEMORY_ID, actor_id=ACTOR_ID, limit=10
+    ) == ([], None)
+
+
+async def test_list_sessions_page_still_raises_on_any_other_client_error():
+    client = _raising_client("AccessDeniedException", "ListSessions")
+
+    with pytest.raises(ClientError):
+        await mr.list_sessions_page(client, memory_id=MEMORY_ID, actor_id=ACTOR_ID, limit=10)
+
+
+async def test_list_session_records_reads_a_missing_actor_or_session_as_no_records():
+    # ``/records?chat_id=...`` skips session enumeration and comes straight
+    # here, so fixing only the ListSessions call sites would leave this 500.
+    client = _raising_client("ResourceNotFoundException", "ListEvents")
+
+    assert await mr.list_session_records(
+        client, memory_id=MEMORY_ID, actor_id=ACTOR_ID, session_id="c", in_recall_window=True
+    ) == ([], False)
+
+
+async def test_list_session_records_still_raises_on_any_other_client_error():
+    client = _raising_client("ThrottlingException", "ListEvents")
+
+    with pytest.raises(ClientError):
+        await mr.list_session_records(
+            client, memory_id=MEMORY_ID, actor_id=ACTOR_ID, session_id="c", in_recall_window=True
+        )
+
+
+async def test_count_session_records_reads_a_missing_actor_as_zero():
+    client = _raising_client("ResourceNotFoundException", "ListEvents")
+
+    assert (
+        await mr.count_session_records(
+            client, memory_id=MEMORY_ID, actor_id=ACTOR_ID, session_id="not-mine"
+        )
+        == 0
+    )
+
+
+async def test_a_client_error_carrying_no_response_shape_still_raises():
+    # Defensive: ``getattr(exc, "response", ...)`` must not turn a
+    # malformed exception into a silent empty result.
+    client = MagicMock()
+    error = ClientError({"Error": {"Code": "ResourceNotFoundException"}}, "ListSessions")
+    error.response = None  # type: ignore[assignment]
+    client.list_sessions.side_effect = error
+
+    with pytest.raises(ClientError):
+        await mr.recall_window_session_ids(client, memory_id=MEMORY_ID, actor_id=ACTOR_ID)
+
+
+async def test_absorbing_a_missing_actor_logs_without_naming_the_actor(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # The derived actor id embeds a label built from the user's email, so
+    # the diagnostic line carries the read's name and nothing else.
+    fake_logger = MagicMock()
+    monkeypatch.setattr(mr, "logger", fake_logger)
+    client = _raising_client("ResourceNotFoundException", "ListSessions")
+
+    await mr.recall_window_session_ids(client, memory_id=MEMORY_ID, actor_id=ACTOR_ID)
+
+    fmt, what = fake_logger.info.call_args.args
+    assert fmt.startswith("memory.actor_partition_absent")
+    assert what == "recall_window"
+    assert ACTOR_ID not in fmt
 
 
 def test_chat_summary_model_is_untouched_by_this_module():

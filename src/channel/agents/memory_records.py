@@ -46,9 +46,12 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
-from collections.abc import Iterable, Iterator
+import logging
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from typing import Any
+
+from botocore.exceptions import ClientError
 
 from channel import storage
 from channel.agents.memory import _META_PREFIX
@@ -61,6 +64,8 @@ from channel.agents.recall import (
 )
 from channel.agents.tools.memory_tools import _REMEMBER_PREFIX
 from channel.models import Chat
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "KIND_CONVERSATION",
@@ -101,6 +106,69 @@ MAX_EVENTS_PER_SESSION = 100
 # are chat UUIDs and AgentCore event ids are ``<digits>#<hex>``.
 _RECORD_ID_SEP = "|"
 _RECORD_ID_FIELDS = 3
+
+
+# ── The AgentCore read seam ───────────────────────────────────────────────
+
+#: The one AgentCore error code this module absorbs — see
+#: :func:`_agentcore_read`. Everything else re-raises.
+_NO_PARTITION_CODE = "ResourceNotFoundException"
+
+
+async def _agentcore_read(
+    call: Callable[..., dict[str, Any]], *, what: str, **kwargs: Any
+) -> dict[str, Any] | None:
+    """One blocking AgentCore read → its response, or ``None`` when the
+    actor has no memory partition (#527).
+
+    Every AgentCore call in this module goes through here, so all three
+    reads answer an absent partition the same way. Blocking boto3 work runs
+    in :func:`asyncio.to_thread`, same as ``agents/recall.py``.
+
+    **Why ``None`` rather than an exception.** An actor partition is created
+    lazily by the first memory *write*, so a user who has signed in but
+    never had a chat turn has none, and every read against them raises::
+
+        ResourceNotFoundException: ... Actor <derived-actor-id> not found
+
+    That is not a failure — a user with no partition genuinely has no
+    records, which is the posture ``AgentCoreRecallHook`` has always taken.
+    Until #527 it propagated out of the read model untouched (the only
+    ``except`` here covered ``record_id`` decoding), so
+    ``GET /api/memory/records`` and ``GET /api/memory/export`` returned 500
+    to every user who had not yet chatted — the exact users most likely to
+    be checking what Channel knows about them. Each caller supplies its own
+    empty value; this function does not invent one, because "no sessions"
+    and "no events" are different shapes.
+
+    **Only that one error code is absorbed.** Any other ``ClientError`` —
+    throttling, access denied, a service fault — re-raises and still
+    surfaces as a 5xx. The distinction is the whole point on an *export*
+    endpoint: answering "you have no memories" during an AgentCore outage
+    would be a data-integrity claim the product cannot stand behind. A
+    blanket ``except Exception`` is what the recall hook can afford, because
+    it degrades a prompt; here it would falsify an answer.
+
+    **The code is matched, never the message.** AWS error codes are a stable
+    contract and message prose is not, so matching on "Actor ... not found"
+    would re-break this for new users the first time the string is reworded.
+    The other condition that shares this code — an unknown ``memoryId`` —
+    resolves to the same honest answer anyway: ``get_or_create_memory``
+    resolves-or-creates the environment's Memory resource on cold start, and
+    a freshly created Memory holds nothing.
+    """
+    try:
+        return await asyncio.to_thread(call, **kwargs)
+    except ClientError as exc:
+        if (getattr(exc, "response", None) or {}).get("Error", {}).get(
+            "Code"
+        ) != _NO_PARTITION_CODE:
+            raise
+        # ``what`` only — no identifiers. The derived actor id carries a
+        # human-legible label built from the user's email (see
+        # ``memory.derive_actor_id``), so it does not belong in a log line.
+        logger.info("memory.actor_partition_absent read=%s", what)
+        return None
 
 
 # ── Record identity ───────────────────────────────────────────────────────
@@ -312,12 +380,18 @@ async def recall_window_session_ids(
     PR #73 already feeds that history into Strands directly; the panel is
     not chat-scoped, so it models the window as it would apply to a chat
     that doesn't exist yet.
+
+    An actor with no memory partition has no recall window — the empty set,
+    not an error. See :func:`_agentcore_read`.
     """
-    resp = await asyncio.to_thread(
+    resp = await _agentcore_read(
         client.list_sessions,
+        what="recall_window",
         memoryId=memory_id,
         actorId=actor_id,
     )
+    if resp is None:
+        return set()
     sessions = resp.get("sessionSummaries", [])
     ordered = sorted(sessions, key=lambda s: s.get("createdAt") or _EPOCH, reverse=True)
     return {s["sessionId"] for s in ordered[:_RECALL_MAX_SESSIONS] if s.get("sessionId")}
@@ -339,6 +413,13 @@ async def list_sessions_page(
     Pagination is **by session, not by record** (epic #129 decision 12):
     the ``ListSessions`` / ``ListEvents`` fan-out makes a record-level
     cursor fragile, and the panel groups by chat anyway.
+
+    An actor with no memory partition reads as one empty page with no
+    continuation — see :func:`_agentcore_read`. Handling it here as well as
+    in :func:`recall_window_session_ids` is not belt-and-braces: with
+    ``CHANNEL_RECALL_ENABLED=0`` the recall probe is skipped entirely, so
+    this is the *first* AgentCore call the page makes, and it is also the
+    one the export's session walk drains.
     """
     kwargs: dict[str, Any] = {
         "memoryId": memory_id,
@@ -347,7 +428,9 @@ async def list_sessions_page(
     }
     if next_token:
         kwargs["nextToken"] = next_token
-    resp = await asyncio.to_thread(client.list_sessions, **kwargs)
+    resp = await _agentcore_read(client.list_sessions, what="sessions_page", **kwargs)
+    if resp is None:
+        return [], None
     return resp.get("sessionSummaries", []), resp.get("nextToken")
 
 
@@ -405,14 +488,26 @@ async def _list_events(
     own ``nextToken`` rather than a ``len(events) == cap`` heuristic — the
     vendor is the authority on whether the session has more, and the
     heuristic would false-positive on a session holding exactly the cap.
+
+    An absent actor **or** session reads as no events, not an error (see
+    :func:`_agentcore_read`). This one is reachable even after the two
+    ``ListSessions`` call sites are fixed: ``/records?chat_id=...`` skips
+    session enumeration entirely and comes straight here for a chat the
+    caller demonstrably owns, so a chat with no memory events — a
+    partition-less user's first chat, or one whose session a best-effort
+    ``chats._wipe_agentcore_session`` already removed — would otherwise
+    still 500.
     """
-    resp = await asyncio.to_thread(
+    resp = await _agentcore_read(
         client.list_events,
+        what="events",
         memoryId=memory_id,
         actorId=actor_id,
         sessionId=session_id,
         maxResults=MAX_EVENTS_PER_SESSION,
     )
+    if resp is None:
+        return [], False
     return resp.get("events", []), bool(resp.get("nextToken"))
 
 
