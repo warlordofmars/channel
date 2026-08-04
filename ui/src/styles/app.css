@@ -1512,16 +1512,7 @@ html.is-electron-mac .sb-top {
     border-bottom: 1px solid var(--border-soft);
   }
   .mobile-menu-btn { width: 40px; height: 40px; }
-  /* `touch-action: manipulation` opts the brand mark out of iOS
-     double-tap-to-zoom (the viewport meta allows zoom), so the temporary
-     five-tap gesture that arms the #467 layout readout doesn't fight the
-     gesture recogniser. Purely a touch behaviour — no visual change, and
-     the mark is still not a control. Removal tracked by #503. */
-  .mobile-topbar-brand {
-    display: inline-flex;
-    align-items: center;
-    touch-action: manipulation;
-  }
+  .mobile-topbar-brand { display: inline-flex; align-items: center; }
   /* On mobile the hamburger owns nav-reveal; the desktop-collapse
      "show sidebar" expand bar is redundant, so hide it. */
   .main-top { display: none; }
@@ -1815,74 +1806,3 @@ html.is-electron-mac .sb-top {
    ============================================================ */
 
 html[data-app-vh] .stage { height: var(--app-vh); }
-
-/* ---------- TEMPORARY: on-device layout readout (#467) ----------
-
-   Rendered by `ui/src/components/LayoutDebug.jsx` only when the URL
-   carries `?__layout-debug=1`; without it the component never mounts, so
-   none of these rules ever match a node. Remove this block together with
-   the component once the dead strip is confirmed fixed on a real
-   installed iOS PWA — removal tracked by #503.
-
-   The `html[data-app-vh] .stage` rule ABOVE is not part of this — that
-   one is the fix, not instrumentation, and stays.
-
-   Sized for a ~390px screen: 10px monospace, wrapping, and scrollable,
-   because the chain readout is longer than any phone viewport. Fills the
-   screen deliberately — one screenshot then carries every number. */
-.layout-debug {
-  position: fixed;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  left: 0;
-  z-index: 9999;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  padding: calc(8px + env(safe-area-inset-top)) calc(8px + env(safe-area-inset-right))
-    calc(8px + env(safe-area-inset-bottom)) calc(8px + env(safe-area-inset-left));
-  background: var(--canvas);
-  color: var(--ink);
-  font-family: var(--font-mono);
-  font-size: 10px;
-  line-height: 1.4;
-  overflow-wrap: anywhere;
-}
-.layout-debug-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 6px;
-  padding-bottom: 6px;
-  border-bottom: 1px solid var(--border);
-}
-.layout-debug-title { color: var(--accent); font-weight: 700; letter-spacing: 0.04em; }
-.layout-debug-actions { display: flex; flex-shrink: 0; gap: 6px; }
-.layout-debug-refresh {
-  flex-shrink: 0;
-  min-height: 28px;
-  padding: 4px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-sm);
-  background: var(--raised);
-  color: var(--ink);
-  font-family: var(--font-mono);
-  font-size: 10px;
-  cursor: pointer;
-}
-.layout-debug-rows { margin: 0 0 10px; }
-.layout-debug-row { display: flex; gap: 8px; justify-content: space-between; }
-.layout-debug-row dt { color: var(--ink-soft); }
-.layout-debug-row dd { margin: 0; color: var(--ink); text-align: right; }
-.layout-debug-chain-head {
-  color: var(--accent);
-  font-weight: 700;
-  padding-top: 6px;
-  border-top: 1px solid var(--border);
-}
-.layout-debug-chain { margin: 4px 0 0; padding: 0 0 0 18px; }
-.layout-debug-node { margin-bottom: 8px; }
-.layout-debug-node-label { display: block; color: var(--accent); }
-.layout-debug-node-rect { display: block; color: var(--ink); }
-.layout-debug-node-styles { display: block; color: var(--ink-soft); }
