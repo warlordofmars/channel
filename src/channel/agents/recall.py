@@ -188,9 +188,19 @@ def _defuse_forged_group_headers(text: str) -> str:
     Line-by-line rather than a ``re.MULTILINE`` sweep because the trailing
     strip has to know whether *this* line's opener fired — see
     ``_FORGED_TRAILING_BOLD_RE``.
+
+    Splits on ``str.splitlines`` and rejoins on ``\\n``, which is load-
+    bearing twice over. ``"\\n"``-only splitting (and ``re.MULTILINE``,
+    whose ``^`` likewise anchors only after ``\\n``) let a forged boundary
+    ride in behind a bare ``\\r``, ``U+2028``, ``U+0085`` or ``U+000B`` —
+    all of which a reader still renders as a line break, so the label kept
+    its structural force while the defusal walked straight past it.
+    Rejoining on ``\\n`` then normalises those terminators, so the ATX and
+    setext passes — which are ``re.MULTILINE`` and would miss them too —
+    see real line starts on the loop's next iteration.
     """
     out: list[str] = []
-    for line in text.split("\n"):
+    for line in text.splitlines():
         opened = _FORGED_STRUCTURAL_OPENER_RE.sub("", line, count=1)
         if opened != line:
             opened = _FORGED_TRAILING_BOLD_RE.sub("", opened, count=1)
@@ -215,7 +225,10 @@ def _defuse_recall_turn(text: str) -> str:
 
     Termination is structural rather than a trusted bound: every regex
     here only deletes characters, so an iteration that changes anything
-    strictly shortens the text.
+    strictly shortens the text. The one step that is not a deletion —
+    normalising exotic line terminators to ``\\n`` — is idempotent, so it
+    can alter the text at most once, after which the shortening argument
+    applies unchanged.
 
     That guarantees the loop *ends*, not that it ends cheaply, so the
     cost is bounded twice over. ``_FORGED_STRUCTURAL_OPENER_RE`` takes a
