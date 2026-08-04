@@ -35,3 +35,4 @@ What are the trade-offs, follow-on work, or constraints this decision creates?
 | [0008](0008-issue-worker-push-discipline.md) | Issue-worker push discipline against wholesale-push damage | Accepted |
 | [0009](0009-unified-context-budget.md) | Unified context budget across history, recall, attachments, and tool results | Accepted |
 | [0010](0010-electron-release-pipeline.md) | Electron desktop release pipeline + macOS signing | Accepted |
+| [0011](0011-context-trust-boundary.md) | Trust classes at prompt-assembly seams | Accepted |

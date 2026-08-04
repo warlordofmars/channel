@@ -79,6 +79,21 @@ def max_tokens_for_effort(effort: str | None) -> int:
     return _EFFORT_MAX_TOKENS.get(effort.lower(), DEFAULT_MAX_TOKENS)
 
 
+# Editing note (#533 / ADR-0011): before adding a NEW block to the system
+# prompt, classify the seam you are adding. `docs/adr/0011-context-trust-
+# boundary.md` §Decision 1 carries the seam/register/trust-class table, and
+# its point is that there are exactly TWO trusted content inputs — this
+# literal (class `system`) and the current user turn (`operator-instruction`).
+# Everything else — the #245 head-summary block, the recall hook's addendum,
+# prior assistant turns, attachments, and every tool result including MCP —
+# is `untrusted-data`. Trust class is a property of the SEAM, assigned here
+# at prompt-assembly time; it is never a stored attribute on the content, and
+# it is never derived from provenance (authorization consumes no provenance —
+# ADR-0011 §Decision 4). A block whose body is not machine-generated
+# in-process is `untrusted-data` no matter how trustworthy its source feels,
+# so it must run through `defuse_forged_headings` like the two existing
+# blocks do, and must not read as an instruction to the model.
+#
 # Editing note (#438): the "Tool use is deliberate" paragraph and the
 # development-self-awareness paragraph below are a matched pair, and the
 # balance between them is load-bearing. #438 traced reflexive tool-firing on
