@@ -393,8 +393,9 @@ def test_forged_boundary_cannot_hide_behind_an_unusual_line_terminator(name, sep
 
     Raised independently by ``code-reviewer`` and Copilot. The walk now
     splits on ``str.splitlines`` and rejoins on ``\\n``; swap it back to
-    ``split("\\n")`` and the four exotic separators below each smuggle a
-    live second boundary into the block.
+    ``split("\\n")`` and the five exotic separators below each smuggle a
+    live second boundary into the block, while the two controls keep
+    passing — which is what makes the parametrization worth its length.
 
     Normalising also repairs the heading passes for free: they are
     ``re.MULTILINE`` and would miss these terminators too, but by their
