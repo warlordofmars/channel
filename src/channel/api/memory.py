@@ -524,18 +524,27 @@ async def _paginate(
 ) -> tuple[list[_T], bool]:
     """Drain a ``(page, next_token)`` paginator → ``(items, drained)``.
 
-    One helper for all three walks (AgentCore sessions, DynamoDB chats,
-    DynamoDB messages) because they differ only in their fetch closure, and
-    a single drain is a single place for the page ceiling to live. ``fetch``
-    takes the previous token (``None`` first) and returns the next page
-    with the token after it.
+    One helper for every walk — the export's AgentCore sessions, DynamoDB
+    chats and DynamoDB messages, plus #477's forget-session walk — because
+    they differ only in their fetch closure, and a single drain is a single
+    place for the page ceiling to live. ``fetch`` takes the previous token
+    (``None`` first) and returns the next page with the token after it.
+
+    ``what`` names the walk in the cap-hit log line, and it is the **only**
+    thing that does: the event name is deliberately neutral
+    (``memory.page_cap_hit``, not ``memory.export_page_cap_hit``) because a
+    shared helper must not label a forget as an export. It was the export
+    name until #477 added a fourth, non-export caller — at which point one
+    log event silently meant two very different operations, which is
+    exactly what makes a canary useless.
 
     Falling out of the loop means the ceiling was reached with a token still
     outstanding, so ``drained`` is false. It is **returned**, not just
-    logged: a log line does not travel with a downloaded file, and an
-    incomplete export that renders as a complete one is precisely the silent
-    lie this surface exists to stop. The caller propagates it to
-    ``manifest.complete``.
+    logged: a log line does not travel with a downloaded file (nor reach the
+    person who just asked for their data to be forgotten), and an incomplete
+    result that renders as a complete one is precisely the silent lie this
+    surface exists to stop. Callers propagate it to ``manifest.complete``
+    and to the forget response's ``complete``.
     """
     items: list[_T] = []
     token: Any = None
@@ -544,7 +553,7 @@ async def _paginate(
         items.extend(page)
         if not token:
             return items, True
-    logger.warning("memory.export_page_cap_hit what=%s pages=%d", what, _EXPORT_MAX_PAGES)
+    logger.warning("memory.page_cap_hit what=%s pages=%d", what, _EXPORT_MAX_PAGES)
     return items, False
 
 
@@ -734,7 +743,7 @@ async def _build_export(user_id: str) -> tuple[dict[str, Any], str]:
             # does not travel with a downloaded file. False when a walk hit
             # the page ceiling OR a chat's memory history exceeded the
             # per-session cap; ``truncated_chat_ids`` says which chats, and
-            # the page-cap case additionally logs ``export_page_cap_hit``.
+            # the page-cap case additionally logs ``memory.page_cap_hit``.
             "complete": records_drained and chats_drained and not truncated_chat_ids,
             "truncated_chat_ids": truncated_chat_ids,
             "note": _EXPORT_NOTE,

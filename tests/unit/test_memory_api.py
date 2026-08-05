@@ -1063,7 +1063,10 @@ async def test_paginate_stops_at_the_page_cap_and_says_so(monkeypatch: pytest.Mo
     assert len(items) == memory_api._EXPORT_MAX_PAGES
     assert drained is False
     fmt, what, pages = fake_logger.warning.call_args.args
-    assert fmt.startswith("memory.export_page_cap_hit")
+    # Neutral event name: the helper is shared with #477's forget walk, so
+    # labelling every cap-hit an "export" would make the canary useless.
+    assert fmt.startswith("memory.page_cap_hit")
+    assert "export" not in fmt
     assert (what, pages) == ("sessions", memory_api._EXPORT_MAX_PAGES)
 
 
