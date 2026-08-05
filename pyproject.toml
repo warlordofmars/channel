@@ -13,7 +13,6 @@ dependencies = [
     "python-jose[cryptography]>=3.5.0",
     "python-multipart>=0.0.30",
     "strands-agents>=1.42.0,<2",
-    "strands-agents-tools>=0.2.0,<1",
     "uvicorn[standard]>=0.42.0",
 ]
 
