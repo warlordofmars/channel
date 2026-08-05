@@ -400,7 +400,9 @@ def build_agent(
     on the request path (a DDB point-read in ``_stream_bedrock_reply``);
     a hook would buy nothing but an extra async seam. It is run through
     :func:`~channel.agents.recall.defuse_forged_headings` first so the
-    gist cannot forge a sibling system-prompt section (#465).
+    gist cannot forge a sibling system-prompt section (#465) — including
+    one riding an exotic line terminator, which that helper only started
+    catching in #544.
 
     ``effort`` is the SPA's "Response effort" tier (low / medium / high
     / max). When supplied it overrides ``max_tokens`` via
@@ -433,6 +435,17 @@ def build_agent(
         # content under HEAD_SUMMARY_HEADING, never as a sibling section.
         # Same helper the recall hook applies to its own block — the two
         # injection sites are deliberately kept symmetric.
+        #
+        # #544: that symmetry is the load-bearing part, and it had
+        # quietly lapsed. #532 taught the recall path that ``^`` only
+        # anchors after ``\n`` — so a heading behind `` ``, ``\r``,
+        # ``\v``, ``\f`` or ``U+0085`` slips past a MULTILINE sweep — but
+        # it taught it to a recall-private function, leaving THIS call
+        # still walking lines the old way for three more PRs. The fix put
+        # the terminator normalisation inside ``defuse_forged_headings``
+        # itself, so this line needed no change and a future site cannot
+        # miss it either. Keep it that way: hardening that belongs at
+        # both seams goes in the shared helper, never at one call site.
         resolved_system_prompt = (
             f"{resolved_system_prompt}\n\n{HEAD_SUMMARY_HEADING}\n\n"
             f"{defuse_forged_headings(head_summary)}"
