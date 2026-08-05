@@ -181,6 +181,56 @@ async def record_memory_export_outcome(success: bool) -> None:
     await emit_metric(metric)
 
 
+async def record_memory_record_delete_outcome(success: bool) -> None:
+    """Emit a CloudWatch counter for one ``DELETE /api/memory/records/{id}``
+    (#477, epic #129 decision 13).
+
+    Separate from the bulk counter below, and from every hook / tool /
+    export counter, for the reason #400 established: a user-initiated
+    mutation must not move a hook-health line on the admin dashboard. It
+    also keeps the two forget shapes legible apart — one record deleted from
+    a settings panel is a different operational event from a whole-account
+    wipe, and averaging them would hide both.
+
+    ``success=False`` means the delete was **attempted and failed** —
+    AgentCore raised something other than the absent-partition code. A
+    request rejected before any delete ran (malformed ``record_id``, an
+    unowned chat, an id that addresses nothing) emits NEITHER counter: a
+    4xx is a statement about the request, and counting it as a failure would
+    put a floor under the failure rate that no fix could lower.
+
+    Counter-only — same cardinality-risk rationale as
+    :func:`record_memory_write_outcome`. No per-actor / per-session
+    dimension; the record's identity is exactly what must not reach
+    CloudWatch.
+    """
+    metric = "MemoryRecordDeleteSuccesses" if success else "MemoryRecordDeleteFailures"
+    await emit_metric(metric)
+
+
+async def record_memory_bulk_forget_outcome(success: bool) -> None:
+    """Emit a CloudWatch counter for one bulk ``DELETE /api/memory/records``
+    (#477) — the ``chat_id`` / ``since`` / ``all`` forms.
+
+    One datapoint per request, whatever the batch size. ``success=True``
+    requires that **every** record the filter selected was forgotten:
+    a partially-failed batch still answers 200 with its
+    ``{"deleted", "failed"}`` counts (abandoning the batch on the first
+    failure would forget less, not more), but it counts as a **failure**
+    here. The counter's job is to answer "is forget working?", and a shape
+    that reads clean while records survive would answer it wrongly on the
+    one endpoint where a false clean signal is worst.
+
+    Counter-only, no dimensions — same rationale as
+    :func:`record_memory_record_delete_outcome`. Deliberately no ``deleted``
+    count dimension either: volume belongs in the audit event's ``details``,
+    which is already written per forget, and a count dimension on a
+    per-user action is an unbounded series.
+    """
+    metric = "MemoryBulkForgetSuccesses" if success else "MemoryBulkForgetFailures"
+    await emit_metric(metric)
+
+
 async def record_auto_title_outcome(success: bool) -> None:
     """Emit a CloudWatch counter for one auto-title attempt.
 

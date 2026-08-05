@@ -235,6 +235,94 @@ def test_record_memory_export_outcome_signature_locks_out_dimensions():
     assert param.annotation == "bool"
 
 
+# ----------------------------------------------------------------
+# Forget counters (#477) — user-initiated memory deletion, split from
+# each other and from every hook / tool / export counter so a settings-
+# panel click and a whole-account wipe stay legible apart.
+# ----------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("success", "expected"),
+    [(True, "MemoryRecordDeleteSuccesses"), (False, "MemoryRecordDeleteFailures")],
+)
+async def test_record_memory_record_delete_outcome_emits_its_own_counter(
+    success: bool, expected: str
+):
+    from channel.metrics import record_memory_record_delete_outcome
+
+    with patch("channel.metrics.emit_metric", new=AsyncMock()) as mock_emit:
+        await record_memory_record_delete_outcome(success=success)
+    mock_emit.assert_awaited_once_with(expected)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("success", "expected"),
+    [(True, "MemoryBulkForgetSuccesses"), (False, "MemoryBulkForgetFailures")],
+)
+async def test_record_memory_bulk_forget_outcome_emits_its_own_counter(
+    success: bool, expected: str
+):
+    from channel.metrics import record_memory_bulk_forget_outcome
+
+    with patch("channel.metrics.emit_metric", new=AsyncMock()) as mock_emit:
+        await record_memory_bulk_forget_outcome(success=success)
+    mock_emit.assert_awaited_once_with(expected)
+
+
+def test_the_two_forget_counters_are_distinct_from_each_other_and_from_memory_health():
+    """One record forgotten from a settings panel and a whole-account wipe
+    are different operational events; folding either into the hook / tool /
+    export counters would let a user action move a health line (#400)."""
+    import asyncio
+
+    from channel.metrics import (
+        record_memory_bulk_forget_outcome,
+        record_memory_record_delete_outcome,
+    )
+
+    with patch("channel.metrics.emit_metric", new=AsyncMock()) as mock_emit:
+        for helper in (record_memory_record_delete_outcome, record_memory_bulk_forget_outcome):
+            asyncio.run(helper(success=True))
+            asyncio.run(helper(success=False))
+    emitted = {call.args[0] for call in mock_emit.await_args_list}
+    assert emitted == {
+        "MemoryRecordDeleteSuccesses",
+        "MemoryRecordDeleteFailures",
+        "MemoryBulkForgetSuccesses",
+        "MemoryBulkForgetFailures",
+    }
+    assert not emitted & {
+        "MemoryWriteSuccesses",
+        "MemoryWriteFailures",
+        "MemoryToolWriteSuccesses",
+        "MemoryToolWriteFailures",
+        "MemoryExportSuccesses",
+        "MemoryExportFailures",
+        "RecallSuccesses",
+        "RecallFailures",
+    }
+
+
+@pytest.mark.parametrize(
+    "helper_name",
+    ["record_memory_record_delete_outcome", "record_memory_bulk_forget_outcome"],
+)
+def test_forget_counter_signatures_lock_out_dimensions(helper_name: str):
+    """Per-actor / per-session / per-record dimensions are exactly what must
+    not reach CloudWatch here — the record's identity IS the sensitive part.
+    A ``deleted`` count dimension is barred by the same signature."""
+    import channel.metrics as metrics_module
+
+    sig = inspect.signature(getattr(metrics_module, helper_name))
+    assert list(sig.parameters.keys()) == ["success"]
+    param = sig.parameters["success"]
+    assert param.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+    assert param.annotation == "bool"
+
+
 @pytest.mark.asyncio
 async def test_record_auto_title_outcome_success_emits_success_counter():
     from channel.metrics import record_auto_title_outcome

@@ -1063,7 +1063,10 @@ async def test_paginate_stops_at_the_page_cap_and_says_so(monkeypatch: pytest.Mo
     assert len(items) == memory_api._EXPORT_MAX_PAGES
     assert drained is False
     fmt, what, pages = fake_logger.warning.call_args.args
-    assert fmt.startswith("memory.export_page_cap_hit")
+    # Neutral event name: the helper is shared with #477's forget walk, so
+    # labelling every cap-hit an "export" would make the canary useless.
+    assert fmt.startswith("memory.page_cap_hit")
+    assert "export" not in fmt
     assert (what, pages) == ("sessions", memory_api._EXPORT_MAX_PAGES)
 
 
@@ -1237,3 +1240,590 @@ def test_export_counts_a_failed_agentcore_read_as_a_failed_export():
         _export_call(fake, {})
 
     counter.assert_awaited_once_with(success=False)
+
+
+# ══ Forget — DELETE /api/memory/records[/{record_id}] (#477) ══════════════
+#
+# This is the destructive surface, so the tests that earn their place are
+# the ones that prove an attempt FAILS rather than that a filter was
+# applied: a cross-user delete must be impossible, and the assertion is
+# that ``delete_event`` was never called at all — a test that only checked
+# the response code would pass against an implementation that deleted the
+# record and then 404'd.
+#
+# The #527 shape is re-proved here on the delete path. Every "no partition"
+# mock RAISES; a mock that returned empty could not tell an absent actor
+# from an empty one, which is exactly how that bug shipped twice. Each
+# absorbing assertion is paired with one proving a different ``ClientError``
+# still produces a 500 — on a forget endpoint, reporting "deleted" when
+# nothing was deleted is worse than the error it replaces, because a user
+# told their data is gone stops asking.
+
+FORGET_URL = "/api/memory/records"
+
+
+def _record_id(session_id: str = "chat-a", event_id: str = "e1", index: int = 0) -> str:
+    from channel.agents.memory_records import encode_record_id
+
+    return encode_record_id(session_id, event_id, index)
+
+
+def _deleting_agentcore(
+    session_ids: list[str],
+    events: dict[str, list[dict[str, Any]]],
+    *,
+    delete_side_effect: Any = None,
+) -> MagicMock:
+    fake = _agentcore(session_ids, events)
+    if delete_side_effect is not None:
+        fake.delete_event.side_effect = delete_side_effect
+    return fake
+
+
+def _forget_call(
+    fake: MagicMock,
+    chats: dict[str, Chat],
+    *,
+    path: str = FORGET_URL,
+    params: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
+    put_audit: Any = None,
+    client_obj: TestClient | None = None,
+):
+    """Drive either DELETE route with every AWS seam mocked."""
+    with (
+        patch.object(memory_api, "_agentcore_client", return_value=fake),
+        patch.object(memory_api, "_memory_id_for_env", return_value="mem-1"),
+        patch("channel.storage.get_chat_by_id", chats.get),
+        patch("channel.storage.put_audit_event", put_audit or MagicMock(return_value={})),
+    ):
+        return (client_obj or client).delete(
+            path, params=params or {}, headers=headers or _headers()
+        )
+
+
+# ── auth ──────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("path", [FORGET_URL, f"{FORGET_URL}/anything"])
+def test_forget_requires_a_mgmt_jwt(path: str):
+    assert client.delete(path).status_code in (401, 403)
+
+
+# ── per-record ────────────────────────────────────────────────────────────
+
+
+def test_forgetting_one_record_deletes_exactly_that_agentcore_event():
+    fake = _deleting_agentcore([], {})
+
+    resp = _forget_call(
+        fake, {"chat-a": _chat("chat-a")}, path=f"{FORGET_URL}/{_record_id('chat-a', 'e7')}"
+    )
+
+    assert resp.status_code == 204
+    assert fake.delete_event.call_args.kwargs == {
+        "memoryId": "mem-1",
+        "actorId": memory_api.derive_actor_id(OWNER),
+        "sessionId": "chat-a",
+        "eventId": "e7",
+    }
+
+
+def test_forgetting_one_record_leaves_the_dynamodb_chat_and_messages_untouched():
+    """Epic #129 decision 9 — the blast radius is the AgentCore event only.
+
+    A click in a settings panel must not punch a hole in visible chat
+    history: it would break user/assistant turn pairing and strand the #245
+    head summary's ``covers_through`` pointer."""
+    fake = _deleting_agentcore([], {})
+    writes = {
+        name: MagicMock()
+        for name in ("delete_chat", "delete_last_assistant_message", "put_chat_summary")
+    }
+
+    with (
+        patch("channel.storage.delete_chat", writes["delete_chat"]),
+        patch(
+            "channel.storage.delete_last_assistant_message", writes["delete_last_assistant_message"]
+        ),
+        patch("channel.storage.put_chat_summary", writes["put_chat_summary"]),
+    ):
+        resp = _forget_call(
+            fake, {"chat-a": _chat("chat-a")}, path=f"{FORGET_URL}/{_record_id('chat-a')}"
+        )
+
+    assert resp.status_code == 204
+    for name, mock in writes.items():
+        assert mock.call_count == 0, f"{name} must not be reached by a memory forget"
+
+
+def test_a_malformed_record_id_is_a_400_and_never_reaches_agentcore():
+    # Forwarding it would come back as a ValidationException — a 500 for
+    # what is plainly a client error.
+    fake = _deleting_agentcore([], {})
+
+    resp = _forget_call(fake, {"chat-a": _chat("chat-a")}, path=f"{FORGET_URL}/not-base64!!")
+
+    assert resp.status_code == 400
+    fake.delete_event.assert_not_called()
+
+
+def test_another_users_record_cannot_be_forgotten():
+    """The load-bearing one: the attempt must FAIL, not merely be filtered.
+
+    404 rather than 403 so a probe cannot distinguish "someone else owns
+    this" from "this never existed" — the shape ``_load_owned_chat`` and
+    ``_load_owned_session`` already use."""
+    fake = _deleting_agentcore([], {})
+
+    resp = _forget_call(
+        fake,
+        {"chat-a": _chat("chat-a", user_id=OWNER)},
+        path=f"{FORGET_URL}/{_record_id('chat-a')}",
+        headers=_headers(INTRUDER),
+    )
+
+    assert resp.status_code == 404
+    fake.delete_event.assert_not_called()
+
+
+def test_a_record_in_a_session_with_no_chat_row_is_a_404():
+    # An orphaned AgentCore session — what a failed
+    # ``chats._wipe_agentcore_session`` leaves behind. Every read withholds
+    # it, so there is nothing in the panel to press.
+    fake = _deleting_agentcore([], {})
+
+    resp = _forget_call(fake, {}, path=f"{FORGET_URL}/{_record_id('orphan')}")
+
+    assert resp.status_code == 404
+    fake.delete_event.assert_not_called()
+
+
+def test_forgetting_a_record_in_a_partition_that_was_never_created_is_a_404_not_a_500():
+    """#527 on the delete path: an actor partition is created lazily by the
+    first memory WRITE, so a user who has never chatted has none. The mock
+    RAISES — one returning a value could not exercise this at all."""
+    fake = _deleting_agentcore(
+        [],
+        {},
+        delete_side_effect=ClientError(
+            {"Error": {"Code": NO_PARTITION, "Message": "Actor x not found"}}, "DeleteEvent"
+        ),
+    )
+
+    resp = _forget_call(fake, {"chat-a": _chat("chat-a")}, path=f"{FORGET_URL}/{_record_id()}")
+
+    assert resp.status_code == 404
+
+
+@pytest.mark.parametrize("code", ["ThrottlingException", "AccessDeniedException"])
+def test_forgetting_a_record_still_500s_when_agentcore_fails_for_any_other_reason(code: str):
+    """The narrowness that makes the 404 trustworthy. Telling a user their
+    record is gone during an AgentCore outage is worse than the error."""
+    fake = _deleting_agentcore([], {})
+    fake.delete_event.side_effect = ClientError({"Error": {"Code": code}}, "DeleteEvent")
+
+    resp = _forget_call(
+        fake,
+        {"chat-a": _chat("chat-a")},
+        path=f"{FORGET_URL}/{_record_id()}",
+        client_obj=error_client,
+    )
+
+    assert resp.status_code == 500
+
+
+def test_a_failed_record_delete_is_counted_as_a_failure():
+    fake = _deleting_agentcore([], {})
+    fake.delete_event.side_effect = ClientError(
+        {"Error": {"Code": "ThrottlingException"}}, "DeleteEvent"
+    )
+
+    with (
+        patch.object(memory_api, "record_memory_record_delete_outcome", new=AsyncMock()) as counter,
+        pytest.raises(ClientError),
+    ):
+        _forget_call(fake, {"chat-a": _chat("chat-a")}, path=f"{FORGET_URL}/{_record_id()}")
+
+    counter.assert_awaited_once_with(success=False)
+
+
+def test_an_unknown_record_counts_neither_success_nor_failure():
+    # A 4xx is a statement about the request; counting it would put a floor
+    # under the failure rate that no fix could lower.
+    fake = _deleting_agentcore([], {})
+    fake.delete_event.side_effect = ClientError({"Error": {"Code": NO_PARTITION}}, "DeleteEvent")
+
+    with patch.object(
+        memory_api, "record_memory_record_delete_outcome", new=AsyncMock()
+    ) as counter:
+        resp = _forget_call(fake, {"chat-a": _chat("chat-a")}, path=f"{FORGET_URL}/{_record_id()}")
+
+    assert resp.status_code == 404
+    counter.assert_not_awaited()
+
+
+def test_a_record_delete_is_counted_and_audited_with_no_record_text():
+    put_audit = MagicMock(return_value={})
+    fake = _deleting_agentcore([], {})
+
+    with patch.object(
+        memory_api, "record_memory_record_delete_outcome", new=AsyncMock()
+    ) as counter:
+        resp = _forget_call(
+            fake,
+            {"chat-a": _chat("chat-a")},
+            path=f"{FORGET_URL}/{_record_id('chat-a', 'e7')}",
+            put_audit=put_audit,
+        )
+
+    assert resp.status_code == 204
+    counter.assert_awaited_once_with(success=True)
+    kwargs = put_audit.call_args.kwargs
+    assert kwargs["event_type"] == "memory.record_deleted"
+    assert kwargs["actor_id"] == OWNER
+    assert kwargs["details"] == {
+        "chat_id": "chat-a",
+        "record_id": _record_id("chat-a", "e7"),
+        "deleted": 1,
+    }
+
+
+def test_a_failed_audit_write_does_not_fail_a_completed_forget():
+    """The opposite call from ``/export``'s: by the time this runs the
+    record is gone, so failing would report a forget that did happen as one
+    that did not — and a user who believes their data survived behaves
+    differently from one who knows it is gone."""
+    fake = _deleting_agentcore([], {})
+
+    resp = _forget_call(
+        fake,
+        {"chat-a": _chat("chat-a")},
+        path=f"{FORGET_URL}/{_record_id()}",
+        put_audit=MagicMock(side_effect=RuntimeError("dynamo down")),
+    )
+
+    assert resp.status_code == 204
+
+
+# ── filter exclusivity ────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        pytest.param({}, id="no-filter"),
+        pytest.param({"all": "false"}, id="all-false-is-no-filter"),
+        pytest.param({"chat_id": "chat-a", "all": "true"}, id="chat-and-all"),
+        pytest.param({"chat_id": "chat-a", "since": "2026-07-30T00:00:00Z"}, id="chat-and-since"),
+        pytest.param({"since": "2026-07-30T00:00:00Z", "all": "true"}, id="since-and-all"),
+    ],
+)
+def test_a_bulk_forget_needs_exactly_one_filter(params: dict[str, Any]):
+    """A bare DELETE must never be a full wipe: the most destructive action
+    this API offers is reachable only by naming it."""
+    fake = _deleting_agentcore(["chat-a"], {})
+
+    resp = _forget_call(fake, {"chat-a": _chat("chat-a")}, params=params)
+
+    assert resp.status_code == 400
+    fake.delete_event.assert_not_called()
+
+
+@pytest.mark.parametrize("since", ["yesterday", "", "2026-13-45"])
+def test_an_unparseable_since_is_a_400_rather_than_widening_to_everything(since: str):
+    fake = _deleting_agentcore(["chat-a"], {})
+
+    resp = _forget_call(fake, {"chat-a": _chat("chat-a")}, params={"since": since})
+
+    assert resp.status_code == 400
+    fake.delete_event.assert_not_called()
+
+
+# ── bulk: chat_id ─────────────────────────────────────────────────────────
+
+
+def test_forgetting_one_chat_deletes_every_event_in_that_session():
+    fake = _deleting_agentcore(
+        [], {"chat-a": [_event("e1", ("USER", "a")), _event("e2", ("ASSISTANT", "b"))]}
+    )
+
+    resp = _forget_call(fake, {"chat-a": _chat("chat-a")}, params={"chat_id": "chat-a"})
+
+    assert resp.status_code == 200
+    assert resp.json() == {"deleted": 2, "failed": 0, "complete": True}
+    assert [c.kwargs["eventId"] for c in fake.delete_event.call_args_list] == ["e1", "e2"]
+
+
+def test_forgetting_another_users_chat_is_a_404_and_deletes_nothing():
+    fake = _deleting_agentcore([], {"chat-a": [_event("e1", ("USER", "a"))]})
+
+    resp = _forget_call(
+        fake,
+        {"chat-a": _chat("chat-a", user_id=OWNER)},
+        params={"chat_id": "chat-a"},
+        headers=_headers(INTRUDER),
+    )
+
+    assert resp.status_code == 404
+    fake.delete_event.assert_not_called()
+
+
+def test_a_404_from_an_unowned_chat_is_not_counted_as_a_failed_forget():
+    fake = _deleting_agentcore([], {})
+
+    with patch.object(memory_api, "record_memory_bulk_forget_outcome", new=AsyncMock()) as counter:
+        resp = _forget_call(
+            fake,
+            {"chat-a": _chat("chat-a", user_id=OWNER)},
+            params={"chat_id": "chat-a"},
+            headers=_headers(INTRUDER),
+        )
+
+    assert resp.status_code == 404
+    counter.assert_not_awaited()
+
+
+# ── bulk: since ───────────────────────────────────────────────────────────
+
+
+def test_forgetting_since_a_timestamp_spares_older_records():
+    old = datetime(2026, 7, 29, 12, tzinfo=timezone.utc)
+    new = datetime(2026, 7, 31, 12, tzinfo=timezone.utc)
+    fake = _deleting_agentcore(
+        ["chat-a"],
+        {
+            "chat-a": [
+                {**_event("old", ("USER", "a")), "eventTimestamp": old},
+                {**_event("new", ("USER", "b")), "eventTimestamp": new},
+            ]
+        },
+    )
+
+    resp = _forget_call(fake, {"chat-a": _chat("chat-a")}, params={"since": "2026-07-30T00:00:00Z"})
+
+    assert resp.json() == {"deleted": 1, "failed": 0, "complete": True}
+    assert [c.kwargs["eventId"] for c in fake.delete_event.call_args_list] == ["new"]
+
+
+# ── bulk: all ─────────────────────────────────────────────────────────────
+
+
+def test_forgetting_everything_walks_every_owned_session():
+    fake = _deleting_agentcore(
+        ["chat-a", "chat-b"],
+        {"chat-a": [_event("e1", ("USER", "a"))], "chat-b": [_event("e2", ("USER", "b"))]},
+    )
+
+    resp = _forget_call(
+        fake, {"chat-a": _chat("chat-a"), "chat-b": _chat("chat-b")}, params={"all": "true"}
+    )
+
+    assert resp.json() == {"deleted": 2, "failed": 0, "complete": True}
+    assert {c.kwargs["sessionId"] for c in fake.delete_event.call_args_list} == {"chat-a", "chat-b"}
+
+
+def test_forget_everything_never_touches_a_session_the_caller_does_not_own():
+    """The bulk half of the cross-user guard. A foreign session sitting in
+    the actor partition — an orphan, or the #474 collision class — is
+    skipped, not erased. Asserted as "``delete_event`` was never called for
+    it", which is the only assertion an implementation that deleted first
+    and filtered afterwards would fail."""
+    fake = _deleting_agentcore(
+        ["chat-mine", "chat-theirs"],
+        {
+            "chat-mine": [_event("e1", ("USER", "a"))],
+            "chat-theirs": [_event("e2", ("USER", "secret"))],
+        },
+    )
+
+    resp = _forget_call(
+        fake,
+        {"chat-mine": _chat("chat-mine"), "chat-theirs": _chat("chat-theirs", user_id=INTRUDER)},
+        params={"all": "true"},
+    )
+
+    assert resp.json()["deleted"] == 1
+    assert {c.kwargs["sessionId"] for c in fake.delete_event.call_args_list} == {"chat-mine"}
+
+
+def test_forgetting_everything_for_a_user_with_no_memory_partition_is_a_no_op_success():
+    """#527 on the most destructive path. The mock RAISES — a mock that
+    returned an empty page would pass even against the broken version."""
+    fake = _agentcore_raising(NO_PARTITION)
+
+    resp = _forget_call(fake, {}, params={"all": "true"})
+
+    assert resp.status_code == 200
+    assert resp.json() == {"deleted": 0, "failed": 0, "complete": True}
+
+
+@pytest.mark.parametrize("code", ["ThrottlingException", "AccessDeniedException"])
+def test_a_bulk_forget_still_500s_when_agentcore_fails_for_any_other_reason(code: str):
+    fake = _agentcore_raising(code)
+
+    resp = _forget_call(fake, {}, params={"all": "true"}, client_obj=error_client)
+
+    assert resp.status_code == 500
+
+
+def test_a_bulk_forget_whose_listing_fails_is_counted_as_a_failure():
+    fake = _agentcore_raising("ThrottlingException")
+
+    with (
+        patch.object(memory_api, "record_memory_bulk_forget_outcome", new=AsyncMock()) as counter,
+        pytest.raises(ClientError),
+    ):
+        _forget_call(fake, {}, params={"all": "true"})
+
+    counter.assert_awaited_once_with(success=False)
+
+
+# ── bulk: partial failure ─────────────────────────────────────────────────
+
+
+def test_one_refused_delete_does_not_abandon_the_batch():
+    """Stopping early would forget LESS than the user asked for — the wrong
+    direction to fail in."""
+    fake = _deleting_agentcore(
+        [],
+        {"chat-a": [_event("e1", ("USER", "a")), _event("e2", ("USER", "b"))]},
+        delete_side_effect=[
+            ClientError({"Error": {"Code": "ThrottlingException"}}, "DeleteEvent"),
+            {},
+        ],
+    )
+
+    resp = _forget_call(fake, {"chat-a": _chat("chat-a")}, params={"chat_id": "chat-a"})
+
+    assert resp.status_code == 200
+    assert resp.json() == {"deleted": 1, "failed": 1, "complete": True}
+
+
+def test_a_partially_failed_batch_counts_as_a_failure_even_though_it_answers_200():
+    # The counter answers "is forget working?", and a shape that read clean
+    # while records survived would answer it wrongly.
+    fake = _deleting_agentcore(
+        [],
+        {"chat-a": [_event("e1", ("USER", "a")), _event("e2", ("USER", "b"))]},
+        delete_side_effect=[
+            ClientError({"Error": {"Code": "ThrottlingException"}}, "DeleteEvent"),
+            {},
+        ],
+    )
+
+    with patch.object(memory_api, "record_memory_bulk_forget_outcome", new=AsyncMock()) as counter:
+        _forget_call(fake, {"chat-a": _chat("chat-a")}, params={"chat_id": "chat-a"})
+
+    counter.assert_awaited_once_with(success=False)
+
+
+def test_a_batch_that_deleted_nothing_while_something_failed_is_a_500():
+    """``{"deleted": 0}`` with a 200 reads as "there was nothing to forget",
+    which during an outage is a claim about the user's own data this
+    endpoint has no basis to make."""
+    fake = _deleting_agentcore(
+        [],
+        {"chat-a": [_event("e1", ("USER", "a"))]},
+        delete_side_effect=ClientError({"Error": {"Code": "ThrottlingException"}}, "DeleteEvent"),
+    )
+
+    resp = _forget_call(
+        fake, {"chat-a": _chat("chat-a")}, params={"chat_id": "chat-a"}, client_obj=error_client
+    )
+
+    assert resp.status_code == 500
+
+
+def test_an_already_absent_event_counts_as_neither_deleted_nor_failed():
+    # Nothing was deleted and nothing broke — the end state the caller
+    # wanted already holds.
+    fake = _deleting_agentcore(
+        [],
+        {"chat-a": [_event("e1", ("USER", "a"))]},
+        delete_side_effect=ClientError({"Error": {"Code": NO_PARTITION}}, "DeleteEvent"),
+    )
+
+    resp = _forget_call(fake, {"chat-a": _chat("chat-a")}, params={"chat_id": "chat-a"})
+
+    assert resp.json() == {"deleted": 0, "failed": 0, "complete": True}
+
+
+def test_a_bulk_forget_that_hit_the_page_ceiling_says_so_in_the_body(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Reported in the response, not only in a log line — a log line is not
+    visible to the person who just asked for their data to be gone."""
+    from channel.agents import memory_records
+
+    monkeypatch.setattr(memory_records, "MAX_FORGET_EVENT_PAGES", 1)
+    fake = MagicMock()
+    fake.list_events.return_value = {
+        "events": [_event("e1", ("USER", "a"))],
+        "nextToken": "more",
+    }
+
+    resp = _forget_call(fake, {"chat-a": _chat("chat-a")}, params={"chat_id": "chat-a"})
+
+    assert resp.json() == {"deleted": 1, "failed": 0, "complete": False}
+
+
+def test_an_incomplete_bulk_forget_counts_as_a_failure(monkeypatch: pytest.MonkeyPatch):
+    from channel.agents import memory_records
+
+    monkeypatch.setattr(memory_records, "MAX_FORGET_EVENT_PAGES", 1)
+    fake = MagicMock()
+    fake.list_events.return_value = {"events": [_event("e1", ("USER", "a"))], "nextToken": "more"}
+
+    with patch.object(memory_api, "record_memory_bulk_forget_outcome", new=AsyncMock()) as counter:
+        _forget_call(fake, {"chat-a": _chat("chat-a")}, params={"chat_id": "chat-a"})
+
+    counter.assert_awaited_once_with(success=False)
+
+
+# ── bulk: audit ───────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("params", "event_type", "extra"),
+    [
+        ({"chat_id": "chat-a"}, "memory.bulk_forget", {"filter": "chat_id", "chat_id": "chat-a"}),
+        (
+            {"since": "2026-01-01T00:00:00Z"},
+            "memory.bulk_forget",
+            {"filter": "since", "since": "2026-01-01T00:00:00Z"},
+        ),
+        ({"all": "true"}, "memory.forget_all", {"filter": "all"}),
+    ],
+)
+def test_every_bulk_forget_audits_counts_and_filters_only(
+    params: dict[str, Any], event_type: str, extra: dict[str, Any]
+):
+    """Copying the text a user just asked to forget into a 365-day immutable
+    audit partition would defeat the feature (epic #129 decision 3)."""
+    put_audit = MagicMock(return_value={})
+    secret = "the sauce is sage and brown butter"
+    fake = _deleting_agentcore(["chat-a"], {"chat-a": [_event("e1", ("USER", secret))]})
+
+    resp = _forget_call(fake, {"chat-a": _chat("chat-a")}, params=params, put_audit=put_audit)
+
+    assert resp.status_code == 200
+    kwargs = put_audit.call_args.kwargs
+    assert kwargs["event_type"] == event_type
+    assert kwargs["actor_id"] == OWNER
+    assert kwargs["details"] == {**extra, "deleted": 1, "failed": 0, "complete": True}
+    assert secret not in json.dumps(kwargs["details"])
+
+
+def test_a_bulk_forget_whose_audit_write_fails_still_reports_its_counts():
+    fake = _deleting_agentcore([], {"chat-a": [_event("e1", ("USER", "a"))]})
+
+    resp = _forget_call(
+        fake,
+        {"chat-a": _chat("chat-a")},
+        params={"chat_id": "chat-a"},
+        put_audit=MagicMock(side_effect=RuntimeError("dynamo down")),
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["deleted"] == 1
