@@ -675,17 +675,64 @@ async def test_forgettable_ids_report_a_walk_that_hit_the_page_ceiling(
     monkeypatch: pytest.MonkeyPatch,
 ):
     # Returned, not merely logged: the caller has to be able to say the
-    # forget was partial rather than present it as complete.
+    # forget was partial rather than present it as complete. Distinct
+    # tokens per page, so this is the ceiling and NOT the stall guard.
     monkeypatch.setattr(mr, "MAX_FORGET_EVENT_PAGES", 2)
-    client = MagicMock()
-    client.list_events.return_value = {"events": [_event("e1", ("USER", "a"))], "nextToken": "more"}
+    client = _paged_events_client(
+        [
+            {"events": [_event("e1", ("USER", "a"))], "nextToken": "p2"},
+            {"events": [_event("e2", ("USER", "b"))], "nextToken": "p3"},
+        ]
+    )
 
     ids, drained = await mr.list_forgettable_event_ids(
         client, memory_id=MEMORY_ID, actor_id=ACTOR_ID, session_id="chat-a"
     )
 
-    assert drained is False
-    assert ids == ["e1", "e1"]
+    assert (ids, drained) == (["e1", "e2"], False)
+    assert client.list_events.call_count == 2
+
+
+async def test_a_stalled_paginator_ends_the_walk_immediately_rather_than_at_the_ceiling():
+    """The ceiling alone is not a stall guard.
+
+    A vendor repeating one ``nextToken`` would otherwise run the full
+    ceiling and hand back the same ids 200 times over — thousands of
+    redundant ``DeleteEvent`` calls, i.e. the burnt Lambda timeout the
+    ceiling exists to prevent, arriving by a different route.
+    """
+    client = MagicMock()
+    client.list_events.return_value = {
+        "events": [_event("e1", ("USER", "a"))],
+        "nextToken": "stuck",
+    }
+
+    ids, drained = await mr.list_forgettable_event_ids(
+        client, memory_id=MEMORY_ID, actor_id=ACTOR_ID, session_id="chat-a"
+    )
+
+    assert (ids, drained) == (["e1"], False)
+    # Two round trips, not MAX_FORGET_EVENT_PAGES of them.
+    assert client.list_events.call_count == 2
+
+
+async def test_forgettable_ids_never_repeat_an_event_id():
+    """``ListEvents`` pages over a session this walk is actively deleting
+    from, so the window can legitimately show one event twice. Returning it
+    twice would spend a second ``DeleteEvent`` to be told it is already
+    gone."""
+    client = _paged_events_client(
+        [
+            {"events": [_event("e1", ("USER", "a"))], "nextToken": "p2"},
+            {"events": [_event("e1", ("USER", "a")), _event("e2", ("USER", "b"))]},
+        ]
+    )
+
+    ids, drained = await mr.list_forgettable_event_ids(
+        client, memory_id=MEMORY_ID, actor_id=ACTOR_ID, session_id="chat-a"
+    )
+
+    assert (ids, drained) == (["e1", "e2"], True)
 
 
 async def test_forgettable_ids_read_a_missing_actor_as_nothing_to_forget():

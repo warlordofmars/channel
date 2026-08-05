@@ -668,11 +668,30 @@ async def list_forgettable_event_ids(
     #527 condition, reached here by a signed-in user who has never chatted
     pressing "forget everything".
 
-    ``drained`` is false only when the page ceiling was hit with a token
-    still outstanding. It is **returned**, not merely logged, so the caller
-    can say so rather than reporting a partial forget as a complete one.
+    ``drained`` is false when the walk stopped short of the end — the page
+    ceiling was hit, or the paginator stalled (below). It is **returned**,
+    not merely logged, so the caller can say so rather than reporting a
+    partial forget as a complete one.
+
+    **Two guards against a stuck paginator, because the ceiling alone is
+    not one.** A vendor that keeps handing back the *same* ``nextToken``
+    would otherwise run the full ceiling and hand the caller the same ids
+    200 times over — thousands of redundant ``DeleteEvent`` calls, which in
+    a synchronous Lambda handler is the burnt timeout the ceiling exists to
+    prevent, arriving by a different route. So:
+
+    1. **A repeated ``nextToken`` ends the walk immediately** with
+       ``drained=False``. The caller still learns the forget was partial;
+       it just learns it after two round trips instead of two hundred.
+    2. **Ids are de-duplicated.** Belt and braces for the above, and
+       independently correct: ``ListEvents`` pages over a session that is
+       being mutated (this walk is *deleting* from it) can legitimately
+       show one event twice as the window shifts. Returning it twice would
+       spend a second ``DeleteEvent`` to be told it is already gone.
     """
     event_ids: list[str] = []
+    seen_ids: set[str] = set()
+    seen_tokens: set[str] = set()
     token: str | None = None
     for _ in range(MAX_FORGET_EVENT_PAGES):
         kwargs: dict[str, Any] = {
@@ -688,14 +707,19 @@ async def list_forgettable_event_ids(
             return event_ids, True
         for event in resp.get("events", []):
             event_id = event.get("eventId") or ""
-            if not event_id:
+            if not event_id or event_id in seen_ids:
                 continue
             if since is not None and not _event_at_or_after(event.get("eventTimestamp"), since):
                 continue
+            seen_ids.add(event_id)
             event_ids.append(event_id)
         token = resp.get("nextToken")
         if not token:
             return event_ids, True
+        if token in seen_tokens:
+            logger.warning("memory.forget_paginator_stalled")
+            return event_ids, False
+        seen_tokens.add(token)
     logger.warning("memory.forget_page_cap_hit pages=%d", MAX_FORGET_EVENT_PAGES)
     return event_ids, False
 
