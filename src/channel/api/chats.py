@@ -40,6 +40,7 @@ from channel.agents.asset_producers import (
 from channel.agents.chat_agent import (
     build_agent,
     build_followups_agent,
+    build_followups_prompt,
     build_head_summary_agent,
     build_head_summary_prompt,
     build_titler_agent,
@@ -1754,9 +1755,10 @@ async def _stream_bedrock_reply(
     if followups_enabled and prefs.suggest_followups:
         try:
             followups_agent = build_followups_agent()
-            followups_prompt = (
-                f"User: {user_message}\n\nAssistant: {assistant_text[:1000]}\n\nFollow-up prompts:"
-            )
+            # #545: framed + defused + capped by the builder, like the
+            # titler above. Was a bare ``User: ...\n\nAssistant: ...``
+            # string with only the assistant half truncated.
+            followups_prompt = build_followups_prompt(user_message, assistant_text)
             chunks: list[str] = []
             try:
                 async for event in followups_agent.stream_async(followups_prompt):
