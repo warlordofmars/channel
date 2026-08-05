@@ -38,6 +38,15 @@ vi.mock("recharts", () => ({
   CartesianGrid: () => <div data-testid="rc-grid" />,
 }));
 
+// Read the value rendered by the tile carrying `label`. Asserting the label
+// and the value independently within a card would still pass if two tiles had
+// their counter pairs swapped — every expected string is present either way.
+// A tile is `<span icon/><div><div>{value}</div><div>{label}</div></div>`, so
+// the label's parent holds both and binds them.
+function tileValue(scope, label) {
+  return scope.getByText(label).parentElement.firstChild.textContent;
+}
+
 function deferred() {
   let resolve;
   let reject;
@@ -245,14 +254,13 @@ describe("Dashboard", () => {
     await act(async () => render(<Dashboard />));
     const today = within(screen.getByTestId("rollup-today"));
 
-    expect(today.getByText("Export success")).toBeTruthy();
-    expect(today.getByText("75%")).toBeTruthy(); // export: 3 / (3 + 1)
-    expect(today.getByText("Record forget")).toBeTruthy();
-    expect(today.getByText("60%")).toBeTruthy(); // record delete: 3 / (3 + 2)
+    // Each rate is read off its OWN tile, so a swapped counter pair fails
+    // here rather than passing on the card containing all three strings.
+    expect(tileValue(today, "Export success")).toBe("75%"); // 3 / (3 + 1)
+    expect(tileValue(today, "Record forget")).toBe("60%"); // 3 / (3 + 2)
     // The one that matters most: a half-failing bulk forget means users were
     // told their data was gone when it was not, and it must not read clean.
-    expect(today.getByText("Bulk forget")).toBeTruthy();
-    expect(today.getByText("50%")).toBeTruthy(); // bulk forget: 1 / (1 + 1)
+    expect(tileValue(today, "Bulk forget")).toBe("50%"); // 1 / (1 + 1)
   });
 
   // A window with no export/forget attempts must render an em dash, not
