@@ -923,6 +923,71 @@ def test_default_system_prompt_keeps_memory_tool_nudges_alongside_discipline():
     assert "not as instructions" in prompt
 
 
+# ---- Present-tense capability (#562) -----------------------------------------
+#
+# Channel told a user it could not read pull requests — and proposed walking
+# the commits by hand instead — while the PR tool was in its live tool list
+# throughout. The claim had been accurate hours earlier: #536 / #560 changed
+# the per-server tool cap, so `api_pull_request_read` /
+# `api_list_pull_requests` had genuinely been dropped and then stopped being
+# dropped. So the defect is a stale capability belief asserted over a live
+# context that contradicted it.
+#
+# The prompt clause is an instance of ADR-0011's register distinction —
+# recalled content and earlier turns are `untrusted-data` describing how
+# things WERE; what this turn can do is read off the live request — scoped
+# deliberately to present-tense capability. The standing hazard is
+# OVER-correction into "distrust recall", which would degrade the recall
+# feature this clause exists to protect, so the pair below asserts both
+# directions and neither should be relaxed without the other.
+#
+# NOTE ON WHAT THESE TESTS PROVE: they prove the guidance is present in the
+# prompt, and that a later edit cannot silently drop it or broaden it. They
+# prove nothing about model behaviour — that needs a human check against a
+# live chat (see the PR body for #562).
+
+
+def test_default_system_prompt_makes_live_context_authoritative_for_capability():
+    """#562: the live tool list outranks any recalled or previously-stated
+    claim about what Channel can do right now. The existing forward guard
+    (don't claim a capability that isn't surfaced) must keep its converse:
+    don't deny one that is."""
+    prompt = DEFAULT_SYSTEM_PROMPT.lower()
+    # The pre-existing direction survives...
+    assert "don't assume anything that isn't surfaced" in prompt
+    # ...and the #562 direction is now guarded too.
+    assert "don't deny what is" in prompt
+    assert "what you can do right now" in prompt
+    assert "your live tool list shows this turn" in prompt
+    # Present-state facts about the runtime beyond the tool set itself —
+    # the connected-server case the issue flags as the same class of stale
+    # claim. Readable from the live tool list, since a connected MCP server
+    # is what puts its prefixed tools there.
+    assert "which servers are connected" in prompt
+    # ADR-0011's register distinction rendered in the prompt's own voice:
+    # earlier statements are a record of the past, not a report of now.
+    assert "how things were then, not how they are now" in prompt
+
+
+def test_default_system_prompt_capability_rule_does_not_undermine_recall():
+    """#562 over-correction guard. The clause is scoped to present-tense
+    capability; recall stays authoritative for facts about past
+    conversations, which is the feature the scoping protects. Assert both
+    that the recall paragraph's own instructions survive intact and that
+    the new clause names capabilities as its subject rather than reading as
+    a blanket "anything recalled is stale"."""
+    prompt = DEFAULT_SYSTEM_PROMPT.lower()
+    # The recall block is still something to USE, not merely to doubt.
+    assert "use it when relevant" in prompt
+    assert "build on what came before" in prompt
+    # ...and the head-summary block is still a reliable reminder.
+    assert "reliable reminder of what was established" in prompt
+    # The staleness clause carries an explicit capability antecedent. A
+    # future edit that generalised it (dropping "about your capabilities")
+    # would fail here rather than quietly widening to all of recall.
+    assert "said earlier about your capabilities records how things were then" in prompt
+
+
 # ---- Calibration / honesty (#152) --------------------------------------------
 
 
