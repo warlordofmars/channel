@@ -568,3 +568,220 @@ def test_chat_summary_model_is_untouched_by_this_module():
     # (epic #129 decision 4). Guards against someone later folding
     # summaries into MemoryRecord.
     assert not hasattr(ChatSummary, "record_id")
+
+
+# ══ The forget seam (#477) ════════════════════════════════════════════════
+#
+# The delete seam repeats the #527 shape on purpose, and these tests are
+# built to catch it repeating the BUG: a mock that RETURNS empty cannot
+# tell "no actor partition" from "empty actor partition", and that is the
+# distinction that shipped broken twice. Every mock below that models an
+# absent partition RAISES, and every absorbing assertion is paired with one
+# proving a different ``ClientError`` still propagates — because on a
+# forget endpoint, an over-broad handler reports "deleted" when nothing was
+# deleted, which is strictly worse than the 500 it replaces.
+
+
+def _paged_events_client(pages: list[dict[str, Any]]) -> MagicMock:
+    """A client whose ``list_events`` walks ``pages`` in order."""
+    client = MagicMock()
+    client.list_events.side_effect = list(pages)
+    return client
+
+
+# ── _event_at_or_after ────────────────────────────────────────────────────
+
+
+def test_an_aware_timestamp_at_the_cutoff_is_included():
+    cutoff = datetime(2026, 7, 30, 12, tzinfo=timezone.utc)
+
+    assert mr._event_at_or_after(cutoff, cutoff) is True
+
+
+def test_an_aware_timestamp_before_the_cutoff_is_excluded():
+    cutoff = datetime(2026, 7, 30, 12, tzinfo=timezone.utc)
+
+    assert mr._event_at_or_after(datetime(2026, 7, 30, 11, tzinfo=timezone.utc), cutoff) is False
+
+
+def test_a_naive_timestamp_is_read_as_utc_rather_than_rejected():
+    # AgentCore stamps in UTC; refusing would make the whole filter depend
+    # on a boto3 deserialization detail.
+    cutoff = datetime(2026, 7, 30, 12, tzinfo=timezone.utc)
+
+    assert mr._event_at_or_after(datetime(2026, 7, 30, 13), cutoff) is True
+
+
+@pytest.mark.parametrize("value", [None, "2026-07-30T13:00:00+00:00"])
+def test_an_undatable_event_is_excluded_from_a_since_forget(value: Any):
+    # A forget that guessed would delete records the user did not ask to
+    # lose — the one direction of error that cannot be undone.
+    cutoff = datetime(2026, 7, 30, 12, tzinfo=timezone.utc)
+
+    assert mr._event_at_or_after(value, cutoff) is False
+
+
+# ── list_forgettable_event_ids ────────────────────────────────────────────
+
+
+async def test_forgettable_ids_drain_every_page_rather_than_capping():
+    # The read model caps at MAX_EVENTS_PER_SESSION and SAYS so via
+    # records_truncated. A forget cannot make that trade: the user is told
+    # the action completed and has no truncation flag to read.
+    client = _paged_events_client(
+        [
+            {"events": [_event("e1", ("USER", "a"))], "nextToken": "p2"},
+            {"events": [_event("e2", ("USER", "b"))]},
+        ]
+    )
+
+    ids, drained = await mr.list_forgettable_event_ids(
+        client, memory_id=MEMORY_ID, actor_id=ACTOR_ID, session_id="chat-a"
+    )
+
+    assert (ids, drained) == (["e1", "e2"], True)
+    assert client.list_events.call_args_list[1].kwargs["nextToken"] == "p2"
+
+
+async def test_forgettable_ids_skip_events_with_no_id():
+    client = _paged_events_client([{"events": [{"eventId": ""}, _event("e1", ("USER", "a"))]}])
+
+    ids, _drained = await mr.list_forgettable_event_ids(
+        client, memory_id=MEMORY_ID, actor_id=ACTOR_ID, session_id="chat-a"
+    )
+
+    assert ids == ["e1"]
+
+
+async def test_forgettable_ids_apply_the_since_cutoff():
+    old = datetime(2026, 7, 29, 12, tzinfo=timezone.utc)
+    new = datetime(2026, 7, 31, 12, tzinfo=timezone.utc)
+    client = _paged_events_client(
+        [{"events": [_event("old", ("USER", "a"), ts=old), _event("new", ("USER", "b"), ts=new)]}]
+    )
+
+    ids, _drained = await mr.list_forgettable_event_ids(
+        client,
+        memory_id=MEMORY_ID,
+        actor_id=ACTOR_ID,
+        session_id="chat-a",
+        since=datetime(2026, 7, 30, tzinfo=timezone.utc),
+    )
+
+    assert ids == ["new"]
+
+
+async def test_forgettable_ids_report_a_walk_that_hit_the_page_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # Returned, not merely logged: the caller has to be able to say the
+    # forget was partial rather than present it as complete.
+    monkeypatch.setattr(mr, "MAX_FORGET_EVENT_PAGES", 2)
+    client = MagicMock()
+    client.list_events.return_value = {"events": [_event("e1", ("USER", "a"))], "nextToken": "more"}
+
+    ids, drained = await mr.list_forgettable_event_ids(
+        client, memory_id=MEMORY_ID, actor_id=ACTOR_ID, session_id="chat-a"
+    )
+
+    assert drained is False
+    assert ids == ["e1", "e1"]
+
+
+async def test_forgettable_ids_read_a_missing_actor_as_nothing_to_forget():
+    # #527, on the destructive path: a signed-in user who has never chatted
+    # has no partition, so "forget everything" must be a no-op success.
+    # The mock RAISES — one returning [] would pass even if this were broken.
+    client = _raising_client("ResourceNotFoundException", "ListEvents")
+
+    assert await mr.list_forgettable_event_ids(
+        client, memory_id=MEMORY_ID, actor_id=ACTOR_ID, session_id="chat-a"
+    ) == ([], True)
+
+
+async def test_forgettable_ids_still_raise_on_any_other_client_error():
+    # Deleting a selection we could not even enumerate is not something to
+    # paper over.
+    client = _raising_client("ThrottlingException", "ListEvents")
+
+    with pytest.raises(ClientError):
+        await mr.list_forgettable_event_ids(
+            client, memory_id=MEMORY_ID, actor_id=ACTOR_ID, session_id="chat-a"
+        )
+
+
+# ── delete_session_event ──────────────────────────────────────────────────
+
+
+async def test_delete_session_event_forwards_the_full_agentcore_address():
+    client = MagicMock()
+
+    assert (
+        await mr.delete_session_event(
+            client,
+            memory_id=MEMORY_ID,
+            actor_id=ACTOR_ID,
+            session_id="chat-a",
+            event_id="e1",
+        )
+        is True
+    )
+    assert client.delete_event.call_args.kwargs == {
+        "memoryId": MEMORY_ID,
+        "actorId": ACTOR_ID,
+        "sessionId": "chat-a",
+        "eventId": "e1",
+    }
+
+
+async def test_delete_session_event_reads_an_absent_event_as_already_gone():
+    client = MagicMock()
+    client.delete_event.side_effect = _client_error("ResourceNotFoundException", "DeleteEvent")
+
+    assert (
+        await mr.delete_session_event(
+            client, memory_id=MEMORY_ID, actor_id=ACTOR_ID, session_id="chat-a", event_id="e1"
+        )
+        is False
+    )
+
+
+async def test_delete_session_event_still_raises_on_any_other_client_error():
+    # The one that matters most on a forget: telling a user their data is
+    # gone during an AgentCore outage is worse than an error they can act on.
+    client = MagicMock()
+    client.delete_event.side_effect = _client_error("AccessDeniedException", "DeleteEvent")
+
+    with pytest.raises(ClientError):
+        await mr.delete_session_event(
+            client, memory_id=MEMORY_ID, actor_id=ACTOR_ID, session_id="chat-a", event_id="e1"
+        )
+
+
+async def test_delete_session_event_logs_an_absence_without_naming_anything():
+    fake_logger = MagicMock()
+    client = MagicMock()
+    client.delete_event.side_effect = _client_error("ResourceNotFoundException", "DeleteEvent")
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(mr, "logger", fake_logger)
+        await mr.delete_session_event(
+            client, memory_id=MEMORY_ID, actor_id=ACTOR_ID, session_id="chat-a", event_id="e1"
+        )
+
+    (line,) = fake_logger.info.call_args.args
+    assert line == "memory.delete_event_absent"
+
+
+async def test_a_malformed_client_error_is_not_read_as_an_absence_on_delete():
+    # Defensive, matching the read seam: ``getattr(exc, "response", ...)``
+    # must not turn a broken exception into a silent "already gone".
+    error = ClientError({"Error": {"Code": "ResourceNotFoundException"}}, "DeleteEvent")
+    error.response = None  # type: ignore[assignment]
+    client = MagicMock()
+    client.delete_event.side_effect = error
+
+    with pytest.raises(ClientError):
+        await mr.delete_session_event(
+            client, memory_id=MEMORY_ID, actor_id=ACTOR_ID, session_id="chat-a", event_id="e1"
+        )
