@@ -445,6 +445,31 @@ async def test_web_fetch_200_with_crawl_error_returns_fetch_failed(monkeypatch, 
     assert result == {"status": "error", "content": [{"text": "fetch_failed"}]}
 
 
+async def test_web_fetch_absent_results_key_with_error_status_still_fails(monkeypatch):
+    """The mirror of the unfamiliar-shape rule above: `results` ABSENT
+    (not merely empty) alongside an error status is still a genuine
+    crawl failure.
+
+    Tightening the guard to require the key to be present would let Exa
+    reintroduce #269's exact bug — a failure reaching the model as a
+    nominal success — just by omitting `results` on the failure path."""
+    _mock_exa(
+        monkeypatch,
+        json_body={
+            "statuses": [
+                {"id": "https://example.com/page", "status": "error", "error": {"tag": "CRAWL_404"}}
+            ]
+        },
+    )
+    monkeypatch.setenv("EXA_API_KEY", "ek-test")
+
+    from channel.agents.tools.web_fetch import web_fetch
+
+    result = await web_fetch(url="https://example.com/page")
+
+    assert result == {"status": "error", "content": [{"text": "fetch_failed"}]}
+
+
 async def test_web_fetch_crawl_error_tag_is_logged_not_enumerated(monkeypatch):
     """The tag carries the diagnosis, so it belongs in the log line even
     though it never branches the token."""
@@ -499,6 +524,31 @@ async def test_web_fetch_partial_success_still_returns_content(monkeypatch):
         ),
         pytest.param({"results": [], "statuses": ["unexpected"]}, id="entry-not-a-dict"),
         pytest.param([], id="body-not-a-dict"),
+        # `results` present but not a list: an unfamiliar envelope, not
+        # a crawl failure. Treating an unknown shape as "no content"
+        # would turn a valid-but-unexpected 2xx into a phantom
+        # fetch_failed (Copilot review, PR #540). Each of these carries
+        # an error status, so only the results-shape check keeps them
+        # on the success path.
+        pytest.param(
+            {"results": "", "statuses": [{"id": "u", "status": "error", "error": {"tag": "T"}}]},
+            id="results-empty-string",
+        ),
+        pytest.param(
+            {"results": {}, "statuses": [{"id": "u", "status": "error", "error": {"tag": "T"}}]},
+            id="results-empty-dict",
+        ),
+        pytest.param(
+            {"results": 0, "statuses": [{"id": "u", "status": "error", "error": {"tag": "T"}}]},
+            id="results-zero",
+        ),
+        pytest.param(
+            {
+                "results": {"a": 1},
+                "statuses": [{"id": "u", "status": "error", "error": {"tag": "T"}}],
+            },
+            id="results-non-empty-dict",
+        ),
     ],
 )
 async def test_web_fetch_non_error_status_shapes_stay_on_success_path(monkeypatch, body):

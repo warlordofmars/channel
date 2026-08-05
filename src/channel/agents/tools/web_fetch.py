@@ -112,11 +112,28 @@ def _crawl_failed_tag(data: Any) -> str | None:
     Any tag maps to the single ``fetch_failed`` token; the tag itself is
     logged, never enumerated. Exa's tag vocabulary is undocumented, and
     branching on it would recreate exactly the brittle
-    match-upstream's-strings coupling this issue removes. Requiring
-    ``results`` to be empty keeps a partial success (content returned
-    alongside a warning) on the success path — we ask for exactly one
-    URL, so there is no ambiguity about whose status it is."""
-    if not isinstance(data, dict) or data.get("results"):
+    match-upstream's-strings coupling this issue removes.
+
+    The recognised shapes are deliberately narrow in BOTH directions,
+    because each direction has its own failure mode:
+
+    - ``results`` non-empty → partial success (content returned
+      alongside a warning) stays on the success path. We ask for
+      exactly one URL, so there is no ambiguity about whose status it is.
+    - ``results`` present but **not a list** → an unfamiliar envelope.
+      Return ``None`` and let the model see it. Treating an unknown
+      shape as "no content" would turn a valid-but-unexpected 2xx into
+      a phantom `fetch_failed` (Copilot review, PR #540).
+    - ``results`` empty **or absent** → genuinely no content, so an
+      error status is the real failure this guard exists to catch.
+      Requiring the key to be present would let Exa reintroduce #269's
+      bug simply by omitting it on failure."""
+    if not isinstance(data, dict):
+        return None
+    results = data.get("results")
+    if results:
+        return None
+    if results is not None and not isinstance(results, list):
         return None
     statuses = data.get("statuses")
     if not isinstance(statuses, list):
