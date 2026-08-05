@@ -95,6 +95,21 @@ _METRIC_ALLOWLIST = (
     "MemoryToolWriteFailures",
     "MemoryToolRecallSuccesses",
     "MemoryToolRecallFailures",
+    # Memory data-rights surface (#476 export, #477 forget) — the counters
+    # behind the Privacy page's export promise and the deletion path. Split
+    # per-endpoint for the same reason #400 split the tool counters off the
+    # hook ones: a user pressing "download my data" or "forget this" must not
+    # move a hook-health line. The FAILURE halves are the ones that matter —
+    # a rise in ``MemoryBulkForgetFailures`` means users are being told their
+    # data is gone when it is not, which ``api/memory.py`` calls the one error
+    # that endpoint must never make. They were emitted but unreadable until
+    # #551 put them here.
+    "MemoryExportSuccesses",
+    "MemoryExportFailures",
+    "MemoryRecordDeleteSuccesses",
+    "MemoryRecordDeleteFailures",
+    "MemoryBulkForgetSuccesses",
+    "MemoryBulkForgetFailures",
     "AutoTitleSuccesses",
     "AutoTitleFailures",
     # Long-chat context (#245): how often the history window truncates,
