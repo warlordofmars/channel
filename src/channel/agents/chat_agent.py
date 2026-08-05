@@ -80,10 +80,11 @@ def max_tokens_for_effort(effort: str | None) -> int:
 
 
 # Editing note (#533 / ADR-0011): before adding a NEW block to the system
-# prompt, classify the seam you are adding. `docs/adr/0011-context-trust-
-# boundary.md` §Decision 1 carries the seam/register/trust-class table, and
-# its point is that there are exactly TWO trusted content inputs — this
-# literal (class `system`) and the current user turn (`operator-instruction`).
+# prompt, classify the seam you are adding.
+# docs/adr/0011-context-trust-boundary.md §Decision 1 carries the
+# seam/register/trust-class table, and its point is that there are exactly
+# TWO trusted content inputs — this literal (class `system`) and the current
+# user turn (class `operator-instruction`).
 # Everything else — the #245 head-summary block, the recall hook's addendum,
 # prior assistant turns, attachments, and every tool result including MCP —
 # is `untrusted-data`. Trust class is a property of the SEAM, assigned here
