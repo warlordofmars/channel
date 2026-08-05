@@ -429,11 +429,10 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-        with:
-          # SonarCloud free plan only supports one main branch (development).
-          # Quality gate status API returns 'not found' for main, so skip the
-          # wait on main-branch pushes; keep it enforced on development + PRs.
-          args: ${{ github.ref == 'refs/heads/main' && '-Dsonar.qualitygate.wait=false' || '' }}
+        # No `args:` override. `sonar.qualitygate.wait=false` is set in
+        # sonar-project.properties for every branch (#246, #541), so the old
+        # main-only override is redundant — and two places disagreeing about
+        # one setting is how it stayed `true` on development unnoticed.
 
       - name: Fetch SonarCloud issues as SARIF
         if: always() && steps.sonar_configured.outputs.configured == 'true'
