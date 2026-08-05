@@ -133,7 +133,13 @@ def max_tokens_for_effort(effort: str | None) -> int:
 # The clause is an INSTANCE of ADR-0011's register distinction, not a fresh
 # rule: recalled content and earlier turns are `untrusted-data` describing
 # how things were, while what this turn can do is read off the live
-# request. Keep it scoped to PRESENT-TENSE capability. Recall is
+# request. It does NOT promote the tool register — ADR-0011 §Decision 1's
+# completeness note classifies MCP tool names and descriptions
+# `untrusted-data`, and they stay that way. The two are orthogonal: the
+# live roster is authoritative for whether a capability EXISTS right now,
+# while the trust class governs whether content may DIRECT behaviour, and a
+# tool's own description is still never an instruction.
+# Keep it scoped to PRESENT-TENSE capability. Recall is
 # legitimately authoritative about past conversations — that is the whole
 # feature, and the recall paragraph above instructs the model to use it —
 # so do NOT generalise this into "distrust recall", which would degrade the
