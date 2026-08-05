@@ -138,7 +138,16 @@ _FORGED_SETEXT_UNDERLINE_RE = re.compile(r"^[ \t]*[=-]{2,}[ \t]*$", re.MULTILINE
 # the text, and it is idempotent — exactly what ``_defuse_recall_turn``'s
 # termination argument needs.
 def _normalise_line_terminators(text: str) -> str:
-    """Rewrite every terminator ``str.splitlines`` recognises as ``\\n``."""
+    """Rewrite every terminator ``str.splitlines`` recognises as ``\\n``.
+
+    Not a pure one-for-one substitution, and callers should not assume
+    it is: a ``\\r\\n`` pair collapses to a single ``\\n``, and a
+    terminator in final position is dropped rather than kept, so
+    ``"a\\r\\nb\\n"`` becomes ``"a\\nb"``. Both follow from rebuilding the
+    text from ``str.splitlines``, and both are wanted here — the result
+    is never longer than the input, which is what
+    :func:`_defuse_recall_turn`'s termination argument rests on.
+    """
     return "\n".join(text.splitlines())
 
 
