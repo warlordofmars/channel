@@ -152,9 +152,11 @@ function summaryFixture() {
     "30d": {
       active_users: 120,
       // ...and hook recall 0/0 → "—" exercises the zero-denominator branch.
-      // Tool recall AND all three #551 data-rights pairs are non-zero here so
-      // the card has a single em dash (the hook tile), keeping the
-      // getByText("—") assertion unambiguous.
+      // Every OTHER rate tile is given a non-zero DENOMINATOR here — tool
+      // recall, plus the three #551 data-rights tiles. Only the success
+      // halves are set below; the failure halves stay 0, which is all a
+      // non-zero `successes + failures` needs. That leaves the card with a
+      // single em dash (the hook tile), keeping getByText("—") unambiguous.
       metrics: metricsBlock({
         MemoryWriteSuccesses: 9000,
         RecallSuccesses: 0,
