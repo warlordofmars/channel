@@ -49,6 +49,7 @@ import binascii
 import logging
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 from botocore.exceptions import ClientError
@@ -72,12 +73,15 @@ __all__ = [
     "KIND_META",
     "KIND_REMEMBERED",
     "MAX_EVENTS_PER_SESSION",
+    "MAX_FORGET_EVENT_PAGES",
     "MemoryRecord",
     "classify_kind",
     "count_session_records",
     "decode_record_id",
+    "delete_session_event",
     "encode_record_id",
     "group_created_at",
+    "list_forgettable_event_ids",
     "list_session_records",
     "list_sessions_page",
     "recall_window",
@@ -115,6 +119,23 @@ _RECORD_ID_FIELDS = 3
 _NO_PARTITION_CODE = "ResourceNotFoundException"
 
 
+def _is_absent(exc: ClientError) -> bool:
+    """Whether ``exc`` is AgentCore's "that doesn't exist" answer.
+
+    **The code is matched, never the message.** AWS error codes are a stable
+    contract and message prose is not, so matching on "Actor ... not found"
+    would re-break this for new users the first time the string is reworded.
+    ``getattr`` guards a malformed exception carrying no ``response`` at all,
+    which must re-raise rather than read as an absence.
+
+    One definition, shared by the read seam (:func:`_agentcore_read`) and the
+    delete seam (:func:`delete_session_event`), so the two can never disagree
+    about what "absent" means — the drift that would let a *forget* endpoint
+    report success against a partition a *read* endpoint still 500s on.
+    """
+    return (getattr(exc, "response", None) or {}).get("Error", {}).get("Code") == _NO_PARTITION_CODE
+
+
 async def _agentcore_read(
     call: Callable[..., dict[str, Any]], *, what: str, **kwargs: Any
 ) -> dict[str, Any] | None:
@@ -149,10 +170,8 @@ async def _agentcore_read(
     blanket ``except Exception`` is what the recall hook can afford, because
     it degrades a prompt; here it would falsify an answer.
 
-    **The code is matched, never the message.** AWS error codes are a stable
-    contract and message prose is not, so matching on "Actor ... not found"
-    would re-break this for new users the first time the string is reworded.
-    The other condition that shares this code — an unknown ``memoryId`` —
+    **The code is matched, never the message** — see :func:`_is_absent`. The
+    other condition that shares this code — an unknown ``memoryId`` —
     resolves to the same honest answer anyway: ``get_or_create_memory``
     resolves-or-creates the environment's Memory resource on cold start, and
     a freshly created Memory holds nothing.
@@ -160,9 +179,7 @@ async def _agentcore_read(
     try:
         return await asyncio.to_thread(call, **kwargs)
     except ClientError as exc:
-        if (getattr(exc, "response", None) or {}).get("Error", {}).get(
-            "Code"
-        ) != _NO_PARTITION_CODE:
+        if not _is_absent(exc):
             raise
         # ``what`` only — no identifiers. The derived actor id carries a
         # human-legible label built from the user's email (see
@@ -588,6 +605,188 @@ async def count_session_records(
         client, memory_id=memory_id, actor_id=actor_id, session_id=session_id
     )
     return sum(1 for _ in _iter_payload_texts(events))
+
+
+# ── The AgentCore forget seam (#477) ──────────────────────────────────────
+
+#: Ceiling on ``ListEvents`` pages per session during a forget walk — a
+#: backstop against a paginator that keeps handing back the same token,
+#: which in a synchronous Lambda handler is a burnt function timeout rather
+#: than a slow response. 200 pages × :data:`MAX_EVENTS_PER_SESSION` is
+#: 20 000 events in one chat, far above any plausible real session. A walk
+#: that hits it reports it rather than silently truncating.
+MAX_FORGET_EVENT_PAGES = 200
+
+
+def _event_at_or_after(value: Any, cutoff: datetime) -> bool:
+    """Whether an ``eventTimestamp`` falls at or after ``cutoff``.
+
+    boto3 deserializes AgentCore timestamps as ``datetime``; anything else
+    (``None``, or a string from some future wire change) is **excluded**
+    from a ``since`` forget. An undatable event cannot be *shown* to fall in
+    the requested range, and a forget that guessed would delete records the
+    user did not ask to lose — the one direction of error that is not
+    recoverable. ``?all=true`` remains the path that reaches them.
+
+    A naive timestamp is read as UTC rather than rejected: AgentCore stamps
+    in UTC, and refusing would make the whole filter depend on a boto3
+    deserialization detail.
+    """
+    if not isinstance(value, datetime):
+        return False
+    at = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    return at >= cutoff
+
+
+async def list_forgettable_event_ids(
+    client: Any,
+    *,
+    memory_id: str,
+    actor_id: str,
+    session_id: str,
+    since: datetime | None = None,
+) -> tuple[list[str], bool]:
+    """Event ids to forget in one session → ``(event_ids, drained)``.
+
+    **Drained across every page, unlike :func:`_list_events`.** The read
+    model caps at :data:`MAX_EVENTS_PER_SESSION` and *reports* the cap via
+    ``records_truncated``, which is honest for a list. A forget cannot make
+    the same trade: "forget everything in this chat" that quietly kept the
+    oldest events would be exactly the silent lie this module family exists
+    to stop, and the user has no ``records_truncated`` to read on a
+    destructive action they believe completed. Same full walk
+    ``chats._wipe_agentcore_session`` performs on chat deletion.
+
+    ``since`` filters to events at or after the cutoff (see
+    :func:`_event_at_or_after`); ``None`` takes the whole session. Events
+    with no id are skipped — there is nothing to address a ``DeleteEvent``
+    at.
+
+    An absent actor **or** session yields no ids and counts as drained (see
+    :func:`_agentcore_read`): a partition that does not exist holds nothing
+    to forget, which is the honest answer rather than a 500. That is the
+    #527 condition, reached here by a signed-in user who has never chatted
+    pressing "forget everything".
+
+    ``drained`` is false when the walk stopped short of the end — the page
+    ceiling was hit, or the paginator stalled (below). It is **returned**,
+    not merely logged, so the caller can say so rather than reporting a
+    partial forget as a complete one.
+
+    **Two guards against a stuck paginator, because the ceiling alone is
+    not one.** A vendor that keeps handing back the *same* ``nextToken``
+    would otherwise run the full ceiling and hand the caller the same ids
+    200 times over — thousands of redundant ``DeleteEvent`` calls, which in
+    a synchronous Lambda handler is the burnt timeout the ceiling exists to
+    prevent, arriving by a different route. So:
+
+    1. **A repeated ``nextToken`` ends the walk immediately** with
+       ``drained=False``. The caller still learns the forget was partial;
+       it just learns it after two round trips instead of two hundred.
+    2. **Ids are de-duplicated.** Belt and braces for the above, and
+       independently correct: a **concurrent** mutator — the
+       ``AgentCoreMemoryHook`` writing a turn from another tab, or an
+       overlapping forget — shifts the paging window, and ``ListEvents``
+       can then show one event on two pages. Returning it twice would
+       spend a second ``DeleteEvent`` to be told it is already gone.
+
+       Note the mutator is *concurrent*, not this walk:
+       ``api/memory._forget_sessions`` drains this function completely for
+       a session and only then enters its delete loop, so no
+       ``DeleteEvent`` is ever in flight against the session being listed.
+       Stated precisely because the obvious-sounding wrong cause ("this
+       walk is deleting from it") is checkable, doesn't hold, and would
+       lead a future reader to conclude the guard is dead weight and
+       remove something that is doing real work.
+
+    Neither guard can drop a record. ``seen_ids`` is added to only *after*
+    the ``since`` filter passes, so an event excluded by the cutoff is
+    never memoised as seen and is re-evaluated freely if it reappears on a
+    later page.
+    """
+    event_ids: list[str] = []
+    seen_ids: set[str] = set()
+    seen_tokens: set[str] = set()
+    token: str | None = None
+    for _ in range(MAX_FORGET_EVENT_PAGES):
+        kwargs: dict[str, Any] = {
+            "memoryId": memory_id,
+            "actorId": actor_id,
+            "sessionId": session_id,
+            "maxResults": MAX_EVENTS_PER_SESSION,
+        }
+        if token:
+            kwargs["nextToken"] = token
+        resp = await _agentcore_read(client.list_events, what="forget", **kwargs)
+        if resp is None:
+            return event_ids, True
+        for event in resp.get("events", []):
+            event_id = event.get("eventId") or ""
+            if not event_id or event_id in seen_ids:
+                continue
+            if since is not None and not _event_at_or_after(event.get("eventTimestamp"), since):
+                continue
+            seen_ids.add(event_id)
+            event_ids.append(event_id)
+        token = resp.get("nextToken")
+        if not token:
+            return event_ids, True
+        if token in seen_tokens:
+            logger.warning("memory.forget_paginator_stalled")
+            return event_ids, False
+        seen_tokens.add(token)
+    logger.warning("memory.forget_page_cap_hit pages=%d", MAX_FORGET_EVENT_PAGES)
+    return event_ids, False
+
+
+async def delete_session_event(
+    client: Any,
+    *,
+    memory_id: str,
+    actor_id: str,
+    session_id: str,
+    event_id: str,
+) -> bool:
+    """``DeleteEvent`` one AgentCore event → whether it was there to delete.
+
+    ``True`` when AgentCore accepted the delete; ``False`` when the event,
+    session or actor partition is already absent. The mirror image of
+    :func:`_agentcore_read` and it absorbs exactly the same one error code
+    (:func:`_is_absent`) for the same reason: an actor partition is created
+    lazily by the first memory *write*, so deleting from one that was never
+    created is a no-op, not a failure. Every other ``ClientError`` —
+    throttling, access denied, a service fault — re-raises and still
+    surfaces as a 5xx.
+
+    That narrowness matters more here than on the read side. A blanket
+    ``except Exception`` would let this report "forgotten" during an
+    AgentCore outage, and a user who is told their data is gone stops asking
+    — which is a worse outcome than the error they can act on. ``False`` is
+    deliberately distinct from an exception so the caller can answer
+    "already gone" (404, or a no-op in a batch) separately from "we failed"
+    (a counted failure).
+
+    Returning a bool rather than raising a bespoke exception keeps this a
+    seam over the vendor call: AgentCore's ``DeleteEvent`` is idempotent in
+    effect, and the caller decides what that means for its status code.
+    """
+    try:
+        await asyncio.to_thread(
+            client.delete_event,
+            memoryId=memory_id,
+            actorId=actor_id,
+            sessionId=session_id,
+            eventId=event_id,
+        )
+    except ClientError as exc:
+        if not _is_absent(exc):
+            raise
+        # No identifiers: the derived actor id carries a label built from
+        # the user's email (``memory.derive_actor_id``), and an event id
+        # addresses one record of it.
+        logger.info("memory.delete_event_absent")
+        return False
+    return True
 
 
 def group_created_at(chat: Chat) -> str:

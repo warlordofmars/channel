@@ -8,7 +8,7 @@ duration_ms, truncated, timed_out, images}``).
 The sandbox Lambda's ARN is resolved from ``CHANNEL_CODE_EXEC_LAMBDA_ARN``
 on each call (cheap env lookup; no caching needed). The boto3 Lambda
 client is lazy-loaded via ``@functools.lru_cache(maxsize=1)`` — mirrors
-``web_search``'s ``_get_exa_search`` pattern so a cold start without
+``web_search``'s ``_resolve_exa_api_key`` pattern so a cold start without
 code-exec usage doesn't pay the boto3 client construction cost.
 
 Errors from the boto3 invoke (throttling / network / sandbox init crash)
@@ -50,7 +50,7 @@ def _error_result(error_type: str) -> dict[str, Any]:
 def _get_lambda_client():  # type: ignore[no-untyped-def]
     """Lazy-load the boto3 Lambda client.
 
-    Mirrors the ``web_search._get_exa_search`` shape — deferring the
+    Mirrors the ``web_search._resolve_exa_api_key`` shape — deferring the
     boto3 import until the model actually calls ``code_exec`` keeps the
     Lambda client construction off the cold-start path for turns that
     don't trigger code execution."""

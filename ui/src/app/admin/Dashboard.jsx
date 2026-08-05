@@ -42,6 +42,15 @@ import { getAdminMetricsSummary, getAdminMetricsTimeseries } from "../../api.js"
  * `MemoryTool*` counters, surfaced by the separate "Tool saves" tile and
  * "Tool recall" rate so tool usage never masks a hook regression.
  *
+ * Memory data-rights (#476 export, #477 forget; surfaced by #551): the last
+ * three tiles read the export / per-record-delete / bulk-forget counters as
+ * success RATES rather than raw counts, deliberately. A count tile reading 0
+ * is ambiguous — "nothing happened" and "the metric name is misspelled" look
+ * identical — whereas `formatRate` renders an em dash only when there were no
+ * attempts at all, and a number the moment there were. On this surface the
+ * failure halves are the point: a dip below 100% on "Bulk forget" means users
+ * were told their data was gone when it was not.
+ *
  * Request SLIs (#111): the "Requests" and "5xx responses" tiles read the
  * per-request EMF counters the API middleware emits, so the card reflects
  * real traffic rather than only agent-internal activity. They read the
@@ -236,14 +245,20 @@ export function fmtTooltipLabel(iso) {
 }
 
 /**
- * The eight stat tiles for one rollup window. `active_users` is a top-level
+ * The eleven stat tiles for one rollup window. `active_users` is a top-level
  * section field; the rest read named counters from `section.metrics` (all
  * allowlisted names are always present per the #236 contract, so no
  * missing-key guards). The first four are hook-health signals; the next two
  * (#400) isolate the agent-driven `remember` / `recall` tools so their usage
- * never dilutes the hook counters above; the last two (#111) are the
- * request-level SLIs, so the card answers "is the service healthy" and not
- * only "are the memory hooks firing".
+ * never dilutes the hook counters above; then two (#111) request-level SLIs,
+ * so the card answers "is the service healthy" and not only "are the memory
+ * hooks firing"; and last the three memory data-rights rates (#476 / #477,
+ * surfaced by #551) covering export and the two forget shapes.
+ *
+ * Every name read here must be on `_METRIC_ALLOWLIST` in
+ * `src/channel/api/admin.py` — the summary endpoint returns only allowlisted
+ * counters, so a name that is merely emitted (or merely misspelled) renders a
+ * silent zero. `tests/unit/test_admin.py` pins that both ways.
  */
 function tilesFor(section) {
   const m = section.metrics;
@@ -256,6 +271,9 @@ function tilesFor(section) {
     { key: "toolRecall", label: "Tool recall", icon: "search", value: formatRate(m.MemoryToolRecallSuccesses, m.MemoryToolRecallFailures) },
     { key: "requests", label: "Requests", icon: "globe", value: formatCount(m.RequestCount) },
     { key: "requestErrors", label: "5xx responses", icon: "shield", value: formatCount(m.Request5xxCount) },
+    { key: "export", label: "Export success", icon: "download", value: formatRate(m.MemoryExportSuccesses, m.MemoryExportFailures) },
+    { key: "recordForget", label: "Record forget", icon: "trash", value: formatRate(m.MemoryRecordDeleteSuccesses, m.MemoryRecordDeleteFailures) },
+    { key: "bulkForget", label: "Bulk forget", icon: "folder-x", value: formatRate(m.MemoryBulkForgetSuccesses, m.MemoryBulkForgetFailures) },
   ];
 }
 

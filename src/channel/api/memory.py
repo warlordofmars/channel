@@ -133,9 +133,55 @@ didn't happen when it did. Here nothing has been disclosed yet, so the
 export can fail closed and keep the invariant that every whole-account
 read left a trail. The caller sees a 5xx and can retry.
 
+## Forget — ``DELETE /api/memory/records[/{record_id}]`` (#477)
+
+The destructive half of the epic, in four forms: one record, one chat
+(``?chat_id=``), everything since a timestamp (``?since=``), and everything
+(``?all=true``). Exactly one filter may be supplied; **no filter is a 400,
+never a full wipe**, so the most destructive action can only be reached by
+asking for it by name.
+
+**Blast radius is the AgentCore event only** (epic #129 decision 9). The
+DynamoDB chat message is untouched and stays visible in the chat, as does
+the ``SK=SUMMARY`` head summary. A click in a settings panel must not
+silently punch a hole in visible chat history — it would break user /
+assistant turn pairing and strand #245's ``covers_through`` pointer.
+Deleting the chat remains the total-erasure path.
+
+Both scoping gates from §Scoping apply, and on a *destructive* surface the
+second one is doing the real work: every session is resolved through
+``resolve_owned_chats`` (bulk) or ``_load_owned_chat`` (per-record and
+``?chat_id=``) against the **raw** JWT sub before a single ``DeleteEvent``
+is issued, so a foreign session in the partition is skipped rather than
+erased. A record whose chat the caller does not own is a **404, not a
+403** — the same shape the rest of the chat surface uses, so a probe cannot
+distinguish "someone else owns this" from "this never existed".
+
+Three properties are load-bearing enough to state outright:
+
+- **The event walk is drained, not capped.** ``/records`` caps at
+  ``MAX_EVENTS_PER_SESSION`` and *says so* via ``records_truncated``; a
+  forget cannot make that trade, because the user is told the action
+  completed and has nothing to read. See ``list_forgettable_event_ids``.
+- **Bulk deletes are partial-failure tolerant** — one refused
+  ``DeleteEvent`` does not abandon the batch, since stopping early forgets
+  *less*. The response carries ``{"deleted", "failed", "complete"}``;
+  ``complete`` is false only if a walk hit its page ceiling. A batch where
+  **nothing** was deleted and something failed is a 5xx rather than a
+  cheerful ``{"deleted": 0}``: telling a user their data is gone when it is
+  not is the one error this endpoint must never make, and it is exactly
+  what an over-broad handler produces.
+- **The audit write is best-effort**, the *opposite* call from
+  ``/export`` above and the same one ``sessions._audit_revocation``
+  makes — by the time it runs the records are already gone, so failing the
+  response would report a forget that did not happen when it did.
+  ``details`` carries counts, filters and opaque identifiers only; copying
+  the text a user just asked to forget into a 365-day immutable audit
+  partition would defeat the feature.
+
 ## A caller with no memory partition (#527)
 
-Applies to both endpoints. An AgentCore actor partition is created lazily
+Applies to all three endpoints. An AgentCore actor partition is created lazily
 by the first memory *write*, so a user who has signed in but never had a
 chat turn has none, and every AgentCore read against them raises
 ``ResourceNotFoundException``. Both endpoints answer that as **empty**,
@@ -160,6 +206,12 @@ or partial result as a complete one.
 ``manifest.complete`` therefore stays true for a partition-less user. It
 answers "did I get everything there is?", not "is there anything?" — the
 walks did finish, and there genuinely was nothing to walk.
+
+For the forget surface the same condition is a **no-op success**: a bulk
+form answers ``{"deleted": 0, "failed": 0, "complete": true}``, and the
+per-record form answers 404, because an id that addresses nothing is
+exactly what "unknown id" means. Neither is a 500, and neither is reached
+by absorbing anything wider than the one error code.
 """
 
 from __future__ import annotations
@@ -176,14 +228,18 @@ from functools import partial
 from typing import Any, TypeVar
 
 import boto3
-from fastapi import APIRouter, Depends, HTTPException, Query
+from botocore.exceptions import ClientError
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from fastapi.responses import JSONResponse
 
 from channel import storage
 from channel.agents.memory import derive_actor_id, get_or_create_memory
 from channel.agents.memory_records import (
     count_session_records,
+    decode_record_id,
+    delete_session_event,
     group_created_at,
+    list_forgettable_event_ids,
     list_session_records,
     list_sessions_page,
     recall_window,
@@ -193,7 +249,11 @@ from channel.agents.memory_records import (
 from channel.api._auth import require_mgmt_user
 from channel.api.chats import _load_owned_chat
 from channel.logging_config import fingerprint_id
-from channel.metrics import record_memory_export_outcome
+from channel.metrics import (
+    record_memory_bulk_forget_outcome,
+    record_memory_export_outcome,
+    record_memory_record_delete_outcome,
+)
 from channel.models import Chat, Message
 
 logger = logging.getLogger(__name__)
@@ -464,18 +524,27 @@ async def _paginate(
 ) -> tuple[list[_T], bool]:
     """Drain a ``(page, next_token)`` paginator → ``(items, drained)``.
 
-    One helper for all three walks (AgentCore sessions, DynamoDB chats,
-    DynamoDB messages) because they differ only in their fetch closure, and
-    a single drain is a single place for the page ceiling to live. ``fetch``
-    takes the previous token (``None`` first) and returns the next page
-    with the token after it.
+    One helper for every walk — the export's AgentCore sessions, DynamoDB
+    chats and DynamoDB messages, plus #477's forget-session walk — because
+    they differ only in their fetch closure, and a single drain is a single
+    place for the page ceiling to live. ``fetch`` takes the previous token
+    (``None`` first) and returns the next page with the token after it.
+
+    ``what`` names the walk in the cap-hit log line, and it is the **only**
+    thing that does: the event name is deliberately neutral
+    (``memory.page_cap_hit``, not ``memory.export_page_cap_hit``) because a
+    shared helper must not label a forget as an export. It was the export
+    name until #477 added a fourth, non-export caller — at which point one
+    log event silently meant two very different operations, which is
+    exactly what makes a canary useless.
 
     Falling out of the loop means the ceiling was reached with a token still
     outstanding, so ``drained`` is false. It is **returned**, not just
-    logged: a log line does not travel with a downloaded file, and an
-    incomplete export that renders as a complete one is precisely the silent
-    lie this surface exists to stop. The caller propagates it to
-    ``manifest.complete``.
+    logged: a log line does not travel with a downloaded file (nor reach the
+    person who just asked for their data to be forgotten), and an incomplete
+    result that renders as a complete one is precisely the silent lie this
+    surface exists to stop. Callers propagate it to ``manifest.complete``
+    and to the forget response's ``complete``.
     """
     items: list[_T] = []
     token: Any = None
@@ -484,7 +553,7 @@ async def _paginate(
         items.extend(page)
         if not token:
             return items, True
-    logger.warning("memory.export_page_cap_hit what=%s pages=%d", what, _EXPORT_MAX_PAGES)
+    logger.warning("memory.page_cap_hit what=%s pages=%d", what, _EXPORT_MAX_PAGES)
     return items, False
 
 
@@ -674,7 +743,7 @@ async def _build_export(user_id: str) -> tuple[dict[str, Any], str]:
             # does not travel with a downloaded file. False when a walk hit
             # the page ceiling OR a chat's memory history exceeded the
             # per-session cap; ``truncated_chat_ids`` says which chats, and
-            # the page-cap case additionally logs ``export_page_cap_hit``.
+            # the page-cap case additionally logs ``memory.page_cap_hit``.
             "complete": records_drained and chats_drained and not truncated_chat_ids,
             "truncated_chat_ids": truncated_chat_ids,
             "note": _EXPORT_NOTE,
@@ -741,3 +810,344 @@ async def export_account_data(
             "X-Content-Type-Options": "nosniff",
         },
     )
+
+
+# ── Forget (#477) ─────────────────────────────────────────────────────────
+
+#: Audit event types — epic #129 decision 3. Three rather than four,
+#: because ``?chat_id=`` and ``?since=`` are the same operation under
+#: different filters and the filter itself is in ``details``; wiping
+#: everything is genuinely a different act and reads as one in the trail.
+_AUDIT_RECORD_DELETED = "memory.record_deleted"
+_AUDIT_BULK_FORGET = "memory.bulk_forget"
+_AUDIT_FORGET_ALL = "memory.forget_all"
+
+#: ``ListSessions`` page size for the bulk walks. Matches the export's:
+#: nobody reads a forget incrementally, so the only thing page size buys
+#: is fewer round trips.
+_FORGET_SESSION_PAGE_SIZE = 50
+
+
+async def _write_forget_audit(event_type: str, user_id: str, details: dict[str, Any]) -> None:
+    """Best-effort audit row for one forget — counts and filters only.
+
+    **Best-effort, unlike ``/export``'s.** By the time this runs the records
+    are already gone, so failing the response would tell the user their
+    forget did not happen when it did — and a user who believes their data
+    survived behaves differently from one who knows it is gone. Losing an
+    audit row degrades forensics; failing the response degrades the truth.
+    The same call ``sessions._audit_revocation`` makes, for the same reason.
+
+    ``details`` carries counts, filters, and opaque identifiers
+    (``chat_id`` / ``record_id``) — **never record text**. The audit
+    partition has a 365-day TTL, so copying in the very text a user asked to
+    forget would quietly outlive the deletion it records.
+    """
+    try:
+        await asyncio.to_thread(
+            storage.put_audit_event,
+            event_type=event_type,
+            actor_id=user_id,
+            details=details,
+        )
+    except Exception:
+        logger.exception("%s audit write failed", event_type)
+
+
+def _parse_since(value: str) -> datetime:
+    """``?since=`` → an aware UTC datetime. Unparseable is a 400.
+
+    ``Z`` is rewritten because Python 3.10's ``fromisoformat`` rejects it
+    while ``Date.prototype.toISOString`` — what any browser client will
+    send — emits nothing else. A naive timestamp is read as UTC, matching
+    ``memory_records._event_at_or_after``, so the two ends of the comparison
+    can't disagree about what an unqualified time means.
+
+    Rejecting rather than defaulting is the point (epic #129 decision 9's
+    sibling rule): a ``since`` this endpoint could not understand must never
+    quietly widen into "everything".
+    """
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="invalid since timestamp") from exc
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+
+async def _owned_forget_session_ids(
+    client: Any,
+    *,
+    memory_id: str,
+    actor_id: str,
+    user_id: str,
+) -> tuple[list[str], bool]:
+    """Sessions the caller owns, across every ``ListSessions`` page.
+
+    The ownership gate from §Scoping, applied before anything is deleted:
+    a session whose chat row this caller does not own is dropped, never
+    erased. On a read that gate withholds data; here it is the difference
+    between forgetting your own memory and forgetting someone else's, so it
+    runs even though the partition is already actor-scoped — the endpoint
+    must not inherit the next ``derive_actor_id`` bug the way #474 would
+    have handed one user another's memory.
+
+    Drained rather than paged, and the drain flag is returned: a "forget
+    everything" that stopped at page one would be the silent lie this
+    module exists to stop.
+    """
+    session_summaries, drained = await _paginate(
+        lambda tok: list_sessions_page(
+            client,
+            memory_id=memory_id,
+            actor_id=actor_id,
+            limit=_FORGET_SESSION_PAGE_SIZE,
+            next_token=tok,
+        ),
+        what="forget_sessions",
+    )
+    session_ids = list(
+        dict.fromkeys(s["sessionId"] for s in session_summaries if s.get("sessionId"))
+    )
+    owned = await asyncio.to_thread(resolve_owned_chats, session_ids, user_id=user_id)
+    withheld = len(session_ids) - len(owned)
+    if withheld:
+        # The same partition canary ``/records`` and ``/export`` log, and
+        # the one place it means "we declined to delete these".
+        logger.warning(
+            "memory.forget_sessions_withheld user_hash=%s sessions=%d",
+            fingerprint_id(user_id),
+            withheld,
+        )
+    return [sid for sid in session_ids if sid in owned], drained
+
+
+async def _forget_sessions(
+    client: Any,
+    *,
+    memory_id: str,
+    actor_id: str,
+    session_ids: list[str],
+    since: datetime | None,
+) -> tuple[int, int, bool]:
+    """Delete every selected event across ``session_ids`` → ``(deleted, failed, complete)``.
+
+    Partial-failure tolerant by design: a refused ``DeleteEvent`` is counted
+    and the batch continues, because abandoning it would forget *less* than
+    the user asked for — the wrong direction to fail in. An event AgentCore
+    reports as already absent counts as neither, since nothing was deleted
+    and nothing broke; the end state the caller wanted already holds.
+
+    **The per-record catch is ``ClientError``, not ``Exception``.** It is
+    narrow deliberately: the batch tolerates a vendor refusal, but a
+    ``TypeError`` or an ``AttributeError`` is a bug in this code and must
+    reach the client as a 500 rather than being silently folded into a
+    ``failed`` count that reads like an AWS blip. The ``ListEvents`` walk is
+    outside the catch for the same reason — a listing that fails means the
+    selection is unknown, and deleting an unknown selection is not something
+    to paper over.
+
+    ``complete`` is the AND over every session's walk: false only when a
+    walk hit its page ceiling with a token outstanding.
+    """
+    deleted = 0
+    failed = 0
+    complete = True
+    for session_id in session_ids:
+        event_ids, drained = await list_forgettable_event_ids(
+            client,
+            memory_id=memory_id,
+            actor_id=actor_id,
+            session_id=session_id,
+            since=since,
+        )
+        complete = complete and drained
+        for event_id in event_ids:
+            try:
+                if await delete_session_event(
+                    client,
+                    memory_id=memory_id,
+                    actor_id=actor_id,
+                    session_id=session_id,
+                    event_id=event_id,
+                ):
+                    deleted += 1
+            except ClientError as exc:
+                failed += 1
+                # ``chat_id`` is fingerprinted for the same reason the
+                # asset wipe fingerprints it; the event id is omitted
+                # entirely — it addresses one record's content.
+                logger.warning(
+                    "memory.forget_event_failed chat_id_hash=%s",
+                    fingerprint_id(session_id),
+                    extra={"error_type": type(exc).__name__, "error_message": str(exc)},
+                )
+    return deleted, failed, complete
+
+
+@router.delete(
+    "/records/{record_id}",
+    status_code=204,
+    responses={
+        400: {"description": "Malformed record_id"},
+        404: {"description": "Unknown record, or one whose chat the caller doesn't own"},
+    },
+)
+async def forget_memory_record(
+    record_id: str,
+    claims: dict[str, Any] = Depends(require_mgmt_user),
+) -> Response:
+    """Forget one memory record.
+
+    The ``record_id`` decodes to ``(session_id, event_id, payload_index)``
+    and the index is deliberately ignored: ``DeleteEvent`` is AgentCore's
+    only granularity, so forgetting one half of a user/assistant turn pair
+    is not an operation the vendor offers (see ``encode_record_id``). The
+    id is opaque, so a caller cannot tell the difference; what they asked to
+    forget is forgotten, plus its pair.
+
+    **Ownership is checked before anything is deleted**, via the same
+    ``_load_owned_chat`` the chat surface uses — ``sessionId`` *is* a
+    ``chat_id``. A record belonging to another user is therefore
+    indistinguishable from one that never existed: both 404. A record in an
+    *orphaned* AgentCore session (one whose chat row is gone, which a failed
+    ``chats._wipe_agentcore_session`` can leave behind) also 404s, matching
+    ``resolve_owned_chats``, which withholds those from every read — there
+    is nothing in the panel to press.
+
+    204 rather than a body: this is a single-resource delete, the shape
+    ``DELETE /api/chats/{chat_id}`` and ``DELETE /api/me/sessions/{id}``
+    already use. The bulk form returns counts because there is something to
+    count.
+    """
+    user_id = claims["sub"]
+    try:
+        session_id, event_id, _payload_index = decode_record_id(record_id)
+    except ValueError as exc:
+        # Never forward a malformed id to AgentCore — it would come back as
+        # a ValidationException, i.e. a 500 for what is a client error.
+        raise HTTPException(status_code=400, detail="malformed record_id") from exc
+
+    await _load_owned_chat(session_id, user_id)
+
+    actor_id = derive_actor_id(user_id)
+    client = _agentcore_client()
+    memory_id = await asyncio.to_thread(_memory_id_for_env)
+    try:
+        deleted = await delete_session_event(
+            client,
+            memory_id=memory_id,
+            actor_id=actor_id,
+            session_id=session_id,
+            event_id=event_id,
+        )
+    except Exception:
+        await record_memory_record_delete_outcome(success=False)
+        raise
+
+    if not deleted:
+        # Unknown id — the event is gone, or the actor partition was never
+        # created (#527: it is created lazily by the first memory *write*).
+        # Neither is an operational failure, so neither counter fires; a 4xx
+        # is a statement about the request, and counting it would put a
+        # floor under the failure rate.
+        raise HTTPException(status_code=404, detail="Record not found")
+
+    await record_memory_record_delete_outcome(success=True)
+    await _write_forget_audit(
+        _AUDIT_RECORD_DELETED,
+        user_id,
+        {"chat_id": session_id, "record_id": record_id, "deleted": 1},
+    )
+    return Response(status_code=204)
+
+
+@router.delete(
+    "/records",
+    responses={
+        400: {"description": "No filter, more than one filter, or an unparseable since"},
+        404: {"description": "chat_id names a chat the caller doesn't own"},
+        500: {"description": "Nothing could be forgotten and something failed"},
+    },
+)
+async def forget_memory_records(
+    chat_id: str | None = Query(default=None),
+    since: str | None = Query(default=None),
+    forget_all: bool = Query(default=False, alias="all"),
+    claims: dict[str, Any] = Depends(require_mgmt_user),
+) -> dict[str, Any]:
+    """Forget a chat's memory, everything since a timestamp, or everything.
+
+    **Exactly one of ``chat_id`` / ``since`` / ``all=true``.** No filter is
+    a 400, never a full wipe: the most destructive action this API offers
+    must be reachable only by naming it, so a client that drops a query
+    param mid-request cannot escalate into "forget everything". More than
+    one filter is also a 400 rather than an intersection or a union —
+    guessing which the caller meant is not a guess to make here.
+
+    ``all=false`` alone is no filter at all, so it 400s like the bare form.
+    That falls out of the same rule rather than being a special case: the
+    filter is *``all=true``*, and anything else is its absence.
+
+    Returns ``{"deleted", "failed", "complete"}``. ``complete`` is false
+    only when an event walk hit its page ceiling, so some records were never
+    even considered — reported in the body rather than only in a log line,
+    because a log line is not visible to the person who just asked for their
+    data to be gone. A batch that deleted nothing while something failed is
+    a 5xx instead: ``{"deleted": 0}`` with a 200 reads as "there was nothing
+    to forget", which during an AgentCore outage is a claim about the user's
+    own data that this endpoint has no basis to make.
+    """
+    user_id = claims["sub"]
+    filters = [chat_id is not None, since is not None, forget_all]
+    if sum(filters) != 1:
+        raise HTTPException(
+            status_code=400,
+            detail="supply exactly one of chat_id, since, all=true",
+        )
+    cutoff = _parse_since(since) if since is not None else None
+
+    actor_id = derive_actor_id(user_id)
+    client = _agentcore_client()
+    memory_id = await asyncio.to_thread(_memory_id_for_env)
+
+    try:
+        if chat_id is not None:
+            # Ownership first, and by the same 404-not-403 gate the rest of
+            # the chat surface uses.
+            await _load_owned_chat(chat_id, user_id)
+            session_ids, sessions_drained = [chat_id], True
+            event_type, details = _AUDIT_BULK_FORGET, {"filter": "chat_id", "chat_id": chat_id}
+        else:
+            session_ids, sessions_drained = await _owned_forget_session_ids(
+                client, memory_id=memory_id, actor_id=actor_id, user_id=user_id
+            )
+            event_type, details = (
+                (_AUDIT_BULK_FORGET, {"filter": "since", "since": since})
+                if since is not None
+                else (_AUDIT_FORGET_ALL, {"filter": "all"})
+            )
+
+        deleted, failed, events_drained = await _forget_sessions(
+            client,
+            memory_id=memory_id,
+            actor_id=actor_id,
+            session_ids=session_ids,
+            since=cutoff,
+        )
+    except HTTPException:
+        # A 4xx decided here (an unowned ``chat_id``) is a statement about
+        # the request, not a forget that failed — same reasoning as the
+        # per-record 404 above, so no counter fires.
+        raise
+    except Exception:
+        await record_memory_bulk_forget_outcome(success=False)
+        raise
+
+    complete = sessions_drained and events_drained
+    await record_memory_bulk_forget_outcome(success=(failed == 0 and complete))
+    await _write_forget_audit(
+        event_type, user_id, {**details, "deleted": deleted, "failed": failed, "complete": complete}
+    )
+    if deleted == 0 and failed:
+        raise HTTPException(status_code=500, detail="no records could be forgotten")
+    return {"deleted": deleted, "failed": failed, "complete": complete}

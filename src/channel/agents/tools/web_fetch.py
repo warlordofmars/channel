@@ -1,34 +1,37 @@
 # Copyright (c) 2026 John Carter. All rights reserved.
 """``web_fetch`` — direct URL → content fetching (#232).
 
-Wraps ``strands_tools.exa.exa_get_contents`` so the model can fetch one
-specific URL the user pasted (or one it picked out of ``web_search``
-results) instead of guessing at a search query that might surface the
-page. Same Exa API key, same extraction quality, same SSM/IAM plumbing
-as ``web_search`` — the two tools are a discover/deep-read pair and
-ship under the same ``CHANNEL_WEB_SEARCH_ENABLED`` kill switch.
+Calls Exa's ``POST /contents`` REST endpoint directly so the model can
+fetch one specific URL the user pasted (or one it picked out of
+``web_search`` results) instead of guessing at a search query that might
+surface the page. Same Exa API key, same extraction quality, same
+SSM/IAM plumbing as ``web_search`` — the two tools are a
+discover/deep-read pair and ship under the same
+``CHANNEL_WEB_SEARCH_ENABLED`` kill switch.
 
-The shared helpers are imported from ``web_search`` rather than copied:
-``_resolve_exa_api_key`` keeps its single warm-pool ``lru_cache`` (one
-SSM read serves both tools) and ``_error_result`` keeps the
-Strands-``ToolResult``-shaped error contract in exactly one place — see
-``web_search._error_result``'s docstring for why the shape matters to
-``strands_sse.translate_event``.
+The shared machinery is imported from ``web_search`` rather than
+copied: ``_resolve_exa_api_key`` keeps its single warm-pool
+``lru_cache`` (one SSM read serves both tools), ``_error_result`` /
+``_success_result`` keep the Strands-``ToolResult`` contract in exactly
+one place (see ``web_search._error_result``'s docstring for why the
+shape matters to ``strands_sse.translate_event``), and ``_exa_post``
+keeps the HTTP transport and its status→token mapping in one place so
+the two tools cannot drift into two vocabularies.
 
-Error vocabulary: this wrapper itself emits ``missing_key`` (key
-resolution failed) and ``invalid_url`` (client-side URL validation —
-only this tool can hit it). The ``timeout`` / ``rate_limit`` /
-``upstream_5xx`` / ``bad_request`` httpx handlers mirror
-``web_search``'s defensive layer, but note the installed
-``strands_tools.exa`` catches its own network failures internally
-(aiohttp + broad ``except``) and returns upstream-shaped result dicts
-instead of raising — so in the current SDK those four tokens fire only
-if a future SDK bump starts letting exceptions escape. Until then,
-upstream failures pass through as Exa's own ``{"status": "error"}``
-payloads (prose reason strings), or — for HTTP-error JSON bodies — as
-nominal successes containing the error body. That pass-through is
-``web_search`` parity today; tightening both tools to parse upstream's
-error shapes into stable tokens is follow-up work flagged on #232.
+Error vocabulary — this tool emits every token ``web_search`` does
+(``missing_key``, ``timeout``, ``rate_limit``, ``upstream_5xx``,
+``bad_request``, ``connection_error``) plus two only it can reach:
+``invalid_url`` (client-side URL validation) and ``fetch_failed`` (Exa
+answered 200, but the crawl of *this* URL failed — see
+``_crawl_failed_tag``).
+
+Before #269 the four status-derived tokens above were unreachable:
+``strands_tools.exa`` swallowed its own network failures and never read
+``response.status``, so a 429 or 5xx arrived here wrapped as a nominal
+success carrying the error body — the model saw a "successful" fetch
+containing an error, and the SPA never saw a ``tool_error`` frame.
+Owning the transport is what makes the mapping fire; the rationale in
+full is in ``web_search``'s module docstring.
 
 The fetch itself runs on Exa's crawlers, not in this Lambda — a
 user-supplied URL pointing at link-local/loopback targets never
@@ -41,44 +44,27 @@ to Exa — see ``_is_fetchable_url``.
 
 from __future__ import annotations
 
-import functools
 import logging
-import os
 import re
-from collections.abc import Awaitable, Callable
 from typing import Any
 from urllib.parse import urlparse
 
-import httpx
 from strands import tool
 
-from channel.agents.tools.web_search import _error_result, _resolve_exa_api_key
+from channel.agents.tools.web_search import (
+    _EXA_CONTENTS_ENDPOINT,
+    _EXA_LIVECRAWL_TIMEOUT_MS,
+    _error_result,
+    _exa_post,
+    _resolve_exa_api_key,
+    _success_result,
+)
 
 logger = logging.getLogger(__name__)
-
-# Exa's ``livecrawlTimeout`` is in MILLISECONDS (upstream default
-# 10_000 — see ``strands_tools.exa.exa_get_contents``'s docstring).
-# 30s gives ``livecrawl="fallback"`` room to crawl an uncached page —
-# the common case for user-pasted URLs — while staying well inside the
-# chassis's 120s wall-clock budget.
-_EXA_LIVECRAWL_TIMEOUT_MS = 30_000
 
 # Exa rejects non-positive ``maxCharacters``; clamp the model-supplied
 # cap the same way ``web_search`` clamps ``num_results``.
 _MAX_CHARS_MIN = 1
-
-
-@functools.lru_cache(maxsize=1)
-def _get_exa_get_contents() -> Callable[..., Awaitable[dict[str, Any]]]:
-    """Lazy-load ``strands_tools.exa.exa_get_contents`` on first invocation.
-
-    Mirrors ``web_search._get_exa_search`` — the Exa SDK's transitive
-    dependency tree (aiohttp, Rich, …) stays off the Lambda cold-start
-    path for turns that never fetch a URL."""
-    from strands_tools.exa import exa_get_contents  # noqa: PLC0415
-
-    return exa_get_contents
-
 
 # Internal whitespace / C0-control characters. ``urlparse`` strips many
 # of these PRE-parse (Python 3.12, WHATWG-aligned), so without an
@@ -113,6 +99,53 @@ def _is_fetchable_url(url: str) -> bool:
     return parsed.scheme in ("http", "https") and bool(hostname)
 
 
+def _crawl_failed_tag(data: Any) -> str | None:
+    """Return Exa's failure tag when a 200 response carries no content.
+
+    ``/contents`` answers 200 even when the crawl of the requested URL
+    failed: the per-URL verdict lives in a ``statuses[]`` entry shaped
+    ``{"id": <url>, "status": "error", "error": {"tag": …}}`` while
+    ``results`` comes back empty. Before #269 that reached the model as
+    a nominal success containing a failure — the "failures masquerade as
+    success" limb of #232's finding.
+
+    Any tag maps to the single ``fetch_failed`` token; the tag itself is
+    logged, never enumerated. Exa's tag vocabulary is undocumented, and
+    branching on it would recreate exactly the brittle
+    match-upstream's-strings coupling this issue removes.
+
+    The recognised shapes are deliberately narrow in BOTH directions,
+    because each direction has its own failure mode:
+
+    - ``results`` non-empty → partial success (content returned
+      alongside a warning) stays on the success path. We ask for
+      exactly one URL, so there is no ambiguity about whose status it is.
+    - ``results`` present but **not a list** → an unfamiliar envelope.
+      Return ``None`` and let the model see it. Treating an unknown
+      shape as "no content" would turn a valid-but-unexpected 2xx into
+      a phantom `fetch_failed` (Copilot review, PR #540).
+    - ``results`` empty **or absent** → genuinely no content, so an
+      error status is the real failure this guard exists to catch.
+      Requiring the key to be present would let Exa reintroduce #269's
+      bug simply by omitting it on failure."""
+    if not isinstance(data, dict):
+        return None
+    results = data.get("results")
+    if results:
+        return None
+    if results is not None and not isinstance(results, list):
+        return None
+    statuses = data.get("statuses")
+    if not isinstance(statuses, list):
+        return None
+    for entry in statuses:
+        if isinstance(entry, dict) and entry.get("status") == "error":
+            error = entry.get("error")
+            tag = error.get("tag") if isinstance(error, dict) else None
+            return str(tag) if tag else "unknown"
+    return None
+
+
 @tool
 async def web_fetch(url: str, max_chars: int | None = None) -> dict[str, Any]:
     """Fetch one specific URL and return its extracted page content.
@@ -132,9 +165,8 @@ async def web_fetch(url: str, max_chars: int | None = None) -> dict[str, Any]:
             when you only need the start of a very long page.
     """
     # ``async def`` is mandatory for the same reason documented in
-    # ``web_search``: ``strands_tools.exa.exa_get_contents`` is an
-    # ``async def`` function, and Strands' ``DecoratedFunctionTool.stream``
-    # only ``await``s tools whose underlying function is a coroutine
+    # ``web_search``: Strands' ``DecoratedFunctionTool.stream`` only
+    # ``await``s tools whose underlying function is a coroutine
     # function — a sync wrapper would ship a coroutine repr to the model.
     #
     # Normalize once, up front: user-pasted URLs commonly carry stray
@@ -151,9 +183,11 @@ async def web_fetch(url: str, max_chars: int | None = None) -> dict[str, Any]:
         return _error_result("invalid_url")
     # Same bare-Exception rationale as ``web_search``: the contract
     # requires a stable ``error_type`` token over SSE, not a raw
-    # exception bubbling through the chassis.
+    # exception bubbling through the chassis. The key stays in a local —
+    # never written back to ``os.environ``, which a warm Lambda shares
+    # across concurrent invocations (#269).
     try:
-        os.environ["EXA_API_KEY"] = _resolve_exa_api_key()
+        api_key = _resolve_exa_api_key()
     except Exception as exc:
         logger.warning("web_fetch.config_error %r", exc)
         return _error_result("missing_key")
@@ -162,24 +196,26 @@ async def web_fetch(url: str, max_chars: int | None = None) -> dict[str, Any]:
         # Server-side truncation: Exa applies ``maxCharacters`` during
         # extraction, so the Lambda never buffers the untruncated page.
         text = {"maxCharacters": max(_MAX_CHARS_MIN, max_chars)}
-    exa_get_contents = _get_exa_get_contents()
-    try:
-        return await exa_get_contents(
-            urls=[url],
-            text=text,
-            livecrawl="fallback",
-            livecrawl_timeout=_EXA_LIVECRAWL_TIMEOUT_MS,
-        )
-    except httpx.ReadTimeout:
-        logger.warning("web_fetch.timeout url_len=%d", len(url))
-        return _error_result("timeout")
-    except httpx.HTTPStatusError as exc:
-        code = exc.response.status_code
-        if code == 429:
-            error_type = "rate_limit"
-        elif 500 <= code < 600:
-            error_type = "upstream_5xx"
-        else:
-            error_type = "bad_request"
-        logger.warning("web_fetch.http_error status=%s url_len=%d", code, len(url))
+    # Flat payload (no nested ``contents`` block — that shape belongs to
+    # ``/search``), matching what ``strands_tools.exa.exa_get_contents``
+    # sent so Exa sees an unchanged request.
+    payload: dict[str, Any] = {
+        "urls": [url],
+        "text": text,
+        "livecrawl": "fallback",
+        "livecrawlTimeout": _EXA_LIVECRAWL_TIMEOUT_MS,
+    }
+
+    data, error_type = await _exa_post(
+        _EXA_CONTENTS_ENDPOINT,
+        payload,
+        api_key,
+        log_prefix="web_fetch",
+        log_context=f"url_len={len(url)}",
+    )
+    if error_type is not None:
         return _error_result(error_type)
+    if (tag := _crawl_failed_tag(data)) is not None:
+        logger.warning("web_fetch.fetch_failed tag=%s url_len=%d", tag, len(url))
+        return _error_result("fetch_failed")
+    return _success_result(data)

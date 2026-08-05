@@ -38,6 +38,15 @@ vi.mock("recharts", () => ({
   CartesianGrid: () => <div data-testid="rc-grid" />,
 }));
 
+// Read the value rendered by the tile carrying `label`. Asserting the label
+// and the value independently within a card would still pass if two tiles had
+// their counter pairs swapped — every expected string is present either way.
+// A tile is `<span icon/><div><div>{value}</div><div>{label}</div></div>`, so
+// the label's parent holds both and binds them.
+function tileValue(scope, label) {
+  return scope.getByText(label).parentElement.firstChild.textContent;
+}
+
 function deferred() {
   let resolve;
   let reject;
@@ -61,6 +70,16 @@ function metricsBlock(overrides = {}) {
     "MemoryToolWriteFailures",
     "MemoryToolRecallSuccesses",
     "MemoryToolRecallFailures",
+    // Memory data-rights counters (#476 export, #477 forget) — surfaced on
+    // the dashboard by #551. The Python side of the name agreement is pinned
+    // by tests/unit/test_admin.py, which derives both sides from the real
+    // artefacts rather than restating them.
+    "MemoryExportSuccesses",
+    "MemoryExportFailures",
+    "MemoryRecordDeleteSuccesses",
+    "MemoryRecordDeleteFailures",
+    "MemoryBulkForgetSuccesses",
+    "MemoryBulkForgetFailures",
     "AutoTitleSuccesses",
     "AutoTitleFailures",
     "ChatDeleteMemoryWipeSuccesses",
@@ -106,6 +125,16 @@ function summaryFixture() {
         MemoryToolRecallFailures: 2,
         RequestCount: 4821,
         Request5xxCount: 7,
+        // #551 data-rights rates, chosen distinct from each other and from
+        // the 90% / 80% above so each getByText below matches exactly one
+        // tile. The bulk-forget pair is deliberately half-failing — that is
+        // the shape the tile exists to make visible.
+        MemoryExportSuccesses: 3,
+        MemoryExportFailures: 1,
+        MemoryRecordDeleteSuccesses: 3,
+        MemoryRecordDeleteFailures: 2,
+        MemoryBulkForgetSuccesses: 1,
+        MemoryBulkForgetFailures: 1,
       }),
     },
     "7d": {
@@ -123,8 +152,11 @@ function summaryFixture() {
     "30d": {
       active_users: 120,
       // ...and hook recall 0/0 → "—" exercises the zero-denominator branch.
-      // Tool recall is non-zero here so the card has a single em dash (the
-      // hook tile), keeping the getByText("—") assertion unambiguous.
+      // Every OTHER rate tile is given a non-zero DENOMINATOR here — tool
+      // recall, plus the three #551 data-rights tiles. Only the success
+      // halves are set below; the failure halves stay 0, which is all a
+      // non-zero `successes + failures` needs. That leaves the card with a
+      // single em dash (the hook tile), keeping getByText("—") unambiguous.
       metrics: metricsBlock({
         MemoryWriteSuccesses: 9000,
         RecallSuccesses: 0,
@@ -133,6 +165,9 @@ function summaryFixture() {
         MemoryToolWriteSuccesses: 200,
         MemoryToolRecallSuccesses: 40,
         MemoryToolRecallFailures: 10,
+        MemoryExportSuccesses: 12,
+        MemoryRecordDeleteSuccesses: 30,
+        MemoryBulkForgetSuccesses: 6,
       }),
     },
   };
@@ -212,6 +247,38 @@ describe("Dashboard", () => {
     expect(today.getByText("Tool recall")).toBeTruthy();
     expect(today.getByText("Requests")).toBeTruthy();
     expect(today.getByText("5xx responses")).toBeTruthy();
+  });
+
+  // #551 — the six #476/#477 counters were emitted but absent from the admin
+  // allowlist, so nothing rendered them. Rates rather than counts, because a
+  // count tile reading 0 cannot be told apart from a misspelled metric name.
+  it("renders the memory data-rights tiles as export / forget success rates", async () => {
+    await act(async () => render(<Dashboard />));
+    const today = within(screen.getByTestId("rollup-today"));
+
+    // Each rate is read off its OWN tile, so a swapped counter pair fails
+    // here rather than passing on the card containing all three strings.
+    expect(tileValue(today, "Export success")).toBe("75%"); // 3 / (3 + 1)
+    expect(tileValue(today, "Record forget")).toBe("60%"); // 3 / (3 + 2)
+    // The one that matters most: a half-failing bulk forget means users were
+    // told their data was gone when it was not, and it must not read clean.
+    expect(tileValue(today, "Bulk forget")).toBe("50%"); // 1 / (1 + 1)
+  });
+
+  // A window with no export/forget attempts must render an em dash, not
+  // "0%" — "nobody exercised the endpoint" and "the endpoint is failing" are
+  // different operational statements and the tile has to distinguish them.
+  it("renders an em dash for a data-rights window with no attempts", async () => {
+    getAdminMetricsSummary.mockResolvedValue({
+      ...summaryFixture(),
+      today: { active_users: 0, metrics: metricsBlock() },
+    });
+    await act(async () => render(<Dashboard />));
+
+    const today = within(screen.getByTestId("rollup-today"));
+    // Every rate tile has a 0 denominator here: hook recall, tool recall,
+    // and the three data-rights tiles.
+    expect(today.getAllByText("—")).toHaveLength(5);
   });
 
   it("shows the loading state while the summary fetch is in flight", async () => {

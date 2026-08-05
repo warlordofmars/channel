@@ -84,7 +84,8 @@ _TOKEN_RE = re.compile(r"[a-z0-9]+")
 def _default_client() -> Any:
     """Lazy-load the boto3 AgentCore data-plane client.
 
-    Mirrors ``code_exec._get_lambda_client`` / ``web_search._get_exa_search``:
+    Mirrors ``code_exec._get_lambda_client`` /
+    ``web_search._resolve_exa_api_key``:
     deferring the boto3 client construction until a memory tool is
     actually invoked keeps it off the cold-start path for turns that
     don't touch memory. Unit tests inject a mock client via
