@@ -1,5 +1,13 @@
 # Copyright (c) 2026 John Carter. All rights reserved.
-"""Call-site tests for the follow-ups one-shot's prompt framing (#545).
+"""Call-site tests for two ``api.chats`` seams: the follow-ups one-shot's
+prompt framing (#545), and the per-server MCP tool-budget *selection*
+(#536). They share a module because they share a subject — this is the
+router's call-site suite, as distinct from ``test_chat_agent.py`` (the
+builders) and ``test_chats_api.py`` (the routes) — not because the
+behaviours are related. The #536 section starts at
+``## MCP tool-budget selection`` below and is self-contained.
+
+## Follow-ups prompt framing (#545)
 
 The *builder* (``build_followups_prompt``) is unit-tested next to its two
 siblings in ``test_chat_agent.py``. This module covers the seam that
@@ -31,12 +39,15 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterator
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
 
 from channel.agents.chat_agent import _FOLLOWUPS_TEXT_CAP, build_followups_prompt
+from channel.api import chats as chats_module
 from channel.api._auth import require_mgmt_user
 from channel.api.main import app
 from channel.models import Prefs
@@ -252,3 +263,337 @@ def test_neither_gate_builds_a_prompt_or_invokes_the_model(
 
     assert response.status_code == 200
     assert '"type": "follow_ups_suggested"' not in response.text
+
+
+# ---------------------------------------------------------------------------
+# ## MCP tool-budget selection (#536)
+#
+# The #389 cap is sound — a heavy MCP server ships ~15-20K tokens of tool
+# schema on EVERY turn — but its v1 *selection* was ``sorted(tools, key=
+# tool_name)`` then truncate. On the GitHub server that is actively
+# perverse: ``api_create_*`` / ``api_delete_*`` sort ahead of
+# ``api_list_*`` / ``api_search_*``, so the cap kept the destructive half
+# of the toolset and dropped every read tool #387's development-
+# self-awareness surface depends on — silently, because the model simply
+# never sees a tool it was not offered.
+#
+# ``_GITHUB_SERVER_TOOLS`` below reproduces the production log line from
+# the issue exactly: 47 advertised, and under the OLD alphabetical rule
+# the 23 dropped names are the ones the log recorded, verbatim. That
+# equivalence is asserted in ``test_fixture_reproduces_the_production_bug``
+# so the fixture cannot drift into proving something easier than the bug.
+# ---------------------------------------------------------------------------
+
+
+# The 23 names the production ``mcp.tools_capped`` line recorded as
+# dropped, verbatim from issue #536.
+_GITHUB_DROPPED_UNDER_ALPHABETICAL = [
+    "api_list_commits",
+    "api_list_issue_fields",
+    "api_list_issue_types",
+    "api_list_issues",
+    "api_list_pull_requests",
+    "api_list_releases",
+    "api_list_repository_collaborators",
+    "api_list_tags",
+    "api_merge_pull_request",
+    "api_pull_request_read",
+    "api_pull_request_review_write",
+    "api_push_files",
+    "api_request_copilot_review",
+    "api_run_secret_scanning",
+    "api_search_code",
+    "api_search_commits",
+    "api_search_issues",
+    "api_search_pull_requests",
+    "api_search_repositories",
+    "api_search_users",
+    "api_sub_issue_write",
+    "api_update_pull_request",
+    "api_update_pull_request_branch",
+]
+
+# The 24 that survived. Five are named in the issue (``api_delete_file``,
+# ``api_create_or_update_file``, ``api_create_repository``,
+# ``api_create_branch``, ``api_issue_write``); the rest are the GitHub MCP
+# server's own tool names that sort before ``api_list_commits``. What the
+# fixture must be faithful about is the *shape* — 47 advertised, and an
+# alphabetical prefix that keeps writes while dropping reads — which
+# ``test_fixture_reproduces_the_production_bug`` pins.
+_GITHUB_KEPT_UNDER_ALPHABETICAL = [
+    "api_add_issue_comment",
+    "api_assign_copilot_to_issue",
+    "api_cancel_workflow_run",
+    "api_create_branch",
+    "api_create_issue",
+    "api_create_or_update_file",
+    "api_create_pull_request",
+    "api_create_repository",
+    "api_delete_file",
+    "api_delete_workflow_run_logs",
+    "api_download_workflow_run_artifact",
+    "api_fork_repository",
+    "api_get_code_scanning_alert",
+    "api_get_commit",
+    "api_get_dependabot_alert",
+    "api_get_discussion",
+    "api_get_file_contents",
+    "api_get_issue",
+    "api_get_job_logs",
+    "api_get_me",
+    "api_get_pull_request",
+    "api_get_workflow_run",
+    "api_issue_read",
+    "api_issue_write",
+]
+
+_GITHUB_SERVER_TOOLS = _GITHUB_KEPT_UNDER_ALPHABETICAL + _GITHUB_DROPPED_UNDER_ALPHABETICAL
+
+# The five tools CLAUDE.md §"Development self-awareness (#387)" names as
+# the live-repo-state read surface. Every one of them was in the dropped
+# list. This is the regression #536 exists to prevent.
+_DEV_SELF_AWARENESS_READ_TOOLS = [
+    "api_list_issues",
+    "api_list_pull_requests",
+    "api_list_commits",
+    "api_search_issues",
+    "api_pull_request_read",
+]
+
+
+class _NamedTool:
+    """Duck-typed ``AgentTool`` carrying only a name — the shape a native
+    Strands ``@tool`` presents to the ranker (no ``mcp_tool`` attribute),
+    which forces the name-heuristic fallback."""
+
+    def __init__(self, name: str) -> None:
+        self.tool_name = name
+
+
+class _AnnotatedTool(_NamedTool):
+    """``MCPAgentTool``-shaped double: the raw ``mcp.types.Tool`` hangs off
+    ``.mcp_tool`` and carries the spec's ``annotations``.
+
+    ``annotations=None`` models a server that advertises tools without
+    annotations at all (the majority today) — the ranker must then fall
+    through to the name heuristic exactly as for a native tool."""
+
+    def __init__(self, name: str, annotations: Any) -> None:
+        super().__init__(name)
+        self.mcp_tool = SimpleNamespace(annotations=annotations)
+
+
+def _hints(**kwargs: Any) -> SimpleNamespace:
+    """An MCP ``ToolAnnotations`` stand-in. Unset hints read back as
+    ``None``, matching the real model's optional-field defaults."""
+    return SimpleNamespace(**{"readOnlyHint": None, "destructiveHint": None, **kwargs})
+
+
+class _FakeInnerClient:
+    """Duck-typed ``MCPClient`` — the cap only calls ``load_tools``."""
+
+    def __init__(self, tools: list[Any]) -> None:
+        self._tools = tools
+
+    async def load_tools(self, **_kwargs: Any) -> list[Any]:
+        return list(self._tools)
+
+
+async def _capped_names(tools: list[Any], max_tools: int) -> list[str]:
+    provider = chats_module._CappedMCPToolProvider(
+        _FakeInnerClient(tools),  # type: ignore[arg-type]
+        server_id="srv-github",
+        max_tools=max_tools,
+    )
+    return [tool.tool_name for tool in await provider.load_tools()]
+
+
+def test_fixture_reproduces_the_production_bug() -> None:
+    """The fixture is only worth anything if the OLD rule fails on it.
+
+    Under ``sorted(tools, key=tool_name)[:24]`` — the pre-#536 selection —
+    this 47-tool set drops exactly the 23 names the production log
+    recorded, and keeps ``api_delete_file`` while dropping
+    ``api_list_issues``. If a later edit makes the fixture easier than the
+    real server, this assertion is what notices."""
+    assert len(_GITHUB_SERVER_TOOLS) == 47
+
+    alphabetical = sorted(_GITHUB_SERVER_TOOLS)
+    kept, dropped = alphabetical[:24], alphabetical[24:]
+
+    assert dropped == _GITHUB_DROPPED_UNDER_ALPHABETICAL
+    assert "api_delete_file" in kept
+    for name in _DEV_SELF_AWARENESS_READ_TOOLS:
+        assert name in dropped
+
+
+@pytest.mark.asyncio
+async def test_capped_selection_keeps_the_387_read_surface(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """THE regression this issue exists to prevent: on a >24-tool GitHub
+    server, ``api_list_issues`` (and the rest of #387's read surface)
+    survives the cap.
+
+    Revert ``load_tools``' sort key to ``tool.tool_name`` and this fails —
+    which is the point."""
+    monkeypatch.setattr(chats_module, "record_mcp_tools_capped", AsyncMock())
+    tools = [_NamedTool(name) for name in _GITHUB_SERVER_TOOLS]
+
+    kept = await _capped_names(tools, max_tools=24)
+
+    assert len(kept) == 24
+    for name in _DEV_SELF_AWARENESS_READ_TOOLS:
+        assert name in kept
+
+
+@pytest.mark.asyncio
+async def test_capped_selection_drops_the_destructive_bias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No destructive or mutating tool may hold a slot while a read-only
+    tool is dropped — the inversion of problem 2 in the issue.
+
+    Stated as a property over the whole kept/dropped split rather than as
+    a name list, so it keeps holding as the fixture evolves."""
+    monkeypatch.setattr(chats_module, "record_mcp_tools_capped", AsyncMock())
+    tools = [_NamedTool(name) for name in _GITHUB_SERVER_TOOLS]
+
+    kept = set(await _capped_names(tools, max_tools=24))
+    dropped = [tool for tool in tools if tool.tool_name not in kept]
+
+    worst_kept_rank = max(
+        chats_module._tool_safety_rank(tool) for tool in tools if tool.tool_name in kept
+    )
+    best_dropped_rank = min(chats_module._tool_safety_rank(tool) for tool in dropped)
+    assert worst_kept_rank <= best_dropped_rank
+
+    # The concrete form of the same claim, against the names the issue
+    # calls out: every destructive tool lost its slot.
+    assert "api_delete_file" not in kept
+    assert "api_delete_workflow_run_logs" not in kept
+
+
+@pytest.mark.asyncio
+async def test_capped_selection_is_stable_across_turns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#389's no-tool-flicker property must survive #536: name is still
+    the tie-break inside a rank, so a reshuffled advertise order yields
+    the identical kept subset in the identical order."""
+    monkeypatch.setattr(chats_module, "record_mcp_tools_capped", AsyncMock())
+
+    forwards = [_NamedTool(name) for name in _GITHUB_SERVER_TOOLS]
+    backwards = [_NamedTool(name) for name in reversed(_GITHUB_SERVER_TOOLS)]
+
+    assert await _capped_names(forwards, 24) == await _capped_names(backwards, 24)
+
+
+@pytest.mark.asyncio
+async def test_tools_capped_log_line_survives_and_counts_dropped_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``mcp.tools_capped`` is what surfaced this bug, so it stays — with
+    the existing positional args unchanged, plus ``dropped_read_only``.
+
+    That new field is the follow-on signal: the read surface is *still*
+    over budget on this server (27 read tools, 24 slots), so three reads
+    spill even after the fix. Zero would mean every advertised read
+    survived.
+
+    The module logger is mocked directly rather than via ``caplog``
+    because the ``channel`` logger sets ``propagate = False`` once
+    ``configure_logging`` has run in the session."""
+    counter = AsyncMock()
+    monkeypatch.setattr(chats_module, "record_mcp_tools_capped", counter)
+    mock_logger = MagicMock()
+    monkeypatch.setattr(chats_module, "logger", mock_logger)
+
+    tools = [_NamedTool(name) for name in _GITHUB_SERVER_TOOLS]
+    await _capped_names(tools, max_tools=24)
+
+    counter.assert_awaited_once_with()
+    warn = next(
+        c for c in mock_logger.warning.call_args_list if c.args[0].startswith("mcp.tools_capped")
+    )
+    assert warn.args[2] == 47  # advertised
+    assert warn.args[3] == 24  # kept
+    assert len(warn.args[4]) == 23  # dropped, named in full
+    assert "api_delete_file" in warn.args[4]
+    assert warn.args[5] == 3  # dropped_read_only
+
+
+def test_annotations_outrank_the_name_heuristic() -> None:
+    """``readOnlyHint`` is authoritative where a server supplies it — the
+    whole reason option 2 was viable rather than a pure naming guess.
+
+    Both directions are checked, because a heuristic that annotations can
+    only *promote* would still be a guess in the dangerous direction."""
+    assert (
+        chats_module._tool_safety_rank(
+            _AnnotatedTool("api_delete_everything", _hints(readOnlyHint=True))
+        )
+        == chats_module._TOOL_RANK_READ_ONLY
+    )
+    assert (
+        chats_module._tool_safety_rank(
+            _AnnotatedTool("api_list_things", _hints(readOnlyHint=False, destructiveHint=True))
+        )
+        == chats_module._TOOL_RANK_DESTRUCTIVE
+    )
+
+
+def test_omitted_destructive_hint_reads_as_destructive() -> None:
+    """MCP spells it out: ``destructiveHint`` defaults to **true** when a
+    tool declares itself non-read-only and says nothing more. Ranking that
+    case as merely-mutating would quietly re-open the bias."""
+    assert (
+        chats_module._tool_safety_rank(_AnnotatedTool("api_do_thing", _hints(readOnlyHint=False)))
+        == chats_module._TOOL_RANK_DESTRUCTIVE
+    )
+    assert (
+        chats_module._tool_safety_rank(
+            _AnnotatedTool("api_do_thing", _hints(readOnlyHint=False, destructiveHint=False))
+        )
+        == chats_module._TOOL_RANK_MUTATING
+    )
+
+
+def test_unannotated_tools_fall_through_to_the_name_heuristic() -> None:
+    """Two shapes reach the fallback: a native Strands ``@tool`` (no
+    ``mcp_tool`` at all) and an MCP tool whose server sent no annotations.
+    Neither may raise."""
+    assert (
+        chats_module._tool_safety_rank(_NamedTool("api_list_issues"))
+        == chats_module._TOOL_RANK_READ_ONLY
+    )
+    assert (
+        chats_module._tool_safety_rank(_AnnotatedTool("api_list_issues", None))
+        == chats_module._TOOL_RANK_READ_ONLY
+    )
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "expected_rank"),
+    [
+        # Destructive tokens win outright, even over a read verb — a
+        # mixed name must never be promoted into the read tier.
+        ("api_delete_file", chats_module._TOOL_RANK_DESTRUCTIVE),
+        ("api_get_or_delete_thing", chats_module._TOOL_RANK_DESTRUCTIVE),
+        # Read beats mutating: real read tools routinely carry a write-ish
+        # noun, genuine writes rarely carry get/list/search.
+        ("api_get_workflow_run", chats_module._TOOL_RANK_READ_ONLY),
+        ("api_pull_request_read", chats_module._TOOL_RANK_READ_ONLY),
+        ("api_download_workflow_run_artifact", chats_module._TOOL_RANK_READ_ONLY),
+        # Verb-last naming is why matching is on tokens, not a prefix.
+        ("api_issue_write", chats_module._TOOL_RANK_MUTATING),
+        ("api_run_secret_scanning", chats_module._TOOL_RANK_MUTATING),
+        # Nothing recognised — ranks between read-only and mutating, so an
+        # unclassifiable tool neither steals a read's slot nor loses one
+        # to a known write.
+        ("api_request_copilot_review", chats_module._TOOL_RANK_UNKNOWN),
+        ("mcp-server_zzz", chats_module._TOOL_RANK_UNKNOWN),
+    ],
+)
+def test_name_heuristic_precedence(tool_name: str, expected_rank: int) -> None:
+    assert chats_module._tool_safety_rank_from_name(tool_name) == expected_rank
