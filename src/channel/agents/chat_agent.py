@@ -85,15 +85,21 @@ def max_tokens_for_effort(effort: str | None) -> int:
 # seam/register/trust-class table, and its point is that there are exactly
 # TWO trusted content inputs — this literal (class `system`) and the current
 # user turn (class `operator-instruction`).
-# Everything else — the #245 head-summary block, the recall hook's addendum,
-# prior assistant turns, attachments, and every tool result including MCP —
-# is `untrusted-data`. Trust class is a property of the SEAM, assigned here
-# at prompt-assembly time; it is never a stored attribute on the content, and
-# it is never derived from provenance (authorization consumes no provenance —
-# ADR-0011 §Decision 4). A block whose body is not machine-generated
-# in-process is `untrusted-data` no matter how trustworthy its source feels,
-# so it must run through `defuse_forged_headings` like the two existing
-# blocks do, and must not read as an instruction to the model.
+# Every other seam that carries user, model, or third-party content is
+# `untrusted-data`: the #245 head-summary block, the recall hook's addendum,
+# prior assistant turns, attachments, and every tool result including MCP.
+# The one carve-out is a body generated in-process from our own state that
+# carries no external content — the `<tool-use-budget>` addendum
+# ModelVisibilityAddendumHook appends is `system`-class for exactly that
+# reason, and it is the only such seam today (ADR-0011 §Decision 1's
+# completeness note).
+# Trust class is a property of the SEAM, assigned here at prompt-assembly
+# time; it is never a stored attribute on the content, and it is never
+# derived from provenance (authorization consumes no provenance —
+# ADR-0011 §Decision 4). So if your new block's body is not machine-generated
+# in-process it is `untrusted-data` no matter how trustworthy its source
+# feels, and it must run through `defuse_forged_headings` like the two
+# existing blocks do, and must not read as an instruction to the model.
 #
 # Editing note (#438): the "Tool use is deliberate" paragraph and the
 # development-self-awareness paragraph below are a matched pair, and the
