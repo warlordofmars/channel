@@ -738,13 +738,54 @@ prod never sets the flag (CDK assertion test in
 - **`AgentCoreRecallHook`** (`src/channel/agents/recall.py`)
   subscribes to `BeforeInvocationEvent`. Per turn, queries the
   actor's prior chats via `ListSessions` + per-session
-  `ListEvents`, formats the aggregate as a Markdown addendum
-  grouped by session with a date header, mutates
-  `event.messages[0]`.
+  `ListEvents`, formats the aggregate as a Markdown addendum, and
+  appends it to **`agent.system_prompt`** — *not* to
+  `event.messages`, which is the conversation. Writing it to
+  `messages[0]` lands the block inside the user turn, which is the
+  Phase 8a Layer-3 bug (#95) this project already shipped once.
+  A fresh Agent per turn is what makes mutating the prompt safe.
+- **Emitted shape** — the trusted `## What we've talked about
+  before` heading, then a data label and a `<<<RECALL` /
+  `RECALL>>>` fence wrapping everything recalled (#534); inside it,
+  one group per prior session headed `**Earlier conversation
+  ({date}) · source {marker}**` (#535) over `- You:` / `- Me:` turn
+  bullets. The heading stays **outside** the fence: it is the
+  formatter's own string and the anchor `DEFAULT_SYSTEM_PROMPT`
+  names, so fencing it would leave the label describing a region
+  containing the label's own subject. Undelimited — the pre-#534
+  shape — recalled prose carrying no marker to strip read as a
+  continuation of the instructions above it; that is the gap the
+  fence closes, and it matches the `<<<NAME` / `NAME>>>` framing
+  the titler and head-summariser already use (#256 Layer 1).
+- **The `source` marker is display and audit, never trust.**
+  ADR-0011 (#533) Decision 4: authorization is never a function of
+  provenance, so a labelled fragment is not a more trusted
+  fragment. The marker exists so the model — and a human reading a
+  captured prompt — can attribute a quote, the same lane as
+  #153 / #479. Nothing in this path may branch on it. Its value is
+  the record's `sessionId` (which *is* the source chat id) cut to
+  8 alphanumerics.
+- **Everything interpolated inside the fence is defused to a
+  fixpoint first** (`_defuse_recall_turn`) — forged headings
+  (#465), forged group headers (#526), forged fence delimiters
+  (#534) and forged turn bullets (#544) each lose the structural
+  marker and keep the words, with line terminators normalised first
+  so a `\r` / `U+2028` cannot hide a marker from the `^`-anchored
+  passes. The source marker is the one value *not* defused: its
+  alphanumeric allowlist is strictly stronger, since a value that
+  cannot contain a structural character cannot forge one.
 - **Caps** — `_RECALL_MAX_SESSIONS = 5` most-recent prior
-  sessions; `_RECALL_EVENTS_PER_SESSION = 2` most-recent events
-  per session; `_RECALL_EVENT_TEXT_TRUNCATE = 120` chars per
-  quoted turn. Worst-case prompt overhead ~2.4 KB.
+  sessions; `_RECALL_EVENTS_PER_SESSION = 2` most-recent *events*
+  per session — and one event is the `messages[-2:]` user+assistant
+  pair, so that is up to **4 quoted turns** per session, not 2;
+  `_RECALL_EVENT_TEXT_TRUNCATE = 120` chars per quoted turn, plus
+  the `...` marker. Worst case is therefore **3 024 chars (≈3.0 KB)**
+  — 5 groups × (55-char header + 4 × 130-char bullets), the
+  separators, and a 121-char wrapper. The long-standing "~2.4 KB"
+  predated the fence, the label and the source marker (together
+  +176 chars on a full block) and is superseded. Truncation runs
+  **before** defusal, so the fixpoint loop never sees an uncapped
+  turn.
 - **Current chat excluded** — PR #73 already feeds the current
   chat's DDB history into Strands; the recall hook drops that
   `sessionId` from the ListSessions result to avoid double-feeding.
