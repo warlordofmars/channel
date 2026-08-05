@@ -154,7 +154,8 @@ def _get_bedrock_runtime_client():  # type: ignore[no-untyped-def]
     """Lazy-load the boto3 ``bedrock-runtime`` client with a long read
     timeout.
 
-    Mirrors ``code_exec._get_lambda_client`` / ``web_search._get_exa_search``
+    Mirrors ``code_exec._get_lambda_client`` /
+    ``web_search._resolve_exa_api_key``
     — deferring the boto3 import and client construction until the model
     actually calls ``generate_image`` keeps them off the cold-start path
     for turns that don't generate an image. ``region_name`` comes from the
