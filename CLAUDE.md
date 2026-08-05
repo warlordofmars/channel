@@ -1389,6 +1389,15 @@ re-derive these during design review — cite them.
   ADR-0009 (recall pool budget) and the existing drop in
   `src/channel/agents/memory.py:240` (`_payload_from_messages` strips
   `toolUse` / `toolResult` content blocks before serializing).
+- **Cross-owner memory never reaches the instruction register.** Pooled
+  or shared-memory content is delivered only via the tool-result
+  register, never spliced into a prompt-assembly seam. Own-data is not
+  thereby trusted — see ADR-0011; every seam but the
+  `DEFAULT_SYSTEM_PROMPT` literal and the current user turn is
+  `untrusted-data`, and trust class is a property of the seam assigned at
+  prompt-assembly time, never a stored per-record attribute.
+  Authorization is never a function of provenance: provenance is a
+  display and audit input (#153, #479) only.
 - **The code-exec sandbox has zero network egress.** The
   `CodeExecLambda` runs in a dedicated PRIVATE_ISOLATED VPC (no IGW,
   no NAT, no VPC endpoints) with a zero-egress security group; IAM
