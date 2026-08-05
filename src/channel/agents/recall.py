@@ -452,7 +452,14 @@ def _format_recall_addendum(records: list[dict[str, Any]]) -> str:
         # costs one pass over ten characters and it is what lets the
         # block's invariants be stated with no "except its own header"
         # caveat. Real dates are untouched by every pass.
-        date = _defuse_recall_turn(str(group["createdAt"])) or "earlier"
+        #
+        # ``or ""`` before ``str()``, not after: ``str(None)`` is the
+        # truthy ``"None"``, which would render ``(None)`` where the
+        # pre-#534 code rendered ``(earlier)``. Unreachable on the live
+        # path — ``_iso_date`` normalises ``None`` to ``""`` at the API
+        # boundary — but this function documents itself as defensive
+        # against a malformed AgentCore response, so it stays that way.
+        date = _defuse_recall_turn(str(group["createdAt"] or "")) or "earlier"
         heading = _RECALL_GROUP_HEADING_TEMPLATE.format(date=date)
         blocks.append(heading + "\n" + "\n".join(group["bullets"]))
 

@@ -834,6 +834,53 @@ def test_forged_delimiter_in_the_session_date_is_defused():
     assert "Earlier conversation (RECALL)" in result
 
 
+@pytest.mark.parametrize("missing", [None, ""], ids=["none", "empty string"])
+def test_missing_session_date_still_falls_back_to_earlier(missing):
+    """The fallback the date's defusal must not swallow.
+
+    ``str(None)`` is the truthy ``"None"``, so defusing ``str(x)``
+    instead of ``str(x or "")`` renders ``(None)`` — a silent regression
+    against the pre-#534 behaviour, and unreachable on the live path
+    (``_iso_date`` normalises ``None`` to ``""``), which is exactly why
+    it needs a test rather than a reader's attention. Raised as a WARN by
+    ``code-reviewer`` on this PR.
+    """
+    records = [
+        {
+            "sessionId": "s1",
+            "createdAt": missing,
+            "payload": [
+                {"conversational": {"role": "USER", "content": {"text": "hi"}}},
+            ],
+        },
+    ]
+    result = _format_recall_addendum(records)
+    assert _RECALL_GROUP_HEADING_TEMPLATE.format(date="earlier") in result
+
+
+def test_delimiter_regex_matches_the_titler_precedent_it_duplicates():
+    """``recall._DELIMITER_BRACKET_RUN_RE`` is a deliberate copy of
+    ``chat_agent._DELIMITER_BRACKET_RUN_RE`` — deduplicating means moving
+    ``_defuse_titler_delimiters`` here, since ``chat_agent`` imports this
+    module and the reverse is a cycle (the same import direction that put
+    ``defuse_forged_headings`` in this file).
+
+    A copy nobody pins drifts, and drift here is silent: the two would
+    still each compile and each pass their own tests while defending
+    against different delimiter shapes. This is the cheap half of the fix
+    — the pin lives in the test file, so it needs no change outside
+    #534's scope. Raised as a WARN by ``code-reviewer`` on this PR.
+
+    Importing ``chat_agent`` from a test is safe precisely because the
+    cycle is a *module import* concern, not a test-time one.
+    """
+    from channel.agents import chat_agent
+
+    assert recall_module._DELIMITER_BRACKET_RUN_RE.pattern == (
+        chat_agent._DELIMITER_BRACKET_RUN_RE.pattern
+    )
+
+
 def test_real_session_dates_survive_the_defusal_untouched():
     """The companion to the test above: over-reach here would be visible
     on every block, since a date is rendered in every group header."""
