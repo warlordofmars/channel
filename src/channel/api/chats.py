@@ -158,6 +158,174 @@ _HEAD_SUMMARY_MAX_MESSAGES_PER_PASS = 100
 # the cap (see ``_mcp_max_tools_per_server``).
 _DEFAULT_MCP_MAX_TOOLS_PER_SERVER = 24
 
+# #536 — how the cap CHOOSES which tools survive. Ranks are sort keys, so
+# lower wins a slot: read-only first, then unclassifiable, then mutating,
+# then destructive. Before this the selection was a plain name sort, which
+# is arbitrary with respect to usefulness and — on the GitHub server that
+# surfaced the bug — actively perverse: ``api_create_*`` / ``api_delete_*``
+# sort ahead of ``api_list_*`` / ``api_search_*``, so a 47-tool server kept
+# ``api_delete_file`` and dropped ``api_list_issues``. That silently broke
+# the #387 development-self-awareness read surface (which needs
+# ``api_list_issues`` / ``api_list_pull_requests`` / ``api_list_commits`` /
+# ``api_search_issues`` / ``api_pull_request_read``) and left the exposed
+# subset biased toward writes. Nobody decided that; it was emergent.
+_TOOL_RANK_READ_ONLY = 0
+_TOOL_RANK_UNKNOWN = 1
+_TOOL_RANK_MUTATING = 2
+_TOOL_RANK_DESTRUCTIVE = 3
+
+# Fallback classifier vocabulary, used ONLY when a tool carries no MCP
+# ``readOnlyHint`` annotation. Matching is on whole ``_``/``-``-delimited
+# tokens anywhere in the tool name, not a prefix, because the registry
+# prepends a per-server ``tool_prefix`` (``api_list_issues``) and some
+# servers put the verb last (``api_pull_request_read``).
+_READ_ONLY_NAME_TOKENS = frozenset(
+    {
+        "list",
+        "get",
+        "search",
+        "read",
+        "fetch",
+        "find",
+        "query",
+        "describe",
+        "show",
+        "view",
+        "count",
+        "diff",
+        "inspect",
+        "browse",
+        "download",
+    }
+)
+_DESTRUCTIVE_NAME_TOKENS = frozenset(
+    {
+        "delete",
+        "destroy",
+        "drop",
+        "erase",
+        "force",
+        "purge",
+        "remove",
+        "revoke",
+        "truncate",
+        "uninstall",
+        "wipe",
+        "overwrite",
+    }
+)
+_MUTATING_NAME_TOKENS = frozenset(
+    {
+        "add",
+        "approve",
+        "assign",
+        "cancel",
+        "close",
+        "comment",
+        "copy",
+        "create",
+        "disable",
+        "dispatch",
+        "edit",
+        "enable",
+        "execute",
+        "fork",
+        "install",
+        "invite",
+        "lock",
+        "merge",
+        "move",
+        "patch",
+        "post",
+        "publish",
+        "push",
+        "put",
+        "rename",
+        "reopen",
+        "reset",
+        "restart",
+        "run",
+        "set",
+        "start",
+        "stop",
+        "submit",
+        "transfer",
+        "trigger",
+        "unlock",
+        "update",
+        "upload",
+        "write",
+    }
+)
+
+
+def _tool_safety_rank_from_name(tool_name: str) -> int:
+    """Classify a tool by the verbs in its name (#536) — the FALLBACK path.
+
+    Only reached when the tool carries no MCP ``readOnlyHint`` annotation
+    (see ``_tool_safety_rank``). Precedence is deliberate:
+
+    * **destructive tokens win outright** — ``get_or_delete_thing`` is
+      never treated as a read, so the destructive bias this issue exists
+      to remove cannot sneak back in through a mixed name.
+    * **read tokens then beat mutating tokens.** Real read tools routinely
+      carry a write-ish noun (``get_workflow_run``, ``get_patch``,
+      ``list_pull_requests``) while genuine writes rarely carry ``get`` /
+      ``list`` / ``search``, so resolving the overlap toward "read"
+      protects the surface #536 is about. The cost of being wrong is one
+      slot, not a new capability — a mis-ranked write was already callable
+      under the old selection.
+
+    A name matching nothing is ``_TOOL_RANK_UNKNOWN``, which sits between
+    read-only and mutating: an unclassifiable tool should not lose its
+    slot to a known write, nor take one from a known read.
+    """
+    tokens = {token for token in re.split(r"[^a-z0-9]+", tool_name.lower()) if token}
+    if tokens & _DESTRUCTIVE_NAME_TOKENS:
+        return _TOOL_RANK_DESTRUCTIVE
+    if tokens & _READ_ONLY_NAME_TOKENS:
+        return _TOOL_RANK_READ_ONLY
+    if tokens & _MUTATING_NAME_TOKENS:
+        return _TOOL_RANK_MUTATING
+    return _TOOL_RANK_UNKNOWN
+
+
+def _tool_safety_rank(tool: AgentTool) -> int:
+    """Rank one tool for the per-server budget — annotations first (#536).
+
+    Strands' ``MCPAgentTool`` keeps the raw ``mcp.types.Tool`` on
+    ``.mcp_tool``, and that object carries the spec's ``annotations``
+    (``readOnlyHint`` / ``destructiveHint``). ``ToolSpec`` itself does
+    **not** — it is Bedrock's Converse shape (name / description /
+    inputSchema / outputSchema) — so the annotations are read off
+    ``mcp_tool`` rather than ``tool_spec``. Everything is reached with
+    ``getattr`` defaults so a native ``@tool`` (no ``mcp_tool``) or an
+    older Strands build simply falls through to the name heuristic.
+
+    Per MCP, ``destructiveHint`` is meaningful only when ``readOnlyHint``
+    is false and **defaults to true** when omitted — so a tool that
+    declares itself mutating without saying more is ranked destructive,
+    which is the cautious reading.
+
+    These are *hints*, and the spec warns clients not to make tool-use
+    decisions on annotations from untrusted servers. That warning is about
+    authorization; this is a **token-budget ordering**. A server that
+    mislabels a write as ``readOnlyHint=true`` wins that tool a slot it
+    would have had anyway under the old name sort — it gains no capability
+    and crosses no trust boundary. The cap is not, and must not become, a
+    security control.
+    """
+    annotations = getattr(getattr(tool, "mcp_tool", None), "annotations", None)
+    read_only_hint = getattr(annotations, "readOnlyHint", None)
+    if read_only_hint is True:
+        return _TOOL_RANK_READ_ONLY
+    if read_only_hint is False:
+        destructive_hint = getattr(annotations, "destructiveHint", None)
+        if destructive_hint is False:
+            return _TOOL_RANK_MUTATING
+        return _TOOL_RANK_DESTRUCTIVE
+    return _tool_safety_rank_from_name(tool.tool_name)
+
 
 def _to_strands_messages(messages: list[Message]) -> list[dict[str, Any]]:
     """Convert stored ``Message`` rows into Strands' ``Messages`` shape.
@@ -778,13 +946,29 @@ class _CappedMCPToolProvider(ToolProvider):
     truncates the enumerated tool list to ``max_tools`` before it reaches
     the registry — so the cap constrains the ``toolConfig`` at its source.
 
-    Ordering is deterministic: tools are sorted by ``tool_name`` and the
-    lexicographically-first ``max_tools`` are kept. A stable name sort
-    means the model sees the same subset on every turn (no tool flicker
-    between turns) regardless of the order the server happens to advertise
-    them in. The name-sorted prefix is a blind heuristic — v1 ships fast;
-    a user-selectable per-server allowlist is the phase-2 follow-on
-    tracked on #389.
+    Selection is by **safety rank, then name** (#536). Read-only tools take
+    slots first, then unclassifiable ones, then mutating, then destructive
+    (``_tool_safety_rank``); ``tool_name`` is only the tie-break within a
+    rank, which keeps the original stability property — the model sees the
+    same subset on every turn, no tool flicker, regardless of the order the
+    server advertises them in.
+
+    v1 (#389) sorted by name alone. That is arbitrary with respect to
+    usefulness, and on the GitHub server it inverted the sensible bias:
+    ``api_create_*`` / ``api_delete_*`` sort ahead of ``api_list_*`` /
+    ``api_search_*``, so a 47-tool server kept ``api_delete_file`` and
+    dropped ``api_list_issues`` — silently disabling #387's live-repo-state
+    read surface while keeping the destructive half of the toolset.
+
+    **Consequence worth knowing:** on a server whose read-only tools alone
+    exceed the budget, no write tool survives. That is the intended
+    direction (the issue's "a capped toolset should bias the other way"),
+    and it is recoverable two ways without code — raise or disable the cap
+    via ``CHANNEL_MCP_MAX_TOOLS_PER_SERVER``, and read the
+    ``mcp.tools_capped`` line, which names every drop. A per-server
+    user-selectable allowlist remains the phase-2 follow-on on #389; that
+    is the surface for "I want exactly these 24", and it needs registry +
+    UI changes rather than a selection tweak.
 
     ``max_tools <= 0`` disables truncation — the inner client's full tool
     set passes through unchanged.
@@ -809,18 +993,28 @@ class _CappedMCPToolProvider(ToolProvider):
         tools = list(await self._inner.load_tools(**kwargs))
         if self._max_tools <= 0 or len(tools) <= self._max_tools:
             return tools
-        # Sort by tool name so the kept subset is stable across turns —
-        # the same N tools every time, not whatever order the server
+        # Safety rank first (read-only tools take slots ahead of writes —
+        # #536), tool name second so the kept subset is stable across turns
+        # — the same N tools every time, not whatever order the server
         # paginated them in.
-        ordered = sorted(tools, key=lambda tool: tool.tool_name)
+        ordered = sorted(tools, key=lambda tool: (_tool_safety_rank(tool), tool.tool_name))
         kept = ordered[: self._max_tools]
         dropped = ordered[self._max_tools :]
+        # ``dropped_read_only`` is the signal that the budget is now tight
+        # enough to cost read coverage — i.e. the #387 surface may STILL be
+        # incomplete even though reads are prioritised. Zero means every
+        # read-only tool the server advertised survived.
+        dropped_read_only = sum(
+            1 for tool in dropped if _tool_safety_rank(tool) == _TOOL_RANK_READ_ONLY
+        )
         logger.warning(
-            "mcp.tools_capped server_id_hash=%s advertised=%d kept=%d dropped=%s",
+            "mcp.tools_capped server_id_hash=%s advertised=%d kept=%d dropped=%s "
+            "dropped_read_only=%d",
             fingerprint_id(self._server_id),
             len(tools),
             len(kept),
             [tool.tool_name for tool in dropped],
+            dropped_read_only,
         )
         await record_mcp_tools_capped()
         return kept
