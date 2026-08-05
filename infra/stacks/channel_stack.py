@@ -682,6 +682,41 @@ class ChannelStack(cdk.Stack):
         mcp_token_key.grant_encrypt_decrypt(api_role)
         common_env["CHANNEL_MCP_TOKEN_KMS_KEY_ID"] = mcp_token_key.key_arn
         common_env["CHANNEL_MCP_REGISTRY_ENABLED"] = "1"
+
+        # #561 — widen the per-server MCP tool budget from the code default
+        # of 24 (``_DEFAULT_MCP_MAX_TOOLS_PER_SERVER`` in
+        # ``src/channel/api/chats.py``) to 35. The override exists precisely
+        # so the deployed budget can differ from the library default; the
+        # default itself stays put.
+        #
+        # WHY 35 AND NOT 24: the GitHub MCP server advertises 47 tools, of
+        # which **28 are read-only**. #536 / #560 made the cap prefer
+        # read-only tools when truncating — correctly, since the pre-#560
+        # name-ordered selection kept ``api_delete_file`` and
+        # ``api_create_repository`` while dropping ``api_list_issues``. But
+        # with a budget of 24 against 28 reads, every slot went to a read, 4
+        # reads still spilled, and all 19 write tools were dropped —
+        # including ``api_issue_write``, so Channel could not create issues,
+        # comment, open PRs or push. 35 fits the whole read surface (taking
+        # ``dropped_read_only`` to 0, which is what #536 was actually after)
+        # plus 7 write slots.
+        #
+        # THE COST IS REAL: #389's rationale for having a cap at all is
+        # token overhead — every enumerated tool's JSON schema ships in the
+        # Bedrock Converse ``toolConfig`` on EVERY turn, ~15-20K tokens for
+        # a heavy server. Raising the budget buys write coverage with
+        # context window.
+        #
+        # THIS IS A BANDAID SIZED TO ONE OBSERVED SERVER, not a principled
+        # limit — 35 is "28 observed reads plus a few", and a different
+        # server with a different tool count gets no better answer from it.
+        # The durable fix is #536 option 3, a per-server allowlist, which
+        # #560 identified as the phase-2 follow-on: it would keep this
+        # server's 28 reads plus the handful of writes actually wanted
+        # (``issue_write``, ``add_issue_comment``, ``create_pull_request``)
+        # and drop the rest, instead of buying write slots by raising a
+        # global budget.
+        common_env["CHANNEL_MCP_MAX_TOOLS_PER_SERVER"] = "35"
         # The redirect URI is the API origin's /auth/mcp/callback path.
         # MCP servers persist this in their DCR client record; changing
         # it later requires re-registering, so derive it from the env's
