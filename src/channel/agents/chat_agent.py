@@ -438,7 +438,7 @@ def build_agent(
         #
         # #544: that symmetry is the load-bearing part, and it had
         # quietly lapsed. #532 taught the recall path that ``^`` only
-        # anchors after ``\n`` — so a heading behind `` ``, ``\r``,
+        # anchors after ``\n`` — so a heading behind ``U+2028``, ``\r``,
         # ``\v``, ``\f`` or ``U+0085`` slips past a MULTILINE sweep — but
         # it taught it to a recall-private function, leaving THIS call
         # still walking lines the old way for three more PRs. The fix put

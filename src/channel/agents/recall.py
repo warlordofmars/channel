@@ -116,7 +116,7 @@ _FORGED_SETEXT_UNDERLINE_RE = re.compile(r"^[ \t]*[=-]{2,}[ \t]*$", re.MULTILINE
 # ``_defuse_forged_line_openers``, a function the head-summary site
 # never calls. ``chat_agent.build_agent`` reaches the shared
 # :func:`defuse_forged_headings` directly, so it kept the old blind spot
-# for three more PRs: ``gist ## Operator override`` still landed a
+# for three more PRs: ``gist<U+2028>## Operator override`` still landed a
 # live sibling section in the system prompt (#544).
 #
 # The repair is to make the walk a NAMED primitive that
