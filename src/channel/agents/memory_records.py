@@ -684,10 +684,25 @@ async def list_forgettable_event_ids(
        ``drained=False``. The caller still learns the forget was partial;
        it just learns it after two round trips instead of two hundred.
     2. **Ids are de-duplicated.** Belt and braces for the above, and
-       independently correct: ``ListEvents`` pages over a session that is
-       being mutated (this walk is *deleting* from it) can legitimately
-       show one event twice as the window shifts. Returning it twice would
+       independently correct: a **concurrent** mutator — the
+       ``AgentCoreMemoryHook`` writing a turn from another tab, or an
+       overlapping forget — shifts the paging window, and ``ListEvents``
+       can then show one event on two pages. Returning it twice would
        spend a second ``DeleteEvent`` to be told it is already gone.
+
+       Note the mutator is *concurrent*, not this walk:
+       ``api/memory._forget_sessions`` drains this function completely for
+       a session and only then enters its delete loop, so no
+       ``DeleteEvent`` is ever in flight against the session being listed.
+       Stated precisely because the obvious-sounding wrong cause ("this
+       walk is deleting from it") is checkable, doesn't hold, and would
+       lead a future reader to conclude the guard is dead weight and
+       remove something that is doing real work.
+
+    Neither guard can drop a record. ``seen_ids`` is added to only *after*
+    the ``since`` filter passes, so an event excluded by the cutoff is
+    never memoised as seen and is re-evaluated freely if it reappears on a
+    later page.
     """
     event_ids: list[str] = []
     seen_ids: set[str] = set()
