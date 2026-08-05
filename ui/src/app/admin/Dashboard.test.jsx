@@ -61,6 +61,16 @@ function metricsBlock(overrides = {}) {
     "MemoryToolWriteFailures",
     "MemoryToolRecallSuccesses",
     "MemoryToolRecallFailures",
+    // Memory data-rights counters (#476 export, #477 forget) — surfaced on
+    // the dashboard by #551. The Python side of the name agreement is pinned
+    // by tests/unit/test_admin.py, which derives both sides from the real
+    // artefacts rather than restating them.
+    "MemoryExportSuccesses",
+    "MemoryExportFailures",
+    "MemoryRecordDeleteSuccesses",
+    "MemoryRecordDeleteFailures",
+    "MemoryBulkForgetSuccesses",
+    "MemoryBulkForgetFailures",
     "AutoTitleSuccesses",
     "AutoTitleFailures",
     "ChatDeleteMemoryWipeSuccesses",
@@ -106,6 +116,16 @@ function summaryFixture() {
         MemoryToolRecallFailures: 2,
         RequestCount: 4821,
         Request5xxCount: 7,
+        // #551 data-rights rates, chosen distinct from each other and from
+        // the 90% / 80% above so each getByText below matches exactly one
+        // tile. The bulk-forget pair is deliberately half-failing — that is
+        // the shape the tile exists to make visible.
+        MemoryExportSuccesses: 3,
+        MemoryExportFailures: 1,
+        MemoryRecordDeleteSuccesses: 3,
+        MemoryRecordDeleteFailures: 2,
+        MemoryBulkForgetSuccesses: 1,
+        MemoryBulkForgetFailures: 1,
       }),
     },
     "7d": {
@@ -123,8 +143,9 @@ function summaryFixture() {
     "30d": {
       active_users: 120,
       // ...and hook recall 0/0 → "—" exercises the zero-denominator branch.
-      // Tool recall is non-zero here so the card has a single em dash (the
-      // hook tile), keeping the getByText("—") assertion unambiguous.
+      // Tool recall AND all three #551 data-rights pairs are non-zero here so
+      // the card has a single em dash (the hook tile), keeping the
+      // getByText("—") assertion unambiguous.
       metrics: metricsBlock({
         MemoryWriteSuccesses: 9000,
         RecallSuccesses: 0,
@@ -133,6 +154,9 @@ function summaryFixture() {
         MemoryToolWriteSuccesses: 200,
         MemoryToolRecallSuccesses: 40,
         MemoryToolRecallFailures: 10,
+        MemoryExportSuccesses: 12,
+        MemoryRecordDeleteSuccesses: 30,
+        MemoryBulkForgetSuccesses: 6,
       }),
     },
   };
@@ -212,6 +236,39 @@ describe("Dashboard", () => {
     expect(today.getByText("Tool recall")).toBeTruthy();
     expect(today.getByText("Requests")).toBeTruthy();
     expect(today.getByText("5xx responses")).toBeTruthy();
+  });
+
+  // #551 — the six #476/#477 counters were emitted but absent from the admin
+  // allowlist, so nothing rendered them. Rates rather than counts, because a
+  // count tile reading 0 cannot be told apart from a misspelled metric name.
+  it("renders the memory data-rights tiles as export / forget success rates", async () => {
+    await act(async () => render(<Dashboard />));
+    const today = within(screen.getByTestId("rollup-today"));
+
+    expect(today.getByText("Export success")).toBeTruthy();
+    expect(today.getByText("75%")).toBeTruthy(); // export: 3 / (3 + 1)
+    expect(today.getByText("Record forget")).toBeTruthy();
+    expect(today.getByText("60%")).toBeTruthy(); // record delete: 3 / (3 + 2)
+    // The one that matters most: a half-failing bulk forget means users were
+    // told their data was gone when it was not, and it must not read clean.
+    expect(today.getByText("Bulk forget")).toBeTruthy();
+    expect(today.getByText("50%")).toBeTruthy(); // bulk forget: 1 / (1 + 1)
+  });
+
+  // A window with no export/forget attempts must render an em dash, not
+  // "0%" — "nobody exercised the endpoint" and "the endpoint is failing" are
+  // different operational statements and the tile has to distinguish them.
+  it("renders an em dash for a data-rights window with no attempts", async () => {
+    getAdminMetricsSummary.mockResolvedValue({
+      ...summaryFixture(),
+      today: { active_users: 0, metrics: metricsBlock() },
+    });
+    await act(async () => render(<Dashboard />));
+
+    const today = within(screen.getByTestId("rollup-today"));
+    // Every rate tile has a 0 denominator here: hook recall, tool recall,
+    // and the three data-rights tiles.
+    expect(today.getAllByText("—")).toHaveLength(5);
   });
 
   it("shows the loading state while the summary fetch is in flight", async () => {
