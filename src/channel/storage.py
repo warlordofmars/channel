@@ -2217,7 +2217,10 @@ def consume_refresh_token(raw_token: str) -> RefreshConsumeResult:
     waits more than 8s for a stalled holder abandons the wait and
     rotates unguarded — an unbounded lock would freeze every other
     document's API calls behind one hung request, which was judged the
-    worse failure. And a *separate* client — desktop (#297) presenting
+    worse failure. (It re-reads the session before doing so, so a
+    document escaping after another has already rotated reuses that
+    result; documents sharing a deadline still escape together and all
+    rotate.) And a *separate* client — desktop (#297) presenting
     the keychain's token, or any non-SPA consumer — shares no lock with
     a browser at all, though it normally holds its own ``device_id`` and
     therefore its own family. So reuse detection stays the authority on

@@ -258,8 +258,14 @@ async function refreshUnlessAnotherDocumentAlreadyDid() {
  * blindly, because up to {@link REFRESH_LOCK_WAIT_MS} can have passed
  * since the caller last looked. Several documents queued behind one
  * stalled holder each escape on their own timer, and without the
- * re-read that is a *cascade* of reuse breaches instead of one; with
- * it, the first to escape rotates and the rest reuse its result.
+ * re-read every one of them rotates; with it, a document that escapes
+ * after another has already rotated reuses that result.
+ *
+ * It narrows the window, it does not close it — documents that began
+ * waiting in the same tick share a deadline, so they escape together,
+ * re-read the same stale session, and all rotate. Nothing here can fix
+ * that; escaping at all is the deliberate concession to not
+ * deadlocking, and reuse detection stays the authority on what follows.
  */
 async function refreshUnderCrossDocumentLock() {
   const locks = globalThis.navigator?.locks;

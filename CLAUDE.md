@@ -417,9 +417,11 @@ serialises documents. What remains:
    reachable again behind a genuinely stalled holder. That is the
    trade #520 already made for `AuthGate` and the same judgement: a
    deadlock across every tab is worse than a rare, bounded collision the
-   server already detects. The escape re-reads the session first, so
-   several documents queued behind one stalled holder produce **one**
-   unguarded rotation rather than one apiece.
+   server already detects. The escape re-reads the session first, so a
+   document escaping after another has already rotated reuses that
+   result — which narrows the window without closing it: documents that
+   began waiting in the same tick share a deadline, escape together,
+   re-read the same stale session, and all rotate.
 2. **Desktop shares no lock with a browser** — but every sign-in mints
    its own `device_id` and therefore its own token family
    (`_mint_session_refresh_token`), so an Electron window and a browser
