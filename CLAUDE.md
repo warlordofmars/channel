@@ -291,12 +291,39 @@ the access JWT it renews has usually already expired.
   than reaching for `refreshAccessToken`, so the skew, the cooldown, the
   single-flight collapse and the 401-only rule below have exactly one
   implementation between them.
-- **Single-flight is correctness, not optimisation.** #290 hard-rotates
-  on every use and reads a re-presented token as an OAuth 2.1 reuse
-  breach that revokes the whole device family. A page load fires several
-  API calls at once, so concurrent renewals would present the
-  just-revoked predecessor and sign the user out on the exact path meant
-  to keep them in. All callers share one in-flight promise.
+- **Single-flight is correctness, not optimisation, and it spans
+  documents (#495).** #290 hard-rotates on every use and reads a
+  re-presented token as an OAuth 2.1 reuse breach that revokes the whole
+  device family. Two layers, both load-bearing: within a document all
+  callers share one in-flight promise (a page load fires several API
+  calls at once); across documents a `navigator.locks` Web Lock named
+  `channel:auth-refresh` serialises them, and the document that acquires
+  it **re-reads the session first** — `localStorage` is shared and
+  synchronous, so the loser returns the winner's freshly rotated token
+  rather than presenting the one the winner just consumed. Without that
+  re-read the lock only orders the breach.
+
+  **Every way of not getting the lock degrades to the per-document
+  promise, never to nothing.** `navigator.locks` is absent in
+  non-secure contexts and older browsers; `request` can reject; and the
+  wait is bounded at **8s** (`REFRESH_LOCK_WAIT_MS`), matching #520's
+  `RENEWAL_HOLD_MS` and chosen for the same reason — one tab on a
+  stalled connection must not freeze every other tab's API calls behind
+  it. The **hold** is deliberately unbounded: releasing while the
+  request is in flight would hand the next document a token being
+  rotated right now, which is the bug, self-inflicted. Web Locks release
+  automatically when a document goes away, so a closed or crashed tab
+  strands nobody.
+
+  Two things this does *not* cover. Desktop (#297) presents the
+  keychain's token and shares no lock with a browser — normally
+  harmless, since each sign-in mints its own `device_id` and therefore
+  its own family, but a second Electron window or app instance sharing
+  one `userData` directory would be inside #495's problem and outside
+  its fix. And the client guarantee is best-effort by construction, so
+  `consume_refresh_token` still treats reuse detection as the authority
+  — see its docstring, which now states the guarantee that actually
+  exists rather than an unqualified "single-flight in the SPA".
 - **A refused refresh is not automatically a sign-out.** `/auth/refresh`
   answers 401 both for a dead token and for a client with no refresh
   credential at all (bypass logins, desktop sessions signed in before
@@ -362,12 +389,11 @@ timeout. Falling through neither cancels the renewal (the promise is
 concurrent API call) nor counts as a credential verdict, so local state
 survives.
 
-Note this gives the per-document single-flight gap below a **second
-trigger**: renewal can now start from a route navigation, not only from
-an API call. It does not widen the gap — within a document every caller
-still collapses onto the one promise, and across documents there was
-never any protection — but a two-tab race is now reachable from
-navigation alone.
+Note this gave the then-open multi-tab race a **second trigger**:
+renewal can start from a route navigation, not only from an API call, so
+two idle tabs could collide on the next click rather than only on the
+next request. #495 has since closed that race with the cross-document
+lock above; the second trigger remains, and is now covered by it.
 
 Until #520 this was filed here as a deliberate, "status-quo-neutral"
 cold-load gap. That framing was wrong twice over: the gate is
@@ -378,27 +404,36 @@ without issuing a request — dev CloudWatch over a six-hour window showed
 zero `/api/*` 401s and two *successful* cookie-transport refreshes
 alongside two fresh sign-ins.
 
-**One known gap remains, and it is deliberate.**
+**The multi-tab gap is closed (#495), with two residual edges.** Until
+#495 the in-flight promise was per-document, so a simultaneous two-tab
+renewal tripped #290's reuse detection and revoked the whole family —
+signing the user out *everywhere*, by the exact mechanism built to keep
+them signed in. That was **not** status-quo-neutral; it was a failure
+mode that could not occur without silent refresh. The Web Lock above now
+serialises documents. What remains:
 
-1. Single-flight is per-document: two tabs share a cookie jar but not
-   the in-flight promise, so a simultaneous multi-tab renewal can trip
-   #290's reuse detection and revoke the whole family — signing the user
-   out *everywhere*. `consume_refresh_token`'s own docstring names
-   "single-flight in the SPA" as the mitigation for exactly this, so the
-   server relies on a guarantee the SPA currently provides only per-tab.
-   This is **not** status-quo-neutral: it introduces a failure mode that
-   cannot occur without silent refresh. The race is narrow — both tabs
-   must cross the skew window within one round trip — which is why it
-   ships, but `navigator.locks.request` should close it soon (#495).
-   **Desktop (#297) does not widen it in the obvious way**: every
-   sign-in mints its own `device_id` and therefore its own token family
+1. **The 8s wait bound is an escape hatch, by design.** A document that
+   cannot acquire the lock in time rotates unguarded, so the old race is
+   reachable again behind a genuinely stalled holder. That is the
+   trade #520 already made for `AuthGate` and the same judgement: a
+   deadlock across every tab is worse than a rare, bounded collision the
+   server already detects.
+2. **Desktop shares no lock with a browser** — but every sign-in mints
+   its own `device_id` and therefore its own token family
    (`_mint_session_refresh_token`), so an Electron window and a browser
    tab hold *different* families and cannot revoke each other. The
-   desktop analogue needs two renderers sharing one `userData`
-   directory — a second app window or a second app instance, of which
-   the app currently creates neither. Adding either (or a
+   desktop analogue of the race needs two renderers sharing one
+   `userData` directory — a second app window or a second app instance,
+   of which the app currently creates neither. Adding either (or a
    `requestSingleInstanceLock`-less multi-instance mode) puts desktop
-   squarely inside #495, and the fix is the same cross-context lock.
+   back inside this problem; Web Locks are per-origin and would cover
+   two renderers of the same origin, so the fix would likely be free.
+
+**Verification note.** CI proves the guarantee against two module
+instances sharing one `localStorage` and one Web Locks implementation,
+which is a faithful model but not the real thing. Two live tabs whose
+access tokens cross the 5-minute skew window against a hard-rotating
+server remains a human check.
 
 Server-side companion gap: `/auth/logout` is `Depends(require_mgmt_user)`
 and `decode_mgmt_jwt` enforces `exp`, so signing out of a tab left idle

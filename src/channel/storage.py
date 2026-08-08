@@ -2196,9 +2196,32 @@ def consume_refresh_token(raw_token: str) -> RefreshConsumeResult:
     deliberately. Two simultaneous consumes of one token are
     indistinguishable at the server from a replay microseconds apart,
     and epic #241 Q1 settles the trade-off in favour of hard rotation on
-    the server with single-flight in the SPA (#295) preventing the race
-    client-side. Treating the loser as a rejection would leave a real
-    replay silently tolerated whenever it arrived fast enough.
+    the server, with the client preventing the race before it reaches
+    here. Treating the loser as a rejection would leave a real replay
+    silently tolerated whenever it arrived fast enough.
+
+    **What the client actually guarantees, precisely (#295, #495).**
+    ``ui/src/api.js`` serialises rotation in two layers: a module-level
+    single-flight promise collapsing one document's concurrent callers,
+    and — since #495 — a ``navigator.locks`` Web Lock that extends the
+    same mutual exclusion across every document of the origin (tabs,
+    windows, the installed PWA). Two documents crossing the renewal skew
+    window therefore produce one rotation, and the loser reads the
+    winner's freshly stored access token instead of re-presenting the
+    consumed one.
+
+    It is a best-effort guarantee, not an invariant this function may
+    rely on, and there are three named ways to reach here anyway. Web
+    Locks are unavailable in non-secure contexts and older browsers, so
+    the client degrades to per-document single-flight. A document that
+    waits more than 8s for a stalled holder abandons the wait and
+    rotates unguarded — an unbounded lock would freeze every other
+    document's API calls behind one hung request, which was judged the
+    worse failure. And a *separate* client — desktop (#297) presenting
+    the keychain's token, or any non-SPA consumer — shares no lock with
+    a browser at all, though it normally holds its own ``device_id`` and
+    therefore its own family. So reuse detection stays the authority on
+    what happened; the client only makes the benign collision rare.
 
     Both expiry columns are enforced, absolute before idle, so a session
     that blew through its 30-day ceiling reports that rather than

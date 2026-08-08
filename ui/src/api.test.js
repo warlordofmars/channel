@@ -1386,6 +1386,7 @@ describe("silent refresh", () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.useRealTimers();
   });
 
   it("does not refresh while the token is comfortably alive", async () => {
@@ -1579,6 +1580,35 @@ describe("silent refresh", () => {
     expect(apiCalls()).toHaveLength(3);
   });
 
+  it("rotates again once the cooldown lapses — the single-flight slot is released", async () => {
+    // The slot holds one *attempt*, not one page's worth. A settled promise
+    // left in it would answer every later caller with the first attempt's
+    // verdict, so a session that recovers from a transient blip would never
+    // renew again — the failure mode the release exists to prevent.
+    vi.useFakeTimers();
+    storeSession(jwt(3600), 60_000);
+    let seen = 0;
+    fetchMock.mockImplementation((url) => {
+      if (url !== "/auth/refresh") {
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
+      }
+      seen += 1;
+      return seen === 1
+        ? Promise.reject(new TypeError("Failed to fetch"))
+        : Promise.resolve(refreshOk({ access_token: ROTATED, expires_in: 3600 }));
+    });
+    const api = await freshApi();
+
+    await api.listModels();
+    expect(refreshCalls()).toHaveLength(1);
+
+    vi.setSystemTime(Date.now() + 31_000); // past the 30s cooldown
+    await api.listModels();
+
+    expect(refreshCalls()).toHaveLength(2);
+    expect(apiCalls()[1][1].headers.Authorization).toBe(`Bearer ${ROTATED}`);
+  });
+
   it("never refreshes when there is no session at all", async () => {
     route(refreshOk({}));
     const api = await freshApi();
@@ -1588,6 +1618,227 @@ describe("silent refresh", () => {
     expect(refreshCalls()).toHaveLength(0);
     expect(assign).not.toHaveBeenCalled();
     expect(apiCalls()[0][1].headers.Authorization).toBeUndefined();
+  });
+
+  // -------------------------------------------------------------------------
+  // Cross-document single-flight (#495)
+  // -------------------------------------------------------------------------
+  //
+  // The suite above proves single-flight WITHIN a document. Two tabs are two
+  // module instances sharing one cookie jar, so `vi.resetModules()` twice is
+  // a faithful stand-in for two documents: separate module state, one shared
+  // `localStorage`, one shared `navigator.locks`.
+  //
+  // What is NOT reproducible here — and stays a human check — is the real
+  // thing: two live tabs whose access tokens cross the 5-minute skew window
+  // at the same moment against a server that hard-rotates.
+  describe("cross-document lock (#495)", () => {
+    /** Mirrors `REFRESH_LOCK_WAIT_MS` in api.js, which is not exported. */
+    const LOCK_WAIT_MS = 8_000;
+
+    /** Let every pending microtask AND macrotask drain. */
+    function settle() {
+      return new Promise((resolve) => { setTimeout(resolve, 0); });
+    }
+
+    /**
+     * Minimal exclusive-mode `navigator.locks` stand-in — jsdom ships none,
+     * so the lock path is otherwise unreachable.
+     *
+     * Models only what `api.js` uses: exclusive mode, FIFO grant order,
+     * release when the callback settles, and an `AbortSignal` that drops a
+     * request still queued. Faithful on the property under test — a waiter's
+     * abort releases only its own queue slot, never the live holder's.
+     */
+    function installWebLocks() {
+      const tails = new Map();
+      vi.stubGlobal("navigator", {
+        locks: {
+          request(name, options, callback) {
+            const predecessor = tails.get(name) ?? Promise.resolve();
+            let release;
+            const held = new Promise((resolve) => { release = resolve; });
+            tails.set(name, predecessor.then(() => held));
+
+            const abandoned = new Promise((_, reject) => {
+              options.signal.addEventListener("abort", () => {
+                reject(Object.assign(new Error("lock request aborted"), { name: "AbortError" }));
+              });
+            });
+
+            return Promise.race([predecessor, abandoned]).then(
+              () => Promise.resolve(callback()).finally(release),
+              (error) => { release(); throw error; },
+            );
+          },
+        },
+      });
+    }
+
+    /** Answer /auth/refresh differently per call; everything else 200 {}. */
+    function routeInTurn(...responses) {
+      let seen = 0;
+      fetchMock.mockImplementation((url) => {
+        if (url !== "/auth/refresh") {
+          return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
+        }
+        const answer = responses[seen];
+        seen += 1;
+        return answer();
+      });
+    }
+
+    function authHeaders() {
+      return apiCalls().map(([, init]) => init.headers.Authorization);
+    }
+
+    it("serialises two documents onto ONE rotation, and the loser reuses the winner's token", async () => {
+      // The load-bearing test. Without the lock both documents present the
+      // same refresh token; #290 reads the second as an OAuth 2.1 reuse
+      // breach and revokes the whole device family.
+      installWebLocks();
+      storeSession("stale", 60_000);
+
+      let answerRefresh;
+      const heldOpen = new Promise((resolve) => { answerRefresh = resolve; });
+      routeInTurn(() => heldOpen.then(() => refreshOk({ access_token: ROTATED, expires_in: 3600 })));
+
+      const tabA = await freshApi();
+      const tabB = await freshApi();
+      const a = tabA.listModels();
+      const b = tabB.listModels();
+      // Both documents are now queued on the lock; A holds it, B waits.
+      await settle();
+      answerRefresh();
+      await Promise.all([a, b]);
+
+      expect(refreshCalls()).toHaveLength(1);
+      // B did not fall back to its stale token either — it read the session
+      // A wrote while holding the lock.
+      expect(authHeaders()).toEqual([`Bearer ${ROTATED}`, `Bearer ${ROTATED}`]);
+      expect(assign).not.toHaveBeenCalled();
+    });
+
+    it("leaves no pending timer behind once the lock is released", async () => {
+      // The wait bound is a timer armed on every rotation. Left uncleared it
+      // would fire ~8s later against an AbortController nobody is watching —
+      // harmless in itself, but one stray timer per API-call burst.
+      vi.useFakeTimers();
+      installWebLocks();
+      storeSession("stale", 60_000);
+      route(refreshOk({ access_token: ROTATED, expires_in: 3600 }));
+      const api = await freshApi();
+      await api.listModels();
+
+      expect(refreshCalls()).toHaveLength(1);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it("rotates twice across two documents WITHOUT Web Locks — the gap this closes", async () => {
+      // Pins what the lock is actually buying: identical setup to the test
+      // above, minus `navigator.locks`, and the second document presents a
+      // token the first has already consumed.
+      vi.stubGlobal("navigator", {});
+      storeSession("stale", 60_000);
+      route(refreshOk({ access_token: ROTATED, expires_in: 3600 }));
+
+      const tabA = await freshApi();
+      const tabB = await freshApi();
+      await Promise.all([tabA.listModels(), tabB.listModels()]);
+
+      expect(refreshCalls()).toHaveLength(2);
+    });
+
+    it("keeps per-document single-flight when Web Locks are unavailable", async () => {
+      // Absent in non-secure contexts and older browsers. Degrading must
+      // land on the pre-#495 behaviour, never on no single-flight at all.
+      vi.stubGlobal("navigator", {});
+      storeSession("stale", 60_000);
+      route(refreshOk({ access_token: ROTATED, expires_in: 3600 }));
+      const api = await freshApi();
+
+      await Promise.all([
+        api.listModels(),
+        api.listModels(),
+        api.listModels(),
+        api.listModels(),
+      ]);
+
+      expect(refreshCalls()).toHaveLength(1);
+      expect(authHeaders()).toEqual(Array(4).fill(`Bearer ${ROTATED}`));
+    });
+
+    it("keeps per-document single-flight when there is no navigator at all", async () => {
+      vi.stubGlobal("navigator", undefined);
+      storeSession("stale", 60_000);
+      route(refreshOk({ access_token: ROTATED, expires_in: 3600 }));
+      const api = await freshApi();
+
+      await Promise.all([api.listModels(), api.listModels()]);
+
+      expect(refreshCalls()).toHaveLength(1);
+    });
+
+    it("falls back to an unguarded rotation when the lock machinery itself fails", async () => {
+      vi.stubGlobal("navigator", {
+        locks: { request: () => Promise.reject(new Error("lock manager unavailable")) },
+      });
+      storeSession("stale", 60_000);
+      route(refreshOk({ access_token: ROTATED, expires_in: 3600 }));
+      const api = await freshApi();
+      await api.listModels();
+
+      expect(refreshCalls()).toHaveLength(1);
+      expect(authHeaders()).toEqual([`Bearer ${ROTATED}`]);
+    });
+
+    it("abandons the wait for a stalled holder rather than wedging behind it", async () => {
+      // An unbounded lock is a worse failure than the bug it fixes: one tab
+      // on a stalled connection would freeze every other tab's API calls.
+      // The holder is never cut off — only the waiter gives up.
+      vi.useFakeTimers();
+      installWebLocks();
+      storeSession("stale", 60_000);
+      routeInTurn(
+        () => new Promise(() => {}), // holder: never answers
+        () => Promise.resolve(refreshOk({ access_token: ROTATED, expires_in: 3600 })),
+      );
+
+      const tabA = await freshApi();
+      const tabB = await freshApi();
+      const stalled = tabA.listModels(); // deliberately never settles
+      const b = tabB.listModels();
+
+      await vi.advanceTimersByTimeAsync(LOCK_WAIT_MS);
+      await b;
+
+      expect(refreshCalls()).toHaveLength(2);
+      expect(authHeaders()).toEqual([`Bearer ${ROTATED}`]);
+      // The stalled document is still stalled — the waiter escaped, it did
+      // not cancel anyone else's in-flight rotation.
+      await expect(Promise.race([stalled, Promise.resolve("pending")])).resolves.toBe("pending");
+    });
+
+    it("releases the lock when the rotation fails, so the next document can retry", async () => {
+      const token = jwt(60);
+      installWebLocks();
+      storeSession(token, 60_000);
+      routeInTurn(
+        () => Promise.resolve({ ok: false, status: 401, json: () => Promise.resolve({}) }),
+        () => Promise.resolve(refreshOk({ access_token: ROTATED, expires_in: 3600 })),
+      );
+
+      const tabA = await freshApi();
+      const tabB = await freshApi();
+      await Promise.all([tabA.listModels(), tabB.listModels()]);
+
+      // A's 401 propagated as a failure (rather than being retried outside
+      // the lock) and released the lock; B then got its own attempt.
+      expect(refreshCalls()).toHaveLength(2);
+      expect(authHeaders()).toEqual([`Bearer ${token}`, `Bearer ${ROTATED}`]);
+      // 401 + a still-usable access token is not a sign-out (#295).
+      expect(assign).not.toHaveBeenCalled();
+    });
   });
 
   it("endSession clears both keys and routes to the login page", async () => {
