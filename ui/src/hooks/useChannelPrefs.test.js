@@ -673,6 +673,85 @@ describe("useChannelPrefs", () => {
     expect(result.current.prefsSyncError.unauthorized).toBe(true);
   });
 
+  it("a write confirmed after a newer change does not discard the newer value", async () => {
+    // A PUT is in flight for as long as the network takes, and the user can
+    // change the same pref meanwhile. Acting on the older request's success
+    // would delete the newer value before anything had sent it — the next
+    // flush then PUTs `undefined` and the change is lost silently, which is
+    // the exact class of bug this issue exists to remove.
+    const result = await mountWithToken();
+    let releaseFirst;
+    const putPrefsSpy = vi
+      .spyOn(api, "putPrefs")
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            releaseFirst = resolve;
+          }),
+      )
+      .mockResolvedValue();
+
+    vi.useFakeTimers();
+    act(() => result.current.setAccent("18"));
+    await act(async () => {
+      vi.advanceTimersByTime(PUT_DEBOUNCE);
+    });
+    expect(putPrefsSpy).toHaveBeenCalledWith({ accent: "18" });
+
+    act(() => result.current.setAccent("150"));
+    await act(async () => {
+      releaseFirst();
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(PUT_DEBOUNCE);
+    });
+    vi.useRealTimers();
+
+    expect(putPrefsSpy).toHaveBeenCalledTimes(2);
+    expect(putPrefsSpy).toHaveBeenLastCalledWith({ accent: "150" });
+    expect(result.current.prefsSyncError).toBeNull();
+  });
+
+  it("a write rejected after a newer change does not report the superseded value", async () => {
+    const result = await mountWithToken();
+    let rejectFirst;
+    const putPrefsSpy = vi
+      .spyOn(api, "putPrefs")
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve, reject) => {
+            rejectFirst = reject;
+          }),
+      )
+      .mockResolvedValue();
+
+    vi.useFakeTimers();
+    act(() => result.current.setSuggestFollowups(false));
+    await act(async () => {
+      vi.advanceTimersByTime(PUT_DEBOUNCE);
+    });
+
+    // Superseded before the failure lands: the newer write is already
+    // queued and owns the key, so this outcome must not be reported and
+    // must not schedule a retry over the newer write's debounce slot.
+    act(() => result.current.setSuggestFollowups(true));
+    await act(async () => {
+      rejectFirst(new api.ApiError("putPrefs failed:", 500));
+    });
+    // Asserted HERE, while the newer write is still only queued. Checking
+    // after it lands proves nothing: its own success would clear a wrongly
+    // recorded error on the way past.
+    expect(result.current.prefsSyncError).toBeNull();
+
+    await act(async () => {
+      vi.advanceTimersByTime(PUT_DEBOUNCE);
+    });
+    vi.useRealTimers();
+
+    expect(putPrefsSpy).toHaveBeenLastCalledWith({ suggest_followups: true });
+    expect(result.current.prefsSyncError).toBeNull();
+  });
+
   it("__resetServerSyncForTest clears a surfaced write failure", async () => {
     const result = await mountWithToken();
     vi.spyOn(api, "putPrefs").mockRejectedValue(new Error("boom"));

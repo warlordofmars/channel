@@ -264,18 +264,36 @@ function scheduleFlush(name, delay) {
   }, delay);
 }
 
+/**
+ * Send one pref's outstanding value and record the outcome.
+ *
+ * The value is captured up front and re-checked once the request
+ * resolves, because a PUT is in flight for as long as the network takes
+ * and the user can change the same pref meanwhile. `schedulePutPref`
+ * will have replaced `unconfirmedWrites[name]` and queued its own write,
+ * so acting on THIS request's outcome would either delete a newer value
+ * that has not been sent yet (dropping it — the next flush would PUT
+ * `undefined`) or report a failure against a value nothing is waiting on
+ * any more. Whoever is still current owns the entry; a superseded
+ * attempt reports nothing and lets the newer write speak for the key.
+ */
 async function flushPref(name) {
+  const value = unconfirmedWrites[name];
   try {
     const { putPrefs } = await import("../api.js");
-    const value = unconfirmedWrites[name];
     const serverVal = BOOLEAN_PREFS.has(name) ? value === "1" : value;
     await putPrefs({ [SERVER_KEY[name]]: serverVal });
+    if (unconfirmedWrites[name] !== value) return;
     delete unconfirmedWrites[name];
     delete putAttempts[name];
     clearWriteFailure(name);
   } catch (err) {
+    if (unconfirmedWrites[name] !== value) return;
     const status = statusOf(err);
     recordWriteFailure(name, status);
+    // `putAttempts[name]` is set alongside every `unconfirmedWrites[name]`
+    // write and deleted alongside it, so the guard above also guarantees
+    // it is a number here.
     const delay = status === 401 ? undefined : PUT_RETRY_DELAYS_MS[putAttempts[name]];
     putAttempts[name] += 1;
     if (delay !== undefined) scheduleFlush(name, delay);
