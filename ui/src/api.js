@@ -58,6 +58,33 @@ const REFRESH_CSRF_HEADER = "X-Channel-Refresh";
 const LOGIN_ROUTE = "/app/login";
 
 /**
+ * Name of the cross-document Web Lock that serialises the rotation
+ * (#495). Web Locks are scoped per-origin, so every document of this
+ * SPA — tab, window, installed PWA — contends for this one name.
+ */
+const REFRESH_LOCK_NAME = "channel:auth-refresh";
+
+/**
+ * How long a document waits for that lock before rotating anyway.
+ *
+ * Bounding the **wait** rather than the **hold** is deliberate. Web
+ * Locks are released automatically when the holding document goes away,
+ * so a closed or crashed tab strands nobody; the residual hazard is a
+ * *live* holder whose `/auth/refresh` never answers — a stalled
+ * connection on flaky mobile, not a refusal — which would otherwise
+ * freeze every other document's API calls behind it indefinitely. #520
+ * bounded `AuthGate`'s renewal hold (`RENEWAL_HOLD_MS`) at the same 8s
+ * for the same reason: a stall must degrade to the pre-#495 behaviour,
+ * never to a deadlock.
+ *
+ * The hold is deliberately *not* bounded. Releasing the lock while the
+ * request is still in flight would hand the next document a token the
+ * first is mid-rotation on, which is exactly the reuse breach this lock
+ * exists to prevent — a self-inflicted version of the bug.
+ */
+const REFRESH_LOCK_WAIT_MS = 8_000;
+
+/**
  * The one in-flight refresh, shared by every concurrent caller.
  *
  * **Single-flight is a correctness requirement, not an optimisation.**
@@ -69,15 +96,13 @@ const LOGIN_ROUTE = "/app/login";
  * the user out on the exact path built to keep them signed in. Collapsing
  * them onto one promise makes that unrepresentable.
  *
- * **Per-document, which is why #495 is open.** Two browser tabs share a
- * cookie jar but not this promise. Desktop (#297) does *not* widen that
- * hole in the way it first appears: every sign-in mints its own
- * `device_id` and therefore its own token family
- * (`_mint_session_refresh_token`), so an Electron window and a browser
- * tab hold different families and cannot revoke each other. The desktop
- * analogue of the multi-tab race needs two renderers sharing one
- * `userData` directory — a second app window or a second instance, of
- * which the app currently runs neither.
+ * **Per-document by construction** — two tabs are two module instances,
+ * so this promise cannot span them. That is what
+ * {@link refreshUnderCrossDocumentLock} adds (#495); this slot remains
+ * the inner layer, and the only layer where Web Locks are unavailable.
+ * Keeping both is not redundancy: the lock serialises *documents*, and
+ * without this promise each of a page load's several concurrent callers
+ * would still queue up behind one another for a rotation apiece.
  */
 let refreshInFlight = null;
 
@@ -181,13 +206,104 @@ function releaseRefreshSlot() {
 }
 
 /**
+ * Rotate — unless another document already did it while we queued.
+ *
+ * Runs while this document holds {@link REFRESH_LOCK_NAME}, so the
+ * session it re-reads is whatever the previous holder just wrote.
+ * `localStorage` is shared across an origin's documents and written
+ * synchronously, so the winner's freshly rotated access token is
+ * already visible here — and reusing it is the whole point: presenting
+ * the predecessor the winner has just consumed is precisely the reuse
+ * breach (#290) that revokes the device family.
+ *
+ * The test is `ensureAccessToken`'s own skew test, so a token that
+ * merely *exists* is not enough — one still inside the renewal window
+ * (nobody rotated; we simply queued behind an unrelated caller) falls
+ * through and rotates. No `token &&` guard is needed: `loadSession`
+ * bottoms out at `expires_at: 0` for every unusable value — no session,
+ * an unparseable envelope, a token with no `exp` claim — so the
+ * comparison is `0 - Date.now() >= …`, and the false branch is the
+ * rotating one.
+ */
+async function refreshUnlessAnotherDocumentAlreadyDid() {
+  const { access_token: token, expires_at: expiresAt } = loadSession();
+  if (expiresAt - Date.now() >= REFRESH_SKEW_MS) return token;
+  return performRefresh();
+}
+
+/**
+ * Serialise the rotation across every document of this origin (#495).
+ *
+ * The module-level {@link refreshInFlight} promise collapses concurrent
+ * callers *within* a document, but two tabs are two module instances
+ * sharing one cookie jar — both could rotate, and #290 reads the loser's
+ * re-presented token as an OAuth 2.1 reuse breach that revokes the whole
+ * device family. A Web Lock is origin-scoped, so it covers exactly the
+ * set of documents that share the credential.
+ *
+ * **Every failure to acquire degrades to the pre-#495 behaviour, never
+ * to no protection at all.** `navigator.locks` is absent in non-secure
+ * contexts and in older browsers, the wait can time out against a
+ * stalled holder, and `request` itself can reject. All of them still
+ * rotate, which is exactly what this function replaced.
+ *
+ * `granted` — set as the callback's first *synchronous* statement, so
+ * it cannot be `false` once a rotation has been attempted — is what
+ * distinguishes "never got the lock" from "held it and the rotation
+ * failed". The second must propagate to {@link onRefreshRejected} so a
+ * 401 still ends the session and a 5xx still arms the cooldown;
+ * retrying it here would rotate twice on every genuine failure.
+ *
+ * The unacquired path re-reads the session rather than rotating
+ * blindly, because up to {@link REFRESH_LOCK_WAIT_MS} can have passed
+ * since the caller last looked. Several documents queued behind one
+ * stalled holder each escape on their own timer, and without the
+ * re-read every one of them rotates; with it, a document that escapes
+ * after another has already rotated reuses that result.
+ *
+ * It narrows the window, it does not close it — documents that began
+ * waiting in the same tick share a deadline, so they escape together,
+ * re-read the same stale session, and all rotate. Nothing here can fix
+ * that; escaping at all is the deliberate concession to not
+ * deadlocking, and reuse detection stays the authority on what follows.
+ */
+async function refreshUnderCrossDocumentLock() {
+  const locks = globalThis.navigator?.locks;
+  if (!locks) return performRefresh();
+
+  const controller = new AbortController();
+  const abandonWait = setTimeout(() => controller.abort(), REFRESH_LOCK_WAIT_MS);
+  let granted = false;
+  try {
+    return await locks.request(REFRESH_LOCK_NAME, { signal: controller.signal }, () => {
+      granted = true;
+      // The wait is over, so from here the timer could only fire against a
+      // lock we already hold. Per the Web Locks spec that is a no-op — an
+      // `AbortSignal` drops a request that is still queued and does nothing
+      // once it has been granted — but "the hold is unbounded" is a property
+      // this file promises, and it should not rest on a spec footnote that
+      // an implementation might read differently.
+      clearTimeout(abandonWait);
+      return refreshUnlessAnotherDocumentAlreadyDid();
+    });
+  } catch (error) {
+    if (granted) throw error;
+    return refreshUnlessAnotherDocumentAlreadyDid();
+  } finally {
+    clearTimeout(abandonWait);
+  }
+}
+
+/**
  * Refresh at most once at a time; resolves to the new token or `""`.
  *
  * The `??=` read and its assignment run in the same synchronous tick, so
  * no second caller can slip between them and start a rival rotation.
  */
 function refreshAccessToken() {
-  refreshInFlight ??= performRefresh().catch(onRefreshRejected).finally(releaseRefreshSlot);
+  refreshInFlight ??= refreshUnderCrossDocumentLock()
+    .catch(onRefreshRejected)
+    .finally(releaseRefreshSlot);
   return refreshInFlight;
 }
 
