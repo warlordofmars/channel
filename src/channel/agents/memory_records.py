@@ -17,9 +17,9 @@ Three things it does, none of which belong in a router:
 2. **Classify** — provenance (:data:`KIND_CONVERSATION` /
    :data:`KIND_REMEMBERED` / :data:`KIND_META`) from the event text's
    prefix, ASSISTANT-only. See :func:`classify_kind`.
-3. **Flag** — ``used_in_recall``, computed from ``recall.py``'s own cap
-   constants rather than copied numbers. See :func:`recall_window_session_ids`
-   and :func:`list_session_records`.
+3. **Flag** — ``used_in_recall``, computed from the live pool constants in
+   ``agents/memory_ranking`` rather than copied numbers. See
+   :func:`recall_window_session_ids` and :func:`list_session_records`.
 
 Plus the two safety rails the read side needs:
 
@@ -56,13 +56,13 @@ from botocore.exceptions import ClientError
 
 from channel import storage
 from channel.agents.memory import _META_PREFIX
-from channel.agents.recall import (
+from channel.agents.memory_ranking import (
     _EPOCH,
-    _RECALL_EVENT_TEXT_TRUNCATE,
-    _RECALL_EVENTS_PER_SESSION,
-    _RECALL_MAX_SESSIONS,
-    _iso_date,
+    POOL_EVENTS_PER_SESSION,
+    POOL_MAX_SESSIONS,
+    iso_date,
 )
+from channel.agents.recall import _RECALL_EVENT_TEXT_TRUNCATE
 from channel.agents.tools.memory_tools import _REMEMBER_PREFIX
 from channel.models import Chat
 
@@ -360,21 +360,35 @@ def resolve_owned_chats(session_ids: Iterable[str], *, user_id: str) -> dict[str
 
 
 def recall_window(*, enabled: bool) -> dict[str, Any]:
-    """The live recall caps, read from ``recall.py``'s constants.
+    """The live recall window, read from the modules that define it.
 
     Never re-literal these numbers (epic #129 decision 2) — the panel's
     whole claim is that it reports what the hook actually does, and a
-    hand-copied ``5`` would make that a lie the first time the cap moves.
-    ``ordering`` is ``"recency"``, not relevance: the Phase 7d semantic
-    strategy was retired in 8a and relevance ordering is #274's job — this
-    surface deliberately *reports* the recency ordering rather than fixing
-    it.
+    hand-copied ``5`` would make that a lie the first time a cap moves.
+    It already would have: #274 widened the pool from 5x2 to
+    ``POOL_MAX_SESSIONS`` x ``POOL_EVENTS_PER_SESSION``, and this sentence
+    followed automatically because it was never a literal.
+
+    **``ordering`` is ``"relevance"`` since #274**, where it read
+    ``"recency"`` before. The window described here is the *candidate
+    pool* — the records the hook can reach — and which of them actually
+    reach a prompt is now decided per turn by ranking them against what
+    the user just said. Reporting ``"recency"`` would understate that in
+    the one direction that matters: it would tell a user their most recent
+    chats are always loaded, when an off-topic message now loads nothing
+    at all.
+
+    The pool caps stay part of the answer rather than being replaced by
+    ``recall._RECALL_TOKEN_BUDGET``: the budget bounds how much of a
+    matched pool is rendered, but it is the pool that determines what
+    Channel could ever recall, which is the question this panel exists to
+    answer honestly.
     """
     return {
-        "max_sessions": _RECALL_MAX_SESSIONS,
-        "events_per_session": _RECALL_EVENTS_PER_SESSION,
+        "max_sessions": POOL_MAX_SESSIONS,
+        "events_per_session": POOL_EVENTS_PER_SESSION,
         "text_truncate": _RECALL_EVENT_TEXT_TRUNCATE,
-        "ordering": "recency",
+        "ordering": "relevance",
         "enabled": enabled,
     }
 
@@ -385,18 +399,28 @@ async def recall_window_session_ids(
     memory_id: str,
     actor_id: str,
 ) -> set[str]:
-    """Session ids the recall hook would draw from for a **brand-new** chat.
+    """Session ids the recall hook could draw from for a **brand-new** chat.
 
-    Mirrors ``AgentCoreRecallHook._fetch_records`` step 1 exactly — one
+    Mirrors ``memory_ranking.collect_candidates`` step 1 exactly — one
     un-paginated ``ListSessions``, explicit newest-first sort (never trust
-    AgentCore's default order), top :data:`_RECALL_MAX_SESSIONS`. Fidelity
+    AgentCore's default order), top :data:`POOL_MAX_SESSIONS`. Fidelity
     to the hook matters more than completeness here: if the hook only ever
     sees one ``ListSessions`` page, so does this.
+
+    **"Could", not "would", since #274.** This is the candidate pool the
+    hook ranks over, and relevance decides per turn which of it is
+    actually injected — a question with no answer until someone types
+    something, so a per-record flag cannot express it. Reporting the pool
+    is the honest fixed point: a record outside it can never be recalled,
+    and a record inside it can. The panel's sentence says so in the same
+    breath (:func:`recall_window` reports ``ordering: "relevance"``).
 
     No current-chat exclusion. The hook drops the *current* chat because
     PR #73 already feeds that history into Strands directly; the panel is
     not chat-scoped, so it models the window as it would apply to a chat
-    that doesn't exist yet.
+    that doesn't exist yet. Since #274 the hook applies that exclusion at
+    rank time rather than at fetch time, which makes this an even closer
+    mirror of the fetch than it was.
 
     An actor with no memory partition has no recall window — the empty set,
     not an error. See :func:`_agentcore_read`.
@@ -411,7 +435,7 @@ async def recall_window_session_ids(
         return set()
     sessions = resp.get("sessionSummaries", [])
     ordered = sorted(sessions, key=lambda s: s.get("createdAt") or _EPOCH, reverse=True)
-    return {s["sessionId"] for s in ordered[:_RECALL_MAX_SESSIONS] if s.get("sessionId")}
+    return {s["sessionId"] for s in ordered[:POOL_MAX_SESSIONS] if s.get("sessionId")}
 
 
 # ── Enumeration ───────────────────────────────────────────────────────────
@@ -454,7 +478,7 @@ async def list_sessions_page(
 def _iso_timestamp(value: Any) -> str:
     """Full ISO-8601 for an event timestamp; ``""`` for None.
 
-    Deliberately NOT ``recall._iso_date``: a group header wants a date, but
+    Deliberately NOT ``memory_ranking.iso_date``: a group header wants a date, but
     an individual record wants its time-of-day so the panel can order and
     disambiguate turns within one chat. boto3 deserializes AgentCore
     timestamps as ``datetime``; anything else is passed through as a string.
@@ -473,7 +497,7 @@ def _iter_payload_texts(
 
     ``pos`` is the event's position in the newest-first response, which is
     what :func:`list_session_records` compares against
-    ``_RECALL_EVENTS_PER_SESSION``. Entries with no text (or an event with
+    :data:`POOL_EVENTS_PER_SESSION`. Entries with no text (or an event with
     no id) are skipped — matching ``recall._format_recall_addendum``, which
     also drops them, so ``used_in_recall`` stays truthful. Shared by the
     record builder and the withheld counter so the two can't disagree about
@@ -539,12 +563,19 @@ async def list_session_records(
     """Every enumerable record in one session → ``(records, truncated)``.
 
     ``used_in_recall`` is true when the session is one of the
-    ``_RECALL_MAX_SESSIONS`` most recent (``in_recall_window``, from
+    :data:`POOL_MAX_SESSIONS` most recent (``in_recall_window``, from
     :func:`recall_window_session_ids`) **and** the record's event is among
-    that session's ``_RECALL_EVENTS_PER_SESSION`` most recent. Since
+    that session's :data:`POOL_EVENTS_PER_SESSION` most recent. Since
     ``ListEvents`` returns newest-first, "most recent M events" is exactly
-    positions ``0..M-1`` of the response — the same slice the hook gets by
-    passing ``maxResults=_RECALL_EVENTS_PER_SESSION``.
+    positions ``0..M-1`` of the response — the same slice
+    ``memory_ranking.collect_candidates`` gets by passing
+    ``maxResults=POOL_EVENTS_PER_SESSION``.
+
+    Post-#274 the flag means "in the pool recall ranks over", not "in
+    every prompt": see :func:`recall_window_session_ids`. The boundary it
+    reports is unchanged in kind — outside it, a record is unreachable —
+    and it is still computed from the live constants rather than copied
+    numbers, so it moved with the pool without being touched here.
 
     Ordering: events are reversed to chronological (oldest first, matching
     ``recall._format_recall_addendum``) while payload entries keep their
@@ -569,7 +600,7 @@ async def list_session_records(
                 role=role,
                 text=text,
                 created_at=created_at,
-                used_in_recall=in_recall_window and pos < _RECALL_EVENTS_PER_SESSION,
+                used_in_recall=in_recall_window and pos < POOL_EVENTS_PER_SESSION,
             )
         )
     records = [record for pos in sorted(by_event, reverse=True) for record in by_event[pos]]
@@ -796,4 +827,4 @@ def group_created_at(chat: Chat) -> str:
     chat row is the one date both the filtered (single ``chat_id``) and
     unfiltered paths always have, and it's the date the user recognises.
     """
-    return _iso_date(chat.created_at)
+    return iso_date(chat.created_at)

@@ -32,14 +32,22 @@ endpoints (#476 / #477 / #479) inherit one definition of a record.
   belong in "what Channel remembers" because they are injected into the
   system prompt on *every turn* of their chat — more load-bearing than most
   AgentCore records, which are injected into nothing.
-- ``recall_window`` — the live caps, read from ``recall.py``'s constants.
-  Showing stored records alone implies Channel uses far more than it does;
-  showing only the recalled slice implies it has forgotten far more than it
-  has. Both are silent lies in opposite directions (#227), so the response
-  carries both and every record carries ``used_in_recall``. When
-  ``recall_window.enabled`` is false the hook injects nothing, so every
-  ``used_in_recall`` is false too — the flag and the envelope can never
-  contradict each other.
+- ``recall_window`` — the live window, read from the constants that define
+  it rather than re-literalled. Showing stored records alone implies
+  Channel uses far more than it does; showing only the recalled slice
+  implies it has forgotten far more than it has. Both are silent lies in
+  opposite directions (#227), so the response carries both and every record
+  carries ``used_in_recall``. When ``recall_window.enabled`` is false the
+  hook injects nothing, so every ``used_in_recall`` is false too — the flag
+  and the envelope can never contradict each other.
+
+  Since #274 the window is the recall hook's *candidate pool* and
+  ``ordering`` reads ``"relevance"``: which of the pool reaches a prompt is
+  decided per turn against what the user just said, so ``used_in_recall``
+  means "reachable by recall", not "in every prompt". The pool is the
+  honest fixed point — outside it a record can never be recalled — and it
+  is a question the panel can answer without knowing what the user will
+  type next.
 - ``withheld_record_count`` — a **lower bound**, not an exact total; see
   §Scoping.
 - ``next_cursor`` — opaque; page on it, never on ``len(groups)``.
@@ -426,8 +434,9 @@ async def list_memory_records(
         )
 
     # Newest chat first, matching the sidebar's Recents ordering and the
-    # recency ordering ``recall_window`` reports. Ties break on chat_id so
-    # the page order is deterministic.
+    # recency order the recall *pool* is drawn in (what the hook then does
+    # with that pool is per-turn relevance — see ``recall_window``). Ties
+    # break on chat_id so the page order is deterministic.
     verified = sorted(
         (owned[sid] for sid in session_ids if sid in owned),
         key=lambda c: (c.created_at, c.chat_id),

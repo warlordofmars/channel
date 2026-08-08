@@ -187,12 +187,13 @@ def test_inspect_recall_returns_block_provenance_and_token_count(mounted_app: Te
     ):
         resp = mounted_app.get(
             "/api/_debug/recall/inspect",
-            params={"chat_id": "current-chat"},
+            params={"chat_id": "current-chat", "user_message": "sage"},
         )
 
     assert resp.status_code == 200
     body = resp.json()
     assert body["chat_id"] == "current-chat"
+    assert body["user_message"] == "sage"
     assert body["actor_id"] == derive_actor_id("u-abc")
     assert body["recall_enabled"] is True
     # Block reuses the hook's real formatting (heading + turn bullets).
@@ -205,13 +206,41 @@ def test_inspect_recall_returns_block_provenance_and_token_count(mounted_app: Te
     assert body["session_count"] == 1
     assert body["char_count"] == len(body["block"])
     assert body["token_estimate"] == (len(body["block"]) + 3) // 4
-    # Current chat is excluded from the ListEvents fan-out.
-    fake_client.list_events.assert_called_once_with(
-        memoryId="m-1",
-        actorId=derive_actor_id("u-abc"),
-        sessionId="prior-1",
-        maxResults=2,
-    )
+    # The fan-out is chat-independent since #274 — the current chat IS
+    # read — but rank-time exclusion keeps it out of the reported
+    # fragments (asserted above) and out of the block.
+    assert {call.kwargs["sessionId"] for call in fake_client.list_events.call_args_list} == {
+        "current-chat",
+        "prior-1",
+    }
+
+
+def test_inspect_recall_without_a_user_message_reports_the_empty_block(
+    mounted_app: TestClient,
+):
+    """The preview is a function of the turn since #274.
+
+    Omitting ``user_message`` is not "show me everything" — it is "what
+    would a turn with an empty message inject", and the honest answer is
+    nothing. A preview that ignored the message would report the unranked
+    pool and overstate what recall does, which is the misleading-instrument
+    failure #227 was opened to fix.
+    """
+    fake_client = _recall_fake_client()
+
+    with (
+        patch("channel.api._debug.boto3.client", return_value=fake_client),
+        patch("channel.api._debug.get_or_create_memory", return_value="m-1"),
+    ):
+        resp = mounted_app.get(
+            "/api/_debug/recall/inspect",
+            params={"chat_id": "current-chat"},
+        )
+
+    body = resp.json()
+    assert body["user_message"] == ""
+    assert body["block"] == ""
+    assert body["fragments"] == []
 
 
 def test_inspect_recall_empty_when_no_prior_sessions(mounted_app: TestClient):
@@ -226,7 +255,7 @@ def test_inspect_recall_empty_when_no_prior_sessions(mounted_app: TestClient):
     ):
         resp = mounted_app.get(
             "/api/_debug/recall/inspect",
-            params={"chat_id": "current-chat"},
+            params={"chat_id": "current-chat", "user_message": "sage"},
         )
 
     assert resp.status_code == 200
@@ -236,7 +265,6 @@ def test_inspect_recall_empty_when_no_prior_sessions(mounted_app: TestClient):
     assert body["session_count"] == 0
     assert body["char_count"] == 0
     assert body["token_estimate"] == 0
-    fake_client.list_events.assert_not_called()
 
 
 def test_inspect_recall_reports_kill_switch_but_still_builds_block(
@@ -254,7 +282,7 @@ def test_inspect_recall_reports_kill_switch_but_still_builds_block(
     ):
         resp = mounted_app.get(
             "/api/_debug/recall/inspect",
-            params={"chat_id": "current-chat"},
+            params={"chat_id": "current-chat", "user_message": "sage"},
         )
 
     assert resp.status_code == 200

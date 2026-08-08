@@ -13,7 +13,7 @@ vi.mock("../../api.js", () => ({
         max_sessions: 5,
         events_per_session: 2,
         text_truncate: 120,
-        ordering: "recency",
+        ordering: "relevance",
         enabled: true,
       },
       withheld_record_count: 0,

@@ -80,6 +80,28 @@ def test_record_recall_outcome_signature_locks_out_dimensions():
     assert sig.parameters["success"].annotation == "bool"
 
 
+@pytest.mark.asyncio
+async def test_record_recall_empty_emits_the_empty_counter():
+    from channel.metrics import record_recall_empty
+
+    with patch("channel.metrics.emit_metric", new=AsyncMock()) as mock_emit:
+        await record_recall_empty()
+    mock_emit.assert_awaited_once_with("RecallEmpty")
+
+
+def test_record_recall_empty_takes_no_parameters_at_all():
+    """The strongest form of the no-dimensions rule (#274).
+
+    ``RecallEmpty`` is a subset counter of ``RecallSuccesses``, and the
+    cuts a caller would reach for — which turn, whose memory — are exactly
+    the unbounded-cardinality ones. An empty signature leaves no kwargs
+    path to slip one through.
+    """
+    from channel.metrics import record_recall_empty
+
+    assert list(inspect.signature(record_recall_empty).parameters) == []
+
+
 # ----------------------------------------------------------------
 # Memory TOOL counters (#400) — agent-driven remember/recall, kept
 # distinct from the hook counters above so hook health stays isolated.

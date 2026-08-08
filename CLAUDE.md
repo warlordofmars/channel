@@ -33,7 +33,8 @@ channel/
 │       │   ├── __init__.py
 │       │   ├── chat_agent.py   # Strands Agent factory + build_titler_agent (7c/7d)
 │       │   ├── memory.py       # AgentCoreMemoryHook + get_or_create_memory (Phase 7c)
-│       │   ├── recall.py       # AgentCoreRecallHook + cache (Phase 7d → 8a)
+│       │   ├── memory_ranking.py # Shared candidate pool + lexical ranker (#274)
+│       │   ├── recall.py       # AgentCoreRecallHook + cache (7d → 8a → #274)
 │       │   └── strands_sse.py  # Strands event → SSE byte translator
 │       └── api/
 │           ├── main.py        # FastAPI app + routes
@@ -733,17 +734,56 @@ verification. Mounted only when `CHANNEL_ENABLE_DEBUG_ENDPOINTS=1`;
 prod never sets the flag (CDK assertion test in
 `tests/unit/test_channel_stack.py` guards this).
 
-### Recall (Phase 8a; pivoted from 7d)
+### Recall (Phase 8a; relevance-gated in #274)
 
 - **`AgentCoreRecallHook`** (`src/channel/agents/recall.py`)
-  subscribes to `BeforeInvocationEvent`. Per turn, queries the
-  actor's prior chats via `ListSessions` + per-session
-  `ListEvents`, formats the aggregate as a Markdown addendum, and
-  appends it to **`agent.system_prompt`** — *not* to
-  `event.messages`, which is the conversation. Writing it to
-  `messages[0]` lands the block inside the user turn, which is the
-  Phase 8a Layer-3 bug (#95) this project already shipped once.
-  A fresh Agent per turn is what makes mutating the prompt safe.
+  subscribes to `BeforeInvocationEvent`. Per turn, it ranks the
+  actor's candidate pool against the current user message, formats
+  what fits the token budget as a Markdown addendum, and appends it
+  to **`agent.system_prompt`** — *not* to `event.messages`, which is
+  the conversation. Writing it to `messages[0]` lands the block
+  inside the user turn, which is the Phase 8a Layer-3 bug (#95) this
+  project already shipped once. A fresh Agent per turn is what makes
+  mutating the prompt safe.
+- **Relevance-gated, still always-on (#274).** An off-topic turn
+  ("morning") matches nothing and injects **nothing at all** — not a
+  shorter block, no block. A topical one gets a smaller, better block
+  than the recency-only version produced. The hook stays the
+  continuity floor rather than being retired in favour of the #273
+  `recall` tool: retiring it makes continuity depend on the model
+  *choosing* to call a tool, and it stops silently when it doesn't.
+  Reversible — if relevance turns out to inject nothing 95% of the
+  time, `RecallEmpty` is the evidence for retiring it.
+  **This is an effectiveness change, not a regression fix.** #227
+  measured the pre-#274 block at 1463–1614 chars (~366–404 tokens),
+  **byte-identical** across a 312-message chat and a 56-message one:
+  it never scaled and was never harmful, it just bought almost
+  nothing. The trust register is unchanged (#299 / ADR-0011) — this
+  picks *which* memories and *how many*, and moves none of them out
+  of `untrusted-data`; selecting fewer strictly shrinks that surface.
+- **Retrieval is shared with the `recall` tool, not duplicated.**
+  `src/channel/agents/memory_ranking.py` owns `collect_candidates`
+  (the `ListSessions` + `ListEvents` fan-out) and `rank_candidates`
+  (lowercased alphanumeric tokens ≥ 3 chars, minus a closed-class
+  stop-word list, substring-matched, matches-first then recency).
+  Both the hook and `tools/memory_tools.py` import it — #273 shipped
+  the primitive and #274 extracted it rather than growing a second
+  scorer that would drift.
+  **`pad` is the entire difference between the two surfaces.** The
+  tool passes `pad=True` (a deliberate search that matches nothing
+  still gets recent notes to judge); the hook passes `pad=False`
+  (nothing matched → empty block → no injection). Padding in an
+  always-on hook is exactly how "morning" used to pull five unrelated
+  chats into every prompt.
+  **The stop-word list is load-bearing for the hook**, not tidiness: a
+  single `the` is a substring of nearly every stored turn, so without
+  it "let's revisit the MCP spike" matched every prior chat and the
+  gate admitted everything. It is closed-class function words only —
+  a topical word listed there would make that subject permanently
+  unrecallable.
+  Still **lexical, not semantic**: `SemanticMemoryStrategy` stays
+  retired (Phase 7d's hours-long ingestion lag), and a vector index is
+  a v2 optimisation covering *both* surfaces in one issue, not two.
 - **Emitted shape** — the trusted `## What we've talked about
   before` heading, then a data label and a `<<<RECALL` /
   `RECALL>>>` fence wrapping everything recalled (#534); inside it,
@@ -774,29 +814,51 @@ prod never sets the flag (CDK assertion test in
   passes. The source marker is the one value *not* defused: its
   alphanumeric allowlist is strictly stronger, since a value that
   cannot contain a structural character cannot forge one.
-- **Caps** — `_RECALL_MAX_SESSIONS = 5` most-recent prior
-  sessions; `_RECALL_EVENTS_PER_SESSION = 2` most-recent *events*
-  per session — and one event is the `messages[-2:]` user+assistant
-  pair, so that is up to **4 quoted turns** per session, not 2;
-  `_RECALL_EVENT_TEXT_TRUNCATE = 120` chars per quoted turn, plus
-  the `...` marker. Worst case is therefore **3 024 chars (≈3.0 KB)**
-  — 5 groups × (55-char header + 4 × 130-char bullets), the
-  separators, and a 121-char wrapper. The long-standing "~2.4 KB"
-  predated the fence, the label and the source marker (together
-  +176 chars on a full block) and is superseded. Truncation runs
-  **before** defusal, so the fixpoint loop never sees an uncapped
-  turn.
-- **Current chat excluded** — PR #73 already feeds the current
-  chat's DDB history into Strands; the recall hook drops that
-  `sessionId` from the ListSessions result to avoid double-feeding.
-- **5-turn cache** — keyed by `(actor_id, chat_id)`, module-level.
-  Cold-start invalidates.
+- **Two caps, because #274 split two jobs.** The **read** cap is the
+  candidate pool — `POOL_MAX_SESSIONS = 10` sessions ×
+  `POOL_EVENTS_PER_SESSION = 5` events (`memory_ranking.py`), the
+  caps #273's tool already used. The **prompt** cap is
+  `_RECALL_TOKEN_BUDGET = 400` tokens (`recall.py`), estimated at
+  `len(text) // 4` over an *upper bound* of each fragment's rendered
+  length, so the block never exceeds it. Ranking needs a pool wider
+  than the prompt, which is why one pair of constants can no longer
+  do both. `_RECALL_EVENT_TEXT_TRUNCATE = 120` chars per quoted turn
+  is unchanged, and truncation still runs **before** defusal so the
+  fixpoint loop never sees an uncapped turn.
+  400 tokens is #227's own measurement of the block this replaces,
+  kept as the regression baseline: "more relevant" must never become
+  "more". Worst case is now *below* the pre-#274 3 024 chars, since
+  the old caps could render up to 20 bullets and the budget cannot.
+- **Current chat excluded — at rank time, not fetch time.** PR #73
+  and #245's head summary already feed this chat to the model, so
+  quoting it is a double-feed. Applying the exclusion after the fetch
+  is what makes the pool chat-independent, which is what makes the
+  cache below shareable.
+- **5-turn cache — keyed by `actor_id` alone**, module-level,
+  cold-start invalidates. It holds the **pool**; the **ranking** runs
+  every turn and is deliberately *not* cached with it, or the hook
+  would be relevant to whatever was said up to five turns ago. The
+  pre-#274 key was `(actor_id, chat_id)`, correct only while the
+  fetch itself excluded the current chat.
 - **Kill-switch** — `CHANNEL_RECALL_ENABLED=0` short-circuits.
+- **`RecallEmpty`** — a subset counter of `RecallSuccesses` (like
+  `BedrockThrottles` under `BedrockErrors`), emitted alongside it so
+  the success counter stays a complete denominator and
+  `RecallEmpty / RecallSuccesses` reads as the gate's hit rate.
+  Without it "relevance working" and "recall broken" are the same
+  datapoint — the blind spot #227 had to be reopened to see through.
+  Not yet on the `/api/admin/metrics/*` allowlist, so it is not on the
+  dashboard.
+- **`GET /api/_debug/recall/inspect` takes a `user_message`** (#227,
+  extended by #274). Selection is a function of the turn, so a preview
+  without one reports an empty block — the honest answer, and what a
+  live turn with an empty message would inject. Pass a phrase to see
+  what a given turn would actually recall.
 - **History**: Phase 7d implemented this via `RetrieveMemoryRecords`
   + `SemanticMemoryStrategy`. The strategy's async ingestion lag
   (hours in real use) made recall empty for too long, so 8a pivoted
-  to raw-event reads. The strategy is no longer attached to new
-  memories.
+  to raw-event reads and #274 added relevance on top of them. The
+  strategy is no longer attached to new memories.
 
 ### Memory tools — `remember` / `recall` (#273)
 
@@ -831,10 +893,12 @@ infra**.
 - **Kill-switch** — `CHANNEL_MEMORY_TOOLS_ENABLED` (default `"1"`, same
   memory-family convention as `CHANNEL_RECALL_ENABLED` /
   `CHANNEL_AUTO_TITLE_ENABLED`). `"0"` removes both tools.
-- **Coexists with the recall hook** — Q2 keeps both; the hook's fate is
-  deferred to #274 (+ #227). The tool's output lands in the
-  *tool-result* register, the hook's in the *system prompt* — different
-  registers, so overlap is bounded.
+- **Coexists with the recall hook** — #274 resolved the hook's fate as
+  "relevance-gate it, keep it always-on", so both stay. The tool's
+  output lands in the *tool-result* register, the hook's in the
+  *system prompt* — different registers, so overlap is bounded — and
+  since #274 they share one retrieval primitive
+  (`agents/memory_ranking.py`), differing only in `pad`. See §Recall.
 - **Trust posture (#273 / #299)** — own-data only (token-scoped, not
   the cross-owner Hive pool) delivered in the **data register**, never
   spliced into the system-prompt instruction register (that's the

@@ -8,6 +8,27 @@ into the system prompt as a Markdown addendum. Uses ``ListSessions`` +
 ``SemanticMemoryStrategy``/``RetrieveMemoryRecords`` approach had
 hours-long ingestion lag that made it unusable in practice.
 
+**Relevance-gated since #274.** The hook is still always-on — it is the
+continuity floor, and the user never has to ask for it — but *what* it
+injects is now chosen by ranking the actor's candidate pool against the
+current user turn, via the shared primitive in ``agents/memory_ranking``.
+An off-topic turn ("morning") matches nothing and injects **nothing at
+all**; a topical one gets a smaller, better block than the recency-only
+version ever produced.
+
+Why this is an effectiveness change and not a bug fix: #227 measured the
+pre-#274 block at 1463–1614 chars (~366–404 tokens) and **byte-identical**
+across a 312-message chat and a 56-message one. It did not scale, it was
+not harmful — it was simply the same five most-recent chats regardless of
+what anyone said. The cost of keeping that was known and trivial; the
+value was close to zero. #274 buys the value without raising the cost:
+``_RECALL_TOKEN_BUDGET`` pins the worst case at that same measurement.
+
+The trust register is deliberately unchanged (#299 / ADR-0011, carried
+forward on #274): this picks *which* memories and *how many*, and moves
+none of them out of ``untrusted-data``. Every defusal below still runs,
+and selecting fewer fragments strictly shrinks that surface.
+
 Design rationale: ``docs/superpowers/specs/2026-05-31-phase-7d-memory-recall-auto-titling-design.md``.
 
 Strands 1.41 has no native AgentCore Memory adapter (verified in the
@@ -23,15 +44,19 @@ import logging
 import os
 import re
 from dataclasses import dataclass
-from datetime import datetime as _dt
-from datetime import timezone as _tz
 from typing import Any
 
 import boto3
 from strands.hooks.events import BeforeInvocationEvent
 
 from channel.agents.memory import derive_actor_id
-from channel.metrics import record_recall_outcome
+from channel.agents.memory_ranking import (
+    Candidate,
+    collect_candidates,
+    rank_candidates,
+    role_label,
+)
+from channel.metrics import record_recall_empty, record_recall_outcome
 
 logger = logging.getLogger(__name__)
 
@@ -55,18 +80,34 @@ _RECALL_BLOCK_OPEN = "<<<RECALL"
 _RECALL_BLOCK_CLOSE = "RECALL>>>"
 
 _RECALL_CACHE_REFRESH_TURNS: int = 5
-_RECALL_ROLE_MAP: dict[str, str] = {"USER": "You", "ASSISTANT": "Me"}
 
-# Phase 8a: ListSessions + ListEvents recall constants.
-# Replace the SemanticMemoryStrategy/RetrieveMemoryRecords approach
-# which had hours-long ingestion lag (unusable in practice).
-_RECALL_MAX_SESSIONS: int = 5
-_RECALL_EVENTS_PER_SESSION: int = 2
 _RECALL_EVENT_TEXT_TRUNCATE: int = 120
 
-# Sentinel used as the sort-key default when a session has no ``createdAt``.
-# Using ``datetime.min`` (tz-aware) ensures datetime objects compare correctly.
-_EPOCH = _dt(1970, 1, 1, tzinfo=_tz.utc)
+# --- #274: the output budget that replaced the per-session caps ---------
+#
+# Pre-#274 the block's size was whatever ``_RECALL_MAX_SESSIONS`` (5) x
+# ``_RECALL_EVENTS_PER_SESSION`` (2, i.e. up to 4 quoted turns) happened to
+# render to. Those two constants did two jobs at once — they bounded the
+# READ and they bounded the PROMPT — and relevance ranking needs the read
+# to be wider than the prompt. So the read cap moved to
+# ``memory_ranking.POOL_*`` and the prompt cap became an explicit budget,
+# per ADR-0009's rule that the envelope, not a count, is the unit.
+#
+# 400 tokens is not a new appetite: it is #227's own measurement of the
+# block this replaces (1463-1614 chars, ~366-404 tokens), kept as the
+# regression baseline so "more relevant" can never quietly become "more".
+# The worst case now lands BELOW the old one, because the old cap could
+# render up to 20 bullets (5 sessions x 4 turns) and this cannot.
+#
+# The estimate is ``len(text) // 4``, the same crude divisor
+# ``chats._HISTORY_TOKEN_BUDGET`` uses and for the same reason: it gates
+# selection only, and a ``CountTokens`` round trip on the critical path to
+# first token would cost more than the precision is worth. It is applied
+# to an UPPER bound of each fragment's rendered length (see
+# :func:`_select_within_budget`), so the real block is never larger than
+# the budget implies — every defusal pass only ever deletes characters.
+_RECALL_TOKEN_BUDGET: int = 400
+_RECALL_CHARS_PER_TOKEN: int = 4
 
 # --- #465: structural (heading) forgery defusal -------------------------
 #
@@ -497,16 +538,17 @@ def _defuse_recall_turn(text: str) -> str:
 # It rides the GROUP header rather than each bullet, because the grouping
 # is already per-session: one marker per group is one marker per record,
 # which is the granularity the preview reports. Per-bullet would restate
-# the same id up to ``_RECALL_EVENTS_PER_SESSION`` times per group for no
-# added provenance, at several times the cost.
+# the same id once per quoted turn in the group for no added provenance,
+# at several times the cost.
 #
-# Cost: ~18 chars per group, so ~90 for a full block against the
-# 1463-1614 chars #227 measured and the ~2.4 KB worst case — under 6%,
-# and a constant per session rather than per turn. A full chat UUID would
-# be ~2.5x that for no legibility gain, hence the truncation; 8 hex
-# characters distinguish ``_RECALL_MAX_SESSIONS`` = 5 sessions with room
-# to spare, and match the short-id convention a reader already knows from
-# git.
+# Cost: ~18 chars per group against the 1463-1614 chars #227 measured and
+# the ``_RECALL_TOKEN_BUDGET`` ceiling that now replaces it — a constant
+# per session rather than per turn, and one the budget accounts for
+# explicitly (:func:`_select_within_budget` charges a group its real
+# header length before admitting its first fragment). A full chat UUID
+# would be ~2.5x that for no legibility gain, hence the truncation; 8 hex
+# characters distinguish far more sessions than a budgeted block can hold,
+# and match the short-id convention a reader already knows from git.
 _RECALL_SOURCE_MARKER_CHARS = 8
 
 # What a marker degrades to when a session id contributes no alphanumeric
@@ -548,34 +590,29 @@ def _source_marker(session_id: Any) -> str:
     return marker or _RECALL_SOURCE_MARKER_UNKNOWN
 
 
-def _iso_date(value: Any) -> str:
-    """Return ``YYYY-MM-DD`` for a datetime or string; empty string for None.
-
-    boto3 deserializes AgentCore ``createdAt`` fields as ``datetime.datetime``
-    objects.  This helper normalizes them to a plain date string at the API
-    boundary so the rest of the module never needs to handle datetimes.
-    """
-    if value is None:
-        return ""
-    if hasattr(value, "strftime"):  # datetime.datetime or datetime.date
-        return value.strftime("%Y-%m-%d")
-    return str(value)[:10]
-
-
 @dataclass
 class CacheEntry:
-    """Per-(actor, chat) recall cache row. ``age`` increments on cache
-    hits; ``records`` is one entry per prior session with shape
-    ``{sessionId, createdAt, payload}`` from the most recent
-    ``ListSessions`` + ``ListEvents`` fetch."""
+    """Per-actor recall cache row. ``age`` increments on cache hits;
+    ``candidates`` is the flat pool from the most recent ``ListSessions``
+    + ``ListEvents`` fetch.
 
-    records: list[dict[str, Any]]
+    **Keyed on ``actor_id`` alone since #274.** The pre-#274 key was
+    ``(actor_id, chat_id)``, which made sense while the fetch itself
+    applied the current-chat exclusion — the pool genuinely differed per
+    chat. Now the exclusion happens at rank time, so one pool serves every
+    chat and a warm Lambda stops re-fetching the same events once per
+    chat. That matters more than it did: ranking wants a wider pool
+    (``POOL_MAX_SESSIONS`` sessions, one serial ``ListEvents`` each) and
+    all of it sits on the critical path to first token.
+    """
+
+    candidates: list[Candidate]
     age: int
 
 
-# Module-level cache keyed by ``(actor_id, chat_id)``. Survives across
-# requests within a warm Lambda instance; cold-start invalidates.
-_recall_cache: dict[tuple[str, str], CacheEntry] = {}
+# Module-level cache keyed by ``actor_id``. Survives across requests
+# within a warm Lambda instance; cold-start invalidates.
+_recall_cache: dict[str, CacheEntry] = {}
 
 
 def _format_recall_addendum(records: list[dict[str, Any]]) -> str:
@@ -648,7 +685,7 @@ def _format_recall_addendum(records: list[dict[str, Any]]) -> str:
             text = (conv.get("content") or {}).get("text", "")
             if not text:
                 continue
-            role_label = _RECALL_ROLE_MAP.get(role_raw, role_raw or "?")
+            label = role_label(role_raw)
             # Cap BEFORE defusing. #465 ran these the other way round to
             # match the #256 order in ``build_titler_prompt``, noting it
             # was safe either way; once #526 made the defusal iterative
@@ -673,7 +710,7 @@ def _format_recall_addendum(records: list[dict[str, Any]]) -> str:
             if len(text) > _RECALL_EVENT_TEXT_TRUNCATE:
                 text = text[:_RECALL_EVENT_TEXT_TRUNCATE] + "..."
             text = _defuse_recall_turn(text)
-            group["bullets"].append(f"- {role_label}: {text}")
+            group["bullets"].append(f"- {label}: {text}")
 
     blocks: list[str] = []
     for sid, group in groups.items():
@@ -715,6 +752,194 @@ def _format_recall_addendum(records: list[dict[str, Any]]) -> str:
     )
 
 
+# --- #274: relevance selection under a token budget ---------------------
+#
+# The frame the formatter always emits, whatever it wraps: heading, blank
+# line, data label, fence open, fence close and the newlines between them.
+# Charged to the budget up front so the budget bounds the whole rendered
+# block rather than only its contents.
+_RECALL_FRAME_CHARS: int = len(
+    f"{_RECALL_HEADING}\n\n{_RECALL_DATA_LABEL}\n{_RECALL_BLOCK_OPEN}\n\n{_RECALL_BLOCK_CLOSE}"
+)
+
+
+def _fragment_cost_chars(candidate: Candidate) -> int:
+    """Upper bound on the characters one quoted turn adds to the block.
+
+    ``"- {label}: {text}"`` plus its joining newline, where ``text`` is
+    what the formatter will render: the turn capped at
+    ``_RECALL_EVENT_TEXT_TRUNCATE`` plus the three-character ``...``
+    marker a cut turn ends in.
+
+    An **upper** bound, never an estimate that can run under: every
+    defusal pass in this module only deletes characters (the fixpoint
+    loop's termination argument rests on the same property), so the
+    rendered bullet is at most this long. That is what lets
+    :func:`_select_within_budget` promise the block never exceeds
+    ``_RECALL_TOKEN_BUDGET`` rather than merely aiming at it.
+    """
+    text_chars = len(candidate.text)
+    if text_chars > _RECALL_EVENT_TEXT_TRUNCATE:
+        text_chars = _RECALL_EVENT_TEXT_TRUNCATE + len("...")
+    # "- " + label + ": " + text + "\n"
+    return len("- : \n") + len(role_label(candidate.role)) + text_chars
+
+
+def _group_cost_chars(candidate: Candidate) -> int:
+    """Upper bound on the characters a NEW session group adds.
+
+    The real header, formatted from this candidate's own date and source
+    marker, plus its newline and the ``"\\n\\n"`` that joins one group
+    block to the next. Computed rather than approximated by a constant so
+    it cannot drift from ``_RECALL_GROUP_HEADING_TEMPLATE``; the date is
+    defused before rendering, which can only shorten it.
+    """
+    header = _RECALL_GROUP_HEADING_TEMPLATE.format(
+        date=candidate.date or "earlier",
+        source=_source_marker(candidate.session_id),
+    )
+    return len(header) + len("\n") + len("\n\n")
+
+
+def _select_within_budget(candidates: list[Candidate]) -> list[Candidate]:
+    """Take ranked candidates in order until the token budget is spent.
+
+    Replaces the pre-#274 ``_RECALL_MAX_SESSIONS`` /
+    ``_RECALL_EVENTS_PER_SESSION`` pair as the thing that bounds the
+    block. Those were *read* caps doing double duty as *prompt* caps;
+    relevance ranking needs a pool wider than the prompt, so the two jobs
+    separated (ADR-0009: the envelope, not a count, is the unit).
+
+    Priority is the ranked order, so the budget is spent on the most
+    relevant fragments first and a group's header is charged once, when
+    its first fragment is admitted. ``break`` rather than ``continue`` on
+    the first fragment that does not fit: the ordering IS the priority
+    order, so skipping ahead to a cheaper but less relevant fragment would
+    quietly re-introduce the "pad the block out" behaviour #274 removes.
+    """
+    budget_chars = _RECALL_TOKEN_BUDGET * _RECALL_CHARS_PER_TOKEN
+    used = _RECALL_FRAME_CHARS
+    seen_sessions: set[str] = set()
+    selected: list[Candidate] = []
+    for candidate in candidates:
+        cost = _fragment_cost_chars(candidate)
+        if candidate.session_id not in seen_sessions:
+            cost += _group_cost_chars(candidate)
+        if used + cost > budget_chars:
+            break
+        used += cost
+        seen_sessions.add(candidate.session_id)
+        selected.append(candidate)
+    return selected
+
+
+def _records_from_candidates(candidates: list[Candidate]) -> list[dict[str, Any]]:
+    """Regroup selected candidates into ``_format_recall_addendum`` records.
+
+    One record per session — the invariant ``_format_recall_addendum``
+    documents and relies on (its ``setdefault`` would otherwise silently
+    drop the second record's ``createdAt``).
+
+    **Ordering is the caller's, not this function's.** Groups come out in
+    first-appearance order and turns in the order they arrive, so
+    :func:`_expand_to_events` — which emits whole events, each internally
+    sorted by ``Candidate.order`` — is the single place ordering is
+    decided. Re-sorting here as well was redundant: matches keep their
+    pool order through ``rank_candidates``, and the pool is already
+    newest-session-first and chronological within a session, so a second
+    sort could never change the result. Dead defensive code in a hot path
+    is worse than none: it cannot be tested, so it cannot be trusted.
+    """
+    grouped: dict[str, dict[str, Any]] = {}
+    for candidate in candidates:
+        record = grouped.setdefault(
+            candidate.session_id,
+            {"sessionId": candidate.session_id, "createdAt": candidate.date, "payload": []},
+        )
+        record["payload"].append(
+            {"conversational": {"role": candidate.role, "content": {"text": candidate.text}}}
+        )
+    return list(grouped.values())
+
+
+def _expand_to_events(
+    pool: list[Candidate],
+    ranked: list[Candidate],
+) -> list[Candidate]:
+    """Re-widen each ranked match to the whole AgentCore event it came from.
+
+    Matching is per *turn*, because that is where the words are. Selecting
+    per turn would be a narrowing this system never had: one event is the
+    ``messages[-2:]`` user+assistant pair the write hook stores atomically
+    (``memory._on_after_invocation_async``), and the pre-#274 caps were
+    counted in events precisely because a fragment is an exchange.
+
+    It matters concretely. "let's revisit the MCP spike" matches the turn
+    where the user *asked*, not the reply — which mentions the registry
+    and the tool prefix but never the words "MCP" or "spike". Without this
+    the block recalls the question and drops the answer, which is close to
+    worthless: the model learns the topic came up before and nothing about
+    what was concluded.
+
+    This function establishes the block's whole ordering, and downstream
+    steps only ever drop from it (:func:`_select_within_budget`) or group
+    it (:func:`_records_from_candidates`). Events come out in ranked
+    order, which for ``pad=False`` means the surviving matches in pool
+    order — newest session first, chronological within a session; turns
+    within an event are sorted by ``Candidate.order``, so an exchange
+    reads question-then-answer.
+
+    ``pool`` is the caller's ALREADY-excluded list rather than the raw
+    candidates. Belt and braces today — ``event_index`` is unique per
+    (session, event), so an event can never span two sessions and the
+    lookup could not reach an excluded one anyway — but the argument
+    that makes it safe is a property of the collector, and this function
+    should not depend on one it cannot see.
+    """
+    by_event: dict[int, list[Candidate]] = {}
+    for candidate in pool:
+        by_event.setdefault(candidate.event_index, []).append(candidate)
+    expanded: list[Candidate] = []
+    seen_events: set[int] = set()
+    for candidate in ranked:
+        if candidate.event_index in seen_events:
+            continue
+        seen_events.add(candidate.event_index)
+        expanded.extend(sorted(by_event[candidate.event_index], key=lambda c: c.order))
+    return expanded
+
+
+def _select_records(
+    candidates: list[Candidate],
+    *,
+    user_message: str,
+    exclude_session_id: str,
+) -> list[dict[str, Any]]:
+    """The whole #274 selection path: exclude → rank → widen → budget → regroup.
+
+    Shared by the live hook and ``preview_addendum`` so the
+    ``/api/_debug/recall/inspect`` instrument (#227) keeps showing what is
+    really injected — a preview that ranked differently from the hook
+    would be worse than no preview.
+
+    **The current chat is excluded here, not at fetch time** (#274 design
+    decision 6). It still has to be excluded — #245's head-summary block
+    and PR #73's history already feed this chat to the model, so including
+    it would double-feed — but doing it at rank time is what lets one
+    cached pool serve every chat.
+
+    ``pad=False`` is the gate: no keyword match means no fragments, which
+    means :func:`_format_recall_addendum` returns ``""`` and the caller
+    injects nothing. The widening step (:func:`_expand_to_events`) cannot
+    reopen that gate — it only ever widens matches that already exist, so
+    zero matches still yields zero fragments.
+    """
+    pool = [c for c in candidates if c.session_id != exclude_session_id]
+    ranked = rank_candidates(pool, user_message, pad=False)
+    expanded = _expand_to_events(pool, ranked)
+    return _records_from_candidates(_select_within_budget(expanded))
+
+
 def _extract_user_message(event: BeforeInvocationEvent) -> str:
     """Read the most recent user-turn text off the event's messages."""
     # Strands types ``event.messages`` as ``list[Message] | None`` but in
@@ -750,14 +975,22 @@ def _append_to_system_prompt(event: BeforeInvocationEvent, addendum: str) -> Non
 
 
 class AgentCoreRecallHook:
-    """Strands ``HookProvider`` that injects AgentCore Memory recall
-    into the system prompt before each turn.
+    """Strands ``HookProvider`` that injects **relevant** AgentCore Memory
+    recall into the system prompt before each turn.
 
     Subscribes to ``BeforeInvocationEvent``; runs ``ListSessions`` +
-    per-session ``ListEvents`` scoped to the caller's ``actorId``;
-    injects the aggregated conversational history as a Markdown
-    system-prompt addendum. Failures are logged + EMF-counted + swallowed
-    — recall must not break chats.
+    per-session ``ListEvents`` scoped to the caller's ``actorId``; ranks
+    the resulting pool against the current user turn; injects what fits
+    the token budget as a Markdown system-prompt addendum. Failures are
+    logged + EMF-counted + swallowed — recall must not break chats.
+
+    **Two costs, split (#274 design decision 6).** The *pool* is
+    chat-independent and behind the ``_RECALL_CACHE_REFRESH_TURNS`` cache,
+    because it costs one serial ``ListEvents`` per session on the critical
+    path to first token. The *ranking* is pure CPU and runs every turn,
+    because the whole point is to answer "relevant to what was just said".
+    Caching the ranking instead would make the hook relevant to whatever
+    was said up to five turns ago.
 
     Conforms to the ``HookProvider`` protocol (``strands.hooks.registry``)
     structurally; no explicit base class — Strands uses ``@runtime_checkable``.
@@ -799,19 +1032,31 @@ class AgentCoreRecallHook:
         agent-build time in ``chat_agent.build_agent``). Strands'
         agent doesn't expose chat_id natively; this is a
         Channel-specific attribute.
+
+        **An empty block is a success, and is counted (#274 decision
+        10).** After relevance gating, "injected nothing" is the expected
+        outcome on any off-topic turn — so without ``RecallEmpty`` there
+        is no way to tell *relevance working* from *recall broken*, and
+        ``RecallSuccesses`` alone would read identically in both worlds.
+        That missing signal is precisely why #227 had to be reopened to
+        find out what the hook was actually doing.
         """
         if os.environ.get("CHANNEL_RECALL_ENABLED", "1") != "1":
             return
         chat_id = getattr(event.agent, "chat_id", None) or ""
 
         try:
-            records = await self._get_or_fetch_records(
+            candidates = await self._get_or_fetch_candidates()
+            records = _select_records(
+                candidates,
                 user_message=_extract_user_message(event),
-                chat_id=chat_id,
+                exclude_session_id=chat_id,
             )
             addendum = _format_recall_addendum(records)
             if addendum:
                 _append_to_system_prompt(event, addendum)
+            else:
+                await record_recall_empty()
             await record_recall_outcome(success=True)
         except Exception as exc:
             logger.warning(
@@ -823,46 +1068,35 @@ class AgentCoreRecallHook:
             )
             await record_recall_outcome(success=False)
 
-    async def _get_or_fetch_records(
-        self,
-        *,
-        user_message: str,
-        chat_id: str,
-    ) -> list[dict[str, Any]]:
-        """Return cached records when fresh; refetch when stale or missing.
+    async def _get_or_fetch_candidates(self) -> list[Candidate]:
+        """Return the cached candidate pool when fresh; refetch when stale.
 
-        Phase 8a: synchronous recall via ListSessions + ListEvents per
-        session. Excludes the current chat (PR #73 already feeds that
-        history into Strands via ``Agent(messages=...)``). Caps at
-        ``_RECALL_MAX_SESSIONS`` prior sessions to bound prompt size.
+        The pool is the actor's ``POOL_MAX_SESSIONS`` most recent sessions
+        x ``POOL_EVENTS_PER_SESSION`` most recent events each, flattened —
+        the read half of recall, and the expensive half. It is
+        **chat-independent** (see :func:`_select_records` for why the
+        current-chat exclusion moved to rank time), so the cache key is
+        ``actor_id`` alone and a warm Lambda serves every one of the
+        user's chats from one fetch.
 
-        ``user_message`` is no longer used for retrieval (we don't do
-        semantic search anymore) — kept on the signature for cache
-        parity and to match the BeforeInvocationEvent contract.
-
-        Returns one record per prior session with shape
-        ``{sessionId, createdAt, payload}``, where ``payload`` is the
-        concatenation of all that session's events' payloads in arrival
-        order. ``_format_recall_addendum`` renders these into Markdown.
+        Ranking is deliberately NOT cached with it — see the class
+        docstring.
         """
-        del user_message  # no longer used for retrieval
-        key = (self._actor_id, chat_id)
-        cache_entry = _recall_cache.get(key)
+        cache_entry = _recall_cache.get(self._actor_id)
         if cache_entry is not None and cache_entry.age < _RECALL_CACHE_REFRESH_TURNS:
             cache_entry.age += 1
-            return cache_entry.records
+            return cache_entry.candidates
 
-        aggregated = await self._fetch_records(chat_id=chat_id)
+        candidates = await self._fetch_candidates()
 
         # ``age=1`` counts the cold-fetch turn as the 1st served turn —
         # next 4 turns are cache hits (ages 2..5), 6th turn triggers refresh.
-        _recall_cache[key] = CacheEntry(records=aggregated, age=1)
-        return aggregated
+        _recall_cache[self._actor_id] = CacheEntry(candidates=candidates, age=1)
+        return candidates
 
-    async def _fetch_records(self, *, chat_id: str) -> list[dict[str, Any]]:
-        """Fetch fresh recall records via ``ListSessions`` + per-session
-        ``ListEvents`` — the uncached read that ``_get_or_fetch_records``
-        wraps with the 5-turn cache.
+    async def _fetch_candidates(self) -> list[Candidate]:
+        """Fetch a fresh candidate pool — the uncached read that
+        :meth:`_get_or_fetch_candidates` wraps with the 5-turn cache.
 
         Pure read: performs NO caching and mutates no module-level state,
         so it is safe to call outside the live-turn path (the
@@ -870,63 +1104,55 @@ class AgentCoreRecallHook:
         polluting ``_recall_cache`` or perturbing the age counters that a
         real turn relies on.
 
-        Returns one record per prior session with shape
-        ``{sessionId, createdAt, payload}`` — see ``_get_or_fetch_records``.
+        Delegates to ``memory_ranking.collect_candidates`` — the same
+        function the #273 ``recall`` tool calls, which is the point of
+        extracting it. The whole fan-out (one ``ListSessions``, then one
+        ``ListEvents`` per session) goes to a worker thread in a single
+        :func:`asyncio.to_thread` hop rather than one hop per call: the
+        calls are serial either way, and boto3 is blocking, so N hops buy
+        N context switches and no concurrency.
         """
-        # Step 1: list this actor's sessions, exclude the current chat.
-        sessions_resp = await asyncio.to_thread(
-            self._client.list_sessions,
-            memoryId=self._memory_id,
-            actorId=self._actor_id,
+        return await asyncio.to_thread(
+            collect_candidates,
+            self._client,
+            self._memory_id,
+            self._actor_id,
         )
-        sessions = sessions_resp.get("sessionSummaries", [])
-        prior_sessions = [s for s in sessions if s.get("sessionId") != chat_id]
-        # Explicit newest-first ordering; don't rely on AgentCore's default.
-        prior_sessions.sort(key=lambda s: s.get("createdAt") or _EPOCH, reverse=True)
-        prior_sessions = prior_sessions[:_RECALL_MAX_SESSIONS]
 
-        # Step 2: fetch the last K events from each prior session and
-        # flatten all events' payloads into one combined list per session.
-        aggregated: list[dict[str, Any]] = []
-        for session in prior_sessions:
-            events_resp = await asyncio.to_thread(
-                self._client.list_events,
-                memoryId=self._memory_id,
-                actorId=self._actor_id,
-                sessionId=session["sessionId"],
-                maxResults=_RECALL_EVENTS_PER_SESSION,
-            )
-            combined_payload: list[dict[str, Any]] = []
-            # ListEvents returns newest-first; reverse so combined_payload reads
-            # chronologically within each session (oldest event first).
-            for ev in reversed(events_resp.get("events", [])):
-                combined_payload.extend(ev.get("payload", []))
-            if combined_payload:
-                aggregated.append(
-                    {
-                        "sessionId": session["sessionId"],
-                        "createdAt": _iso_date(session.get("createdAt")),
-                        "payload": combined_payload,
-                    }
-                )
-        return aggregated
-
-    async def preview_addendum(self, *, chat_id: str) -> tuple[str, list[dict[str, Any]]]:
+    async def preview_addendum(
+        self,
+        *,
+        chat_id: str,
+        user_message: str = "",
+    ) -> tuple[str, list[dict[str, Any]]]:
         """Return ``(addendum_text, records)`` the hook WOULD inject for
-        ``chat_id`` — computed WITHOUT firing a real turn and WITHOUT
-        touching the 5-turn ``_recall_cache``.
+        ``chat_id`` given ``user_message`` — computed WITHOUT firing a real
+        turn and WITHOUT touching the 5-turn ``_recall_cache``.
 
         Diagnostic-only surface for ``/api/_debug/recall/inspect`` (#227).
-        Reuses the exact fetch + formatting path the live hook runs
-        (``_fetch_records`` + ``_format_recall_addendum``) so the preview
-        matches what really gets injected. Two deliberate differences from
-        the live path, both to make the endpoint a faithful *right now*
-        probe rather than a replay of hook state:
+        Reuses the exact fetch + selection + formatting path the live hook
+        runs (:meth:`_fetch_candidates` + :func:`_select_records` +
+        ``_format_recall_addendum``) so the preview matches what really
+        gets injected.
+
+        **``user_message`` is what makes it still faithful after #274.**
+        Selection is now a function of the turn, so a preview that omitted
+        it would report the unranked pool and systematically overstate what
+        recall injects — the exact class of misleading instrument #227 was
+        opened to replace. It defaults to ``""``, which is an honest
+        answer rather than a convenience: an empty message yields no query
+        tokens, and ``pad=False`` turns that into an empty block, which is
+        precisely what a live turn with an empty message would inject.
+
+        Two deliberate differences from the live path remain, both to make
+        the endpoint a faithful *right now* probe rather than a replay of
+        hook state:
 
         - **Always a fresh fetch** — the block reflects the current
           AgentCore Memory state. On a warm Lambda a live turn that hits
-          the cache could inject a block up to ``_RECALL_CACHE_REFRESH_TURNS``
-          turns stale; the preview shows the un-cached truth.
+          the cache could rank against a pool up to
+          ``_RECALL_CACHE_REFRESH_TURNS`` turns stale; the preview shows
+          the un-cached truth.
         - **Ignores the kill-switch** — the block is computed even when
           ``CHANNEL_RECALL_ENABLED=0`` so it stays inspectable during an
           A/B comparison (the endpoint reports the flag separately).
@@ -939,5 +1165,6 @@ class AgentCoreRecallHook:
         every record here, by construction rather than by convention,
         because the formatter derives it from this same field.
         """
-        records = await self._fetch_records(chat_id=chat_id)
+        candidates = await self._fetch_candidates()
+        records = _select_records(candidates, user_message=user_message, exclude_session_id=chat_id)
         return _format_recall_addendum(records), records
