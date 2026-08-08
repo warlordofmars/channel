@@ -454,6 +454,17 @@ describe("chats wrappers", () => {
         /putPrefs failed: 422/,
       );
     });
+
+    it("carries the HTTP status on the thrown error (#482)", async () => {
+      // `useChannelPrefs` branches on 401 (session gone — hold the write for
+      // re-auth) vs anything else (transient — retry it). A bare Error would
+      // collapse that distinction and put the write back on the silent path.
+      mockFail(401);
+      await expect(putPrefs({ theme: "dark" })).rejects.toMatchObject({
+        name: "ApiError",
+        status: 401,
+      });
+    });
   });
 
   // ---- logout -------------------------------------------------------------
