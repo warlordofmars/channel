@@ -1627,11 +1627,32 @@ html.is-electron-mac .sb-top {
   /* ----- composer fits a ~390px width ----- */
   .composer-wrap { max-width: none; }
   .composer { padding: 12px 12px 8px; }
-  /* Let the control row wrap rather than overflow. When everything
-     fits it stays a single row (the spacer still pins send to the
-     right, same as desktop); when it doesn't, the controls wrap onto a
-     second line — no horizontal overflow either way. */
+  /* Let the control row wrap rather than overflow. When everything fits
+     it stays a single row; when it doesn't, the controls wrap onto a
+     second line — no horizontal overflow either way.
+
+     `.spacer` (`flex: 1`) only pins send to the right in the UNWRAPPED
+     case. Wrapped, it stays on the first line and absorbs the leftover
+     width THERE, so nothing pushes send right on the line it actually
+     lands on — which left-packed send hard against the `+` attach
+     button whenever the MCP picker was present (#571, reported from a
+     real device; measured at 393px as 305px of empty space to send's
+     right). The comment here used to claim the spacer pinned send
+     "same as desktop" unconditionally, which was true only in the case
+     this rule does NOT create.
+
+     `margin-left: auto` fixes the wrapped case without touching the
+     other: per the flexbox main-axis alignment rules an auto margin
+     receives only the free space that flex-grow has not already taken,
+     so on a single line the spacer still takes all of it and send does
+     not move. Auto margins also count as zero when items are collected
+     into lines, so the wrap point is unchanged too.
+
+     NOT `justify-content: flex-end` with `.spacer` dropped: that also
+     right-aligns send, but it right-aligns EVERY line, dragging the `+`
+     attach button off the left edge. Measured, and worse than the bug. */
   .composer-row { flex-wrap: wrap; gap: 6px; }
+  .composer-row .send { margin-left: auto; }
   /* 16px textarea avoids iOS Safari's focus auto-zoom. */
   .composer textarea { font-size: 16px; }
   /* ≥40px touch targets for the primary composer controls (send +

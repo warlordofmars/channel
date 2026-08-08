@@ -1,6 +1,6 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
 import React, { useCallback, useEffect, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import {
   deleteMCPServer,
   listMCPServers,
@@ -84,6 +84,144 @@ const BEHAVIOR_ROWS = [
     "setSuggestFollowups",
   ],
 ];
+
+// Hook-key → the name this page gives that preference.
+//
+// `prefsSyncError.keys` speaks `useChannelPrefs`'s camelCase vocabulary.
+// Naming which setting failed is the point of surfacing the error at all —
+// "a setting didn't save" leaves the user hunting the page for it — so the
+// keys are translated back into the labels the rows above already show.
+// `shape` and `font` have no row here yet but are real prefs the hook can
+// fail to write, so they get labels too.
+const PREF_LABELS = Object.freeze({
+  theme: "Theme",
+  accent: "Accent color",
+  density: "Density",
+  shape: "Shape",
+  font: "Font",
+  model: "Default model",
+  effort: "Reasoning effort",
+  sendOnEnter: "Send on Enter",
+  showReasoning: "Show reasoning trace",
+  suggestFollowups: "Suggest follow-ups",
+});
+
+function prefSyncLabel(key) {
+  return PREF_LABELS[key] || key;
+}
+
+const SYNC_NOTICE_STYLE = {
+  display: "flex",
+  alignItems: "flex-start",
+  gap: 11,
+  padding: "12px 14px",
+  marginBottom: 26,
+  borderRadius: "var(--r-md)",
+  borderWidth: 1,
+  borderStyle: "solid",
+  fontSize: 13,
+};
+
+// The two states get different chrome, not one banner with two strings.
+// #573 kept "waiting on re-auth" and "waiting on the network" apart on
+// purpose: one needs the user to do something (danger palette, sign-in
+// action), the other resolves itself (neutral card, retry offered but not
+// demanded). Collapsing them here would throw that distinction away.
+const SYNC_NOTICE_VARIANTS = Object.freeze({
+  unauthorized: {
+    icon: "shield",
+    tone: "var(--danger)",
+    style: { borderColor: "var(--danger)", background: "var(--danger-soft)" },
+    title: "Sign in again to save these settings",
+    detail:
+      "Your session expired, so Channel can't save them to your account " +
+      "until you sign in again.",
+  },
+  retryable: {
+    icon: "refresh",
+    tone: "var(--accent)",
+    style: { borderColor: "var(--border)", background: "var(--raised)" },
+    title: "Some settings haven't reached your account",
+    detail: "Channel keeps retrying in the background — you can also retry now.",
+  },
+});
+
+/**
+ * The write-failure indicator for `/app/customize` (#574).
+ *
+ * `useChannelPrefs` has published `prefsSyncError` since #573 and nothing
+ * consumed it, so a rejected PUT was detected, retried, and still invisible.
+ * This is the consumer.
+ *
+ * Note what it does NOT do: revert the control. #573 deliberately keeps the
+ * unconfirmed value (`test: PUT failure does not roll back local state`)
+ * because rolling back takes the network's word over the user's and breaks
+ * every offline change — so the copy says the value is safe locally and only
+ * the account copy is behind.
+ */
+export function PrefsSyncNotice({ error, onRetry }) {
+  const [retrying, setRetrying] = useState(false);
+
+  async function handleRetry() {
+    setRetrying(true);
+    try {
+      await onRetry();
+    } finally {
+      setRetrying(false);
+    }
+  }
+
+  if (!error) return null;
+
+  const variant = error.unauthorized ? "unauthorized" : "retryable";
+  const v = SYNC_NOTICE_VARIANTS[variant];
+
+  return (
+    <div
+      role="alert"
+      data-testid="prefs-sync-error"
+      data-variant={variant}
+      style={{ ...SYNC_NOTICE_STYLE, ...v.style }}
+    >
+      <span
+        data-icon={v.icon}
+        aria-hidden="true"
+        style={{ color: v.tone, flexShrink: 0, marginTop: 1 }}
+      >
+        <Icon name={v.icon} size={17} />
+      </span>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontWeight: 600, color: "var(--ink)" }}>{v.title}</div>
+        <div style={{ color: "var(--ink-soft)", marginTop: 3 }}>
+          Still saved on this device, but not to your account yet:{" "}
+          <strong style={{ color: "var(--ink)" }}>
+            {error.keys.map(prefSyncLabel).join(", ")}
+          </strong>
+          . {v.detail}
+        </div>
+        <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+          {error.unauthorized && (
+            <Link
+              className="btn-primary"
+              to="/app/login"
+              style={{ display: "inline-flex", alignItems: "center", textDecoration: "none" }}
+            >
+              Sign in again
+            </Link>
+          )}
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={handleRetry}
+            disabled={retrying}
+          >
+            {retrying ? "Retrying…" : "Try again"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 /**
  * `/app/customize` view. Translated from design-sources/app/views.jsx
@@ -199,6 +337,11 @@ export default function Customize() {
           <h2>Customize</h2>
           <p>Tune Channel's appearance and defaults. Changes apply instantly.</p>
         </div>
+
+        <PrefsSyncNotice
+          error={prefs.prefsSyncError}
+          onRetry={prefs.retryPrefsSync}
+        />
 
         <div className="set-group">
           <h3>Appearance</h3>
