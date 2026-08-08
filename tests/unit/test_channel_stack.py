@@ -631,6 +631,27 @@ def test_prod_stack_carries_mcp_env_vars(prod_template):
     assert "CHANNEL_MCP_TOKEN_KMS_KEY_ID" in env_vars
 
 
+@pytest.mark.parametrize("env_fixture", ["dev_template", "prod_template"])
+def test_mcp_max_tools_per_server_is_pinned_to_35(env_fixture, request):
+    """#561 — the per-server MCP tool budget is pinned in the template.
+
+    The code default (``_DEFAULT_MCP_MAX_TOOLS_PER_SERVER = 24``) is
+    smaller than the GitHub MCP server's 28 read-only tools, so under the
+    #560 read-preferring selection every slot went to a read and all 19
+    write tools were dropped — ``api_issue_write`` included. 35 fits the
+    whole read surface (``dropped_read_only`` → 0) plus 7 write slots.
+
+    Pinned here rather than left to the code default for the same reason
+    as the other deployed knobs (``#181`` clock tool, ``#279`` image gen,
+    ``#111`` route dimension): the deployed value stays auditable in the
+    template, and a console edit to the Lambda env map would be clobbered
+    by the next ``cdk deploy`` — so this IS the flip point.
+    """
+    api_fn = _api_function(request.getfixturevalue(env_fixture))
+    env_vars = api_fn["Properties"]["Environment"]["Variables"]
+    assert env_vars.get("CHANNEL_MCP_MAX_TOOLS_PER_SERVER") == "35"
+
+
 def test_prod_stack_mcp_token_kms_key_id_is_not_local_sentinel(prod_template):
     """Defense-in-depth — the local-dev passthrough sentinel must never
     leak to a deployed env. The CDK stack always wires a real KMS ARN
