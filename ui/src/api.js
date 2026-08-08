@@ -277,6 +277,13 @@ async function refreshUnderCrossDocumentLock() {
   try {
     return await locks.request(REFRESH_LOCK_NAME, { signal: controller.signal }, () => {
       granted = true;
+      // The wait is over, so from here the timer could only fire against a
+      // lock we already hold. Per the Web Locks spec that is a no-op — an
+      // `AbortSignal` drops a request that is still queued and does nothing
+      // once it has been granted — but "the hold is unbounded" is a property
+      // this file promises, and it should not rest on a spec footnote that
+      // an implementation might read differently.
+      clearTimeout(abandonWait);
       return refreshUnlessAnotherDocumentAlreadyDid();
     });
   } catch (error) {

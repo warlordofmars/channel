@@ -1734,6 +1734,30 @@ describe("silent refresh", () => {
       expect(vi.getTimerCount()).toBe(0);
     });
 
+    it("disarms the wait timer the moment the lock is granted, so it can never reach the hold", async () => {
+      // The bound is on the WAIT. Leaving the timer armed while we hold the
+      // lock would point it at our own in-flight rotation — and the spec's
+      // "aborting after grant is a no-op" is the wrong thing to be relying
+      // on for a property this module states outright.
+      vi.useFakeTimers();
+      installWebLocks();
+      storeSession("stale", 60_000);
+      let answerRefresh;
+      const heldOpen = new Promise((resolve) => { answerRefresh = resolve; });
+      routeInTurn(() => heldOpen.then(() => refreshOk({ access_token: ROTATED, expires_in: 3600 })));
+
+      const api = await freshApi();
+      const call = api.listModels();
+      await vi.advanceTimersByTimeAsync(0); // lock granted; rotation in flight
+
+      expect(refreshCalls()).toHaveLength(1);
+      expect(vi.getTimerCount()).toBe(0);
+
+      answerRefresh();
+      await call;
+      expect(authHeaders()).toEqual([`Bearer ${ROTATED}`]);
+    });
+
     it("rotates twice across two documents WITHOUT Web Locks — the gap this closes", async () => {
       // Pins what the lock is actually buying: identical setup to the test
       // above, minus `navigator.locks`, and the second document presents a
@@ -1780,6 +1804,7 @@ describe("silent refresh", () => {
     });
 
     it("falls back to an unguarded rotation when the lock machinery itself fails", async () => {
+      vi.useFakeTimers();
       vi.stubGlobal("navigator", {
         locks: { request: () => Promise.reject(new Error("lock manager unavailable")) },
       });
@@ -1790,6 +1815,8 @@ describe("silent refresh", () => {
 
       expect(refreshCalls()).toHaveLength(1);
       expect(authHeaders()).toEqual([`Bearer ${ROTATED}`]);
+      // Never granted, so only the outer cleanup can have disarmed the timer.
+      expect(vi.getTimerCount()).toBe(0);
     });
 
     it("abandons the wait for a stalled holder rather than wedging behind it", async () => {
