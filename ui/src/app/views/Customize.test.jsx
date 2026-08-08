@@ -1,10 +1,20 @@
 // Copyright (c) 2026 John Carter. All rights reserved.
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 
 vi.mock("../../api.js", () => ({
   listModels: vi.fn(),
+  getPrefs: vi.fn(() => Promise.resolve({})),
+  putPrefs: vi.fn(() => Promise.resolve()),
   listMemoryRecords: vi.fn(() =>
     Promise.resolve({
       groups: [],
@@ -36,7 +46,7 @@ vi.mock("../../api.js", () => ({
 }));
 
 import * as api from "../../api.js";
-import Customize from "./Customize.jsx";
+import Customize, { PrefsSyncNotice } from "./Customize.jsx";
 import {
   EFFORTS,
   MODEL_DISPLAY_META,
@@ -48,6 +58,7 @@ import {
   __resetChannelPrefsForTest,
   __resetServerSyncForTest,
 } from "../../hooks/useChannelPrefs.js";
+import { TOKEN_KEY } from "../../lib/auth.js";
 
 const SERVER_ALLOWLIST = [
   { id: "claude-opus-4-6", label: "Claude Opus 4.6", tier: "Flagship" },
@@ -84,10 +95,18 @@ describe("Customize", () => {
     __resetModelsCacheForTest();
     api.listModels.mockReset();
     api.listModels.mockResolvedValue({ models: SERVER_ALLOWLIST });
+    api.getPrefs.mockReset();
+    api.getPrefs.mockResolvedValue({});
+    api.putPrefs.mockReset();
+    api.putPrefs.mockResolvedValue();
     // Pre-warm the cache so synchronous renders see the model list.
     await loadModels();
   });
   afterEach(() => {
+    // Unconditional: a test that throws between useFakeTimers() and its own
+    // useRealTimers() would otherwise leave the fake clock installed, and
+    // every later `waitFor` in the file would hang on it.
+    vi.useRealTimers();
     vi.unstubAllGlobals();
     __resetModelsCacheForTest();
   });
@@ -822,5 +841,220 @@ describe("Customize", () => {
       // Once for mount + once for the search-params effect.
       expect(api.listMCPServers).toHaveBeenCalledTimes(2),
     );
+  });
+
+  // ---- prefsSyncError indicator (#574) -----------------------------------
+  //
+  // #573 made a rejected pref PUT detectable (`prefsSyncError` +
+  // `retryPrefsSync`) and nothing consumed it, so the failure was still
+  // invisible. These drive the REAL hook — a mgmt token in storage plus a
+  // rejecting `putPrefs` — rather than stubbing `useChannelPrefs`, so they
+  // fail if the wiring between hook and view breaks, not just if the JSX
+  // stops mentioning a field.
+
+  /** Comfortably past the hook's 200ms write debounce. */
+  const PUT_DEBOUNCE = 250;
+
+  function apiErrorWithStatus(status) {
+    // `statusOf` in the hook reads `err.status`; `null` models the
+    // transport-level throw that carries no HTTP status at all.
+    const err = new Error("putPrefs failed");
+    if (status !== null) err.status = status;
+    return err;
+  }
+
+  /**
+   * Render Customize with a live mgmt session, change Density, and let the
+   * debounced PUT fail with `status`. Returns once `prefsSyncError` is set.
+   */
+  async function renderWithFailedWrite(status) {
+    storage[TOKEN_KEY] = "tok";
+    // Back to the default so clicking Compact is always a real change —
+    // `setPref` short-circuits when the value is already current, and no
+    // write means no failure to surface.
+    delete storage[STORAGE_KEYS.density];
+    __resetChannelPrefsForTest();
+    __resetServerSyncForTest();
+    api.putPrefs.mockRejectedValue(apiErrorWithStatus(status));
+    const utils = renderCustomize();
+    // Real clock first: the hydrate round-trip has to settle before fake
+    // timers take over for the debounce (react-component SKILL §5.2 case B).
+    await waitFor(() => expect(api.getPrefs).toHaveBeenCalled());
+
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole("button", { name: "Compact" }));
+    await act(async () => {
+      vi.advanceTimersByTime(PUT_DEBOUNCE);
+    });
+    vi.useRealTimers();
+    return utils;
+  }
+
+  it("shows no sync indicator while every pref write is confirmed", async () => {
+    storage[TOKEN_KEY] = "tok";
+    __resetChannelPrefsForTest();
+    __resetServerSyncForTest();
+    renderCustomize();
+    await waitFor(() => expect(api.getPrefs).toHaveBeenCalled());
+
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole("button", { name: "Compact" }));
+    await act(async () => {
+      vi.advanceTimersByTime(PUT_DEBOUNCE);
+    });
+    vi.useRealTimers();
+
+    expect(api.putPrefs).toHaveBeenCalledWith({ density: "compact" });
+    expect(screen.queryByTestId("prefs-sync-error")).toBeNull();
+  });
+
+  it("surfaces a transient write failure, naming the pref that didn't stick", async () => {
+    await renderWithFailedWrite(503);
+
+    const alert = screen.getByTestId("prefs-sync-error");
+    expect(alert.getAttribute("data-variant")).toBe("retryable");
+    expect(alert.textContent).toContain("Some settings haven't reached your account");
+    // The affected key, in this page's own vocabulary — not `density`.
+    expect(within(alert).getByText("Density")).toBeTruthy();
+    expect(alert.textContent).toContain("Still saved on this device");
+    expect(alert.textContent).toContain("keeps retrying in the background");
+    // Re-auth is NOT what this state is waiting on.
+    expect(within(alert).queryByRole("link", { name: "Sign in again" })).toBeNull();
+  });
+
+  it("a transport-level throw (no HTTP status) still surfaces as retryable", async () => {
+    await renderWithFailedWrite(null);
+
+    const alert = screen.getByTestId("prefs-sync-error");
+    expect(alert.getAttribute("data-variant")).toBe("retryable");
+    expect(within(alert).getByText("Density")).toBeTruthy();
+  });
+
+  it("does NOT roll the control back when the write fails", async () => {
+    await renderWithFailedWrite(503);
+
+    // #573 keeps the unconfirmed value on purpose. Reverting would take the
+    // network's word over the user's and break offline pref changes.
+    expect(screen.getByRole("button", { name: "Compact" }).className).toContain("on");
+    expect(screen.getByRole("button", { name: "Cozy" }).className).not.toContain("on");
+    expect(storage[STORAGE_KEYS.density]).toBe("compact");
+  });
+
+  it("renders the 401 as a re-authentication prompt, not a retry notice", async () => {
+    await renderWithFailedWrite(401);
+
+    const alert = screen.getByTestId("prefs-sync-error");
+    expect(alert.getAttribute("data-variant")).toBe("unauthorized");
+    expect(alert.textContent).toContain("Sign in again to save these settings");
+    expect(alert.textContent).toContain("Your session expired");
+    // The retryable copy must not leak into the 401 state — "we'll keep
+    // trying" is exactly what a held-for-re-auth write is not doing.
+    expect(alert.textContent).not.toContain("keeps retrying in the background");
+    expect(alert.textContent).not.toContain("Some settings haven't reached your account");
+    const signIn = within(alert).getByRole("link", { name: "Sign in again" });
+    expect(signIn.getAttribute("href")).toBe("/app/login");
+    // Still names the pref.
+    expect(within(alert).getByText("Density")).toBeTruthy();
+  });
+
+  it("gives the two states different chrome, not just different words", async () => {
+    await renderWithFailedWrite(503);
+    const retryable = screen.getByTestId("prefs-sync-error");
+    const retryableIcon = retryable.querySelector("[data-icon]");
+    expect(retryableIcon.getAttribute("data-icon")).toBe("refresh");
+    expect(retryableIcon.style.color).toBe("var(--accent)");
+    expect(retryable.style.background).toBe("var(--raised)");
+    expect(retryable.style.borderColor).toBe("var(--border)");
+
+    cleanup();
+    await renderWithFailedWrite(401);
+    const unauthorized = screen.getByTestId("prefs-sync-error");
+    const unauthorizedIcon = unauthorized.querySelector("[data-icon]");
+    expect(unauthorizedIcon.getAttribute("data-icon")).toBe("shield");
+    expect(unauthorizedIcon.style.color).toBe("var(--danger)");
+    expect(unauthorized.style.background).toBe("var(--danger-soft)");
+    expect(unauthorized.style.borderColor).toBe("var(--danger)");
+  });
+
+  it("names every affected pref when more than one write is outstanding", async () => {
+    await renderWithFailedWrite(503);
+
+    vi.useFakeTimers();
+    // Second failing write, on a different pref.
+    fireEvent.click(screen.getByRole("button", { name: "Max" }));
+    await act(async () => {
+      vi.advanceTimersByTime(PUT_DEBOUNCE);
+    });
+    vi.useRealTimers();
+
+    const alert = screen.getByTestId("prefs-sync-error");
+    expect(within(alert).getByText("Density, Reasoning effort")).toBeTruthy();
+  });
+
+  it("clears the indicator when Try again succeeds, re-sending the held value", async () => {
+    await renderWithFailedWrite(503);
+    api.putPrefs.mockReset();
+    api.putPrefs.mockResolvedValue();
+
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+
+    await waitFor(() => expect(screen.queryByTestId("prefs-sync-error")).toBeNull());
+    // The value the server rejected is what got re-sent — #573 held it
+    // rather than discarding it.
+    expect(api.putPrefs).toHaveBeenCalledWith({ density: "compact" });
+  });
+
+  it("keeps the indicator up when Try again fails again", async () => {
+    await renderWithFailedWrite(503);
+
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(api.putPrefs).toHaveBeenCalledTimes(2));
+
+    const alert = screen.getByTestId("prefs-sync-error");
+    expect(alert.getAttribute("data-variant")).toBe("retryable");
+    expect(screen.getByRole("button", { name: "Try again" }).disabled).toBe(false);
+  });
+
+  it("Try again on the 401 notice re-sends too (the escape hatch after re-auth)", async () => {
+    await renderWithFailedWrite(401);
+    api.putPrefs.mockReset();
+    api.putPrefs.mockResolvedValue();
+
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+
+    await waitFor(() => expect(screen.queryByTestId("prefs-sync-error")).toBeNull());
+    expect(api.putPrefs).toHaveBeenCalledWith({ density: "compact" });
+  });
+
+  it("disables Try again while the re-send is in flight", async () => {
+    await renderWithFailedWrite(503);
+    let settle;
+    api.putPrefs.mockReset();
+    api.putPrefs.mockReturnValue(new Promise((resolve) => { settle = resolve; }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+
+    const pending = await screen.findByRole("button", { name: "Retrying…" });
+    expect(pending.disabled).toBe(true);
+
+    await act(async () => { settle(); });
+    await waitFor(() => expect(screen.queryByTestId("prefs-sync-error")).toBeNull());
+  });
+
+  it("PrefsSyncNotice renders nothing when there is no error", () => {
+    render(<PrefsSyncNotice error={null} onRetry={vi.fn()} />);
+    expect(screen.queryByTestId("prefs-sync-error")).toBeNull();
+  });
+
+  it("PrefsSyncNotice falls back to the raw key for an unlabelled pref", () => {
+    render(
+      <MemoryRouter>
+        <PrefsSyncNotice
+          error={{ keys: ["someNewPref"], statuses: {}, unauthorized: false }}
+          onRetry={vi.fn()}
+        />
+      </MemoryRouter>,
+    );
+    expect(screen.getByText("someNewPref")).toBeTruthy();
   });
 });
