@@ -224,24 +224,80 @@ def test_query_tokens_drops_function_words_that_would_match_anything():
     test whose fixture happens to avoid common words.
     """
     assert query_tokens("what did we say about the deploy") == ["deploy"]
-    assert query_tokens("hey, good morning") == ["good"]
+    assert query_tokens("could you tell me what we decided") == ["decided"]
 
 
 def test_query_tokens_returns_nothing_for_an_all_function_word_message():
-    """The pure-filler turn — the shape #274's wish names — carries no
-    signal at all, so ``pad=False`` injects nothing."""
-    assert query_tokens("hey there, how are you doing today") == []
+    """A pure-filler turn carries no signal at all, so ``pad=False``
+    injects nothing.
+
+    Note this is NOT the path #274's headline "morning" case takes — see
+    :func:`test_morning_is_a_real_token_so_the_gate_is_tested_on_the_match_path`.
+    """
+    assert query_tokens("hey there, how are you doing") == []
+
+
+def test_morning_is_a_real_token_so_the_gate_is_tested_on_the_match_path():
+    """Guards the headline acceptance test against silently going hollow.
+
+    "morning" is #274's own example of a low-relevance turn, and the
+    honest reason it injects nothing is that it *matches nothing* — not
+    that it tokenises to nothing. An earlier draft of ``_STOP_WORDS`` held
+    ``morning``, which routed the whole acceptance test down the
+    no-usable-tokens branch and left the branch it was written to exercise
+    untested. Putting it back would do so again, silently, so this pins
+    the token as real.
+    """
+    assert query_tokens("morning") == ["morning"]
 
 
 def test_stop_words_hold_no_topical_vocabulary():
     """A topic word wrongly listed would make that subject permanently
     unrecallable — a silent, total failure, and far worse than the false
-    match the list exists to prevent. Pinned against the project's own
-    vocabulary, which is exactly what a careless addition would hit."""
+    match the list exists to prevent.
+
+    Two groups, and the second is the one that caught a real defect. The
+    first is the project's own vocabulary, which a careless addition would
+    obviously hit. The second is the words that *look* like filler and are
+    not: an earlier draft listed ``new``, ``old`` and the whole
+    time-of-day / day-relative set, every one of which can be exactly what
+    a chat was about — "the new schema", "last night's incident",
+    "today's deploy".
+    """
     from channel.agents.memory_ranking import _STOP_WORDS
 
     for word in ("mcp", "api", "spike", "deploy", "memory", "recall", "sage", "billing"):
         assert word not in _STOP_WORDS
+    for word in (
+        "new",
+        "old",
+        "morning",
+        "afternoon",
+        "evening",
+        "night",
+        "today",
+        "tomorrow",
+        "yesterday",
+    ):
+        assert word not in _STOP_WORDS
+
+
+def test_stop_words_are_deduplicated():
+    """The list's curation is load-bearing, so dead entries are not inert
+    — a duplicate is a line a future reader has to decide about twice.
+    Asserted against the literal source rather than the frozenset, which
+    would swallow the duplication being checked for."""
+    import re
+    from pathlib import Path
+
+    import channel.agents.memory_ranking as mr
+
+    source = Path(mr.__file__).read_text()
+    block = source.split("_STOP_WORDS: frozenset[str] = frozenset(", 1)[1].split(")", 1)[0]
+    entries = re.findall(r'"([a-z]+)"', block)
+    assert len(entries) == len(set(entries)), sorted(
+        w for w in set(entries) if entries.count(w) > 1
+    )
 
 
 def test_query_tokens_preserves_first_seen_order_not_set_order():

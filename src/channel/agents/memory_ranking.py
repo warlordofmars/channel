@@ -86,14 +86,25 @@ MIN_TOKEN_LEN = 3
 #: chat and everything else, and ``pad=False`` gated exactly nothing. A
 #: gate that only holds for messages with no common words is not a gate.
 #:
-#: Deliberately small and deliberately closed-class: function words and
-#: conversational filler, nothing topical. A topic word wrongly listed
-#: here would silently make some subject unrecallable forever, which is
-#: far worse than a false match, so the bar for adding one is that it
-#: cannot be what a conversation is *about*. Matching is substring-based,
-#: so short entries do most of the work; longer ones ("about", "there")
-#: earn their place by being frequent openers of exactly the "what did we
-#: say about X" phrasing this ranker is for.
+#: Deliberately small, and the bar for membership is functional rather
+#: than grammatical: **a word belongs here only if it cannot be what a
+#: conversation is about.** That admits the closed classes (articles,
+#: pronouns, prepositions, auxiliaries, conjunctions) and conversational
+#: filler, and it also admits the delexical verbs — ``make``, ``say``,
+#: ``tell``, ``want``, ``need``, ``like``, ``get`` — which are open-class
+#: but carry no topic in a query like "tell me about the migration". It
+#: excludes anything that could be a subject: an earlier draft of this
+#: list held ``new``, ``old``, ``morning``, ``night``, ``today`` and
+#: ``yesterday``, and every one of them can be exactly what a chat was
+#: about ("the new schema", "last night's incident"). A topic word
+#: wrongly listed here makes that subject unrecallable forever and does
+#: so silently, which is far worse than the false match the list exists
+#: to prevent — so when in doubt, leave it out.
+#:
+#: Matching is substring-based, so short entries do most of the work;
+#: longer ones ("about", "there") earn their place by being frequent
+#: openers of exactly the "what did we say about X" phrasing this ranker
+#: is for.
 _STOP_WORDS: frozenset[str] = frozenset(
     [
         "the",
@@ -210,8 +221,6 @@ _STOP_WORDS: frozenset[str] = frozenset(
         "one",
         "two",
         "now",
-        "new",
-        "old",
         "more",
         "most",
         "less",
@@ -229,15 +238,6 @@ _STOP_WORDS: frozenset[str] = frozenset(
         "sorry",
         "hey",
         "hello",
-        "morning",
-        "afternoon",
-        "evening",
-        "night",
-        "today",
-        "tomorrow",
-        "yesterday",
-        "was",
-        "were",
         "im",
         "ive",
         "ill",

@@ -764,8 +764,8 @@ prod never sets the flag (CDK assertion test in
 - **Retrieval is shared with the `recall` tool, not duplicated.**
   `src/channel/agents/memory_ranking.py` owns `collect_candidates`
   (the `ListSessions` + `ListEvents` fan-out) and `rank_candidates`
-  (lowercased alphanumeric tokens ≥ 3 chars, minus a closed-class
-  stop-word list, substring-matched, matches-first then recency).
+  (lowercased alphanumeric tokens ≥ 3 chars, minus a stop-word list,
+  substring-matched, matches-first then recency).
   Both the hook and `tools/memory_tools.py` import it — #273 shipped
   the primitive and #274 extracted it rather than growing a second
   scorer that would drift.
@@ -778,9 +778,14 @@ prod never sets the flag (CDK assertion test in
   **The stop-word list is load-bearing for the hook**, not tidiness: a
   single `the` is a substring of nearly every stored turn, so without
   it "let's revisit the MCP spike" matched every prior chat and the
-  gate admitted everything. It is closed-class function words only —
-  a topical word listed there would make that subject permanently
-  unrecallable.
+  gate admitted everything. Membership is a **functional** bar, not a
+  grammatical one: a word belongs only if it cannot be what a
+  conversation is *about*. That admits closed-class words, filler, and
+  the delexical verbs (`tell`, `want`, `need`, `like`) — and excludes
+  anything that could be a subject. `new`, `old` and the time-of-day
+  set were dropped for exactly that reason ("the new schema", "last
+  night's incident"); a topical word listed there makes that subject
+  permanently and silently unrecallable.
   Still **lexical, not semantic**: `SemanticMemoryStrategy` stays
   retired (Phase 7d's hours-long ingestion lag), and a vector index is
   a v2 optimisation covering *both* surfaces in one issue, not two.
