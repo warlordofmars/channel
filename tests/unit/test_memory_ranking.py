@@ -136,6 +136,27 @@ def test_collect_candidates_orders_sessions_and_reverses_events():
     client.list_sessions.assert_called_once_with(memoryId="mem-1", actorId="actor-1")
 
 
+def test_collect_candidates_degrades_an_explicit_null_role_to_unknown():
+    """``{"role": None}`` must reach ``role_label`` as empty, not ``"None"``.
+
+    A ``get`` default only fires on a MISSING key, so an explicit null
+    passes straight through to ``str()`` and becomes the truthy string
+    ``"None"`` — rendering ``- None: ...`` in the recall block. Both
+    pre-#274 call sites degraded it to ``?`` and the extraction lost that;
+    this pins it back. Same trap the session-date handling in
+    ``recall._format_recall_addendum`` already documents.
+    """
+    client = _events_client(
+        [{"sessionId": "s", "createdAt": datetime(2026, 6, 14, tzinfo=timezone.utc)}],
+        {"s": [{"payload": [{"conversational": {"role": None, "content": {"text": "hi"}}}]}]},
+    )
+
+    (candidate,) = collect_candidates(client, "mem-1", "actor-1")
+
+    assert candidate.role == ""
+    assert role_label(candidate.role) == "?"
+
+
 def test_collect_candidates_precomputes_lowercased_capped_match_text():
     """``match_text`` is lowercased and capped at collection time.
 

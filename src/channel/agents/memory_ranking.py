@@ -418,7 +418,16 @@ def collect_candidates(client: Any, memory_id: str, actor_id: str) -> list[Candi
                     Candidate(
                         session_id=str(sid),
                         date=date,
-                        role=str(conv.get("role", "")),
+                        # ``or ""`` before ``str()``, not a ``get`` default:
+                        # the default only fires on a MISSING key, so an
+                        # explicit ``{"role": None}`` would reach ``str()``
+                        # and become the truthy ``"None"`` — rendering a
+                        # bullet as ``- None: ...`` instead of degrading to
+                        # ``role_label``'s ``?``. Both pre-#274 call sites
+                        # handled this and the extraction lost it; the same
+                        # trap is documented on the session date in
+                        # ``recall._format_recall_addendum``.
+                        role=str(conv.get("role") or ""),
                         text=text,
                         match_text=text[:MATCH_TEXT_LIMIT].lower(),
                         order=len(candidates),
