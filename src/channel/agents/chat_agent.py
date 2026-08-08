@@ -120,6 +120,32 @@ def max_tokens_for_effort(effort: str | None) -> int:
 # result to a follow-up call. Both directions are pinned by tests in
 # tests/unit/test_chat_agent.py; the ..._teaches_tool_discipline /
 # ..._does_not_suppress_warranted_tool_use pair should move together.
+#
+# Editing note (#562): the closing capability paragraph guards BOTH
+# directions, and the second half is the load-bearing one. Channel told a
+# user it could not read pull requests — proposing a manual walk of the
+# commits instead — while the PR tool sat in its live tool list the whole
+# time. The claim had been true hours earlier (#536 / #560 changed the
+# per-server tool cap, so the PR tools stopped being dropped), so this is a
+# stale capability belief asserted over a live context that contradicted
+# it, not an invention.
+#
+# The clause is an INSTANCE of ADR-0011's register distinction, not a fresh
+# rule: recalled content and earlier turns are `untrusted-data` describing
+# how things were, while what this turn can do is read off the live
+# request. It does NOT promote the tool register — ADR-0011 §Decision 1's
+# completeness note classifies MCP tool names and descriptions
+# `untrusted-data`, and they stay that way. The two are orthogonal: the
+# live roster is authoritative for whether a capability EXISTS right now,
+# while the trust class governs whether content may DIRECT behaviour, and a
+# tool's own description is still never an instruction.
+# Keep it scoped to PRESENT-TENSE capability. Recall is
+# legitimately authoritative about past conversations — that is the whole
+# feature, and the recall paragraph above instructs the model to use it —
+# so do NOT generalise this into "distrust recall", which would degrade the
+# feature it exists to protect. Pinned by the
+# ..._makes_live_context_authoritative_for_capability /
+# ..._capability_rule_does_not_undermine_recall pair; they move together.
 DEFAULT_SYSTEM_PROMPT = """You are Channel — a private, persistent AI workspace. The person \
 you're talking to is using either the web app or the desktop app you \
 live in; they came to you to think, build, or get something done.
@@ -216,7 +242,12 @@ you can make a reasonable assumption and proceed, do that and name \
 the assumption.
 
 When tools, attachments, or other capabilities are available, the \
-runtime will tell you. Don't assume anything that isn't surfaced."""
+runtime will tell you. Don't assume anything that isn't surfaced — and \
+don't deny what is: what you can do right now, including which servers \
+are connected, is whatever your live tool list shows this turn, and \
+anything you or the recall block said earlier about your capabilities \
+records how things were then, not how they are now. Check before \
+telling the user you can't."""
 
 _DEFAULT_TITLER_MODEL = "claude-haiku-4-5"
 _TITLER_MAX_TOKENS = 60
