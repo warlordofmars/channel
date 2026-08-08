@@ -96,7 +96,12 @@ jobs:
         with:
           node-version: "20"
           cache: "npm"
-          cache-dependency-path: ui/package-lock.json
+          # Both lockfiles, because this job audits both npm projects. Listing
+          # only `ui/` here would key the cache off a lockfile whose changes
+          # say nothing about the desktop tree being audited below.
+          cache-dependency-path: |
+            ui/package-lock.json
+            desktop/package-lock.json
 
       # Supply-chain tripwire for the `--no-build` gap described at the top of
       # this file. Every dependency in uv.lock resolves to a wheel today, so no
@@ -118,6 +123,13 @@ jobs:
         working-directory: ui
         run: npm ci --ignore-scripts
 
+      - name: Install desktop Node dependencies
+        working-directory: desktop
+        # `--ignore-scripts` also skips electron's postinstall, so this never
+        # downloads the ~150 MB Electron binary — the audit only needs the
+        # dependency tree.
+        run: npm ci --ignore-scripts
+
       - name: pip-audit
         # CVE-2026-3219 / CVE-2026-6357 / PYSEC-2026-196 all affect the pip
         # bundled with the venv itself, not anything in our pyproject.toml.
@@ -134,6 +146,24 @@ jobs:
 
       - name: npm audit
         working-directory: ui
+        run: npm audit --audit-level=high
+
+      - name: npm audit (desktop)
+        working-directory: desktop
+        # `desktop/` is a second npm project with its own lockfile. Until #568
+        # this job audited `ui/` only, so five HIGH advisories accumulated here
+        # unreported and were found by hand rather than by a gate. Blocking
+        # (not warn-only) and identical to the `ui/` step above: a non-blocking
+        # audit is the same class of advisory-shaped non-check that let them
+        # accumulate in the first place.
+        #
+        # Why this is not redundant with Trivy, which does scan this lockfile:
+        # Trivy's npm scanner skips dev dependencies unless `--include-dev-deps`
+        # is set, and in `desktop/` everything except `electron-updater` (and
+        # its transitive `js-yaml`) is a devDependency. That is exactly why
+        # Trivy reported 1 finding here where npm audit reported 6 — it is a
+        # scope difference, not a database difference, and it means Trivy alone
+        # cannot see the build/test toolchain that produces the signed app.
         run: npm audit --audit-level=high
 
       - name: Trivy — dependency scan (table, for log visibility)
