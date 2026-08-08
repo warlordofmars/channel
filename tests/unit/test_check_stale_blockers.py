@@ -8,8 +8,12 @@ outlived their blocker (issue #457). Tests cover:
 - the `Blocked by` regex across every shape the backlog actually uses
   (single, `and`-joined, comma-joined, lowercase, `&`), and the code-span
   exclusion that stops an issue documenting the syntax from self-reporting
-- all four finding kinds: stale-block, missing-block, not-planned-blocker,
-  dangling-ref
+- all five finding kinds: stale-block, missing-block, unverifiable-block,
+  not-planned-blocker, dangling-ref
+- the unverifiable-block branch (#570) against the real prose shapes that were
+  invisible to the sweep, including #495's — the p1 that sat `status:blocked`
+  for six days after its blocker merged. That branch is what turns "the sweep
+  reports clean" into "the sweep reports clean *and could have failed*"
 - reference resolution: GraphQL batching, missing issues, pull-request refs,
   and the NOT_FOUND-vs-real-error split
 - the `--fix` label flips, including the one-status-label invariant
@@ -522,11 +526,22 @@ def test_dangling_ref_when_the_blocker_does_not_exist() -> None:
     assert "#99999" in findings[0].detail
 
 
-def test_blocked_label_with_no_references_is_not_a_stale_block() -> None:
-    """`status:blocked` with an unparseable body is a taxonomy problem, not a stale ref."""
+def test_blocked_label_with_no_references_is_reported_not_silently_passed() -> None:
+    """`status:blocked` with an unparseable body is its own finding, not silence.
+
+    This test used to assert `analyse(...) == []` — it pinned the #570 gap as
+    intended behaviour, calling it "a taxonomy problem, not a stale ref" and
+    then reporting nothing at all. Being a taxonomy problem is precisely what
+    makes it worth reporting.
+    """
     issues = [_issue(104, body="waiting on the platform team", labels=["status:blocked"])]
 
-    assert sweep.analyse(issues, {}) == []
+    findings = sweep.analyse(issues, {})
+
+    assert _kinds(findings) == [sweep.UNVERIFIABLE_BLOCK]
+    assert findings[0].number == 104
+    # Still not a stale block — nothing here says the work became dispatchable.
+    assert sweep.STALE_BLOCK not in _kinds(findings)
 
 
 def test_issues_without_references_or_the_label_are_skipped() -> None:
@@ -536,7 +551,12 @@ def test_issues_without_references_or_the_label_are_skipped() -> None:
 
 
 def test_unresolved_reference_numbers_are_ignored() -> None:
-    """A ref absent from the state map (a batch that never resolved) is skipped."""
+    """A ref absent from the state map (a batch that never resolved) is skipped.
+
+    And specifically *not* reported as an unverifiable block: the body does name
+    a blocker in the required form, so the label is well-formed. The finding
+    keys off what the author wrote, not off what the sweep managed to resolve.
+    """
     issues = [_issue(106, body="Blocked by #14", labels=["status:blocked"])]
 
     assert sweep.analyse(issues, {}) == []
@@ -557,7 +577,150 @@ def test_analyse_reports_every_matching_issue() -> None:
     ]
 
 
+# ── analyse: unverifiable-block (#570) ────────────────────────────────────────
+#
+# The branch these cover is the one the sweep was missing. Each fixture is a
+# shape that produced *zero* findings before #570 — the failure mode being
+# fixed is silence, so every test here asserts a finding appears where none
+# used to, and the negative tests below bound it so the branch can still be
+# wrong in the other direction.
+
+
+def test_unverifiable_block_for_the_prose_that_hid_issue_495() -> None:
+    """#495's exact phrasing: a p1 that sat blocked for six days after PR #488 merged.
+
+    The body names two numbers, so this is not "no `#N` anywhere" — it is the
+    *form* that the sweep cannot check. That distinction is the whole finding.
+    """
+    issues = [
+        _issue(
+            495,
+            title="Silent refresh can revoke the family across tabs",
+            body="Depends on #295 (PR #488) landing first.",
+            labels=["status:blocked", "priority:p1"],
+        )
+    ]
+
+    findings = sweep.analyse(issues, {})
+
+    assert _kinds(findings) == [sweep.UNVERIFIABLE_BLOCK]
+    assert findings[0].number == 495
+    assert findings[0].statuses == ["status:blocked"]
+    # No reference was resolvable, so there is nothing to show as a blocker.
+    assert findings[0].blockers == {}
+
+
+def test_unverifiable_block_names_both_ways_out() -> None:
+    """The detail has to say what to do, or it is a list nobody can action."""
+    issues = [_issue(459, body="blocked on the production cutover", labels=["status:blocked"])]
+
+    detail = sweep.analyse(issues, {})[0].detail
+
+    assert sweep.BLOCKED_BY_FORM in detail  # restate it in the checkable form
+    assert sweep.NEEDS_INFO_LABEL in detail  # or relabel: the dependency is off-repo
+
+
+def test_unverifiable_block_when_the_only_reference_sits_in_a_code_span() -> None:
+    """Code spans are stripped before parsing, so a fenced ref leaves nothing to check."""
+    issues = [_issue(107, body="see the `Blocked by #12` syntax", labels=["status:blocked"])]
+
+    assert _kinds(sweep.analyse(issues, {})) == [sweep.UNVERIFIABLE_BLOCK]
+
+
+def test_unverifiable_block_when_the_only_phrasing_is_negated() -> None:
+    """ "no longer blocked by #99" is the author saying it is done — but the label stayed."""
+    issues = [_issue(108, body="no longer blocked by #99", labels=["status:blocked"])]
+
+    assert _kinds(sweep.analyse(issues, {})) == [sweep.UNVERIFIABLE_BLOCK]
+
+
+def test_unverifiable_block_tolerates_an_empty_body() -> None:
+    issues = [_issue(109, body=None, labels=["status:blocked"])]
+
+    assert _kinds(sweep.analyse(issues, {})) == [sweep.UNVERIFIABLE_BLOCK]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "Blocked by #10",
+        "blocked by: #10 and #11",
+        "Some prose first.\n\nBlocked by #10.",
+    ],
+)
+def test_a_parseable_blocker_is_never_an_unverifiable_block(body: str) -> None:
+    """The bound in the other direction: a well-formed body must not be flagged."""
+    issues = [_issue(110, body=body, labels=["status:blocked"])]
+
+    assert sweep.UNVERIFIABLE_BLOCK not in _kinds(sweep.analyse(issues, _states(_open_issue(10))))
+
+
+def test_prose_dependencies_without_the_blocked_label_stay_silent() -> None:
+    """#570 requires the *label* to carry a checkable blocker — it does not police prose.
+
+    An unlabelled issue mentioning a dependency in passing is not making a claim
+    the sweep is responsible for, so flagging it would turn the new finding into
+    noise across the whole backlog.
+    """
+    issues = [_issue(111, body="Depends on #295 landing first.", labels=["status:ready"])]
+
+    assert sweep.analyse(issues, {}) == []
+
+
+def test_unverifiable_block_is_reported_once_and_alone() -> None:
+    """No other kind can fire for the same issue — they all derive from the refs."""
+    issues = [_issue(112, body="waiting on someone", labels=["status:blocked"])]
+
+    assert len(sweep.analyse(issues, {})) == 1
+
+
+def test_every_blocked_issue_lands_in_exactly_one_bucket() -> None:
+    """Completeness, which is the argument for requiring the form over widening the regex.
+
+    Each of these is labelled blocked; each is either parseable (and judged on
+    its refs) or reported as unverifiable. Nothing passes through un-assessed.
+    """
+    issues = [
+        _issue(280, body="Depends on the MCP work", labels=["status:blocked"]),
+        _issue(285, body="After the cutover", labels=["status:blocked"]),
+        _issue(286, body="Requires the sibling repo", labels=["status:blocked"]),
+        _issue(300, body="Blocked by #10", labels=["status:blocked"]),  # resolved
+        _issue(301, body="Blocked by #11", labels=["status:blocked"]),  # still open
+    ]
+    states = _states(_closed_issue(10), _open_issue(11))
+
+    findings = sweep.analyse(issues, states)
+
+    assert [(f.number, f.kind) for f in findings] == [
+        (280, sweep.UNVERIFIABLE_BLOCK),
+        (285, sweep.UNVERIFIABLE_BLOCK),
+        (286, sweep.UNVERIFIABLE_BLOCK),
+        (300, sweep.STALE_BLOCK),
+    ]
+    # #301 is the only one with a live blocker, and the only one not reported.
+    assert 301 not in {f.number for f in findings}
+
+
 # ── scan ──────────────────────────────────────────────────────────────────────
+
+
+def test_scan_reports_an_unverifiable_block_without_resolving_anything(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end: the finding survives a sweep that has no references to resolve.
+
+    Guards the plausible shortcut of skipping the analysis when nothing parsed —
+    which would restore the exact silence #570 is about.
+    """
+    issues = [_issue(495, body="Depends on #295 landing first.", labels=["status:blocked"])]
+    run = mock.Mock(return_value=_proc(stdout=json.dumps(issues)))
+    monkeypatch.setattr(sweep.subprocess, "run", run)
+
+    findings = sweep.scan("acme/widgets")
+
+    assert _kinds(findings) == [sweep.UNVERIFIABLE_BLOCK]
+    # One round-trip: no refs parsed, so GraphQL is never called.
+    assert run.call_count == 1
 
 
 def test_scan_fetches_issues_then_resolves_their_references(
@@ -702,6 +865,48 @@ def test_apply_fixes_skips_the_judgement_calls(monkeypatch: pytest.MonkeyPatch) 
     run.assert_not_called()
 
 
+def test_apply_fixes_never_relabels_an_unverifiable_block(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#570 is report-only, deliberately.
+
+    The two candidate flips point opposite ways — `status:ready` if the
+    dependency is done, `status:needs-info` if it was never an issue in this
+    repo — and the sweep has no evidence to choose. Guessing dispatches
+    genuinely blocked work or buries a real dependency, so it reports and stops.
+    """
+    run = mock.Mock(return_value=_proc())
+    monkeypatch.setattr(sweep.subprocess, "run", run)
+
+    changed = sweep.apply_fixes(
+        "acme/widgets",
+        [_finding(sweep.UNVERIFIABLE_BLOCK, 495, statuses=["status:blocked"])],
+    )
+
+    assert changed == 0
+    run.assert_not_called()
+
+
+def test_apply_fixes_still_flips_a_stale_block_reported_beside_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Skipping the unverifiable one must not stall the rest of the sweep's fixes."""
+    run = mock.Mock(return_value=_proc())
+    monkeypatch.setattr(sweep.subprocess, "run", run)
+
+    changed = sweep.apply_fixes(
+        "acme/widgets",
+        [
+            _finding(sweep.UNVERIFIABLE_BLOCK, 495, statuses=["status:blocked"]),
+            _finding(sweep.STALE_BLOCK, 300, statuses=["status:blocked"]),
+        ],
+    )
+
+    assert changed == 1
+    assert run.call_count == 1
+    assert "300" in run.call_args.args[0]
+
+
 # ── Reporting ─────────────────────────────────────────────────────────────────
 
 
@@ -722,6 +927,25 @@ def test_format_report_groups_by_kind_in_severity_order() -> None:
     assert "      detail one" in report
     assert "blockers: #10=CLOSED/COMPLETED" in report
     assert "NOT-PLANNED" not in report  # empty groups are omitted
+
+
+def test_format_report_renders_unverifiable_blocks_under_their_own_heading() -> None:
+    """A new kind absent from `_ORDER` is silently dropped from the report, so pin it."""
+    findings = [
+        sweep.Finding(495, "the p1", sweep.UNVERIFIABLE_BLOCK, "no parseable blocker"),
+        sweep.Finding(1, "first", sweep.STALE_BLOCK, "detail one"),
+        sweep.Finding(9, "ninth", sweep.NOT_PLANNED_BLOCKER, "detail nine"),
+    ]
+
+    report = sweep.format_report(findings)
+
+    assert "UNVERIFIABLE BLOCK" in report
+    assert "  #495 the p1" in report
+    assert "      no parseable blocker" in report
+    # Fixable kinds first, judgement calls after.
+    assert report.index("STALE BLOCK") < report.index("UNVERIFIABLE BLOCK")
+    assert report.index("UNVERIFIABLE BLOCK") < report.index("NOT-PLANNED BLOCKER")
+    assert "(1)" in report  # the per-heading count still renders
 
 
 def test_format_report_omits_the_blockers_line_when_there_are_none() -> None:

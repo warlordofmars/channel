@@ -1,22 +1,40 @@
 # Copyright (c) 2026 John Carter. All rights reserved.
 """Find open issues whose ``Blocked by #N`` references no longer hold.
 
-Two failure modes rot the backlog, and both hide real work:
+Three failure modes rot the backlog, and all three hide real work:
 
 * **Stale block** — an issue is labelled ``status:blocked`` but every issue it
   names as a blocker is now resolved. The work is dispatchable and nobody knows.
 * **Missing block** — an issue names an *open* blocker in its body but is not
   labelled ``status:blocked``, so the queue will hand an agent work that cannot
   be finished.
+* **Unverifiable block** — an issue is labelled ``status:blocked`` but names no
+  blocker in the ``Blocked by #N`` form at all. Its dependency cannot be
+  checked, so it can never be auto-unblocked and the sweep used to pass over it
+  in silence (issue #570).
 
 It also flags two subtler cases: a blocker closed as ``NOT_PLANNED`` (the work
 usually moved somewhere else, so the dependency needs re-pointing rather than
 deleting), and a reference to an issue that does not exist.
 
 This enforces the CLAUDE.md §"Backlog labels and milestones" definition of
-``status:blocked`` — *"depends on another **open** issue in this repo"* —
-mechanically, instead of relying on someone remembering to re-label every
-dependent when a blocker merges.
+``status:blocked`` — *"depends on another **open** issue in this repo"*, whose
+*"body must name the blocker with ``Blocked by #N``"* — mechanically, instead of
+relying on someone remembering to re-label every dependent when a blocker
+merges.
+
+Why the literal form is *required* rather than the pattern being widened:
+    ``status:blocked`` issues used to state their dependency in prose
+    (*"Depends on #295 (PR #488) landing first"*, #495) and the sweep saw
+    nothing. Widening the regex to guess at ``Depends on`` / ``Requires`` /
+    ``After`` / ``Waiting on`` is a losing game against free text — and it fails
+    in the worse direction, because a phrase the regex happens to match feeds
+    the ``--fix`` label flip. Requiring the literal form instead is complete by
+    construction: a ``status:blocked`` issue is either parseable (every check
+    below applies to it) or reported as unverifiable. There is no third state,
+    and no phrasing can slip between them. Off-repo dependencies have their own
+    label — ``status:needs-info`` — which is what the taxonomy already says it
+    is for.
 
 Read-only by default. ``--fix`` flips labels for the two unambiguous cases
 (stale-block and missing-block) and prints every change it makes.
@@ -59,7 +77,13 @@ from typing import Any
 
 BLOCKED_LABEL = "status:blocked"
 READY_LABEL = "status:ready"
+NEEDS_INFO_LABEL = "status:needs-info"
 STATUS_PREFIX = "status:"
+
+#: The one phrasing ``status:blocked`` accepts, quoted back at the author in the
+#: unverifiable-block finding. Named rather than inlined so the message and
+#: :data:`_BLOCKED_RE` can't drift apart silently.
+BLOCKED_BY_FORM = "Blocked by #N"
 
 #: Open issues fetched in one ``gh issue list`` call. ``gh`` paginates
 #: internally; the value only needs to exceed the open-issue count.
@@ -109,13 +133,18 @@ _NOT_FOUND = "NOT_FOUND"
 # Finding kinds, in report order.
 STALE_BLOCK = "stale-block"
 MISSING_BLOCK = "missing-block"
+UNVERIFIABLE_BLOCK = "unverifiable-block"
 NOT_PLANNED_BLOCKER = "not-planned-blocker"
 DANGLING_REF = "dangling-ref"
 
-_ORDER = (STALE_BLOCK, MISSING_BLOCK, NOT_PLANNED_BLOCKER, DANGLING_REF)
+# The first two are what `--fix` can flip mechanically; everything from
+# UNVERIFIABLE_BLOCK down needs a human, so the order also reads as
+# "fixable first".
+_ORDER = (STALE_BLOCK, MISSING_BLOCK, UNVERIFIABLE_BLOCK, NOT_PLANNED_BLOCKER, DANGLING_REF)
 _HEADINGS = {
     STALE_BLOCK: "STALE BLOCK — blocker(s) resolved, work is dispatchable",
     MISSING_BLOCK: "MISSING BLOCK — open blocker but not labelled blocked",
+    UNVERIFIABLE_BLOCK: f"UNVERIFIABLE BLOCK — labelled blocked, no '{BLOCKED_BY_FORM}' to check",
     NOT_PLANNED_BLOCKER: "NOT-PLANNED BLOCKER — dependency likely moved",
     DANGLING_REF: "DANGLING REF — referenced issue does not exist",
 }
@@ -400,6 +429,37 @@ def analyse(
         detail_map = {ref.number: ref.describe() for ref in resolved}
         context = (issue["number"], issue["title"], detail_map, statuses)
 
+        if labelled and not blockers:
+            # The label asserts a dependency the body never names in a form
+            # anything can check. Every list below derives from `blockers`, so
+            # nothing else can fire and the issue would leave the sweep clean —
+            # which is exactly how #495 (priority:p1) sat blocked for six days
+            # after its blocker merged, its dependency written as prose.
+            #
+            # Reported, never fixed: the right answer is status:ready if the
+            # dependency is done, or status:needs-info if it was never an open
+            # issue in this repo, and that is a judgement about where the
+            # dependency lives. --fix must not guess between them.
+            #
+            # The `continue` is a semantic stop, not an optimisation: with no
+            # references there is nothing further to say about this issue's
+            # dependencies, and a later check that fired here anyway would be
+            # reporting on refs it does not have. It is behaviour-neutral
+            # against the checks below as they stand today (all of them derive
+            # from `blockers`), so no test can distinguish keeping it from
+            # dropping it — it is here to keep that true.
+            findings.append(
+                _finding(
+                    context,
+                    UNVERIFIABLE_BLOCK,
+                    f"labelled {BLOCKED_LABEL} but names no blocker as "
+                    f"'{BLOCKED_BY_FORM}' — the dependency cannot be verified, so this "
+                    f"issue can never be auto-unblocked. Restate it in that form, or use "
+                    f"{NEEDS_INFO_LABEL} if the dependency is not an open issue in this repo",
+                )
+            )
+            continue
+
         missing = [ref.number for ref in resolved if not ref.exists]
         if missing:
             findings.append(
@@ -463,8 +523,11 @@ def apply_fixes(repo: str, findings: Sequence[Finding]) -> int:
     """Flip labels for the unambiguous cases. Returns the number of issues changed.
 
     Only ``stale-block`` and ``missing-block`` are mechanical. ``not-planned-blocker``
-    needs a human to decide where the dependency moved, and ``dangling-ref`` needs
-    someone to work out what the author meant.
+    needs a human to decide where the dependency moved, ``dangling-ref`` needs
+    someone to work out what the author meant, and ``unverifiable-block`` needs
+    someone to decide whether the issue is now ``status:ready`` or was always
+    ``status:needs-info`` — a guess there either dispatches genuinely blocked
+    work or buries a dependency the label was right about.
 
     The taxonomy allows exactly one ``status:*`` label, so a fix that adds one
     removes the others it displaces.
@@ -539,7 +602,10 @@ def format_report(findings: Sequence[Finding]) -> str:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Detect Blocked by references that outlived their blocker."
+        description=(
+            "Detect Blocked by references that outlived their blocker, and "
+            f"{BLOCKED_LABEL} issues naming no blocker anything can check."
+        )
     )
     parser.add_argument(
         "--repo",
