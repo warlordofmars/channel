@@ -282,21 +282,53 @@ def test_stop_words_hold_no_topical_vocabulary():
         assert word not in _STOP_WORDS
 
 
-def test_stop_words_are_deduplicated():
-    """The list's curation is load-bearing, so dead entries are not inert
-    — a duplicate is a line a future reader has to decide about twice.
-    Asserted against the literal source rather than the frozenset, which
-    would swallow the duplication being checked for."""
-    import re
+def _stop_word_source_entries() -> list[str]:
+    """The literal ``_STOP_WORDS`` entries, in source order, via the AST.
+
+    Read from source rather than from the frozenset because the frozenset
+    is exactly what would swallow the duplication being checked for.
+
+    Parsed with :mod:`ast` rather than by slicing the source between
+    delimiters. A first draft did the latter — ``.split(")", 1)[0]`` after
+    the assignment anchor — and it **failed open**: any future edit
+    putting a paren inside the list body (an ordinary inline comment, the
+    style this module uses everywhere else) truncates the block early, and
+    an empty parse makes the dedup assert pass vacuously. Verified, not
+    theorised: adding ``# articles (see #274)`` above the first entry and
+    re-duplicating ``was``/``were`` in the same edit left the whole suite
+    green. A guard that can be silently disarmed by a comment is worse
+    than no guard, because it is also read as coverage.
+    """
+    import ast
     from pathlib import Path
 
     import channel.agents.memory_ranking as mr
 
-    source = Path(mr.__file__).read_text()
-    block = source.split("_STOP_WORDS: frozenset[str] = frozenset(", 1)[1].split(")", 1)[0]
-    entries = re.findall(r'"([a-z]+)"', block)
-    assert len(entries) == len(set(entries)), sorted(
-        w for w in set(entries) if entries.count(w) > 1
+    tree = ast.parse(Path(mr.__file__).read_text())
+    for node in ast.walk(tree):
+        target = getattr(node, "target", None)
+        if isinstance(node, ast.AnnAssign) and getattr(target, "id", "") == "_STOP_WORDS":
+            call = node.value
+            assert isinstance(call, ast.Call), "_STOP_WORDS is no longer a frozenset(...) call"
+            (literal,) = call.args
+            assert isinstance(literal, ast.List), "_STOP_WORDS no longer wraps a list literal"
+            return [ast.literal_eval(element) for element in literal.elts]
+    raise AssertionError("no _STOP_WORDS annotated assignment found")
+
+
+def test_stop_words_are_deduplicated():
+    """The list's curation is load-bearing, so a dead entry is not inert —
+    it is a line a future reader has to decide about twice.
+
+    The count comparison doubles as the non-vacuity check: a parse that
+    found nothing reads as 0 entries against a populated frozenset and
+    fails loudly, rather than reporting "no duplicates found".
+    """
+    from channel.agents.memory_ranking import _STOP_WORDS
+
+    entries = _stop_word_source_entries()
+    assert len(entries) == len(_STOP_WORDS), sorted(
+        word for word in set(entries) if entries.count(word) > 1
     )
 
 
@@ -310,6 +342,12 @@ def test_query_tokens_preserves_first_seen_order_not_set_order():
 
 
 def test_query_tokens_caps_the_needle_count():
+    """The hot-path bound on how many needles reach the pool scan.
+
+    Distinct from the scan-chars ceiling below: this one bounds the
+    *matching* cost (needles x candidates x haystack), that one bounds the
+    cost of finding the needles at all.
+    """
     query = " ".join(f"word{i:04d}" for i in range(MAX_QUERY_TOKENS * 10))
     tokens = query_tokens(query)
     assert len(tokens) == MAX_QUERY_TOKENS

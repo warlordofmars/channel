@@ -781,11 +781,13 @@ prod never sets the flag (CDK assertion test in
   gate admitted everything. Membership is a **functional** bar, not a
   grammatical one: a word belongs only if it cannot be what a
   conversation is *about*. That admits closed-class words, filler, and
-  the delexical verbs (`tell`, `want`, `need`, `like`) — and excludes
-  anything that could be a subject. `new`, `old` and the time-of-day
-  set were dropped for exactly that reason ("the new schema", "last
-  night's incident"); a topical word listed there makes that subject
-  permanently and silently unrecallable.
+  the delexical verbs (`get`, `make`, `say`, `tell`, `want`, `need`,
+  `like`) — and excludes anything that could be a subject. `new`, `old`
+  and the time-of-day / day-relative set (`morning`…`night`,
+  `yesterday`…`tomorrow`) were dropped for exactly that reason ("the
+  new schema", "last night's incident", "today's deploy"); a topical
+  word listed there makes that subject permanently and silently
+  unrecallable.
   Still **lexical, not semantic**: `SemanticMemoryStrategy` stays
   retired (Phase 7d's hours-long ingestion lag), and a vector index is
   a v2 optimisation covering *both* surfaces in one issue, not two.
