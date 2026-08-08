@@ -38,10 +38,32 @@
 //      strip *into* the box as 42px of grey, so #509 dropped the
 //      clearance outright — the controls now sit ~8px above the screen
 //      bottom, inside the home-indicator region, deliberately.
+//   7. That the mobile control row keeps the send button flush to the
+//      row's right edge **when the row wraps** — the case `.spacer`
+//      alone does not cover (#571). Unlike 1-6 this is not a declaration
+//      match: it lays the row out. See the section comment above that
+//      block for what is real in it and what is modelled.
+import { act, render } from "@testing-library/react";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { createElement } from "react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+// #571's assertions lay out the REAL `.composer-row`, which means rendering
+// the real `Composer` — and that drags in the attachment client as a module
+// import. Nothing below drives an upload or opens a popover, so these are
+// stubs, not models. `listModels` has to resolve because `ModelPicker` asks
+// for the list at mount.
+vi.mock("../api.js", () => ({
+  listModels: vi.fn().mockResolvedValue({ models: [] }),
+  sha256Hex: vi.fn(),
+  presignAttachment: vi.fn(),
+  uploadToPresigned: vi.fn(),
+  finalizeAttachment: vi.fn(),
+}));
+
+import Composer from "../app/Composer.jsx";
 
 // Deliberately NOT `new URL("./app.css", import.meta.url)`, the shape
 // `ui/src/pwa.test.js` uses. Vite statically rewrites that exact literal
@@ -477,6 +499,526 @@ describe("safe-area insets survive the viewport change (#425 / #437)", () => {
     expect(css).toMatch(/@media \(min-width: 641px\)/);
     expect(css).toMatch(
       /padding-bottom:\s*calc\(18px \+ env\(safe-area-inset-bottom\)\)/,
+    );
+  });
+});
+
+
+// ===========================================================================
+// #571 — the composer control row, laid out
+// ===========================================================================
+//
+// Everything above asserts declarations. This section asserts an OUTCOME:
+// which side of the row the send button ends up on. That needs a layout, and
+// jsdom implements none — every `getBoundingClientRect` is zeroes — so the
+// two steps of the flexbox algorithm that decide the question are modelled
+// here:
+//
+//   1. Collecting items into flex lines (CSS Flexbox §9.3). An item
+//      contributes its flex base size, so `.spacer`'s `flex: 1` (basis `0`)
+//      contributes nothing — and an auto margin contributes nothing either.
+//   2. Sizing a line: flexible lengths resolve first (§9.7), and only the
+//      free space LEFT OVER reaches auto margins (§9.5).
+//
+// Step 2's order is the whole reason `margin-left: auto` is safe here. On a
+// single line `.spacer` grows into all the free space, so the auto margin
+// receives zero and send does not move; on a wrapped line, which has no
+// spacer to grow, the auto margin receives all of it. Both halves are
+// asserted below, and so is the step-1 consequence: the fix cannot move the
+// wrap point.
+//
+// Two inputs are real rather than invented, deliberately — a model fed on
+// invented inputs is exactly the "unit test passing against a DOM that
+// cannot occur on a phone" failure #505 is named for:
+//
+//   * The DECLARATIONS come from `app.css` on disk. `sendHasAutoLeftMargin()`
+//     reads the fix itself and feeds every mobile layout below, so deleting
+//     the declaration turns the wrapped-case assertions red rather than
+//     leaving them vacuously green.
+//   * The CHILDREN come from rendering the real `Composer` with the MCP
+//     picker present, in the order the browser gets them. Reordering the row,
+//     dropping `.spacer`, or adding a control this model cannot size each
+//     fail here instead of being silently mismodelled.
+//
+// What stays modelled is the intrinsic width of the two text-bearing
+// controls (the MCP pill, the model picker), which only real text layout can
+// supply. So the assertions sweep a range of plausible widths and hold the
+// property across EVERY configuration that actually wraps, rather than
+// trusting one stand-in. That makes them a left-vs-right conclusion, not a
+// pixel claim — the same thing the harness in the issue established. A real
+// phone remains the only oracle for the pixels, and confirming it there is
+// the reporter's step.
+
+/**
+ * Body of the first rule in `block` whose selector matches the regex source
+ * `selectorSource`, or `null` when there is no such rule.
+ *
+ * `null` rather than a throw because the missing-rule case is not
+ * hypothetical here — it is exactly what the mutation check produces, and it
+ * should surface as a failed assertion naming the send button rather than as
+ * a `TypeError` from inside a regex helper.
+ *
+ * The `(?:^|[{};])` prefix is what stops `\\.send` matching the
+ * `.composer-row .send` rule: a descendant selector puts the class name mid
+ * prelude, where this pattern cannot start.
+ */
+function ruleBodyIn(block, selectorSource) {
+  const match = block.match(
+    new RegExp(`(?:^|[{};])\\s*${selectorSource}\\s*\\{([^}]*)\\}`),
+  );
+  return match ? match[1] : null;
+}
+
+/** Body of an un-indented, top-level rule. Throws if it isn't there. */
+function topLevelRuleBody(selectorSource, label) {
+  const match = css.match(new RegExp(`^${selectorSource}\\s*\\{([^}]*)\\}`, "m"));
+  if (match === null) {
+    throw new Error(
+      `no top-level \`${label} { ... }\` rule in app.css — it was renamed or ` +
+        "removed, and the #571 layout model reads desktop geometry from it",
+    );
+  }
+  return match[1];
+}
+
+/** Integer `px` value of `prop` in a rule body. Throws if it isn't there. */
+function pxDecl(body, prop, label) {
+  // The leading `(?:^|[;{\s])` stops `width` matching inside `max-width`.
+  const match = body.match(new RegExp(`(?:^|[;{\\s])${prop}:\\s*(\\d+)px`));
+  if (match === null) {
+    throw new Error(
+      `no \`${prop}: <n>px\` in the ${label} rule of app.css — the #571 ` +
+        "layout model reads its geometry from the stylesheet and can no " +
+        "longer size this control",
+    );
+  }
+  return Number(match[1]);
+}
+
+/**
+ * Is `margin-left: auto` declared on `.composer-row .send` inside the ≤640px
+ * block? **This is the fix under test.** Every mobile layout below takes its
+ * send item's `marginLeftAuto` from here, so removing the declaration from
+ * `app.css` is a real mutation of these assertions rather than a change they
+ * merely fail to notice.
+ */
+function sendHasAutoLeftMargin() {
+  const body = ruleBodyIn(mobileBlock(), "\\.composer-row\\s+\\.send");
+  return body !== null && /margin-left:\s*auto/.test(body);
+}
+
+/** Row + control geometry as the ≤640px block declares it. */
+function mobileRowGeometry() {
+  const row = ruleBodyIn(mobileBlock(), "\\.composer-row");
+  return {
+    gap: pxDecl(row, "gap", "mobile `.composer-row`"),
+    wrap: /flex-wrap:\s*wrap/.test(row),
+    send: pxDecl(ruleBodyIn(mobileBlock(), "\\.send"), "width", "mobile `.send`"),
+    round: pxDecl(
+      ruleBodyIn(mobileBlock(), "\\.cbtn\\.round"),
+      "width",
+      "mobile `.cbtn.round`",
+    ),
+  };
+}
+
+/** The same geometry as a ≥641px viewport gets: the base rules, unmodified. */
+function desktopRowGeometry() {
+  const row = topLevelRuleBody("\\.composer-row", ".composer-row");
+  return {
+    gap: pxDecl(row, "gap", "base `.composer-row`"),
+    wrap: /flex-wrap:\s*wrap/.test(row),
+    send: pxDecl(topLevelRuleBody("\\.send", ".send"), "width", "base `.send`"),
+    round: pxDecl(
+      topLevelRuleBody("\\.cbtn\\.round", ".cbtn.round"),
+      "width",
+      "base `.cbtn.round`",
+    ),
+  };
+}
+
+/** Does `child` match `selector`, either itself or through a descendant? */
+function has(child, selector) {
+  return child.matches(selector) || child.querySelector(selector) !== null;
+}
+
+/**
+ * What kind of flex item a real `.composer-row` child is.
+ *
+ * `AttachMenu` / `MCPPicker` / `ModelPicker` each render a `position:
+ * relative` wrapper around a single visible control, with their popover
+ * markup either unmounted (closed, as here) or absolutely positioned — so
+ * the wrapper is content-sized to that control, and the control's width is
+ * the item's width. The mic and send buttons are direct children, hence the
+ * self-or-descendant match.
+ */
+function classifyRowChild(child) {
+  if (has(child, ".spacer")) return { kind: "spacer", grow: 1 };
+  if (has(child, ".send")) return { kind: "send", grow: 0 };
+  if (has(child, ".cbtn.round")) return { kind: "round", grow: 0 };
+  if (has(child, ".mcp-pill")) return { kind: "mcp", grow: 0 };
+  if (has(child, ".model-pick")) return { kind: "model", grow: 0 };
+  throw new Error(
+    "unrecognised `.composer-row` child " +
+      `<${child.tagName.toLowerCase()} class="${child.className}"> — the row ` +
+      "grew a control this #571 layout model cannot size, so its conclusions " +
+      "no longer describe the real row; give the new control a width here " +
+      "before trusting them again",
+  );
+}
+
+/** Flex base size: a growable item contributes its `flex-basis: 0`, not a width. */
+function baseSizeOf(item) {
+  return item.grow > 0 ? 0 : item.width;
+}
+
+/**
+ * Collect items into flex lines (§9.3).
+ *
+ * Auto margins are absent from this step on purpose: they resolve during
+ * free-space distribution, not line breaking, which is precisely why adding
+ * one cannot change where the row breaks.
+ */
+function collectLines({ containerWidth, gap, wrap, items }) {
+  const lines = [];
+  let current = [];
+  let used = 0;
+  items.forEach((item) => {
+    const hypothetical = baseSizeOf(item);
+    const lead = current.length > 0 ? gap : 0;
+    if (wrap && current.length > 0 && used + lead + hypothetical > containerWidth) {
+      lines.push(current);
+      current = [item];
+      used = hypothetical;
+    } else {
+      used += lead + hypothetical;
+      current.push(item);
+    }
+  });
+  lines.push(current);
+  return lines;
+}
+
+/**
+ * Lay out a `display: flex; flex-direction: row` container, returning one
+ * `{ kind, line, left, right, autoMargin }` box per item.
+ *
+ * `flex-shrink` is not modelled: with `flex-wrap: wrap` a line can only
+ * overflow when a single item is wider than the container, which no swept
+ * configuration produces, and the desktop widths are chosen wide enough to
+ * leave free space. That precondition is asserted rather than assumed — see
+ * "no configuration overflows its line".
+ */
+function layoutFlexRow({ containerWidth, gap, wrap, items }) {
+  const boxes = [];
+  collectLines({ containerWidth, gap, wrap, items }).forEach((line, lineIndex) => {
+    const widths = line.map(baseSizeOf);
+    const growTotal = line.reduce((total, item) => total + item.grow, 0);
+    let free =
+      containerWidth - widths.reduce((a, b) => a + b, 0) - gap * (line.length - 1);
+
+    // §9.7 — flexible lengths resolve first. The spacer takes everything.
+    if (free > 0 && growTotal > 0) {
+      line.forEach((item, i) => {
+        widths[i] += (free * item.grow) / growTotal;
+      });
+      free = 0;
+    }
+
+    // §9.5 — only then do auto margins see anything.
+    const autoCount = line.filter((item) => item.marginLeftAuto).length;
+    const autoShare = free > 0 && autoCount > 0 ? free / autoCount : 0;
+
+    let x = 0;
+    line.forEach((item, i) => {
+      if (item.marginLeftAuto) x += autoShare;
+      boxes.push({
+        kind: item.kind,
+        line: lineIndex,
+        left: x,
+        right: x + widths[i],
+        autoMargin: item.marginLeftAuto ? autoShare : 0,
+      });
+      x += widths[i] + gap;
+    });
+  });
+  return boxes;
+}
+
+// A registered, authed MCP server — enough for `MCPPicker` to render its
+// pill, which is the control whose presence tips the row over.
+const MCP_SERVERS = [
+  {
+    server_id: "srv-1",
+    name: "Hive",
+    tool_prefix: "hive",
+    globally_enabled: true,
+    auth_status: "active",
+  },
+];
+
+/**
+ * Render the real `Composer` and return its `.composer-row` children,
+ * classified.
+ *
+ * Rendered once per structure rather than once per swept width, because the
+ * DOM does not depend on the widths — only on whether the MCP picker is
+ * there.
+ */
+async function composerRowKinds(mcpServers) {
+  // iOS Safari ships the Web Speech API, so the phone this was reported from
+  // renders the mic button. jsdom ships nothing and `Composer` feature-detects
+  // at mount, so without the stub the modelled row would be one control short
+  // of the real one.
+  vi.stubGlobal("SpeechRecognition", function FakeSpeechRecognition() {});
+  let view;
+  await act(async () => {
+    view = render(
+      createElement(Composer, {
+        model: { id: "m", name: "Claude Opus 4.6", short: "Opus 4.6" },
+        effort: "High",
+        setModel: vi.fn(),
+        setEffort: vi.fn(),
+        onSend: vi.fn(),
+        mcpServers,
+        mcpSettings: { mode: "inherit", explicit_server_ids: [] },
+        setMcpSettings: vi.fn(),
+      }),
+    );
+  });
+  const row = view.container.querySelector(".composer-row");
+  if (row === null) {
+    throw new Error(
+      "the rendered Composer has no `.composer-row` — the control row was " +
+        "renamed or removed, and these #571 assertions need repointing",
+    );
+  }
+  return [...row.children].map(classifyRowChild);
+}
+
+/**
+ * Turn classified children into flex items of given widths.
+ *
+ * `.send` is the only item that carries an auto margin; nothing else in the
+ * row declares one, and `classifyRowChild` refuses any child that might.
+ */
+function itemsFrom(kinds, widths, marginLeftAuto) {
+  return kinds.map((k) => ({
+    kind: k.kind,
+    grow: k.grow,
+    width: k.grow > 0 ? 0 : widths[k.kind],
+    marginLeftAuto: marginLeftAuto && k.kind === "send",
+  }));
+}
+
+// The row's inner width on a phone: a 390-430px device, less the
+// `.bottom-composer` gutter and the `.composer` padding the mobile block
+// declares. Swept rather than pinned so no assertion rests on one device's
+// arithmetic.
+const CONTAINER_WIDTHS = [340, 350, 360, 370, 380];
+// Stand-ins for the two text-bearing controls. Each renders an icon, a short
+// label and a chevron inside a padded pill, which lands either side of 130px
+// at the app's 13-14px control type.
+const MCP_WIDTHS = [100, 120, 140, 160];
+const MODEL_WIDTHS = [100, 130, 150, 170];
+
+/**
+ * Lay the row out once per (container × mcp width × model width)
+ * combination, so a property can be asserted over all of them rather than
+ * over one lucky stand-in.
+ */
+function sweepMobileLayouts(kinds, marginLeftAuto) {
+  const geometry = mobileRowGeometry();
+  const results = [];
+  CONTAINER_WIDTHS.forEach((containerWidth) => {
+    MCP_WIDTHS.forEach((mcp) => {
+      MODEL_WIDTHS.forEach((model) => {
+        const items = itemsFrom(
+          kinds,
+          { send: geometry.send, round: geometry.round, mcp, model },
+          marginLeftAuto,
+        );
+        results.push({
+          containerWidth,
+          boxes: layoutFlexRow({
+            containerWidth,
+            gap: geometry.gap,
+            wrap: geometry.wrap,
+            items,
+          }),
+        });
+      });
+    });
+  });
+  return results;
+}
+
+/** The single box for `kind` in a laid-out row. */
+function box(boxes, kind) {
+  return boxes.find((b) => b.kind === kind);
+}
+
+describe("composer control row — send stays right when the row wraps (#571)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("declares the fix, and only inside the ≤640px block", () => {
+    // Presence: every wrapped-case assertion below is fed from this, so if it
+    // silently went false they would fail too — but failing here first is
+    // what names the cause.
+    expect(sendHasAutoLeftMargin()).toBe(true);
+
+    // Scope: exactly one `.composer-row .send` rule in the file, and it is
+    // the one inside the mobile block. A second copy at top level would
+    // right-align send on desktop too, where `.spacer` already does the job
+    // and the row never wraps.
+    expect([...css.matchAll(/\.composer-row\s+\.send\s*\{/g)]).toHaveLength(1);
+    expect(mobileBlock()).toMatch(
+      /\.composer-row\s+\.send\s*\{[^}]*margin-left:\s*auto/,
+    );
+  });
+
+  it("lays out the row the real Composer renders, in its real order", async () => {
+    // The #505 guard. Everything below is a claim about this list, so if the
+    // row's structure drifts the claims stop describing the app and this is
+    // where that surfaces. `send` last, and `spacer` ahead of it, are the two
+    // properties the fix's reasoning actually rests on.
+    expect(await composerRowKinds(MCP_SERVERS)).toEqual([
+      { kind: "round", grow: 0 }, // AttachMenu's `+`
+      { kind: "mcp", grow: 0 }, // MCPPicker's pill — the control that overflows the row
+      { kind: "spacer", grow: 1 },
+      { kind: "model", grow: 0 }, // ModelPicker
+      { kind: "round", grow: 0 }, // dictation mic
+      { kind: "send", grow: 0 },
+    ]);
+    // The row's own geometry being the wrapping kind is a premise of the
+    // rest; asserted here rather than assumed at each use.
+    expect(mobileRowGeometry().wrap).toBe(true);
+  });
+
+  it("is the MCP picker's presence that tips the row into wrapping", async () => {
+    // The bug report's precondition, restated as a property of the model:
+    // without the pill the row fits on one line at every swept width, and
+    // with it there are widths where it does not. Without this the
+    // wrapped-case assertion below could go vacuous without saying so.
+    const auto = sendHasAutoLeftMargin();
+    const without = sweepMobileLayouts(await composerRowKinds(undefined), auto);
+    const present = sweepMobileLayouts(await composerRowKinds(MCP_SERVERS), auto);
+
+    expect(without.every((r) => r.boxes.every((b) => b.line === 0))).toBe(true);
+    expect(present.some((r) => r.boxes.some((b) => b.line > 0))).toBe(true);
+  });
+
+  it("pins send flush to the right edge in every wrapping configuration", async () => {
+    // THE bug. Before the fix send sat at the left of the second line with
+    // essentially the whole row empty to its right; the assertion is that its
+    // right edge now coincides with the row's, on whatever line it lands on.
+    const kinds = await composerRowKinds(MCP_SERVERS);
+    const wrapped = sweepMobileLayouts(kinds, sendHasAutoLeftMargin()).filter(
+      (r) => box(r.boxes, "send").line > 0,
+    );
+
+    // Non-vacuity: a sweep that produced no wrapped row would pass the loop
+    // below by describing nothing.
+    expect(wrapped.length).toBeGreaterThan(0);
+    wrapped.forEach((r) => {
+      const send = box(r.boxes, "send");
+      expect(send.right).toBeCloseTo(r.containerWidth, 6);
+      // …and it got there via the auto margin, the spacer having stayed
+      // behind on an earlier line. That is what distinguishes the fixed row
+      // from one that merely happens to end flush.
+      expect(send.autoMargin).toBeGreaterThan(0);
+      expect(box(r.boxes, "spacer").line).toBeLessThan(send.line);
+    });
+  });
+
+  it("leaves the single-line case to .spacer, the auto margin taking nothing", async () => {
+    // The other half of "nothing else changes", at mobile widths: where the
+    // row already fitted, the fix must be inert. `autoMargin === 0` is the
+    // mechanism — flexible lengths resolve first, so the spacer has already
+    // consumed the free space by the time auto margins are served.
+    const kinds = await composerRowKinds(MCP_SERVERS);
+    const single = sweepMobileLayouts(kinds, sendHasAutoLeftMargin()).filter((r) =>
+      r.boxes.every((b) => b.line === 0),
+    );
+
+    expect(single.length).toBeGreaterThan(0);
+    single.forEach((r) => {
+      const send = box(r.boxes, "send");
+      expect(send.right).toBeCloseTo(r.containerWidth, 6);
+      expect(send.autoMargin).toBe(0);
+    });
+  });
+
+  it("does not move the wrap point", async () => {
+    // Auto margins resolve after line breaking, so the fix can change where
+    // an item sits on its line but never which line it lands on. Asserted by
+    // laying the same rows out with the margin off and comparing the line
+    // assignment.
+    const kinds = await composerRowKinds(MCP_SERVERS);
+    const fixed = sweepMobileLayouts(kinds, true);
+    const unfixed = sweepMobileLayouts(kinds, false);
+    const lines = (results) => results.map((r) => r.boxes.map((b) => b.line));
+
+    expect(lines(fixed)).toEqual(lines(unfixed));
+
+    // And the unfixed row really is the reported bug: somewhere in the sweep
+    // send lands on a later line with space to its right. Without this the
+    // comparison above would also pass a "fix" that did nothing at all.
+    const broken = unfixed.filter((r) => {
+      const send = box(r.boxes, "send");
+      return send.line > 0 && r.containerWidth - send.right > 1;
+    });
+    expect(broken.length).toBeGreaterThan(0);
+  });
+
+  it("leaves desktop unchanged", async () => {
+    // At ≥641px the media block does not apply, so the row is `nowrap` with
+    // no auto margin and `.spacer` does all the work — exactly as before.
+    const geometry = desktopRowGeometry();
+    expect(geometry.wrap).toBe(false);
+
+    const items = itemsFrom(
+      await composerRowKinds(MCP_SERVERS),
+      { send: geometry.send, round: geometry.round, mcp: 160, model: 170 },
+      false,
+    );
+    [640, 720, 840].forEach((containerWidth) => {
+      const boxes = layoutFlexRow({
+        containerWidth,
+        gap: geometry.gap,
+        wrap: geometry.wrap,
+        items,
+      });
+      expect(boxes.every((b) => b.line === 0)).toBe(true);
+      expect(box(boxes, "send").right).toBeCloseTo(containerWidth, 6);
+      expect(box(boxes, "send").autoMargin).toBe(0);
+    });
+  });
+
+  it("no configuration overflows its line, so shrinking never applies", async () => {
+    // `layoutFlexRow`'s stated precondition. A line whose items overflowed
+    // would need `flex-shrink`, which is not implemented, and every layout
+    // above would be describing something the browser does not do. An
+    // overflowing line shows up as the last box on it ending past the
+    // container's right edge.
+    const kinds = await composerRowKinds(MCP_SERVERS);
+    sweepMobileLayouts(kinds, sendHasAutoLeftMargin()).forEach((r) => {
+      r.boxes.forEach((b) => {
+        expect(b.right).toBeLessThanOrEqual(r.containerWidth + 1e-9);
+      });
+    });
+  });
+
+  it("refuses to model a row child it cannot size", () => {
+    // The #505 guard's teeth. A control added to the row has to be given a
+    // width here; silently treating it as zero-width would let the sweep go
+    // on reporting a wrap behaviour the real row no longer has.
+    const stranger = document.createElement("div");
+    stranger.className = "some-new-control";
+    expect(() => classifyRowChild(stranger)).toThrow(
+      /unrecognised `\.composer-row` child/,
     );
   });
 });
