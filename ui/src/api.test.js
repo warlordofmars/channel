@@ -1819,6 +1819,31 @@ describe("silent refresh", () => {
       await expect(Promise.race([stalled, Promise.resolve("pending")])).resolves.toBe("pending");
     });
 
+    it("reuses a session written while it waited, instead of rotating on escape", async () => {
+      // Several documents queued behind one stalled holder each escape on
+      // their own timer. Without this re-read that is a *cascade* of reuse
+      // breaches rather than one: up to 8s have passed since the caller last
+      // looked, so whoever escaped first may already have rotated.
+      vi.useFakeTimers();
+      installWebLocks();
+      storeSession("stale", 60_000);
+      routeInTurn(() => new Promise(() => {})); // holder: never answers
+
+      const tabA = await freshApi();
+      const tabB = await freshApi();
+      tabA.listModels(); // deliberately never settles
+      const b = tabB.listModels();
+
+      await vi.advanceTimersByTimeAsync(LOCK_WAIT_MS / 2);
+      storeSession(ROTATED, HOUR_MS); // another document finished its rotation
+      await vi.advanceTimersByTimeAsync(LOCK_WAIT_MS / 2);
+      await b;
+
+      // Only the stalled holder's request was ever issued.
+      expect(refreshCalls()).toHaveLength(1);
+      expect(authHeaders()).toEqual([`Bearer ${ROTATED}`]);
+    });
+
     it("releases the lock when the rotation fails, so the next document can retry", async () => {
       const token = jwt(60);
       installWebLocks();

@@ -219,9 +219,11 @@ function releaseRefreshSlot() {
  * The test is `ensureAccessToken`'s own skew test, so a token that
  * merely *exists* is not enough — one still inside the renewal window
  * (nobody rotated; we simply queued behind an unrelated caller) falls
- * through and rotates. No `token &&` guard is needed: with no session
- * at all `expires_at` is `undefined`, the comparison is `NaN >= …`, and
- * the false branch is the rotating one.
+ * through and rotates. No `token &&` guard is needed: `loadSession`
+ * bottoms out at `expires_at: 0` for every unusable value — no session,
+ * an unparseable envelope, a token with no `exp` claim — so the
+ * comparison is `0 - Date.now() >= …`, and the false branch is the
+ * rotating one.
  */
 async function refreshUnlessAnotherDocumentAlreadyDid() {
   const { access_token: token, expires_at: expiresAt } = loadSession();
@@ -240,16 +242,24 @@ async function refreshUnlessAnotherDocumentAlreadyDid() {
  * set of documents that share the credential.
  *
  * **Every failure to acquire degrades to the pre-#495 behaviour, never
- * to no protection at all.** `navigator.locks` is absent in
- * non-secure contexts and in older browsers, the wait can time out
- * against a stalled holder, and `request` itself can reject; all three
- * land on a plain {@link performRefresh}, which is exactly what this
- * function replaced. `granted` — set as the callback's first statement
- * — is what distinguishes "never got the lock" from "held it and the
- * rotation failed": the second must propagate to
- * {@link onRefreshRejected} so a 401 still ends the session and a 5xx
- * still arms the cooldown. Retrying it outside the lock would rotate
- * twice on every genuine failure.
+ * to no protection at all.** `navigator.locks` is absent in non-secure
+ * contexts and in older browsers, the wait can time out against a
+ * stalled holder, and `request` itself can reject. All of them still
+ * rotate, which is exactly what this function replaced.
+ *
+ * `granted` — set as the callback's first *synchronous* statement, so
+ * it cannot be `false` once a rotation has been attempted — is what
+ * distinguishes "never got the lock" from "held it and the rotation
+ * failed". The second must propagate to {@link onRefreshRejected} so a
+ * 401 still ends the session and a 5xx still arms the cooldown;
+ * retrying it here would rotate twice on every genuine failure.
+ *
+ * The unacquired path re-reads the session rather than rotating
+ * blindly, because up to {@link REFRESH_LOCK_WAIT_MS} can have passed
+ * since the caller last looked. Several documents queued behind one
+ * stalled holder each escape on their own timer, and without the
+ * re-read that is a *cascade* of reuse breaches instead of one; with
+ * it, the first to escape rotates and the rest reuse its result.
  */
 async function refreshUnderCrossDocumentLock() {
   const locks = globalThis.navigator?.locks;
@@ -265,7 +275,7 @@ async function refreshUnderCrossDocumentLock() {
     });
   } catch (error) {
     if (granted) throw error;
-    return performRefresh();
+    return refreshUnlessAnotherDocumentAlreadyDid();
   } finally {
     clearTimeout(abandonWait);
   }

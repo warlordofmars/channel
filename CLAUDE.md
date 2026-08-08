@@ -413,11 +413,13 @@ mode that could not occur without silent refresh. The Web Lock above now
 serialises documents. What remains:
 
 1. **The 8s wait bound is an escape hatch, by design.** A document that
-   cannot acquire the lock in time rotates unguarded, so the old race is
+   cannot acquire the lock in time rotates anyway, so the old race is
    reachable again behind a genuinely stalled holder. That is the
    trade #520 already made for `AuthGate` and the same judgement: a
    deadlock across every tab is worse than a rare, bounded collision the
-   server already detects.
+   server already detects. The escape re-reads the session first, so
+   several documents queued behind one stalled holder produce **one**
+   unguarded rotation rather than one apiece.
 2. **Desktop shares no lock with a browser** — but every sign-in mints
    its own `device_id` and therefore its own token family
    (`_mint_session_refresh_token`), so an Electron window and a browser

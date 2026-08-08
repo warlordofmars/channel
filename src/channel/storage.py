@@ -2291,8 +2291,10 @@ def _refresh_race_loss_response(token_hash: str, row: RefreshToken) -> RefreshCo
         return RefreshConsumeResult(outcome=RefreshConsumeOutcome.REVOKED)
     # A concurrent consume won: indistinguishable at the server from a
     # replay arriving microseconds later, so it takes the reuse path
-    # (epic #241 Q1 — hard rotation on the server, single-flight in the
-    # SPA). Deliberately also the fallback for the can't-happen case
+    # (epic #241 Q1 — hard rotation on the server, with the client
+    # serialising rotation on a best-effort basis; see
+    # `consume_refresh_token` for exactly how far that reaches).
+    # Deliberately also the fallback for the can't-happen case
     # where the row reads back live, since a token we failed to claim
     # is not a token we may hand out a successor for.
     return _refresh_reuse_response(row)
