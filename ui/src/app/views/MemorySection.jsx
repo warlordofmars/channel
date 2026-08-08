@@ -56,7 +56,13 @@ function plural(count, word) {
 /**
  * The stored-vs-used sentence, built ENTIRELY from the API's
  * `recall_window` envelope — never from hardcoded numbers (epic #129
- * decision 2).
+ * decision 2). That includes `ordering`: #274 turned recall from
+ * recency-ordered into relevance-selected, and the only reason this
+ * sentence did not have to be rewritten around a new number is that it
+ * never spelled one out. The trailing clause used to read "ordered by
+ * recency, not by relevance", which the same change made false — a
+ * hardcoded claim about the ordering was the one part of the sentence
+ * that could go stale, so it is gone.
  *
  * Channel stores far more than it uses: #227 measured the injected recall
  * block at ~366 tokens, byte-identical for a 312-message chat and a
@@ -87,8 +93,8 @@ function recallSentence(window) {
     "Channel stores everything below. When you start a new chat it loads a " +
     `short extract — up to ${window.events_per_session} ` +
     `${plural(window.events_per_session, "turn")} from ${scope}, ` +
-    `each trimmed to ${window.text_truncate} characters — ordered by ` +
-    `${window.ordering}, not by relevance.`
+    `each trimmed to ${window.text_truncate} characters — selected by ` +
+    `${window.ordering}.`
   );
 }
 
@@ -102,7 +108,10 @@ function recallSentence(window) {
  * whenever the history window slides, so a delete affordance would silently
  * reappear).
  *
- * Records inside the recall window carry a badge; records outside it render
+ * Records inside the recall window carry a badge — "Can be recalled",
+ * not "Used in recall", since #274: the window is the candidate pool the
+ * hook ranks over, and whether a given record reaches a prompt depends on
+ * what the user types next. Records outside it render
  * normally rather than greyed out. They are still stored, which is the whole
  * point of being able to see them.
  *
@@ -339,7 +348,7 @@ function MemoryRecordRow({ record }) {
         <span className="mem-time">{relativeTime(record.created_at)}</span>
         {record.used_in_recall && (
           <span className="mem-badge">
-            <Icon name="check" size={12} /> Used in recall
+            <Icon name="check" size={12} /> Can be recalled
           </span>
         )}
       </div>

@@ -14,9 +14,10 @@ Current endpoints:
 - ``DELETE /api/_debug/memory/events/{event_id}`` — best-effort cleanup
   hook for the Playwright e2e so reruns within the same hour start clean.
 - ``GET /api/_debug/recall/inspect`` — return the recall block
-  ``AgentCoreRecallHook`` WOULD inject for the caller + ``chat_id``,
-  with per-fragment provenance + a token estimate. The investigation
-  instrument for the long-chat-degradation hypothesis (#227).
+  ``AgentCoreRecallHook`` WOULD inject for the caller + ``chat_id`` +
+  ``user_message``, with per-fragment provenance + a token estimate. The
+  investigation instrument for the long-chat-degradation hypothesis
+  (#227), and since #274 the way to see the relevance gate decide.
 
 All endpoints require a valid mgmt JWT and scope the AgentCore call
 by the caller's ``jwt.sub`` — leaked enablement on a real environment
@@ -101,10 +102,12 @@ async def delete_memory_event(
 @router.get("/recall/inspect")
 async def inspect_recall(
     chat_id: str = Query(...),
+    user_message: str = Query(""),
     claims: dict[str, Any] = Depends(require_mgmt_user),
 ) -> dict[str, Any]:
     """Return the recall block ``AgentCoreRecallHook`` WOULD inject for the
-    caller + ``chat_id`` right now — without firing a real turn (#227).
+    caller + ``chat_id`` + ``user_message`` right now — without firing a
+    real turn (#227).
 
     Investigation instrument for the long-chat-degradation hypothesis: it
     surfaces the exact ``## What we've talked about before`` addendum the
@@ -114,12 +117,23 @@ async def inspect_recall(
     by fragments from other, topically-unrelated chats and how big the
     block is relative to the prompt budget.
 
+    **``user_message`` is what keeps that faithful after #274.** Selection
+    is now a function of the turn: the hook ranks the actor's candidate
+    pool against the user's message and injects nothing when nothing
+    matches. Previewing without a message would report an unranked pool
+    and overstate what recall does — the same class of misleading
+    instrument this endpoint was opened to replace. It is optional and
+    defaults to ``""``, which is not a shortcut: an empty message matches
+    nothing, so an empty block is exactly what a live turn would inject,
+    and the same request is now the cheapest way to *demonstrate* the gate.
+    Pass a real phrase to see what a given turn would actually recall.
+
     Scoped to the caller's ``jwt.sub`` (same as the other _debug
     endpoints): even if the flag leaks on a real environment, one user
     cannot inspect another's recall. The hook constructor derives the
     raw ``sub`` into the AgentCore ``actorId``.
 
-    Reuses the hook's own fetch + formatting path via
+    Reuses the hook's own fetch + selection + formatting path via
     ``preview_addendum`` so the output matches what really gets injected.
     That path bypasses the hook's 5-turn cache (a fresh view of Memory)
     and ignores the ``CHANNEL_RECALL_ENABLED`` kill-switch so the block is
@@ -133,7 +147,7 @@ async def inspect_recall(
         actor_id=claims["sub"],
         client=client,
     )
-    block, records = await hook.preview_addendum(chat_id=chat_id)
+    block, records = await hook.preview_addendum(chat_id=chat_id, user_message=user_message)
     fragments = [
         {
             "session_id": rec.get("sessionId", ""),
@@ -144,6 +158,7 @@ async def inspect_recall(
     ]
     return {
         "chat_id": chat_id,
+        "user_message": user_message,
         "actor_id": derive_actor_id(claims["sub"]),
         "recall_enabled": os.environ.get("CHANNEL_RECALL_ENABLED", "1") == "1",
         "block": block,

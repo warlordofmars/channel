@@ -16,7 +16,7 @@ const RECALL = {
   max_sessions: 5,
   events_per_session: 2,
   text_truncate: 120,
-  ordering: "recency",
+  ordering: "relevance",
   enabled: true,
 };
 
@@ -123,7 +123,11 @@ describe("MemorySection", () => {
       expect(lead.textContent).toContain("up to 2 turns");
       expect(lead.textContent).toContain("5 most recent chats");
       expect(lead.textContent).toContain("120 characters");
-      expect(lead.textContent).toContain("ordered by recency, not by relevance");
+      // #274: the ordering claim comes from the envelope, and the
+      // hardcoded ", not by relevance" tail is gone — it became false the
+      // moment recall started selecting on relevance.
+      expect(lead.textContent).toContain("selected by relevance");
+      expect(lead.textContent).not.toContain("not by relevance");
     });
 
     it("tracks the caps when they move, including down to singulars", async () => {
@@ -176,7 +180,7 @@ describe("MemorySection", () => {
       expect(within(section).getByText("Remembered")).toBeTruthy();
       expect(within(section).getByText("Channel")).toBeTruthy();
       expect(within(section).getByText("[remember] user prefers dark mode")).toBeTruthy();
-      expect(within(section).getByText("Used in recall")).toBeTruthy();
+      expect(within(section).getByText("Can be recalled")).toBeTruthy();
       expect(container.querySelector(".mem-time").textContent).not.toBe("");
     });
 
@@ -184,7 +188,7 @@ describe("MemorySection", () => {
       api.listMemoryRecords.mockResolvedValueOnce(page({ groups: [group()] }));
       await renderReady();
       expect(screen.getByText("the stored text")).toBeTruthy();
-      expect(screen.queryByText("Used in recall")).toBeNull();
+      expect(screen.queryByText("Can be recalled")).toBeNull();
       expect(screen.getByText("From the conversation")).toBeTruthy();
       expect(screen.getByText("You")).toBeTruthy();
     });

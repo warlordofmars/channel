@@ -32,11 +32,11 @@ from botocore.exceptions import ClientError
 
 from channel.agents import memory_records as mr
 from channel.agents.memory import _META_PREFIX
-from channel.agents.recall import (
-    _RECALL_EVENT_TEXT_TRUNCATE,
-    _RECALL_EVENTS_PER_SESSION,
-    _RECALL_MAX_SESSIONS,
+from channel.agents.memory_ranking import (
+    POOL_EVENTS_PER_SESSION,
+    POOL_MAX_SESSIONS,
 )
+from channel.agents.recall import _RECALL_EVENT_TEXT_TRUNCATE
 from channel.agents.tools.memory_tools import _REMEMBER_PREFIX
 from channel.models import Chat, ChatSummary
 
@@ -219,10 +219,10 @@ def test_recall_window_reads_the_live_constants():
     # Never re-literal these (epic #129 decision 2) — comparing against the
     # imported constants is what makes that mechanical.
     assert mr.recall_window(enabled=True) == {
-        "max_sessions": _RECALL_MAX_SESSIONS,
-        "events_per_session": _RECALL_EVENTS_PER_SESSION,
+        "max_sessions": POOL_MAX_SESSIONS,
+        "events_per_session": POOL_EVENTS_PER_SESSION,
         "text_truncate": _RECALL_EVENT_TEXT_TRUNCATE,
-        "ordering": "recency",
+        "ordering": "relevance",
         "enabled": True,
     }
     assert mr.recall_window(enabled=False)["enabled"] is False
@@ -233,13 +233,13 @@ async def test_recall_window_session_ids_sorts_newest_first_and_caps():
     client.list_sessions.return_value = {
         "sessionSummaries": [
             {"sessionId": f"s{i}", "createdAt": datetime(2026, 7, i + 1, tzinfo=timezone.utc)}
-            for i in range(_RECALL_MAX_SESSIONS + 3)
+            for i in range(POOL_MAX_SESSIONS + 3)
         ]
     }
 
     ids = await mr.recall_window_session_ids(client, memory_id=MEMORY_ID, actor_id=ACTOR_ID)
 
-    assert len(ids) == _RECALL_MAX_SESSIONS
+    assert len(ids) == POOL_MAX_SESSIONS
     # Newest are s7,s6,s5,s4,s3 for a cap of 5 — oldest must be excluded.
     assert "s0" not in ids
     client.list_sessions.assert_called_once_with(memoryId=MEMORY_ID, actorId=ACTOR_ID)
@@ -299,15 +299,17 @@ async def test_list_sessions_page_omits_token_on_first_page():
 
 async def test_list_session_records_orders_chronologically_and_flags_the_window():
     client = MagicMock()
-    # ListEvents is newest-first. With _RECALL_EVENTS_PER_SESSION == 2 the
-    # first two events are in-window and the third is not.
-    client.list_events.return_value = {
-        "events": [
-            _event("e3", ("USER", "newest")),
-            _event("e2", ("USER", "middle")),
-            _event("e1", ("USER", "oldest q"), ("ASSISTANT", "oldest a")),
-        ]
-    }
+    # ListEvents is newest-first, and the window is the
+    # POOL_EVENTS_PER_SESSION most recent events. Built FROM the constant
+    # rather than from a literal count, so the fixture follows the cap the
+    # same way the code does — #274 moved it from 2 to 5 and this test
+    # needed no new numbers.
+    in_window = [_event(f"e{i}", ("USER", f"in {i}")) for i in range(POOL_EVENTS_PER_SESSION - 1)]
+    # The oldest in-window event is a USER+ASSISTANT pair, so the
+    # within-event ordering is asserted on a real turn.
+    in_window.append(_event("pair", ("USER", "in q"), ("ASSISTANT", "in a")))
+    out_of_window = [_event("old", ("USER", "out"))]
+    client.list_events.return_value = {"events": [*in_window, *out_of_window]}
 
     records, _truncated = await mr.list_session_records(
         client,
@@ -317,10 +319,16 @@ async def test_list_session_records_orders_chronologically_and_flags_the_window(
         in_recall_window=True,
     )
 
-    assert [r.text for r in records] == ["oldest q", "oldest a", "middle", "newest"]
-    assert [r.used_in_recall for r in records] == [False, False, True, True]
+    # Oldest event first.
+    assert [r.text for r in records] == [
+        "out",
+        "in q",
+        "in a",
+        *(f"in {i}" for i in reversed(range(POOL_EVENTS_PER_SESSION - 1))),
+    ]
+    assert [r.used_in_recall for r in records] == [False] + [True] * (len(records) - 1)
     # Within an event the turn pair keeps USER-then-ASSISTANT order.
-    assert [r.role for r in records[:2]] == ["USER", "ASSISTANT"]
+    assert [r.role for r in records[1:3]] == ["USER", "ASSISTANT"]
     client.list_events.assert_called_once_with(
         memoryId=MEMORY_ID,
         actorId=ACTOR_ID,

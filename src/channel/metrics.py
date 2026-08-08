@@ -122,6 +122,35 @@ async def record_recall_outcome(success: bool) -> None:
     await emit_metric(metric)
 
 
+async def record_recall_empty() -> None:
+    """Emit a CloudWatch counter for a recall turn that injected NOTHING (#274).
+
+    A **subset** of ``RecallSuccesses``, the same way ``BedrockThrottles``
+    is a subset of ``BedrockErrors`` — the turn succeeded, it just found
+    nothing relevant. Emitted alongside the success counter, never instead
+    of it, so ``RecallSuccesses`` stays a complete denominator and
+    ``RecallEmpty / RecallSuccesses`` reads directly as the gate's hit rate.
+
+    **Why it has to exist at all.** Before #274 the hook injected the same
+    five most-recent chats on every turn, so "did recall do anything" and
+    "did recall succeed" were the same question. Relevance gating makes an
+    empty block the *expected* outcome on an off-topic turn, which means
+    ``RecallSuccesses`` alone reads identically whether the gate is working
+    perfectly or the ranker is silently matching nothing ever. #227 had to
+    be reopened precisely because no metric distinguished "recall is
+    running" from "recall is useful"; shipping the gate without this one
+    would rebuild that blind spot on purpose.
+
+    Takes no arguments, which is deliberate rather than incidental: it is
+    the strongest possible form of the no-dimensions rule the other
+    ``record_*`` helpers enforce by signature (see
+    :func:`record_memory_write_outcome`). The interesting cut — *which*
+    turn, *whose* memory — is exactly the unbounded-cardinality one, and
+    belongs in the structured logs.
+    """
+    await emit_metric("RecallEmpty")
+
+
 async def record_memory_tool_write_outcome(success: bool) -> None:
     """Emit a CloudWatch counter for one ``remember`` tool write (#400).
 

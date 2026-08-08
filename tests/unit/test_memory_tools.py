@@ -9,14 +9,14 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from channel.agents.memory import derive_actor_id
+from channel.agents.memory_ranking import Candidate
 from channel.agents.tools import memory_tools as mt
 from channel.agents.tools.memory_tools import (
     _RECALL_TOOL_MAX_RESULTS,
     _RECALL_TOOL_TEXT_TRUNCATE,
-    _collect_candidates,
     _format_recall_result,
     _format_remember_text,
-    _rank_candidates,
+    _rank_tool_candidates,
     build_memory_tools,
 )
 
@@ -62,7 +62,7 @@ def test_format_remember_text_strips_surrounding_whitespace():
 
 
 # ---------------------------------------------------------------------------
-# _collect_candidates
+# shared test client
 # ---------------------------------------------------------------------------
 
 
@@ -78,83 +78,59 @@ def _events_client(sessions, events_by_session):
     return client
 
 
-def test_collect_candidates_orders_sessions_and_reverses_events():
-    """Newest session first; events (ListEvents returns newest-first) are
-    reversed to chronological; sessions without an id are skipped;
-    payload entries without text are skipped; unknown roles fall through
-    to the raw role label."""
-    sessions = [
-        {"sessionId": "s-old", "createdAt": datetime(2026, 6, 10, tzinfo=timezone.utc)},
-        {"sessionId": "s-new", "createdAt": datetime(2026, 6, 14, tzinfo=timezone.utc)},
-        {"createdAt": datetime(2026, 6, 12, tzinfo=timezone.utc)},  # no sessionId → skip
-    ]
-    events_by_session = {
-        "s-new": [
-            # ListEvents newest-first: this is the most recent event.
-            {"payload": [{"conversational": {"role": "ASSISTANT", "content": {"text": "second"}}}]},
-            {
-                "payload": [
-                    {"conversational": {"role": "USER", "content": {"text": "first"}}},
-                    {"conversational": {"role": "ROBOT", "content": {"text": "odd role"}}},
-                    {"conversational": {"role": "USER", "content": {}}},  # no text → skip
-                ]
-            },
-        ],
-        "s-old": [
-            {"payload": [{"conversational": {"role": "USER", "content": {"text": "old chat"}}}]},
-        ],
-    }
-    client = _events_client(sessions, events_by_session)
-
-    candidates = _collect_candidates(client, "mem-1", "actor-1")
-
-    assert candidates == [
-        {"date": "2026-06-14", "role": "You", "text": "first"},
-        {"date": "2026-06-14", "role": "ROBOT", "text": "odd role"},
-        {"date": "2026-06-14", "role": "Me", "text": "second"},
-        {"date": "2026-06-10", "role": "You", "text": "old chat"},
-    ]
-    # Read scoping is passed through to AgentCore verbatim.
-    client.list_sessions.assert_called_once_with(memoryId="mem-1", actorId="actor-1")
-
-
-def test_collect_candidates_empty_when_no_sessions():
-    client = _events_client([], {})
-    assert _collect_candidates(client, "mem-1", "actor-1") == []
+def _cand(text, date="2026-06-14", role="USER", session_id="s-1", order=0):
+    return Candidate(
+        session_id=session_id,
+        date=date,
+        role=role,
+        text=text,
+        match_text=text.lower(),
+        order=order,
+        event_index=order,
+    )
 
 
 # ---------------------------------------------------------------------------
-# _rank_candidates
+# _rank_tool_candidates — the tool's binding of the SHARED ranker (#274)
 # ---------------------------------------------------------------------------
 
 
-def _cand(text, date="2026-06-14", role="You"):
-    return {"date": date, "role": role, "text": text}
-
-
-def test_rank_candidates_floats_keyword_matches_to_top():
+def test_rank_tool_candidates_floats_keyword_matches_to_top():
     candidates = [
-        _cand("weather is nice"),
-        _cand("about billing preferences"),
-        _cand("the migration plan"),
+        _cand("weather is nice", order=0),
+        _cand("about billing preferences", order=1),
+        _cand("the migration plan", order=2),
     ]
-    ranked = _rank_candidates(candidates, "billing preferences")
+    ranked = _rank_tool_candidates(candidates, "billing preferences")
     # The matching candidate floats above the non-matches; non-matches
     # keep their recency order below.
-    assert ranked[0]["text"] == "about billing preferences"
-    assert ranked[1:] == [_cand("weather is nice"), _cand("the migration plan")]
+    assert ranked[0].text == "about billing preferences"
+    assert [c.text for c in ranked[1:]] == ["weather is nice", "the migration plan"]
 
 
-def test_rank_candidates_recency_when_no_usable_query_tokens():
+def test_rank_tool_candidates_pads_with_recency_when_nothing_matches():
+    """The tool's ``pad=True`` is the half of #274 that did NOT change.
+
+    A deliberate ``recall`` call that matches nothing still gets the most
+    recent notes to judge — the exact behaviour the always-on hook now
+    refuses (see ``test_recall.py``). Both surfaces run one ranker; this
+    flag is the entire difference between them, so it is pinned on both
+    sides.
+    """
+    candidates = [_cand("one", order=0), _cand("two", order=1), _cand("three", order=2)]
+    assert _rank_tool_candidates(candidates, "zzzznomatch") == candidates
+
+
+def test_rank_tool_candidates_recency_when_no_usable_query_tokens():
     """A query of only sub-3-char words yields no tokens → pure recency."""
-    candidates = [_cand("one"), _cand("two"), _cand("three")]
-    assert _rank_candidates(candidates, "a of is") == candidates
+    candidates = [_cand("one", order=0), _cand("two", order=1), _cand("three", order=2)]
+    assert _rank_tool_candidates(candidates, "a of is") == candidates
 
 
-def test_rank_candidates_truncates_to_max_results():
-    candidates = [_cand(f"note {i}") for i in range(_RECALL_TOOL_MAX_RESULTS + 5)]
+def test_rank_tool_candidates_truncates_to_max_results():
+    candidates = [_cand(f"note {i}", order=i) for i in range(_RECALL_TOOL_MAX_RESULTS + 5)]
     # No usable tokens → recency path, still capped.
-    ranked = _rank_candidates(candidates, "")
+    ranked = _rank_tool_candidates(candidates, "")
     assert len(ranked) == _RECALL_TOOL_MAX_RESULTS
 
 
@@ -166,8 +142,8 @@ def test_rank_candidates_truncates_to_max_results():
 def test_format_recall_result_renders_lines_and_truncates_long_text():
     long_text = "L" * (_RECALL_TOOL_TEXT_TRUNCATE + 50)
     candidates = [
-        {"date": "2026-06-14", "role": "You", "text": "short note"},
-        {"date": "", "role": "Me", "text": long_text},  # empty date → "earlier"
+        _cand("short note", date="2026-06-14", role="USER"),
+        _cand(long_text, date="", role="ASSISTANT"),  # empty date → "earlier"
     ]
     result = _format_recall_result(candidates)
 
@@ -175,6 +151,16 @@ def test_format_recall_result_renders_lines_and_truncates_long_text():
     assert "- (2026-06-14) You: short note" in result
     assert "- (earlier) Me: " + "L" * _RECALL_TOOL_TEXT_TRUNCATE + "..." in result
     assert "L" * (_RECALL_TOOL_TEXT_TRUNCATE + 1) not in result
+
+
+def test_format_recall_result_passes_an_unknown_role_through():
+    """An unrecognised AgentCore role renders as itself, not as ``Me``.
+
+    Shares ``memory_ranking.role_label`` with the recall hook, so a wire
+    change stays visible on both surfaces rather than being silently
+    relabelled on one of them.
+    """
+    assert "ROBOT: beep" in _format_recall_result([_cand("beep", role="ROBOT")])
 
 
 # ---------------------------------------------------------------------------

@@ -32,11 +32,11 @@ from fastapi.testclient import TestClient
 os.environ.setdefault("CHANNEL_JWT_SECRET", "test-secret-for-unit-tests")
 
 from channel.agents.memory import _META_PREFIX  # noqa: E402
-from channel.agents.recall import (  # noqa: E402
-    _RECALL_EVENT_TEXT_TRUNCATE,
-    _RECALL_EVENTS_PER_SESSION,
-    _RECALL_MAX_SESSIONS,
+from channel.agents.memory_ranking import (  # noqa: E402
+    POOL_EVENTS_PER_SESSION,
+    POOL_MAX_SESSIONS,
 )
+from channel.agents.recall import _RECALL_EVENT_TEXT_TRUNCATE  # noqa: E402
 from channel.agents.tools.memory_tools import _REMEMBER_PREFIX  # noqa: E402
 from channel.api import memory as memory_api  # noqa: E402
 from channel.api.main import app  # noqa: E402
@@ -184,10 +184,10 @@ def test_recall_window_reports_the_live_caps():
     body = _call(fake, {}).json()
 
     assert body["recall_window"] == {
-        "max_sessions": _RECALL_MAX_SESSIONS,
-        "events_per_session": _RECALL_EVENTS_PER_SESSION,
+        "max_sessions": POOL_MAX_SESSIONS,
+        "events_per_session": POOL_EVENTS_PER_SESSION,
         "text_truncate": _RECALL_EVENT_TEXT_TRUNCATE,
-        "ordering": "recency",
+        "ordering": "relevance",
         "enabled": True,
     }
 
@@ -695,10 +695,10 @@ def test_export_manifest_is_self_describing():
     assert manifest["schema_version"] == memory_api._EXPORT_SCHEMA_VERSION
     assert manifest["actor_id"] == memory_api.derive_actor_id(OWNER)
     assert manifest["recall_window"] == {
-        "max_sessions": _RECALL_MAX_SESSIONS,
-        "events_per_session": _RECALL_EVENTS_PER_SESSION,
+        "max_sessions": POOL_MAX_SESSIONS,
+        "events_per_session": POOL_EVENTS_PER_SESSION,
         "text_truncate": _RECALL_EVENT_TEXT_TRUNCATE,
-        "ordering": "recency",
+        "ordering": "relevance",
         "enabled": True,
     }
     # The one sentence that stops a reader mistaking "stored" for "recalled".
@@ -713,8 +713,8 @@ def test_export_manifest_never_re_literals_the_recall_caps():
 
     window = _export_call(fake, {}).json()["manifest"]["recall_window"]
 
-    assert window["max_sessions"] == _RECALL_MAX_SESSIONS
-    assert window["events_per_session"] == _RECALL_EVENTS_PER_SESSION
+    assert window["max_sessions"] == POOL_MAX_SESSIONS
+    assert window["events_per_session"] == POOL_EVENTS_PER_SESSION
 
 
 def test_export_sets_the_attachment_download_headers():
@@ -1143,7 +1143,7 @@ def test_records_for_a_user_with_no_memory_partition_is_empty_not_an_error(
     assert body["next_cursor"] is None
     # The window is still reported honestly — the caps are real, the caller
     # simply has nothing sitting in them.
-    assert body["recall_window"]["max_sessions"] == _RECALL_MAX_SESSIONS
+    assert body["recall_window"]["max_sessions"] == POOL_MAX_SESSIONS
 
 
 def test_records_is_still_empty_with_the_recall_kill_switch_off(

@@ -33,6 +33,15 @@ Phase 8a (ingestion lag), so ``recall`` is keyword/recency over the
 actor's own events, not vector search. Candidate notes are surfaced and
 the model does the final relevance judgment. A semantic index is a v2
 optimization, not a v1 blocker.
+
+**Since #274 the retrieval half lives in ``agents/memory_ranking``** and
+is shared with ``AgentCoreRecallHook`` rather than duplicated. This module
+keeps what is specific to a *deliberate* search: the wider result cap, the
+200-char render truncation, and ``pad=True`` — a model that explicitly
+asked gets the most recent notes to judge even when nothing matched, where
+the always-on hook gets nothing. That single flag is the difference
+between the two surfaces; everything else about how candidates are found
+and ordered is now one implementation.
 """
 
 from __future__ import annotations
@@ -40,14 +49,18 @@ from __future__ import annotations
 import asyncio
 import functools
 import logging
-import re
 from datetime import datetime, timezone
 from typing import Any
 
 from strands import tool
 
 from channel.agents.memory import derive_actor_id
-from channel.agents.recall import _iso_date
+from channel.agents.memory_ranking import (
+    Candidate,
+    collect_candidates,
+    rank_candidates,
+    role_label,
+)
 from channel.metrics import (
     record_memory_tool_recall_outcome,
     record_memory_tool_write_outcome,
@@ -61,23 +74,19 @@ logger = logging.getLogger(__name__)
 # tool-use META facts when read back by ``recall`` or the recall hook.
 _REMEMBER_PREFIX = "[remember]"
 
-# ``recall`` read caps. Deliberate search is allowed a wider net than
-# the always-on recall hook (which caps at 5 sessions / 2 events per
-# ``agents/recall.py``) because the model asked for it explicitly.
-_RECALL_TOOL_MAX_SESSIONS = 10
-_RECALL_TOOL_EVENTS_PER_SESSION = 5
+# ``recall`` OUTPUT caps. The read caps that used to live beside them
+# (``10`` sessions x ``5`` events) moved to
+# ``memory_ranking.POOL_MAX_SESSIONS`` / ``POOL_EVENTS_PER_SESSION`` in
+# #274, where the hook now shares them — the pool is the same question
+# asked by both surfaces, so it is asked once.
+#
+# These two are genuinely tool-specific and stay: a deliberate search
+# renders more results, at greater length, than an always-on prompt
+# addendum can afford. The hook's counterpart is a token budget
+# (``recall._RECALL_TOKEN_BUDGET``), not a result count, because it is
+# spending prompt rather than tool-result space.
 _RECALL_TOOL_MAX_RESULTS = 12
 _RECALL_TOOL_TEXT_TRUNCATE = 200
-
-_RECALL_ROLE_MAP: dict[str, str] = {"USER": "You", "ASSISTANT": "Me"}
-
-# Sort-key sentinel for sessions missing ``createdAt`` (mirrors recall.py).
-_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
-
-# Minimum token length considered for keyword matching in ``recall`` —
-# drops noise words like "a" / "of" / "is" without a full stop-word list.
-_RECALL_MIN_TOKEN_LEN = 3
-_TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 
 @functools.lru_cache(maxsize=1)
@@ -111,82 +120,31 @@ def _format_remember_text(content: str, tags: list[str] | None) -> str:
     return text
 
 
-def _collect_candidates(client: Any, memory_id: str, actor_id: str) -> list[dict[str, str]]:
-    """ListSessions + ListEvents across the actor → flat candidate notes.
+def _rank_tool_candidates(candidates: list[Candidate], query: str) -> list[Candidate]:
+    """Rank for a **deliberate** search: matches first, recency behind them.
 
-    Same read plumbing as ``AgentCoreRecallHook._get_or_fetch_records``
-    but flattened for tool-result rendering, and it does NOT exclude the
-    current session — the model is searching deliberately and wants
-    everything it has stored.
+    A thin binding of the shared ranker to this surface's two choices —
+    ``_RECALL_TOOL_MAX_RESULTS`` and, load-bearingly, ``pad=True``.
 
-    Returns candidates newest-session-first, each shaped
-    ``{"date": str, "role": str, "text": str}``. Runs blocking boto3
-    calls; callers dispatch it via ``asyncio.to_thread``.
+    Padding is right here and wrong for the hook, which is the whole
+    asymmetry #274 turned on. The model called ``recall`` on purpose, so
+    "nothing matched your words, here are your most recent notes" is a
+    useful answer it can judge and discard; the same behaviour in an
+    always-on hook is how "morning" used to drag five unrelated chats into
+    every system prompt. Same ranker, opposite default.
     """
-    sessions_resp = client.list_sessions(memoryId=memory_id, actorId=actor_id)
-    sessions = list(sessions_resp.get("sessionSummaries", []))
-    # Explicit newest-first ordering; don't rely on AgentCore's default.
-    sessions.sort(key=lambda s: s.get("createdAt") or _EPOCH, reverse=True)
-    sessions = sessions[:_RECALL_TOOL_MAX_SESSIONS]
-
-    candidates: list[dict[str, str]] = []
-    for session in sessions:
-        sid = session.get("sessionId")
-        if not sid:
-            continue
-        events_resp = client.list_events(
-            memoryId=memory_id,
-            actorId=actor_id,
-            sessionId=sid,
-            maxResults=_RECALL_TOOL_EVENTS_PER_SESSION,
-        )
-        date = _iso_date(session.get("createdAt"))
-        # ListEvents returns newest-first; reverse for chronological read.
-        for ev in reversed(events_resp.get("events", [])):
-            for msg in ev.get("payload", []):
-                conv = msg.get("conversational") or {}
-                text = (conv.get("content") or {}).get("text", "")
-                if not text:
-                    continue
-                role = _RECALL_ROLE_MAP.get(conv.get("role", ""), conv.get("role") or "?")
-                candidates.append({"date": date, "role": role, "text": text})
-    return candidates
+    return rank_candidates(candidates, query, limit=_RECALL_TOOL_MAX_RESULTS, pad=True)
 
 
-def _rank_candidates(candidates: list[dict[str, str]], query: str) -> list[dict[str, str]]:
-    """Float keyword matches to the top, fill with recency, cap results.
-
-    v1 keyword/recency ranking (no vector search). Query tokens are
-    lowercased alphanumeric runs of length >= ``_RECALL_MIN_TOKEN_LEN``.
-    A candidate matches if any token is a substring of its lowercased
-    text. Matches keep their (recency) order and precede non-matches;
-    the combined list is truncated to ``_RECALL_TOOL_MAX_RESULTS`` so the
-    model always gets a bounded set to judge. With no usable query
-    tokens, pure recency applies.
-    """
-    tokens = {t for t in _TOKEN_RE.findall(query.lower()) if len(t) >= _RECALL_MIN_TOKEN_LEN}
-    if not tokens:
-        return candidates[:_RECALL_TOOL_MAX_RESULTS]
-    matched: list[dict[str, str]] = []
-    unmatched: list[dict[str, str]] = []
-    for candidate in candidates:
-        text = candidate["text"].lower()
-        if any(tok in text for tok in tokens):
-            matched.append(candidate)
-        else:
-            unmatched.append(candidate)
-    return (matched + unmatched)[:_RECALL_TOOL_MAX_RESULTS]
-
-
-def _format_recall_result(candidates: list[dict[str, str]]) -> str:
+def _format_recall_result(candidates: list[Candidate]) -> str:
     """Render ranked candidates as tool-result text (the data register)."""
     lines = ["Notes from your past conversations:", ""]
     for candidate in candidates:
-        text = candidate["text"]
+        text = candidate.text
         if len(text) > _RECALL_TOOL_TEXT_TRUNCATE:
             text = text[:_RECALL_TOOL_TEXT_TRUNCATE] + "..."
-        date = candidate["date"] or "earlier"
-        lines.append(f"- ({date}) {candidate['role']}: {text}")
+        date = candidate.date or "earlier"
+        lines.append(f"- ({date}) {role_label(candidate.role)}: {text}")
     return "\n".join(lines)
 
 
@@ -271,7 +229,7 @@ def build_memory_tools(
         """
         try:
             candidates = await asyncio.to_thread(
-                _collect_candidates, _client(), memory_id, derived_actor
+                collect_candidates, _client(), memory_id, derived_actor
             )
         except Exception as exc:
             logger.warning(
@@ -283,7 +241,7 @@ def build_memory_tools(
             await record_memory_tool_recall_outcome(success=False)
             return "Could not search memory right now."
         await record_memory_tool_recall_outcome(success=True)
-        ranked = _rank_candidates(candidates, query)
+        ranked = _rank_tool_candidates(candidates, query)
         if not ranked:
             return "No matching memories found."
         return _format_recall_result(ranked)
