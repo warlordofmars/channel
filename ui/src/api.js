@@ -817,7 +817,12 @@ export async function putPrefs(partial) {
     headers: { ...(await authHeader()), "Content-Type": "application/json" },
     body: JSON.stringify({ prefs: partial }),
   });
-  if (!res.ok) throw new Error(`putPrefs failed: ${res.status}`);
+  // `ApiError` rather than a bare `Error` so the caller can branch on the
+  // status: `useChannelPrefs` has to tell a 401 (the session is gone — the
+  // write waits for re-auth) apart from a transient failure (retry it).
+  // The operation string keeps the message byte-identical to the legacy
+  // `putPrefs failed: <status>` shape callers already match on.
+  if (!res.ok) throw new ApiError("putPrefs failed:", res.status);
 }
 
 // ---- MCP servers (#207) ---------------------------------------------------

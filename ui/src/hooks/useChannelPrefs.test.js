@@ -5,11 +5,15 @@ import * as api from "../api.js";
 import {
   useChannelPrefs,
   DEFAULTS,
+  PUT_RETRY_DELAYS_MS,
   STORAGE_KEYS,
   __resetChannelPrefsForTest,
   __resetServerSyncForTest,
 } from "./useChannelPrefs.js";
 import { TOKEN_KEY } from "../lib/auth.js";
+
+/** Comfortably past the hook's 200ms write debounce. */
+const PUT_DEBOUNCE = 250;
 
 describe("useChannelPrefs", () => {
   let storage;
@@ -418,5 +422,349 @@ describe("useChannelPrefs", () => {
     });
     vi.useRealTimers();
     expect(putPrefsSpy).not.toHaveBeenCalled();
+  });
+
+  // ---- Write failures are visible, not swallowed (#482) -------------------
+  //
+  // Half 1 of #482. Before this, `schedulePutPref` ended in
+  // `catch { /* swallow */ }`: the browser kept showing a value the server
+  // had rejected, and nothing anywhere recorded that it had. #469's whole
+  // investigation was spent inside that gap. Every test below asserts the
+  // FAILURE path — a suite that only proves a successful PUT is what let
+  // this ship.
+
+  /** Mount with a token + stubbed hydrate, and return the hook handle. */
+  async function mountWithToken() {
+    storage[TOKEN_KEY] = "tok";
+    __resetChannelPrefsForTest();
+    __resetServerSyncForTest();
+    vi.spyOn(api, "getPrefs").mockResolvedValue({});
+    const { result } = renderHook(() => useChannelPrefs());
+    await waitFor(() => expect(api.getPrefs).toHaveBeenCalled());
+    return result;
+  }
+
+  it("surfaces a failed PUT as prefsSyncError instead of swallowing it", async () => {
+    const result = await mountWithToken();
+    vi.spyOn(api, "putPrefs").mockRejectedValue(new Error("network down"));
+    expect(result.current.prefsSyncError).toBeNull();
+
+    vi.useFakeTimers();
+    act(() => result.current.setSuggestFollowups(false));
+    await act(async () => {
+      vi.advanceTimersByTime(PUT_DEBOUNCE);
+    });
+    vi.useRealTimers();
+
+    expect(result.current.prefsSyncError).not.toBeNull();
+    expect(result.current.prefsSyncError.keys).toEqual(["suggestFollowups"]);
+    // A transport-level throw carries no HTTP status.
+    expect(result.current.prefsSyncError.statuses.suggestFollowups).toBeNull();
+    expect(result.current.prefsSyncError.unauthorized).toBe(false);
+  });
+
+  it("flags a 401 as unauthorized and does NOT burn retries on it", async () => {
+    const result = await mountWithToken();
+    const putPrefsSpy = vi
+      .spyOn(api, "putPrefs")
+      .mockRejectedValue(new api.ApiError("putPrefs failed:", 401));
+
+    vi.useFakeTimers();
+    act(() => result.current.setAccent("18"));
+    await act(async () => {
+      vi.advanceTimersByTime(PUT_DEBOUNCE);
+    });
+    expect(putPrefsSpy).toHaveBeenCalledTimes(1);
+    expect(result.current.prefsSyncError.statuses.accent).toBe(401);
+    expect(result.current.prefsSyncError.unauthorized).toBe(true);
+
+    // The session is gone; a timer retry would only spend requests (and
+    // token renewals) to be refused again. The value waits for re-auth.
+    await act(async () => {
+      vi.advanceTimersByTime(60_000);
+    });
+    vi.useRealTimers();
+    expect(putPrefsSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries a transient failure with backoff and clears the error on success", async () => {
+    const result = await mountWithToken();
+    const putPrefsSpy = vi
+      .spyOn(api, "putPrefs")
+      .mockRejectedValueOnce(new api.ApiError("putPrefs failed:", 503))
+      .mockResolvedValueOnce();
+
+    vi.useFakeTimers();
+    act(() => result.current.setSuggestFollowups(false));
+    await act(async () => {
+      vi.advanceTimersByTime(PUT_DEBOUNCE);
+    });
+    expect(putPrefsSpy).toHaveBeenCalledTimes(1);
+    expect(result.current.prefsSyncError.statuses.suggestFollowups).toBe(503);
+
+    await act(async () => {
+      vi.advanceTimersByTime(PUT_RETRY_DELAYS_MS[0]);
+    });
+    vi.useRealTimers();
+    expect(putPrefsSpy).toHaveBeenCalledTimes(2);
+    // Same value, re-sent — the failed write was held, not discarded.
+    expect(putPrefsSpy).toHaveBeenLastCalledWith({ suggest_followups: false });
+    expect(result.current.prefsSyncError).toBeNull();
+  });
+
+  it("stops retrying once the backoff budget is spent, keeping the error", async () => {
+    const result = await mountWithToken();
+    const putPrefsSpy = vi
+      .spyOn(api, "putPrefs")
+      .mockRejectedValue(new api.ApiError("putPrefs failed:", 500));
+
+    vi.useFakeTimers();
+    act(() => result.current.setAccent("18"));
+    await act(async () => {
+      vi.advanceTimersByTime(PUT_DEBOUNCE);
+    });
+    for (const delay of PUT_RETRY_DELAYS_MS) {
+      await act(async () => {
+        vi.advanceTimersByTime(delay);
+      });
+    }
+    expect(putPrefsSpy).toHaveBeenCalledTimes(1 + PUT_RETRY_DELAYS_MS.length);
+
+    // Budget spent: no further automatic attempts, and the failure stays
+    // visible rather than quietly resolving itself.
+    await act(async () => {
+      vi.advanceTimersByTime(120_000);
+    });
+    vi.useRealTimers();
+    expect(putPrefsSpy).toHaveBeenCalledTimes(1 + PUT_RETRY_DELAYS_MS.length);
+    expect(result.current.prefsSyncError.statuses.accent).toBe(500);
+  });
+
+  it("retryPrefsSync re-sends the held write after a 401 and clears the error", async () => {
+    const result = await mountWithToken();
+    const putPrefsSpy = vi
+      .spyOn(api, "putPrefs")
+      .mockRejectedValueOnce(new api.ApiError("putPrefs failed:", 401));
+
+    vi.useFakeTimers();
+    act(() => result.current.setSuggestFollowups(false));
+    await act(async () => {
+      vi.advanceTimersByTime(PUT_DEBOUNCE);
+    });
+    vi.useRealTimers();
+    expect(result.current.prefsSyncError.unauthorized).toBe(true);
+
+    // Caller has re-authenticated; the write is still there to send.
+    putPrefsSpy.mockResolvedValue();
+    await act(async () => {
+      await result.current.retryPrefsSync();
+    });
+    expect(putPrefsSpy).toHaveBeenCalledTimes(2);
+    expect(putPrefsSpy).toHaveBeenLastCalledWith({ suggest_followups: false });
+    expect(result.current.prefsSyncError).toBeNull();
+  });
+
+  it("retryPrefsSync is a no-op when every write has been confirmed", async () => {
+    const result = await mountWithToken();
+    const putPrefsSpy = vi.spyOn(api, "putPrefs").mockResolvedValue();
+
+    vi.useFakeTimers();
+    act(() => result.current.setAccent("18"));
+    await act(async () => {
+      vi.advanceTimersByTime(PUT_DEBOUNCE);
+    });
+    vi.useRealTimers();
+    expect(putPrefsSpy).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await result.current.retryPrefsSync();
+    });
+    expect(putPrefsSpy).toHaveBeenCalledTimes(1);
+    expect(result.current.prefsSyncError).toBeNull();
+  });
+
+  it("clears only the pref that recovered, not every reported failure", async () => {
+    const result = await mountWithToken();
+    // 401 so neither failure schedules a backoff retry — the only write that
+    // runs after this point is the one the test drives explicitly.
+    const putPrefsSpy = vi
+      .spyOn(api, "putPrefs")
+      .mockRejectedValue(new api.ApiError("putPrefs failed:", 401));
+
+    vi.useFakeTimers();
+    act(() => result.current.setAccent("18"));
+    act(() => result.current.setSuggestFollowups(false));
+    await act(async () => {
+      vi.advanceTimersByTime(PUT_DEBOUNCE);
+    });
+    expect([...result.current.prefsSyncError.keys].sort()).toEqual([
+      "accent",
+      "suggestFollowups",
+    ]);
+
+    // Re-authenticated, and the user changes ONLY the accent. Its write
+    // lands; `suggest_followups` is still unconfirmed and must still be
+    // reported — a recovery clears the pref that recovered, not the store.
+    putPrefsSpy.mockResolvedValue();
+    act(() => result.current.setAccent("150"));
+    await act(async () => {
+      vi.advanceTimersByTime(PUT_DEBOUNCE);
+    });
+    vi.useRealTimers();
+    expect(putPrefsSpy).toHaveBeenLastCalledWith({ accent: "150" });
+    expect(result.current.prefsSyncError.keys).toEqual(["suggestFollowups"]);
+    expect(result.current.prefsSyncError.unauthorized).toBe(true);
+  });
+
+  it("a fresh change supersedes a pending retry for the same pref", async () => {
+    const result = await mountWithToken();
+    const putPrefsSpy = vi
+      .spyOn(api, "putPrefs")
+      .mockRejectedValueOnce(new api.ApiError("putPrefs failed:", 500))
+      .mockResolvedValue();
+
+    vi.useFakeTimers();
+    act(() => result.current.setAccent("18"));
+    await act(async () => {
+      vi.advanceTimersByTime(PUT_DEBOUNCE);
+    });
+    expect(putPrefsSpy).toHaveBeenLastCalledWith({ accent: "18" });
+
+    // Change it again before the backoff elapses: the retry must carry the
+    // NEW value, and must fire once — not once per scheduled timer.
+    act(() => result.current.setAccent("150"));
+    await act(async () => {
+      vi.advanceTimersByTime(PUT_DEBOUNCE + PUT_RETRY_DELAYS_MS[0]);
+    });
+    vi.useRealTimers();
+    expect(putPrefsSpy).toHaveBeenCalledTimes(2);
+    expect(putPrefsSpy).toHaveBeenLastCalledWith({ accent: "150" });
+    expect(result.current.prefsSyncError).toBeNull();
+  });
+
+  it("a later transient failure never masks an outstanding 401", async () => {
+    // Each key keeps its own status. With one shared "last failure status"
+    // the 500 below overwrote the 401 and `unauthorized` flipped to false —
+    // so a UI would promise an automatic retry for a write that is actually
+    // stuck until the user signs in again.
+    const result = await mountWithToken();
+    const putPrefsSpy = vi
+      .spyOn(api, "putPrefs")
+      .mockRejectedValueOnce(new api.ApiError("putPrefs failed:", 401));
+
+    vi.useFakeTimers();
+    act(() => result.current.setSuggestFollowups(false));
+    await act(async () => {
+      vi.advanceTimersByTime(PUT_DEBOUNCE);
+    });
+    expect(result.current.prefsSyncError.unauthorized).toBe(true);
+
+    putPrefsSpy.mockRejectedValue(new api.ApiError("putPrefs failed:", 500));
+    act(() => result.current.setAccent("18"));
+    await act(async () => {
+      vi.advanceTimersByTime(PUT_DEBOUNCE);
+    });
+    vi.useRealTimers();
+
+    expect(result.current.prefsSyncError.statuses).toEqual({
+      suggestFollowups: 401,
+      accent: 500,
+    });
+    expect(result.current.prefsSyncError.unauthorized).toBe(true);
+  });
+
+  it("a write confirmed after a newer change does not discard the newer value", async () => {
+    // A PUT is in flight for as long as the network takes, and the user can
+    // change the same pref meanwhile. Acting on the older request's success
+    // would delete the newer value before anything had sent it — the next
+    // flush then PUTs `undefined` and the change is lost silently, which is
+    // the exact class of bug this issue exists to remove.
+    const result = await mountWithToken();
+    let releaseFirst;
+    const putPrefsSpy = vi
+      .spyOn(api, "putPrefs")
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            releaseFirst = resolve;
+          }),
+      )
+      .mockResolvedValue();
+
+    vi.useFakeTimers();
+    act(() => result.current.setAccent("18"));
+    await act(async () => {
+      vi.advanceTimersByTime(PUT_DEBOUNCE);
+    });
+    expect(putPrefsSpy).toHaveBeenCalledWith({ accent: "18" });
+
+    act(() => result.current.setAccent("150"));
+    await act(async () => {
+      releaseFirst();
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(PUT_DEBOUNCE);
+    });
+    vi.useRealTimers();
+
+    expect(putPrefsSpy).toHaveBeenCalledTimes(2);
+    expect(putPrefsSpy).toHaveBeenLastCalledWith({ accent: "150" });
+    expect(result.current.prefsSyncError).toBeNull();
+  });
+
+  it("a write rejected after a newer change does not report the superseded value", async () => {
+    const result = await mountWithToken();
+    let rejectFirst;
+    const putPrefsSpy = vi
+      .spyOn(api, "putPrefs")
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve, reject) => {
+            rejectFirst = reject;
+          }),
+      )
+      .mockResolvedValue();
+
+    vi.useFakeTimers();
+    act(() => result.current.setSuggestFollowups(false));
+    await act(async () => {
+      vi.advanceTimersByTime(PUT_DEBOUNCE);
+    });
+
+    // Superseded before the failure lands: the newer write is already
+    // queued and owns the key, so this outcome must not be reported and
+    // must not schedule a retry over the newer write's debounce slot.
+    act(() => result.current.setSuggestFollowups(true));
+    await act(async () => {
+      rejectFirst(new api.ApiError("putPrefs failed:", 500));
+    });
+    // Asserted HERE, while the newer write is still only queued. Checking
+    // after it lands proves nothing: its own success would clear a wrongly
+    // recorded error on the way past.
+    expect(result.current.prefsSyncError).toBeNull();
+
+    await act(async () => {
+      vi.advanceTimersByTime(PUT_DEBOUNCE);
+    });
+    vi.useRealTimers();
+
+    expect(putPrefsSpy).toHaveBeenLastCalledWith({ suggest_followups: true });
+    expect(result.current.prefsSyncError).toBeNull();
+  });
+
+  it("__resetServerSyncForTest clears a surfaced write failure", async () => {
+    const result = await mountWithToken();
+    vi.spyOn(api, "putPrefs").mockRejectedValue(new Error("boom"));
+
+    vi.useFakeTimers();
+    act(() => result.current.setAccent("18"));
+    await act(async () => {
+      vi.advanceTimersByTime(PUT_DEBOUNCE);
+    });
+    vi.useRealTimers();
+    expect(result.current.prefsSyncError).not.toBeNull();
+
+    act(() => __resetServerSyncForTest());
+    expect(result.current.prefsSyncError).toBeNull();
   });
 });
