@@ -95,12 +95,55 @@ function getSnapshot() {
 // ---- Server sync ---------------------------------------------------------
 //
 // One-shot hydrate on first mount when a mgmt JWT is present; debounced
-// per-key PUT on each set. Failures are swallowed — localStorage stays the
-// canonical source of truth so the UI never blocks on network.
+// per-key PUT on each set.
+//
+// **A rejected PUT is neither discarded nor silent (#482).** It used to be
+// both — `catch { /* swallow */ }` — so localStorage showed a value the
+// server had never accepted, with nothing anywhere saying so. #469 spent its
+// entire investigation inside that gap: `suggest_followups` was correctly
+// honoured server-side, but the write that was supposed to change it had
+// been dropped on the floor, so the toggle read as dead wiring.
+//
+// localStorage is still canonical and the UI still never blocks on the
+// network — a pref changed offline must keep working. What changed is that
+// the unconfirmed value is *kept* (`unconfirmedWrites`), re-sent with
+// bounded backoff, and published on a store the hook returns as
+// `prefsSyncError`.
+//
+// Rolling the local value back on failure was considered and rejected: it
+// takes the network's word over the user's and breaks every offline change.
+// `test: PUT failure does not roll back local state` pins that choice.
 
 let hydrated = false;
 let hydratePromise = null;
+
+/** Per-key timer slot, shared by the debounce and the retry backoff. */
 const pendingPuts = {};
+
+/** Debounce before a changed pref is sent, collapsing rapid changes. */
+const PUT_DEBOUNCE_MS = 200;
+
+/**
+ * Backoff before each automatic re-attempt of a failed write.
+ *
+ * Two retries, then the value waits for `retryPrefsSync()` or for the next
+ * change to the same key. Bounded on purpose: an endpoint that has refused
+ * twice is not usually one more immediate attempt away from succeeding, and
+ * every attempt can drag a token renewal along behind it.
+ */
+export const PUT_RETRY_DELAYS_MS = Object.freeze([1_000, 5_000]);
+
+/**
+ * Hook-key → value for every write the server has not confirmed.
+ *
+ * This is what "not silently discarded" means mechanically: a rejected PUT
+ * leaves its value here and `retryPrefsSync()` re-sends whatever is still
+ * outstanding. Entries clear only on a 2xx.
+ */
+const unconfirmedWrites = {};
+
+/** Per-key count of attempts already spent, so the backoff terminates. */
+const putAttempts = {};
 
 function shouldHydrate() {
   try {
@@ -141,20 +184,147 @@ async function hydrateFromServer() {
   return hydratePromise;
 }
 
+// ---- Write-failure store -------------------------------------------------
+//
+// A second `useSyncExternalStore` source, deliberately separate from the
+// prefs snapshot: sync health is not a preference, and folding it into
+// `snapshot` would put a non-pref key in a structure that is otherwise
+// exactly `STORAGE_KEYS` and round-trips through localStorage.
+
+let syncSnapshot = Object.freeze({ error: null });
+const syncListeners = new Set();
+
+function subscribeSync(listener) {
+  syncListeners.add(listener);
+  return () => syncListeners.delete(listener);
+}
+
+function getSyncSnapshot() {
+  return syncSnapshot;
+}
+
+function publishSyncSnapshot(error) {
+  syncSnapshot = Object.freeze({ error });
+  syncListeners.forEach((l) => l());
+}
+
+/**
+ * Hook-key → HTTP status of its most recent failed write (null for a
+ * transport-level throw, which has no status).
+ *
+ * Per-key rather than one shared "last status": several prefs can be
+ * outstanding at once, and a later transient 500 must not overwrite an
+ * earlier 401 and quietly downgrade "this needs you to sign in again" to
+ * "we'll retry it".
+ */
+const failedWrites = new Map();
+
+function publishWriteFailures() {
+  if (!failedWrites.size) {
+    publishSyncSnapshot(null);
+    return;
+  }
+  publishSyncSnapshot(
+    Object.freeze({
+      keys: Object.freeze([...failedWrites.keys()]),
+      statuses: Object.freeze(Object.fromEntries(failedWrites)),
+      // A 401 is not a blip: the session is no longer usable, so a timer
+      // retry would only spend requests (and, through `authHeader`, token
+      // renewals) to be refused again. Those writes are held for a manual
+      // retry once the caller has re-authenticated. True if ANY outstanding
+      // write is in that state — one 401 among transient failures still
+      // means the session, not the network, is what needs attention.
+      unauthorized: [...failedWrites.values()].some(isUnauthorized),
+    }),
+  );
+}
+
+function isUnauthorized(status) {
+  return status === 401;
+}
+
+function recordWriteFailure(name, status) {
+  failedWrites.set(name, status);
+  publishWriteFailures();
+}
+
+function clearWriteFailure(name) {
+  if (failedWrites.delete(name)) publishWriteFailures();
+}
+
+/** HTTP status carried by an `ApiError`; null for a transport-level throw. */
+function statusOf(err) {
+  return typeof err?.status === "number" ? err.status : null;
+}
+
+function scheduleFlush(name, delay) {
+  pendingPuts[name] = setTimeout(function flushTimer() {
+    delete pendingPuts[name];
+    void flushPref(name);
+  }, delay);
+}
+
+/**
+ * Send one pref's outstanding value and record the outcome.
+ *
+ * The value is captured up front and re-checked once the request
+ * resolves, because a PUT is in flight for as long as the network takes
+ * and the user can change the same pref meanwhile. `schedulePutPref`
+ * will have replaced `unconfirmedWrites[name]` and queued its own write,
+ * so acting on THIS request's outcome would either delete a newer value
+ * that has not been sent yet (dropping it — the next flush would PUT
+ * `undefined`) or report a failure against a value nothing is waiting on
+ * any more. Whoever is still current owns the entry; a superseded
+ * attempt reports nothing and lets the newer write speak for the key.
+ */
+async function flushPref(name) {
+  const value = unconfirmedWrites[name];
+  try {
+    const { putPrefs } = await import("../api.js");
+    const serverVal = BOOLEAN_PREFS.has(name) ? value === "1" : value;
+    await putPrefs({ [SERVER_KEY[name]]: serverVal });
+    if (unconfirmedWrites[name] !== value) return;
+    delete unconfirmedWrites[name];
+    delete putAttempts[name];
+    clearWriteFailure(name);
+  } catch (err) {
+    if (unconfirmedWrites[name] !== value) return;
+    const status = statusOf(err);
+    recordWriteFailure(name, status);
+    // `putAttempts[name]` is set alongside every `unconfirmedWrites[name]`
+    // write and deleted alongside it, so the guard above also guarantees
+    // it is a number here.
+    const delay = status === 401 ? undefined : PUT_RETRY_DELAYS_MS[putAttempts[name]];
+    putAttempts[name] += 1;
+    if (delay !== undefined) scheduleFlush(name, delay);
+  }
+}
+
 function schedulePutPref(name, value) {
   if (!shouldHydrate()) return;
+  // Latest value wins, and a fresh change supersedes any retry still
+  // pending for the same key — both share the one timer slot.
+  unconfirmedWrites[name] = value;
+  putAttempts[name] = 0;
   clearTimeout(pendingPuts[name]);
-  pendingPuts[name] = setTimeout(async () => {
+  scheduleFlush(name, PUT_DEBOUNCE_MS);
+}
+
+/**
+ * Re-send every write the server has not confirmed.
+ *
+ * The escape hatch for the two cases automatic backoff deliberately does
+ * not cover: a 401 (retry after re-authenticating) and a failure that
+ * outlived the retry budget.
+ */
+export async function retryPrefsSync() {
+  const names = Object.keys(unconfirmedWrites);
+  for (const name of names) {
+    clearTimeout(pendingPuts[name]);
     delete pendingPuts[name];
-    try {
-      const { putPrefs } = await import("../api.js");
-      const serverKey = SERVER_KEY[name];
-      const serverVal = BOOLEAN_PREFS.has(name) ? value === "1" : value;
-      await putPrefs({ [serverKey]: serverVal });
-    } catch {
-      /* swallow; localStorage already updated */
-    }
-  }, 200);
+    putAttempts[name] = 0;
+  }
+  await Promise.all(names.map((name) => flushPref(name)));
 }
 
 function setPref(name, value) {
@@ -187,10 +357,18 @@ export function __resetServerSyncForTest() {
     clearTimeout(pendingPuts[k]);
     delete pendingPuts[k];
   });
+  Object.keys(unconfirmedWrites).forEach((k) => delete unconfirmedWrites[k]);
+  Object.keys(putAttempts).forEach((k) => delete putAttempts[k]);
+  failedWrites.clear();
+  // Publish rather than assign, so a hook mounted before the reset re-reads
+  // the cleared state instead of rendering a stale error. `syncListeners` is
+  // deliberately NOT cleared for the same reason.
+  publishWriteFailures();
 }
 
 export function useChannelPrefs() {
   const current = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+  const sync = useSyncExternalStore(subscribeSync, getSyncSnapshot, getSyncSnapshot);
   const { theme, accent, density, shape, font, model, effort } = current;
 
   // NOTE: `theme` is intentionally NOT applied to `data-theme` here. Each
@@ -246,5 +424,10 @@ export function useChannelPrefs() {
     setShowReasoning,
     suggestFollowups: current.suggestFollowups === "1",
     setSuggestFollowups,
+    // `null` while every change has been confirmed by the server; otherwise
+    // `{ keys, statuses, unauthorized }` naming the prefs that did not stick
+    // (#482). A settings UI must not report success it cannot confirm.
+    prefsSyncError: sync.error,
+    retryPrefsSync,
   };
 }
