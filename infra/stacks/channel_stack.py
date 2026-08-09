@@ -230,8 +230,15 @@ ALARM_TOPIC_ARN_OUTPUT = "AlarmTopicArn"
 #: up to 100 subscriptions per page and supplies the continuation token
 #: itself; the cap exists so a misbehaving pagination response cannot
 #: hang a deploy pipeline, not because 2 000 subscriptions is plausible
-#: on an alarm topic. The walk also stops at the first confirmed
-#: subscription, so truncation can never turn a pass into a failure.
+#: on an alarm topic.
+#:
+#: The walk stops at the first confirmed subscription, so the cap can
+#: only bite when every one of the first 2 000 records is unconfirmed —
+#: and then it reports a failure it has not fully ruled out rather than
+#: one it has proven. That direction is deliberate: this gate exists to
+#: catch alarms that reach nobody, so an unverifiable topic should read
+#: as unverified. It is a false *failure* that is possible here, never a
+#: false pass.
 _MAX_SUBSCRIPTION_PAGES = 20
 
 
