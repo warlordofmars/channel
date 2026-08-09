@@ -192,6 +192,55 @@ Three properties are load-bearing enough to state outright:
   the text a user just asked to forget into a 365-day immutable audit
   partition would defeat the feature.
 
+## Correct a note — ``PATCH /api/memory/records/{record_id}`` (#478)
+
+The verb between keeping and forgetting. When ``remember`` stored something
+that has since gone stale — "prefers Postgres" after the user moved to
+DynamoDB — forgetting it loses the true half along with the false half.
+
+**Replace, not update** (epic #129 decision 8). AgentCore has no
+``UpdateEvent``, so this is ``DeleteEvent`` + ``CreateEvent``, which has
+three consequences the contract has to carry rather than hide:
+
+- **The replacement re-uses the original ``eventTimestamp``**, so a
+  corrected note keeps its place in chronological order instead of jumping
+  to the top of the recall window. Correcting a fact must not also promote
+  it.
+- **A new event means a new ``record_id``**, which is why this route
+  returns the updated record rather than 204. The old id addresses an
+  event that no longer exists; a client that keeps using it gets a 404 on
+  its next edit or forget.
+- **The whole payload is re-created, not just the edited entry.**
+  ``DeleteEvent`` is event-granular while a record is one *payload entry*
+  (see ``memory_records.encode_record_id``), so re-creating only the
+  corrected entry would silently drop its siblings.
+
+**Ordering is delete-then-create, and the failure that ordering admits is
+reported rather than swallowed.** If the create refuses after the delete
+succeeded, the response is a 500 whose body carries ``original_text`` — the
+exact bytes that were removed — so the panel can offer them back instead of
+the user losing a note by pressing "save". The reverse order would trade
+that for a duplicate, which is the harder failure to explain and the harder
+one to clean up.
+
+**Only ``kind == "remembered"`` may be rewritten.** ``conversation`` and
+``meta`` are a 409 with a plain-language reason. Rewriting a conversation
+turn falsifies the transcript — the user said what they said, and that is a
+forget-or-keep decision, not an edit — and a ``meta`` fact is telemetry
+about a tool call that either happened or did not. #475's read model
+already exposes this as ``editable`` so the panel never offers the
+affordance; the 409 is the server-side backstop, not the primary control.
+
+Empty or whitespace-only ``content`` is a **400, never a delete**. "Save an
+empty note" is far more likely to be a slipped keystroke than a request to
+erase, and ``DELETE`` is one call away for the case where it isn't.
+
+The stored text is re-formatted through
+``memory_tools._format_remember_text``, the same function the ``remember``
+tool writes with, so a corrected note is byte-shaped exactly like an
+originally-written one — which is what keeps it classifiable by #475's read
+model and its tags findable by the ``recall`` tool's inline-tag matching.
+
 ## Withheld records — reported on every surface (#552)
 
 All three endpoints drop sessions the ownership gate cannot verify, and all
@@ -229,7 +278,7 @@ the conservatism the withholding exists to preserve.
 
 ## A caller with no memory partition (#527)
 
-Applies to all three endpoints. An AgentCore actor partition is created lazily
+Applies to every endpoint here. An AgentCore actor partition is created lazily
 by the first memory *write*, so a user who has signed in but never had a
 chat turn has none, and every AgentCore read against them raises
 ``ResourceNotFoundException``. Both endpoints answer that as **empty**,
@@ -266,6 +315,14 @@ and the
 per-record form answers 404, because an id that addresses nothing is
 exactly what "unknown id" means. Neither is a 500, and neither is reached
 by absorbing anything wider than the one error code.
+
+``PATCH`` answers 404 for the same reason and by the same route — its
+``GetEvent`` read goes through ``memory_records._agentcore_read``, so an
+absent partition reads as an absent record. Its ``CreateEvent`` is
+deliberately *outside* that absorption (``create_session_event``): a write
+to a partition that does not exist creates it, so there is nothing to
+absorb, and a swallowed create is precisely the "we saved your correction"
+lie this module is built to refuse.
 """
 
 from __future__ import annotations
@@ -285,13 +342,20 @@ import boto3
 from botocore.exceptions import ClientError
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from channel import storage
 from channel.agents.memory import derive_actor_id, get_or_create_memory
 from channel.agents.memory_records import (
+    KIND_REMEMBERED,
+    MemoryRecord,
+    classify_kind,
     count_session_records,
+    create_session_event,
     decode_record_id,
     delete_session_event,
+    encode_record_id,
+    get_session_event,
     group_created_at,
     list_forgettable_event_ids,
     list_session_records,
@@ -300,6 +364,7 @@ from channel.agents.memory_records import (
     recall_window_session_ids,
     resolve_owned_chats,
 )
+from channel.agents.tools.memory_tools import _format_remember_text
 from channel.api._auth import require_mgmt_user
 from channel.api.chats import _load_owned_chat
 from channel.logging_config import fingerprint_id
@@ -307,6 +372,7 @@ from channel.metrics import (
     record_memory_bulk_forget_outcome,
     record_memory_export_outcome,
     record_memory_record_delete_outcome,
+    record_memory_record_edit_outcome,
 )
 from channel.models import Chat, Message
 
@@ -1002,20 +1068,23 @@ _AUDIT_FORGET_ALL = "memory.forget_all"
 _FORGET_SESSION_PAGE_SIZE = 50
 
 
-async def _write_forget_audit(event_type: str, user_id: str, details: dict[str, Any]) -> None:
-    """Best-effort audit row for one forget — counts and filters only.
+async def _write_memory_audit(event_type: str, user_id: str, details: dict[str, Any]) -> None:
+    """Best-effort audit row for one memory *mutation* — forget or edit.
 
-    **Best-effort, unlike ``/export``'s.** By the time this runs the records
-    are already gone, so failing the response would tell the user their
-    forget did not happen when it did — and a user who believes their data
-    survived behaves differently from one who knows it is gone. Losing an
-    audit row degrades forensics; failing the response degrades the truth.
-    The same call ``sessions._audit_revocation`` makes, for the same reason.
+    **Best-effort, unlike ``/export``'s.** By the time this runs the write
+    has already happened, so failing the response would tell the user their
+    forget or correction did not happen when it did — and a user who
+    believes their data survived behaves differently from one who knows it
+    is gone. Losing an audit row degrades forensics; failing the response
+    degrades the truth. The same call ``sessions._audit_revocation`` makes,
+    for the same reason.
 
     ``details`` carries counts, filters, and opaque identifiers
-    (``chat_id`` / ``record_id``) — **never record text**. The audit
-    partition has a 365-day TTL, so copying in the very text a user asked to
-    forget would quietly outlive the deletion it records.
+    (``chat_id`` / ``record_id``) — **never record text**, on either verb.
+    The audit partition has a 365-day TTL, so copying in the very text a
+    user asked to forget would quietly outlive the deletion it records, and
+    copying in a corrected note's before-and-after would preserve exactly
+    the stale claim the correction exists to retire.
     """
     try:
         await asyncio.to_thread(
@@ -1231,7 +1300,7 @@ async def forget_memory_record(
         raise HTTPException(status_code=404, detail="Record not found")
 
     await record_memory_record_delete_outcome(success=True)
-    await _write_forget_audit(
+    await _write_memory_audit(
         _AUDIT_RECORD_DELETED,
         user_id,
         {"chat_id": session_id, "record_id": record_id, "deleted": 1},
@@ -1358,7 +1427,7 @@ async def forget_memory_records(
     # that condition is the ``memory.forget_sessions_withheld`` warning, and
     # the user-visible one is the field below.
     await record_memory_bulk_forget_outcome(success=(failed == 0 and complete))
-    await _write_forget_audit(
+    await _write_memory_audit(
         event_type,
         user_id,
         {
@@ -1377,3 +1446,276 @@ async def forget_memory_records(
         "complete": complete,
         "withheld_record_count": withheld_records,
     }
+
+
+# ── Correct a note (#478) ─────────────────────────────────────────────────
+
+#: Audit event type for a correction — epic #129 decision 3. Its own name
+#: rather than a ``verb`` field on the forget events: rewriting a note and
+#: erasing one are different acts, and a trail that needs a field read to
+#: tell them apart is a trail that will be read wrongly.
+_AUDIT_RECORD_EDITED = "memory.record_edited"
+
+#: The 409 body for a record whose class forbids rewriting. Plain language
+#: rather than an error code, because this reaches a settings panel and the
+#: *reason* is the whole point — a user who is told "409" learns that the
+#: product said no, not that the transcript is deliberately immutable.
+_NOT_EDITABLE_DETAIL = (
+    "Conversation turns can be forgotten, but not rewritten. "
+    "Only notes Channel chose to remember can be corrected."
+)
+
+
+class _RecordEditRequest(BaseModel):
+    """``PATCH`` body — the corrected note, in the ``remember`` tool's own shape.
+
+    ``content`` is the note as the user wants it stored; ``tags`` replaces
+    the record's tags wholesale (omit or pass ``null`` to clear them). Both
+    go through ``memory_tools._format_remember_text``, so what lands in
+    AgentCore is byte-identical to what the tool itself would have written.
+    """
+
+    content: str
+    tags: list[str] | None = None
+
+
+async def _record_is_in_recall(
+    client: Any,
+    *,
+    memory_id: str,
+    actor_id: str,
+    session_id: str,
+    record_id: str,
+) -> bool:
+    """``used_in_recall`` for the record about to be replaced.
+
+    Read from the record's **pre-edit** view and carried onto the
+    replacement rather than recomputed after the write. Two reasons, and
+    the first is the load-bearing one:
+
+    - **The answer is identical by construction.** The replacement re-uses
+      the original ``eventTimestamp``, so the session's events are
+      unchanged in both count and ordering and the corrected record sits at
+      exactly the position the original held. Recomputing would spend a
+      second enumeration to learn something already known.
+    - **A post-write read would be at the mercy of read-after-write
+      timing** on an event created milliseconds earlier, and would report
+      ``false`` for a record that is in fact recalled — the response's one
+      chance to mislead the panel.
+
+    Computed through the same :func:`list_session_records` the panel is
+    served from, so the flag on a corrected row means exactly what it meant
+    on the row the user was looking at when they pressed save. A record
+    absent from that (capped) page reads ``false``, which is **exact rather
+    than a fallback**: the page holds the newest ``MAX_EVENTS_PER_SESSION``
+    events and the pool only the newest ``POOL_EVENTS_PER_SESSION``, and
+    the former is far larger — so anything outside the page is
+    provably outside the pool.
+
+    The kill-switch short-circuits before either call, matching ``/records``
+    and ``/export``: a disabled hook injects nothing, so no record can
+    honestly be flagged and the two probes are wasted.
+    """
+    if not _recall_enabled():
+        return False
+    window = await recall_window_session_ids(client, memory_id=memory_id, actor_id=actor_id)
+    records, _truncated = await list_session_records(
+        client,
+        memory_id=memory_id,
+        actor_id=actor_id,
+        session_id=session_id,
+        in_recall_window=session_id in window,
+    )
+    return any(record.record_id == record_id and record.used_in_recall for record in records)
+
+
+async def _replace_remembered_record(
+    record_id: str, body: _RecordEditRequest, user_id: str
+) -> tuple[dict[str, Any], str]:
+    """Do the replace → ``(updated record, session_id)``.
+
+    Separate from the route so the route is only the metric wrapper and the
+    audit write, and so every AgentCore call sits inside one try/except that
+    can count a failure exactly once — the same split ``_build_export`` /
+    ``export_account_data`` uses.
+
+    **Everything that can refuse, refuses before the delete.** The id
+    decode, the empty-content check, the ownership gate, the record lookup,
+    the ``remembered``-only gate and the timestamp check all run first, so a
+    rejected edit leaves the record exactly as it was. Only two things can
+    fail after the delete — the create itself, and that is what the
+    ``original_text`` in the 500 body is for.
+    """
+    try:
+        session_id, event_id, payload_index = decode_record_id(record_id)
+    except ValueError as exc:
+        # Never forward a malformed id to AgentCore — it would come back as
+        # a ValidationException, i.e. a 500 for what is a client error.
+        raise HTTPException(status_code=400, detail="malformed record_id") from exc
+
+    if not body.content.strip():
+        # A 400, deliberately not a delete: an empty save is far more likely
+        # to be a slipped keystroke than an erase request, and DELETE is one
+        # call away for the case where it isn't.
+        raise HTTPException(status_code=400, detail="content must not be empty")
+
+    # Ownership before anything is read, by the same 404-not-403 gate the
+    # rest of the chat surface uses — ``sessionId`` *is* a ``chat_id``.
+    await _load_owned_chat(session_id, user_id)
+
+    actor_id = derive_actor_id(user_id)
+    client = _agentcore_client()
+    memory_id = await asyncio.to_thread(_memory_id_for_env)
+
+    event = await get_session_event(
+        client,
+        memory_id=memory_id,
+        actor_id=actor_id,
+        session_id=session_id,
+        event_id=event_id,
+    )
+    if event is None:
+        raise HTTPException(status_code=404, detail="Record not found")
+
+    payload = list(event.get("payload") or [])
+    if payload_index >= len(payload):
+        # The event exists but holds no entry at that index — an id from a
+        # stale panel, or one hand-built. Indistinguishable from an unknown
+        # record, and answered as one.
+        raise HTTPException(status_code=404, detail="Record not found")
+    conversational = payload[payload_index].get("conversational") or {}
+    role = conversational.get("role", "")
+    original_text = (conversational.get("content") or {}).get("text", "")
+    if not original_text:
+        # A text-less entry is not a record: the read model skips it, so the
+        # panel never showed it and there is nothing to correct.
+        raise HTTPException(status_code=404, detail="Record not found")
+
+    if classify_kind(role, original_text) != KIND_REMEMBERED:
+        raise HTTPException(status_code=409, detail=_NOT_EDITABLE_DETAIL)
+
+    event_timestamp = event.get("eventTimestamp")
+    if not isinstance(event_timestamp, datetime):
+        # boto3 deserializes AgentCore timestamps as ``datetime`` and the
+        # service model makes ``eventTimestamp`` required, so this is a wire
+        # anomaly rather than an expected shape. It refuses BEFORE the
+        # delete, so the record survives: preserving chronological position
+        # is the whole reason the timestamp is re-used, and creating the
+        # replacement at "now" would silently promote a corrected note to
+        # the top of the recall window.
+        raise HTTPException(status_code=500, detail="record has no usable timestamp")
+
+    used_in_recall = await _record_is_in_recall(
+        client,
+        memory_id=memory_id,
+        actor_id=actor_id,
+        session_id=session_id,
+        record_id=record_id,
+    )
+
+    new_text = _format_remember_text(body.content, body.tags)
+
+    if not await delete_session_event(
+        client,
+        memory_id=memory_id,
+        actor_id=actor_id,
+        session_id=session_id,
+        event_id=event_id,
+    ):
+        # Raced with a forget between the GetEvent above and here. The
+        # record is gone, which is what a 404 says.
+        raise HTTPException(status_code=404, detail="Record not found")
+
+    # Sibling entries are carried over untouched — ``DeleteEvent`` took the
+    # whole event, so anything not re-created here is lost.
+    payload[payload_index] = {"conversational": {"role": role, "content": {"text": new_text}}}
+    try:
+        new_event_id = await create_session_event(
+            client,
+            memory_id=memory_id,
+            actor_id=actor_id,
+            session_id=session_id,
+            event_timestamp=event_timestamp,
+            payload=payload,
+        )
+    except Exception as exc:
+        # The one failure this ordering admits. The original bytes go back
+        # in the body so the panel can offer them to the user rather than
+        # losing a note to a "save" — see the module docstring.
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": (
+                    "the correction could not be saved and the original was already removed"
+                ),
+                "original_text": original_text,
+            },
+        ) from exc
+
+    updated = MemoryRecord(
+        record_id=encode_record_id(session_id, new_event_id, payload_index),
+        # Re-classified rather than assumed: ``_format_remember_text`` and
+        # ``classify_kind`` are the write and read halves of one convention,
+        # and asserting the round trip here is free.
+        kind=classify_kind(role, new_text),
+        role=role,
+        text=new_text,
+        created_at=event_timestamp.isoformat(),
+        used_in_recall=used_in_recall,
+    )
+    return updated.to_dict(), session_id
+
+
+@router.patch(
+    "/records/{record_id}",
+    responses={
+        400: {"description": "Malformed record_id, or empty content"},
+        404: {"description": "Unknown record, or one whose chat the caller doesn't own"},
+        409: {"description": "The record is a conversation turn or a meta fact"},
+        500: {"description": "The replacement could not be written after the original was removed"},
+    },
+)
+async def edit_memory_record(
+    record_id: str,
+    body: _RecordEditRequest,
+    claims: dict[str, Any] = Depends(require_mgmt_user),
+) -> dict[str, Any]:
+    """Correct one ``remembered`` note, in place, keeping its position.
+
+    Returns the updated record in the same shape ``/records`` serves —
+    including its **new** ``record_id``, which the caller must adopt: the
+    replacement is a new AgentCore event, so the id it was addressed by no
+    longer exists.
+    """
+    user_id = claims["sub"]
+    try:
+        updated, session_id = await _replace_remembered_record(record_id, body, user_id)
+    except HTTPException as exc:
+        # A 4xx is a statement about the request, not an edit that failed —
+        # the same rule the per-record forget follows, so counting it would
+        # put a floor under the failure rate that no fix could lower. A 5xx
+        # is an operational failure and does count, including the
+        # create-after-delete case that is the one worth alarming on.
+        if exc.status_code >= 500:
+            await record_memory_record_edit_outcome(success=False)
+        raise
+    except Exception:
+        await record_memory_record_edit_outcome(success=False)
+        raise
+
+    await record_memory_record_edit_outcome(success=True)
+    # Best-effort, and counts + opaque ids only. The correction has already
+    # landed, so failing the response would report an edit that did not
+    # happen — and copying the before/after text into a 365-day audit
+    # partition would preserve exactly the stale claim it just retired.
+    await _write_memory_audit(
+        _AUDIT_RECORD_EDITED,
+        user_id,
+        {
+            "chat_id": session_id,
+            "record_id": record_id,
+            "new_record_id": updated["record_id"],
+            "edited": 1,
+        },
+    )
+    return updated

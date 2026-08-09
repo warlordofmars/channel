@@ -355,9 +355,57 @@ def test_the_two_forget_counters_are_distinct_from_each_other_and_from_memory_he
     }
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("success", "expected"),
+    [(True, "MemoryRecordEditSuccesses"), (False, "MemoryRecordEditFailures")],
+)
+async def test_record_memory_record_edit_outcome_emits_its_own_counter(
+    success: bool, expected: str
+):
+    from channel.metrics import record_memory_record_edit_outcome
+
+    with patch("channel.metrics.emit_metric", new=AsyncMock()) as mock_emit:
+        await record_memory_record_edit_outcome(success=success)
+    mock_emit.assert_awaited_once_with(expected)
+
+
+def test_the_edit_counter_is_distinct_from_the_forget_and_health_counters():
+    """Correcting a stale note and erasing one are different operational
+    events — a failed edit can leave a record deleted rather than rewritten,
+    which a shared counter would average away (#478)."""
+    import asyncio
+
+    from channel.metrics import record_memory_record_edit_outcome
+
+    with patch("channel.metrics.emit_metric", new=AsyncMock()) as mock_emit:
+        asyncio.run(record_memory_record_edit_outcome(success=True))
+        asyncio.run(record_memory_record_edit_outcome(success=False))
+    emitted = {call.args[0] for call in mock_emit.await_args_list}
+    assert emitted == {"MemoryRecordEditSuccesses", "MemoryRecordEditFailures"}
+    assert not emitted & {
+        "MemoryRecordDeleteSuccesses",
+        "MemoryRecordDeleteFailures",
+        "MemoryBulkForgetSuccesses",
+        "MemoryBulkForgetFailures",
+        "MemoryExportSuccesses",
+        "MemoryExportFailures",
+        "MemoryWriteSuccesses",
+        "MemoryWriteFailures",
+        "MemoryToolWriteSuccesses",
+        "MemoryToolWriteFailures",
+        "RecallSuccesses",
+        "RecallFailures",
+    }
+
+
 @pytest.mark.parametrize(
     "helper_name",
-    ["record_memory_record_delete_outcome", "record_memory_bulk_forget_outcome"],
+    [
+        "record_memory_record_delete_outcome",
+        "record_memory_bulk_forget_outcome",
+        "record_memory_record_edit_outcome",
+    ],
 )
 def test_forget_counter_signatures_lock_out_dimensions(helper_name: str):
     """Per-actor / per-session / per-record dimensions are exactly what must
