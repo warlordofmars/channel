@@ -1,16 +1,22 @@
 # Alarm delivery
 
-The stack creates 24 CloudWatch alarms and one SNS topic
+The stack creates 15 CloudWatch alarms and one SNS topic
 (`AlarmTopic`) for them to publish to. An alarm that fires into a topic
 with no subscriber notifies nobody, so alarm *delivery* is a separate
 thing from alarm *correctness* and has its own control.
 
-Two guards exist and they cover different halves of the chain:
+Three guards exist and they cover different parts of the chain:
 
 | Guard | What it proves | Where |
 | --- | --- | --- |
 | `test_every_channel_namespace_alarm_references_an_emitted_metric` | Each alarm watches a metric the code really publishes | `tests/unit/test_channel_stack.py` |
+| `test_ops_doc_alarm_count_matches_the_synthesised_stack` | The count on this page is the count the stack builds | `tests/unit/test_channel_stack.py` |
 | **Verify prod alarm subscription** | The topic can reach a human | `.github/workflows/ci.yml`, post-deploy |
+
+The count above is checked against the synthesised template rather than
+maintained by hand — it read 24 against a stack of 14 within a day of
+being written, which is the same shape of untrue claim the rest of this
+page exists to prevent.
 
 Before the second one existed, the pipeline read: metric emitted
 correctly → alarm wired correctly → topic with zero subscribers →
@@ -144,3 +150,46 @@ simply the lowest-setup option.
 It means somebody unsubscribed, the address bounced hard enough for SNS
 to disable it, or the topic was replaced. Alarms have been silent since
 whenever that happened. Work back through the checklist from step 3.
+
+## `Channel-prod-RefreshReuseDetected` — the one that is not a rate
+
+Added in #496. Every other alarm on this topic watches a rate or a
+sustained level, because one 5xx or one throttle is noise. This one
+fires on a **single occurrence** and there is no sensitivity to tune.
+
+It means a refresh token that had already been rotated was presented
+again. Under hard rotation (#290) a live device family holds exactly one
+usable token at a time, so a second presentation of a spent one is the
+RFC 9700 §4.14.2 breach signal: in practice, a credential that was
+copied off the device it was issued to.
+
+**The automatic response has already run** by the time the alarm fires.
+`consume_refresh_token` revoked the whole device family, so the attacker
+and the legitimate user are both signed out of that device and must
+re-authenticate. Nothing is on fire and nothing needs an emergency
+rollback. The alarm exists because a revoke recorded and never read by a
+human is indistinguishable from a breach nobody noticed.
+
+What to do:
+
+1. **Identify the account.** The counter carries no dimensions on
+   purpose (`user_id` / `device_id` / client IP are unbounded, and one is
+   PII). The identity is in the logs: query the `auth.refresh rejected`
+   lines around the alarm timestamp for the `reused` reason.
+2. **Check whether it repeats.** One occurrence is consistent with a
+   benign client bug — two tabs or two app instances racing a renewal
+   past the single-flight guard (#495 narrows this window but leaves a
+   bounded escape hatch). A pattern across separate sign-ins, or across
+   accounts, is not.
+3. **Check what the family did before it died** — `/auth/refresh`
+   successes in that device's chain, and whether the account's other
+   devices are still live (`GET /api/me/sessions` covers the user's own
+   view; the refresh rows carry `device_id`).
+4. **If it looks like theft**, end every session for the account
+   (`DELETE /api/me/sessions` denylists the caller's access token as
+   well as revoking the families) and treat the access tokens minted
+   from that family as compromised for up to their 1-hour TTL.
+
+An occurrence in `dev` notifies nobody by design (see the posture
+above). It is still visible as a CloudWatch alarm-state change on the
+dev stack.
