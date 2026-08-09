@@ -383,14 +383,19 @@ could sign in was an admin.
 - `_allowed_emails()` **fails closed** on parse or load errors: a
   malformed JSON value or an unreachable SSM call is logged and
   treated as an empty list. No login is admitted.
-- An empty allowlist (`"[]"` — the default after first deploy) means
-  every login attempt is rejected with HTTP 403, including the
+- An empty sign-in allowlist (`"[]"` — the default after first deploy)
+  means every login attempt is rejected with HTTP 403, including the
   deployer's own. Populate the parameter before expecting anyone to
   log in.
-- Admin role is granted by the `is_admin_email` heuristic in
-  `src/channel/auth/google.py`, which today maps to membership in
-  the same allowlist — every allowlisted email is an admin. Replace
-  this if you need a more granular role split.
+- Admin role is granted by `is_admin_email`
+  (`src/channel/auth/google.py`), which reads `_admin_allowed_emails()`
+  — the **separate** admin list, not the sign-in one (#600). Signing in
+  therefore grants `role=user` and nothing more.
+- An empty admin allowlist (`"[]"` — also the default after first
+  deploy) means **no admins**: `/api/admin/*` and the admin dashboard
+  are unreachable by everyone until the parameter is populated. That is
+  a deploy step, not a fault. It is deliberately *not* "everyone is an
+  admin", which is what a fail-open here would mean.
 
 ### Redirect URI registration
 

@@ -284,6 +284,60 @@ def test_allowed_emails_non_array_denies_all(monkeypatch):
     assert _allowed_emails() == frozenset()
 
 
+def test_signin_allowlist_from_ssm_parameter(monkeypatch):
+    """The sign-in caller passes its OWN parameter env var.
+
+    Mirrors `test_admin_allowlist_from_ssm_parameter`. Both callers hand
+    the same shared helper five strings; without this the admin tests
+    cover every *line* of the SSM branch while nothing checks that the
+    sign-in call site names `ALLOWED_EMAILS_PARAM` — a transposition
+    would point the sign-in gate at the admin list and stay green.
+    """
+    monkeypatch.delenv("ALLOWED_EMAILS", raising=False)
+    monkeypatch.setenv("ALLOWED_EMAILS_PARAM", "/channel/dev/allowed-emails")
+
+    seen = []
+
+    def _fake_ssm(name):
+        seen.append(name)
+        return '["alice@example.com"]'
+
+    monkeypatch.setattr("channel.auth.google._ssm_param", _fake_ssm)
+
+    assert is_email_allowed("alice@example.com") is True
+    assert seen == ["/channel/dev/allowed-emails"]
+
+
+def test_signin_allowlist_ssm_default_parameter_path(monkeypatch):
+    """With no `*_PARAM` override, the sign-in default path is unchanged."""
+    monkeypatch.delenv("ALLOWED_EMAILS", raising=False)
+    monkeypatch.delenv("ALLOWED_EMAILS_PARAM", raising=False)
+
+    seen = []
+
+    def _fake_ssm(name):
+        seen.append(name)
+        return "[]"
+
+    monkeypatch.setattr("channel.auth.google._ssm_param", _fake_ssm)
+
+    assert _allowed_emails() == frozenset()
+    assert seen == ["/channel/allowed-emails"]
+
+
+def test_signin_allowlist_ssm_read_error_denies_all(monkeypatch):
+    """The sign-in list fails closed on an SSM error, exactly as before."""
+    monkeypatch.delenv("ALLOWED_EMAILS", raising=False)
+
+    def _boom(_name):
+        raise RuntimeError("ssm unavailable")
+
+    monkeypatch.setattr("channel.auth.google._ssm_param", _boom)
+
+    assert _allowed_emails() == frozenset()
+    assert is_email_allowed("anyone@example.com") is False
+
+
 def test_allowed_emails_ttl_cache_returns_cached_value(monkeypatch):
     """A second call within the TTL window returns the cached set even if
     the env var changes — the cache absorbs intra-window churn so a single

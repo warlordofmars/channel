@@ -31,8 +31,13 @@ def _no_denied_jtis(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _no_ssm_reads(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Stub the SSM boundary so no unit test makes a network round trip.
+def _no_ssm_allowlist_reads(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub the **allowlist** SSM boundary — ``channel.auth.google._ssm_param``.
+
+    Scope is exactly that one seam, not SSM generally: ``startup.py``,
+    ``auth/tokens.py`` and ``agents/tools/web_search.py`` each read SSM
+    through their own helper and are deliberately untouched here. Widen
+    this fixture rather than assuming it already covers them.
 
     Both email allowlists fall back to an SSM read when their env var is
     unset (``ALLOWED_EMAILS`` for sign-in, ``ADMIN_ALLOWED_EMAILS`` for
@@ -43,9 +48,10 @@ def _no_ssm_reads(monkeypatch: pytest.MonkeyPatch) -> None:
     Raising here reproduces exactly what a missing/unreadable parameter
     does in production — the caller logs and yields an empty allowlist —
     so a test that hasn't set its env var still exercises the real
-    default-deny branch rather than a special test-only shortcut. Tests
-    that drive the SSM transport on purpose override this with their own
-    ``monkeypatch.setattr``.
+    default-deny branch rather than a special test-only shortcut. It can
+    therefore only make a test observe *fewer* admins, never more: it
+    cannot mask a fail-open. Tests that drive the SSM transport on
+    purpose override this with their own ``monkeypatch.setattr``.
     """
 
     def _refuse(name: str) -> str:

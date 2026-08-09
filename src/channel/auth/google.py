@@ -92,6 +92,7 @@ def _parse_allowlist(raw: str, label: str) -> frozenset[str]:
 
 
 def _load_email_allowlist(
+    *,
     cache_key: str,
     env_var: str,
     param_env_var: str,
@@ -99,6 +100,12 @@ def _load_email_allowlist(
     failure_effect: str,
 ) -> frozenset[str]:
     """Load one email allowlist from env or SSM, with a short TTL cache.
+
+    Keyword-only on purpose: five same-typed strings, two of which name
+    the *other* list's parameter if transposed. A positional call site
+    that swapped ``param_env_var`` and ``default_param`` between the two
+    callers would point the sign-in gate at the admin parameter, and
+    every line here would still be covered.
 
     **Fails closed (empty set) on every path that isn't an explicit, valid
     list**: env var unset with no readable parameter, an SSM read error,
@@ -151,11 +158,11 @@ def _load_email_allowlist(
 def _allowed_emails() -> frozenset[str]:
     """The sign-in allowlist — who may use Channel at all."""
     return _load_email_allowlist(
-        _SIGNIN_ALLOWLIST,
-        "ALLOWED_EMAILS",
-        "ALLOWED_EMAILS_PARAM",
-        "/channel/allowed-emails",
-        "denying all logins",
+        cache_key=_SIGNIN_ALLOWLIST,
+        env_var="ALLOWED_EMAILS",
+        param_env_var="ALLOWED_EMAILS_PARAM",
+        default_param="/channel/allowed-emails",
+        failure_effect="denying all logins",
     )
 
 
@@ -167,11 +174,11 @@ def _admin_allowed_emails() -> frozenset[str]:
     reaches ``/api/admin/*``.
     """
     return _load_email_allowlist(
-        _ADMIN_ALLOWLIST,
-        "ADMIN_ALLOWED_EMAILS",
-        "ADMIN_ALLOWED_EMAILS_PARAM",
-        "/channel/admin-allowed-emails",
-        "granting the admin role to nobody",
+        cache_key=_ADMIN_ALLOWLIST,
+        env_var="ADMIN_ALLOWED_EMAILS",
+        param_env_var="ADMIN_ALLOWED_EMAILS_PARAM",
+        default_param="/channel/admin-allowed-emails",
+        failure_effect="granting the admin role to nobody",
     )
 
 
