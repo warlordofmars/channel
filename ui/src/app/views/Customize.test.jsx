@@ -117,6 +117,15 @@ describe("Customize", () => {
     expect(screen.getByText(/Tune Channel's appearance/i)).toBeTruthy();
   });
 
+  it("links to the signed-in devices view (#296)", () => {
+    // The sessions view is its own route, so this row is the only way a user
+    // finds it — a route with no entry point is unreachable code.
+    renderCustomize();
+    expect(screen.getByRole("heading", { level: 3, name: "Security" })).toBeTruthy();
+    const link = screen.getByRole("link", { name: "Manage" });
+    expect(link.getAttribute("href")).toBe("/app/sessions");
+  });
+
   it("renders three section headers: Appearance / Defaults / Behavior", () => {
     renderCustomize();
     expect(screen.getByRole("heading", { level: 3, name: "Appearance" })).toBeTruthy();

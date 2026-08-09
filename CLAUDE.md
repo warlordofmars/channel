@@ -90,12 +90,13 @@ channel/
 │   │       ├── DeleteChatModal.jsx                           # Delete confirm dialog
 │   │       ├── RenameChatModal.jsx                           # Rename chat dialog
 │   │       ├── renderMarkdown.jsx                            # Tiny markdown helper (paragraphs/bold/OL/cursor)
-│   │       └── views/                                        # /app/projects, /app/projects/:id, /app/artifacts, /app/customize
+│   │       └── views/                                        # /app/projects, /app/projects/:id, /app/artifacts, /app/customize, /app/sessions
 │   │           ├── Projects.jsx                              # Grid of project cards + 'New project' tile
 │   │           ├── ProjectDetail.jsx                         # Project header + Composer + docs + chats list
 │   │           ├── Artifacts.jsx                             # List of artifact rows + bookmarkable panel
 │   │           ├── ArtifactPanel.jsx                         # Slide-in viewer with 5 renderers (Code/Chart/Data/Interactive/Document)
 │   │           ├── Customize.jsx                             # 5 visual prefs (theme/accent/density/model/effort) + 3 behavior toggles
+│   │           ├── Sessions.jsx                              # /app/sessions — signed-in devices + per-device / all-device revoke (#296)
 │   │           └── artifactHelpers.js                        # colorFor / inkFor / artIcon utilities
 │   └── package.json
 ├── desktop/
@@ -469,6 +470,29 @@ to: the server-side revoke is the authoritative one, and a browser
 presenting the now-dead cookie to `/auth/refresh` gets a 401 that clears
 it (see above). Clearing here would be cosmetic, and the cookie's
 `Path=/auth` doesn't reach `/api/*` on the request side anyway.
+
+**The SPA surface is `/app/sessions` (#296)** —
+`ui/src/app/views/Sessions.jsx`, reached from a "Signed-in devices" row on
+`/app/customize`, over three `api.js` wrappers (`listSessions` /
+`revokeSession` / `revokeAllSessions`, all built on `authHeader()` so they
+inherit #295's silent refresh). Three things the view must keep doing,
+each a direct consequence of the API's shape above:
+
+- **A 404 from the per-device revoke is reported as success**, not as an
+  error. The list walks the eventually-consistent index, so revoking a row
+  it just showed can 404 — and "gone" is what the user asked for. The list
+  is re-read either way.
+- **No revoked-count is ever displayed.** The `DELETE`s return 204 with no
+  count on purpose; the view re-reads the list and shows what is actually
+  there.
+- **"Sign out everywhere" ends the local session.** It is the
+  all-devices route, which includes this device and denylists the caller's
+  own access token, so on success the view calls `endSession()` (clear
+  storage, route to `/app/login`) rather than returning to a view whose
+  every request would now 401. There is no all-but-current variant to call
+  instead — see the missing `device_id` claim above — which is the same
+  reason no row is badged "this device": the client cannot tell which one
+  it is, and guessing would be a confident lie on a security surface.
 
 Ownership is the JWT `sub` claim and a mismatch is **404, not 403**
 (`_load_owned_session` mirrors `_load_owned_chat`): lookups run inside
