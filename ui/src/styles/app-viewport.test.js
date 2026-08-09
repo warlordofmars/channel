@@ -43,27 +43,41 @@
 //      alone does not cover (#571). Unlike 1-6 this is not a declaration
 //      match: it lays the row out. See the section comment above that
 //      block for what is real in it and what is modelled.
-import { act, render } from "@testing-library/react";
+//   8. That no popover can be drawn outside the viewport it opens in
+//      (#582). Like 7 this is an outcome, not a declaration match, and it
+//      renders the real popovers. See the section comment above that block.
+import { act, fireEvent, render } from "@testing-library/react";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createElement } from "react";
+import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 // #571's assertions lay out the REAL `.composer-row`, which means rendering
 // the real `Composer` — and that drags in the attachment client as a module
-// import. Nothing below drives an upload or opens a popover, so these are
-// stubs, not models. `listModels` has to resolve because `ModelPicker` asks
-// for the list at mount.
+// import. `listModels` has to resolve because `ModelPicker` asks for the
+// list at mount. `logout` is `Sidebar`'s, imported for #582's account
+// popover; nothing below drives an upload or a sign-out, so these are
+// stubs, not models.
 vi.mock("../api.js", () => ({
   listModels: vi.fn().mockResolvedValue({ models: [] }),
   sha256Hex: vi.fn(),
   presignAttachment: vi.fn(),
   uploadToPresigned: vi.fn(),
   finalizeAttachment: vi.fn(),
+  logout: vi.fn(),
+}));
+
+// `Sidebar` reads the chat list through this context (#582 renders it for
+// the real `.sb-foot > .account-wrap > .pop` ancestry). Nothing below
+// archives a chat.
+vi.mock("../hooks/ChatsContext.jsx", () => ({
+  useChats: () => ({ archiveChat: vi.fn() }),
 }));
 
 import Composer from "../app/Composer.jsx";
+import Sidebar from "../app/Sidebar.jsx";
 
 // Deliberately NOT `new URL("./app.css", import.meta.url)`, the shape
 // `ui/src/pwa.test.js` uses. Vite statically rewrites that exact literal
@@ -1020,5 +1034,887 @@ describe("composer control row — send stays right when the row wraps (#571)", 
     expect(() => classifyRowChild(stranger)).toThrow(
       /unrecognised `\.composer-row` child/,
     );
+  });
+});
+
+// ===========================================================================
+// #582 — popovers, clamped to the viewport
+// ===========================================================================
+//
+// Like #571 above, this section asserts an OUTCOME rather than a
+// declaration: where a popover's left and right edges land on a phone. That
+// needs a layout and jsdom implements none, so the two rules that decide it
+// are modelled here:
+//
+//   1. Which ancestor establishes the containing block (CSS 2.1 §10.1) —
+//      the nearest ancestor whose `position` is not `static`. This is the
+//      whole mechanism of the fix: the ≤640px block makes `.pop-anchor`
+//      static, which hands the popover up to `.composer-wrap`.
+//   2. How `left` / `right` / `min-width` / `max-width` size and place an
+//      absolutely-positioned box (§10.3.7), including the over-constrained
+//      case — with both edges pinned and a clamp in play, `right` is the
+//      one that gives way in `ltr`.
+//
+// Three inputs are real rather than invented, for the reason #571 states:
+//
+//   * The DECLARATIONS come from `app.css` on disk — every gutter, every
+//     anchor offset, every clamp. Nothing below hardcodes a pixel the
+//     stylesheet doesn't declare, so deleting the fix moves the model.
+//   * The POPOVERS are the real ones, opened by clicking the real trigger
+//     inside the real `Composer` / `Sidebar`, so their ancestry and their
+//     class lists are the browser's, not a fixture's.
+//   * The VIEWPORTS are swept, so no assertion rests on one device.
+//
+// What stays modelled is a popover's intrinsic content width, which only
+// real text layout can supply — so that too is swept, and one of the
+// assertions is that the answer does not depend on it. That is the
+// property the fix actually buys, and the reason the anchor was pinned at
+// both edges rather than flipped: a flipped anchor's safe edge is still a
+// function of content width and trigger position, so a longer server name
+// re-breaks it silently.
+//
+// SCOPE, stated plainly: these assertions cover ≤640px, which is #582's
+// scope and the viewport the bug was reported from. They deliberately do
+// NOT assert the trigger-anchored geometry at ≥641px — see the PR for
+// #582, which reports that the right-anchored MCP popover can still clip
+// on a narrow desktop window and proposes a follow-up. Asserting a bound
+// this change does not deliver would be worse than not asserting it.
+//
+// A real phone remains the only oracle for the pixels, and confirming it
+// there is the reporter's step.
+
+/** The `@media (max-width: N px)` breakpoint, read rather than assumed. */
+function mobileBreakpointPx() {
+  const match = css.match(/@media \(max-width: (\d+)px\)/);
+  if (match === null) {
+    throw new Error(
+      "no `@media (max-width: <n>px)` block in app.css — the #582 model " +
+        "takes its breakpoint from the stylesheet and can no longer find one",
+    );
+  }
+  return Number(match[1]);
+}
+
+/**
+ * Every un-indented, top-level rule body for `selectorSource`, in source
+ * order.
+ *
+ * Plural on purpose: `app.css` declares `.composer-wrap` twice at top level
+ * — the sizing rule in the composer section and `position: relative` three
+ * hundred lines later — so a helper that returned the first match would
+ * report the wrapper as `static` and the containing-block walk below would
+ * sail straight past the element the whole fix depends on.
+ *
+ * `^` + the `m` flag is what confines this to top level: rules nested in a
+ * media query are indented, the same assumption `stageRule()` above makes.
+ */
+function topLevelRuleBodies(selectorSource) {
+  return [
+    ...css.matchAll(new RegExp(`^${selectorSource}\\s*\\{([^}]*)\\}`, "gm")),
+  ].map((m) => m[1]);
+}
+
+/** Every rule body in `block` whose selector is exactly `selectorSource`. */
+function ruleBodiesIn(block, selectorSource) {
+  return [
+    ...block.matchAll(
+      new RegExp(`(?:^|[{};])\\s*${selectorSource}\\s*\\{([^}]*)\\}`, "g"),
+    ),
+  ].map((m) => m[1]);
+}
+
+/**
+ * Last declared value of `prop` across `bodies`, in source order, or `null`.
+ *
+ * Resolved rather than read off one declaration for the reason
+ * `effectiveBottomPadding` gives above: `app.css` sets several of these
+ * properties twice — once in the layout rule, once in the safe-area
+ * sub-block appended lower down the same media query — and which one wins
+ * is a cascade question, not a lookup.
+ *
+ * The leading `(?:^|[;{\s])` is what stops `width` matching inside
+ * `max-width`; `[^;}]` keeps a value that drops its terminating semicolon
+ * (legal for the last declaration in a block) from running past its rule.
+ */
+function effectiveDecl(bodies, prop) {
+  let value = null;
+  for (const body of bodies) {
+    for (const [, raw] of body.matchAll(
+      new RegExp(`(?:^|[;{\\s])${prop}:\\s*([^;}]+)`, "g"),
+    )) {
+      value = raw.trim();
+    }
+  }
+  return value;
+}
+
+/** `effectiveDecl`, but a missing declaration is an error rather than null. */
+function requireDecl(bodies, prop, label) {
+  const value = effectiveDecl(bodies, prop);
+  if (value === null) {
+    throw new Error(
+      `no \`${prop}\` in the ${label} rule of app.css — the #582 model reads ` +
+        "the popover's geometry from the stylesheet and can no longer place it",
+    );
+  }
+  return value;
+}
+
+/** The `side` component of a `padding` shorthand value. */
+function shorthandSide(value, side) {
+  const parts = value.trim().split(/\s+/);
+  if (side === "right") return parts.length >= 2 ? parts[1] : parts[0];
+  if (parts.length >= 4) return parts[3];
+  return parts.length >= 2 ? parts[1] : parts[0];
+}
+
+/**
+ * Effective `padding-left` / `padding-right` across `bodies`, walking both
+ * the shorthand and the longhand forms in source order.
+ */
+function effectivePaddingSide(bodies, side) {
+  let value = null;
+  for (const body of bodies) {
+    for (const [, longhand, raw] of body.matchAll(
+      /(?:^|[;{\s])padding(-top|-right|-bottom|-left)?:\s*([^;}]+)/g,
+    )) {
+      if (longhand === undefined) value = shorthandSide(raw, side);
+      else if (longhand === `-${side}`) value = raw.trim();
+    }
+  }
+  return value;
+}
+
+/** Split on top-level commas — `min(a, calc(b - c))` is two terms, not three. */
+function splitTopLevel(expr) {
+  const parts = [];
+  let depth = 0;
+  let token = "";
+  for (const ch of expr) {
+    if (ch === "(") depth += 1;
+    if (ch === ")") depth -= 1;
+    if (ch === "," && depth === 0) {
+      parts.push(token);
+      token = "";
+      continue;
+    }
+    token += ch;
+  }
+  parts.push(token);
+  return parts;
+}
+
+/**
+ * Evaluate a `calc()` body. CSS requires whitespace around `+` and `-`, so
+ * the separator test is unambiguous and a `-` inside an identifier
+ * (`safe-area-inset-left`) is never mistaken for an operator.
+ */
+function calcPx(expr, viewport) {
+  let total = 0;
+  let sign = 1;
+  let depth = 0;
+  let token = "";
+  for (let i = 0; i < expr.length; i += 1) {
+    const ch = expr[i];
+    if (ch === "(") depth += 1;
+    if (ch === ")") depth -= 1;
+    const spaced = /\s/.test(expr[i - 1] ?? "") && /\s/.test(expr[i + 1] ?? "");
+    if (depth === 0 && (ch === "+" || ch === "-") && spaced) {
+      total += sign * lengthPx(token, viewport);
+      token = "";
+      sign = ch === "+" ? 1 : -1;
+      continue;
+    }
+    token += ch;
+  }
+  return total + sign * lengthPx(token, viewport);
+}
+
+/**
+ * A CSS length in px at `viewport`.
+ *
+ * Throws on any shape it does not implement rather than guessing — the
+ * #505 discipline applied to the stylesheet side. A value this cannot read
+ * is a value the model is not entitled to reason about.
+ *
+ * `env(safe-area-inset-*)` resolves to 0, which is what it resolves to on
+ * every non-notched device and in every desktop browser. On a notched one
+ * the insets only ever *increase* a gutter, which moves both edges further
+ * inside the viewport, so 0 is also the worst case for these bounds.
+ *
+ * `vw` is taken as the plain viewport width. Real browsers count the
+ * classic scrollbar in `vw`, but the app layer is `position: fixed;
+ * inset: 0` and never scrolls the document, so there is no gutter to
+ * over-count.
+ */
+function lengthPx(value, viewport) {
+  const v = String(value).trim();
+  if (/^-?\d+(?:\.\d+)?$/.test(v)) {
+    if (Number(v) === 0) return 0;
+    throw new Error(`unitless non-zero length \`${v}\` in app.css (#582 model)`);
+  }
+  let m = /^(-?\d+(?:\.\d+)?)px$/.exec(v);
+  if (m) return Number(m[1]);
+  m = /^(-?\d+(?:\.\d+)?)vw$/.exec(v);
+  if (m) return (Number(m[1]) / 100) * viewport;
+  m = /^env\(safe-area-inset-(?:top|right|bottom|left)\)$/.exec(v);
+  if (m) return 0;
+  m = /^calc\((.+)\)$/.exec(v);
+  if (m) return calcPx(m[1], viewport);
+  m = /^min\((.+)\)$/.exec(v);
+  if (m) {
+    return Math.min(...splitTopLevel(m[1]).map((p) => lengthPx(p, viewport)));
+  }
+  m = /^max\((.+)\)$/.exec(v);
+  if (m) {
+    return Math.max(...splitTopLevel(m[1]).map((p) => lengthPx(p, viewport)));
+  }
+  throw new Error(
+    `app.css declares the length \`${v}\`, which the #582 viewport model ` +
+      "cannot evaluate — teach `lengthPx` this shape before trusting any " +
+      "bound computed from it",
+  );
+}
+
+/** Rule bodies that apply to a bare class at `viewport`: base, then mobile. */
+function bodiesForClass(className, viewport) {
+  if (!/^[a-z][a-z0-9-]*$/.test(className)) {
+    throw new Error(
+      `class \`${className}\` is not a plain identifier — the #582 model ` +
+        "interpolates class names into regexes and will not do so blindly",
+    );
+  }
+  const selector = `\\.${className}`;
+  const bodies = topLevelRuleBodies(selector);
+  if (viewport <= mobileBreakpointPx()) {
+    bodies.push(...ruleBodiesIn(mobileBlock(), selector));
+  }
+  return bodies;
+}
+
+/**
+ * The `position` app.css gives `el` at `viewport`.
+ *
+ * Throws when no rule in the file mentions any of the element's classes:
+ * an ancestor the stylesheet says nothing about is one this model cannot
+ * claim is `static`, and claiming it wrongly would silently re-point every
+ * containing block below it.
+ */
+function effectivePosition(el, viewport) {
+  const classes = [...el.classList];
+  if (classes.length === 0) {
+    throw new Error(
+      `<${el.tagName.toLowerCase()}> has no class, so the #582 model cannot ` +
+        "tell whether it establishes a containing block — the walk should " +
+        "have stopped at a positioned ancestor before reaching it",
+    );
+  }
+  // The ≤640px correction itself. Read from the stylesheet, not assumed, so
+  // deleting it moves every assertion below rather than none of them.
+  if (
+    viewport <= mobileBreakpointPx() &&
+    classes.includes("pop-anchor") &&
+    el.closest(".composer-row") !== null
+  ) {
+    const mobile = effectiveDecl(
+      ruleBodiesIn(mobileBlock(), "\\.composer-row\\s+\\.pop-anchor"),
+      "position",
+    );
+    if (mobile !== null) return mobile;
+  }
+  let known = false;
+  let position = "static";
+  for (const className of classes) {
+    const bodies = bodiesForClass(className, viewport);
+    if (bodies.length === 0) continue;
+    known = true;
+    const declared = effectiveDecl(bodies, "position");
+    if (declared !== null) position = declared;
+  }
+  if (!known) {
+    throw new Error(
+      `no rule in app.css matches any class of <${el.tagName.toLowerCase()} ` +
+        `class="${el.className}">, so the #582 model cannot say whether it ` +
+        "establishes a containing block",
+    );
+  }
+  return position;
+}
+
+/** The ancestor that establishes `popEl`'s containing block (CSS 2.1 §10.1). */
+function containingBlockElement(popEl, viewport) {
+  for (let el = popEl.parentElement; el !== null; el = el.parentElement) {
+    if (effectivePosition(el, viewport) !== "static") return el;
+  }
+  throw new Error(
+    "walked to the document root without finding a positioned ancestor for " +
+      "a `.pop` — in the app it is always inside one, so the rendered tree " +
+      "no longer matches the one these #582 assertions describe",
+  );
+}
+
+/** Horizontal extent of a `.composer-wrap` inside `host` at `viewport`. */
+function composerWrapRect(viewport, host) {
+  const bodies = bodiesForClass(host, viewport);
+  if (bodies.length === 0) {
+    throw new Error(
+      `no \`.${host}\` rule in app.css — the #582 model takes the composer's ` +
+        "gutters from its host and can no longer find them",
+    );
+  }
+  const left = lengthPx(
+    effectivePaddingSide(bodies, "left") ?? "0",
+    viewport,
+  );
+  const right = lengthPx(
+    effectivePaddingSide(bodies, "right") ?? "0",
+    viewport,
+  );
+  // `.composer-wrap { max-width: none }` inside the media query, so at these
+  // widths the wrapper fills its host and the host's padding IS the gutter.
+  const wrapMax = effectiveDecl(bodiesForClass("composer-wrap", viewport), "max-width");
+  if (wrapMax !== "none") {
+    throw new Error(
+      "`.composer-wrap` no longer releases its max-width at ≤640px " +
+        `(reads \`${wrapMax}\`), so it may be centred rather than filling ` +
+        "its host and the #582 model's gutters no longer describe it",
+    );
+  }
+  return { left, right: viewport - right };
+}
+
+/** Horizontal extent of the sidebar's `.account-wrap` at `viewport`. */
+function accountWrapRect(viewport) {
+  const sb = bodiesForClass("sb", viewport);
+  const width = lengthPx(requireDecl(sb, "width", "`.sb`"), viewport);
+  const inset = lengthPx(effectivePaddingSide(sb, "left") ?? "0", viewport);
+  const foot = bodiesForClass("sb-foot", viewport);
+  const pad = lengthPx(
+    effectivePaddingSide(foot, "left") ?? "0",
+    viewport,
+  );
+  const padRight = lengthPx(
+    effectivePaddingSide(foot, "right") ?? "0",
+    viewport,
+  );
+  // The open drawer sits at x=0 (`.sb.mobile-open { transform: translateX(0) }`
+  // over the fixed `left: 0`); the closed one is off-canvas, where "inside
+  // the viewport" is not a claim worth making. Tests render it open.
+  return { left: inset + pad, right: width - padRight };
+}
+
+/**
+ * Horizontal extent of a `.composer-row` trigger wrapper at `viewport`,
+ * laid out with #571's flex model.
+ *
+ * Only reached when `.pop-anchor` is still `position: relative` at this
+ * width — i.e. by the assertion that reproduces the reported failure, and
+ * by nothing in the fixed configuration.
+ */
+function triggerRect(anchorEl, viewport, host, widths) {
+  const wrap = composerWrapRect(viewport, host);
+  const composer = bodiesForClass("composer", viewport);
+  const padLeft = lengthPx(effectivePaddingSide(composer, "left"), viewport);
+  const padRight = lengthPx(effectivePaddingSide(composer, "right"), viewport);
+  const rowLeft = wrap.left + padLeft;
+  const rowWidth = wrap.right - padRight - rowLeft;
+
+  const row = anchorEl.closest(".composer-row");
+  if (row === null) {
+    throw new Error(
+      "a `.pop-anchor` outside `.composer-row` reached the #582 trigger " +
+        "model, which only knows how to lay that row out",
+    );
+  }
+  const children = [...row.children];
+  const index = children.indexOf(anchorEl);
+  const geometry =
+    viewport <= mobileBreakpointPx() ? mobileRowGeometry() : desktopRowGeometry();
+  const items = itemsFrom(
+    children.map(classifyRowChild),
+    { send: geometry.send, round: geometry.round, ...widths },
+    viewport <= mobileBreakpointPx() && sendHasAutoLeftMargin(),
+  );
+  const boxes = layoutFlexRow({
+    containerWidth: rowWidth,
+    gap: geometry.gap,
+    wrap: geometry.wrap,
+    items,
+  });
+  return { left: rowLeft + boxes[index].left, right: rowLeft + boxes[index].right };
+}
+
+/** Every horizontal declaration in a `.pop`'s inline `style` attribute. */
+function inlineHorizontal(popEl) {
+  const found = {};
+  ["left", "right", "width", "min-width", "max-width"].forEach((prop) => {
+    const value = popEl.style.getPropertyValue(prop);
+    if (value !== "") found[prop] = value;
+  });
+  return found;
+}
+
+const KNOWN_POP_CLASSES = new Set([
+  "pop",
+  "pop-above",
+  "pop-start",
+  "pop-end",
+  "pop-compact",
+]);
+
+/**
+ * Resolve a `.pop`'s horizontal box properties at `viewport`.
+ *
+ * This is the #505 guard for #582, and it has two sets of teeth:
+ *
+ *   * An unrecognised class throws. A popover given a new anchor the model
+ *     cannot resolve must not be silently laid out as if it had none.
+ *   * Inline horizontal anchoring throws — **unless** it is exactly the
+ *     pinned-both-edges shape (`left: 0; right: 0; min-width: 0`), which is
+ *     `AccountPopover`'s and is safe by construction: a box pinned to both
+ *     edges of its containing block cannot be wider than that block. Every
+ *     other inline form is the bug #582 fixed, because an inline value
+ *     outranks the stylesheet and puts the popover outside the reach of
+ *     every breakpoint correction.
+ */
+function popHorizontal(popEl, viewport) {
+  [...popEl.classList].forEach((className) => {
+    if (!KNOWN_POP_CLASSES.has(className)) {
+      throw new Error(
+        `unrecognised \`.pop\` class \`${className}\` — a popover grew an ` +
+          "anchor this #582 model cannot resolve, so its conclusions no " +
+          "longer describe where the box lands; teach `popHorizontal` this " +
+          "class before trusting them again",
+      );
+    }
+  });
+
+  const popRule = bodiesForClass("pop", viewport);
+  const resolved = {
+    left: null,
+    right: null,
+    minWidth: lengthPx(requireDecl(popRule, "min-width", "`.pop`"), viewport),
+    maxWidth: lengthPx(requireDecl(popRule, "max-width", "`.pop`"), viewport),
+  };
+  if (popEl.classList.contains("pop-compact")) {
+    resolved.minWidth = lengthPx(
+      requireDecl(ruleBodiesIn(css, "\\.pop\\.pop-compact"), "min-width", "`.pop.pop-compact`"),
+      viewport,
+    );
+  }
+  if (popEl.classList.contains("pop-start")) {
+    resolved.left = lengthPx(
+      requireDecl(ruleBodiesIn(css, "\\.pop\\.pop-start"), "left", "`.pop.pop-start`"),
+      viewport,
+    );
+  }
+  if (popEl.classList.contains("pop-end")) {
+    resolved.right = lengthPx(
+      requireDecl(ruleBodiesIn(css, "\\.pop\\.pop-end"), "right", "`.pop.pop-end`"),
+      viewport,
+    );
+  }
+  // The ≤640px correction: pin both edges to the composer and release the
+  // floor. Read from the stylesheet so removing it moves the model.
+  if (viewport <= mobileBreakpointPx() && popEl.closest(".composer-row") !== null) {
+    const mobile = ruleBodiesIn(mobileBlock(), "\\.composer-row\\s+\\.pop");
+    const left = effectiveDecl(mobile, "left");
+    const right = effectiveDecl(mobile, "right");
+    const minWidth = effectiveDecl(mobile, "min-width");
+    if (left !== null) resolved.left = lengthPx(left, viewport);
+    if (right !== null) resolved.right = lengthPx(right, viewport);
+    if (minWidth !== null) resolved.minWidth = lengthPx(minWidth, viewport);
+  }
+
+  const inline = inlineHorizontal(popEl);
+  const inlineKeys = Object.keys(inline).sort().join(",");
+  if (inlineKeys === "left,min-width,right") {
+    const zeroed = ["left", "right", "min-width"].every(
+      (prop) => lengthPx(inline[prop], viewport) === 0,
+    );
+    if (zeroed) {
+      // AccountPopover's shape — the one popover that never had this bug,
+      // and the one #582 copies onto the other three.
+      return { ...resolved, left: 0, right: 0, minWidth: 0 };
+    }
+  }
+  if (inlineKeys !== "") {
+    throw new Error(
+      `\`.pop\` declares horizontal anchoring inline (${inlineKeys}) — #582 ` +
+        "moved anchoring into classes precisely because an inline value " +
+        "outranks the stylesheet, so no media query can correct it; the " +
+        "pinned-both-edges shape is the only inline form still accepted",
+    );
+  }
+  if (resolved.left === null && resolved.right === null) {
+    throw new Error(
+      "a `.pop` carries no horizontal anchor at all — it would be laid out " +
+        "at its static position, which #582's assertions cannot bound",
+    );
+  }
+  return resolved;
+}
+
+/**
+ * The popover's box, given its containing block and an intrinsic content
+ * width (CSS 2.1 §10.3.7 plus the `min-width` / `max-width` clamps).
+ *
+ * When both edges are pinned the used width is the containing block's,
+ * less the offsets; a clamp that changes it is resolved by ignoring
+ * `right`, which is what `direction: ltr` does. When only one edge is
+ * pinned the box is shrink-to-fit, hence the swept `contentWidth`.
+ */
+function popBox(popEl, viewport, cb, contentWidth) {
+  const { left, right, minWidth, maxWidth } = popHorizontal(popEl, viewport);
+  const cbWidth = cb.right - cb.left;
+  let width =
+    left !== null && right !== null ? cbWidth - left - right : contentWidth;
+  width = Math.min(width, maxWidth);
+  width = Math.max(width, minWidth);
+  const boxLeft =
+    left !== null ? cb.left + left : cb.right - right - width;
+  return { left: boxLeft, right: boxLeft + width };
+}
+
+// Phone-class viewports, plus the breakpoint itself. 320 is the narrowest
+// display iOS still ships (SE 1st gen); 430 is a Pro Max; 393 is the device
+// this was reported from.
+const POP_VIEWPORTS = [320, 360, 375, 390, 393, 412, 414, 430, 540, 640];
+// Stand-ins for a popover's intrinsic content width — a two-line menu at
+// the low end, a long server name and tool prefix at the high end.
+const POP_CONTENT_WIDTHS = [140, 220, 300, 380, 460, 560];
+
+/** Render the real `Composer` with an MCP server registered. */
+async function renderComposer() {
+  // iOS Safari ships the Web Speech API, so the reporting phone renders the
+  // mic button; jsdom ships nothing and `Composer` feature-detects at mount.
+  vi.stubGlobal("SpeechRecognition", function FakeSpeechRecognition() {});
+  let view;
+  await act(async () => {
+    view = render(
+      createElement(Composer, {
+        model: { id: "m", name: "Claude Opus 4.6", short: "Opus 4.6" },
+        effort: "High",
+        setModel: vi.fn(),
+        setEffort: vi.fn(),
+        onSend: vi.fn(),
+        mcpServers: MCP_SERVERS,
+        mcpSettings: { mode: "inherit", explicit_server_ids: [] },
+        setMcpSettings: vi.fn(),
+      }),
+    );
+  });
+  return view;
+}
+
+/** Open a popover by clicking its real trigger; return the real `.pop`. */
+async function openPopover(view, triggerSelector) {
+  const trigger = view.container.querySelector(triggerSelector);
+  if (trigger === null) {
+    throw new Error(
+      `no \`${triggerSelector}\` in the rendered tree — the popover's trigger ` +
+        "was renamed or removed, and these #582 assertions need repointing",
+    );
+  }
+  await act(async () => {
+    fireEvent.click(trigger);
+  });
+  const pop = view.container.querySelector(".pop");
+  if (pop === null) {
+    throw new Error(
+      `clicking \`${triggerSelector}\` opened no \`.pop\` — the popover no ` +
+        "longer uses the shared popover shell (CLAUDE.md §Chat-app popovers)",
+    );
+  }
+  return pop;
+}
+
+/** The three composer popovers, each opened in a freshly rendered Composer. */
+async function composerPopovers() {
+  const specs = [
+    { name: "MCPPicker", trigger: ".mcp-pill" },
+    { name: "ModelPicker", trigger: ".model-pick" },
+    { name: "AttachMenu", trigger: 'button[aria-label="Attach files"]' },
+  ];
+  const opened = [];
+  for (const spec of specs) {
+    const view = await renderComposer();
+    opened.push({ ...spec, pop: await openPopover(view, spec.trigger) });
+  }
+  return opened;
+}
+
+/** The sidebar's account popover, opened in a real, mobile-open Sidebar. */
+async function accountPopover() {
+  let view;
+  await act(async () => {
+    view = render(
+      createElement(
+        MemoryRouter,
+        null,
+        createElement(Sidebar, { chats: [], mobileOpen: true }),
+      ),
+    );
+  });
+  return { name: "AccountPopover", pop: await openPopover(view, "button.account") };
+}
+
+describe("popovers stay inside the viewport (#582)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("clamps `.pop` so it can never be wider than the screen", () => {
+    // Necessary but not sufficient, and the rule's own comment says so: the
+    // MCP picker started at -67px whatever its width was capped at. What
+    // this pins is that the 280px floor YIELDS to the clamp — a floor above
+    // the cap wins in CSS, and the box overflows anyway.
+    const pop = topLevelRuleBody("\\.pop", ".pop");
+    expect(pop).toMatch(/max-width:\s*calc\(100vw - 16px\)/);
+    expect(pop).toMatch(/min-width:\s*min\(280px, calc\(100vw - 16px\)\)/);
+
+    POP_VIEWPORTS.forEach((viewport) => {
+      const bodies = bodiesForClass("pop", viewport);
+      const minWidth = lengthPx(effectiveDecl(bodies, "min-width"), viewport);
+      const maxWidth = lengthPx(effectiveDecl(bodies, "max-width"), viewport);
+      expect(minWidth).toBeLessThanOrEqual(maxWidth);
+      expect(maxWidth).toBeLessThanOrEqual(viewport);
+    });
+  });
+
+  it("declares the ≤640px correction, and only inside the mobile block", () => {
+    // Presence: every bound below is computed from these two rules, so if
+    // one silently vanished the assertions would fail too — but failing
+    // here first is what names the cause.
+    const mobile = mobileBlock();
+    expect(mobile).toMatch(/\.composer-row\s+\.pop-anchor\s*\{[^}]*position:\s*static/);
+    expect(mobile).toMatch(/\.composer-row\s+\.pop\s*\{[^}]*left:\s*0/);
+    expect(mobile).toMatch(/\.composer-row\s+\.pop\s*\{[^}]*right:\s*0/);
+    expect(mobile).toMatch(/\.composer-row\s+\.pop\s*\{[^}]*min-width:\s*0/);
+
+    // Scope: the correction exists nowhere else, so ≥641px keeps the
+    // trigger-relative anchoring it has always had.
+    expect([...css.matchAll(/\.composer-row\s+\.pop-anchor\s*\{/g)]).toHaveLength(1);
+    expect([...css.matchAll(/\.composer-row\s+\.pop\s*\{/g)]).toHaveLength(1);
+  });
+
+  it("keeps the anchor classes byte-equivalent to the inline styles they replaced", () => {
+    // The ≥641px "nothing changed" claim, made as a declaration match
+    // rather than a layout: the JSX swap is a pure refactor up there, so
+    // the classes must carry exactly the values that were inline.
+    // `.pop-anchor` replaces each consumer's inline `position: relative`.
+    expect(topLevelRuleBody("\\.pop-anchor", ".pop-anchor")).toMatch(
+      /position:\s*relative/,
+    );
+    expect(ruleBodiesIn(css, "\\.pop\\.pop-above")[0]).toMatch(
+      /bottom:\s*calc\(100% \+ 8px\)/,
+    );
+    expect(ruleBodiesIn(css, "\\.pop\\.pop-start")[0]).toMatch(/left:\s*0/);
+    expect(ruleBodiesIn(css, "\\.pop\\.pop-end")[0]).toMatch(/right:\s*0/);
+    // AttachMenu's 240px floor, which was `minWidth: 240` inline, now
+    // clamped the same way the base floor is.
+    expect(ruleBodiesIn(css, "\\.pop\\.pop-compact")[0]).toMatch(
+      /min-width:\s*min\(240px, calc\(100vw - 16px\)\)/,
+    );
+  });
+
+  it("opens the real popovers from the real triggers", async () => {
+    // The #505 guard. Everything below is a claim about these four boxes,
+    // so if a popover stopped using the shared shell, moved out of the
+    // composer row, or grew an anchor the model cannot resolve, this is
+    // where it surfaces rather than three assertions later.
+    const popovers = [...(await composerPopovers()), await accountPopover()];
+    expect(popovers.map((p) => p.name)).toEqual([
+      "MCPPicker",
+      "ModelPicker",
+      "AttachMenu",
+      "AccountPopover",
+    ]);
+    // The three composer popovers hang off `.composer-row`, which is what
+    // brings them inside the ≤640px correction; the account popover does
+    // not, and does not need to.
+    expect(popovers.map((p) => p.pop.closest(".composer-row") !== null)).toEqual([
+      true,
+      true,
+      true,
+      false,
+    ]);
+    // Anchoring resolves for all four — this is the call that throws on an
+    // inline anchor or an unknown class.
+    popovers.forEach((p) => {
+      expect(() => popHorizontal(p.pop, 393)).not.toThrow();
+    });
+  });
+
+  it("keeps the MCP picker's popover on screen at 393px — the reported failure", async () => {
+    // THE bug: header clipped to "VERS FOR THIS CHAT", entries to "Hub" and
+    // "ls available as api_*". Its trigger sits mid-row, it is the only
+    // right-anchored popover, and `.pop`'s floor is 280px, so it started
+    // around -67px. Pinned first and on its own, because it is the one the
+    // reporter saw.
+    const view = await renderComposer();
+    const pop = await openPopover(view, ".mcp-pill");
+    const cb = containingBlockElement(pop, 393);
+    expect([...cb.classList]).toContain("composer-wrap");
+
+    POP_CONTENT_WIDTHS.forEach((contentWidth) => {
+      const box = popBox(pop, 393, composerWrapRect(393, "bottom-composer"), contentWidth);
+      expect(box.left).toBeGreaterThanOrEqual(0);
+      expect(box.right).toBeLessThanOrEqual(393);
+    });
+  });
+
+  it("keeps all four on screen across every phone-class viewport", async () => {
+    // The other three, so a future trigger-position change cannot quietly
+    // reintroduce the bug on a popover that fits only by luck today. Both
+    // composer hosts are swept: the conversation strip and the empty
+    // state's `.home`, which carry their gutters independently.
+    const composer = await composerPopovers();
+    const account = await accountPopover();
+    const offscreen = [];
+    let checked = 0;
+
+    function check(label, box, viewport) {
+      checked += 1;
+      if (box.left < 0 || box.right > viewport) {
+        offscreen.push(`${label} → [${box.left}, ${box.right}] of ${viewport}`);
+      }
+    }
+
+    POP_VIEWPORTS.forEach((viewport) => {
+      POP_CONTENT_WIDTHS.forEach((contentWidth) => {
+        ["bottom-composer", "home"].forEach((host) => {
+          composer.forEach(({ name, pop }) => {
+            const cb = composerWrapRect(viewport, host);
+            check(`${name} in .${host}`, popBox(pop, viewport, cb, contentWidth), viewport);
+          });
+        });
+        const cb = accountWrapRect(viewport);
+        check("AccountPopover", popBox(account.pop, viewport, cb, contentWidth), viewport);
+      });
+    });
+
+    // Reported as a list rather than an early bail, so a failure names every
+    // configuration that clips instead of only the first.
+    expect(offscreen).toEqual([]);
+    // Non-vacuity: a sweep that computed nothing would pass the line above
+    // by describing nothing.
+    expect(checked).toBe(
+      POP_VIEWPORTS.length * POP_CONTENT_WIDTHS.length * (composer.length * 2 + 1),
+    );
+  });
+
+  it("places every popover independently of its content width at ≤640px", async () => {
+    // The property that makes the bound structural rather than lucky, and
+    // the reason the anchor was pinned at both edges rather than flipped
+    // left: a flipped anchor keeps one edge a function of content width and
+    // trigger position, so a longer server name, one more control in the
+    // row or a narrower device re-breaks it with no warning — the same
+    // pressure that already wraps this row (#571).
+    const popovers = [...(await composerPopovers()), await accountPopover()];
+    POP_VIEWPORTS.forEach((viewport) => {
+      popovers.forEach(({ name, pop }) => {
+        const cb =
+          pop.closest(".composer-row") === null
+            ? accountWrapRect(viewport)
+            : composerWrapRect(viewport, "bottom-composer");
+        const boxes = POP_CONTENT_WIDTHS.map((w) => popBox(pop, viewport, cb, w));
+        const distinct = [...new Set(boxes.map((b) => `${b.left}..${b.right}`))];
+        expect(`${name}@${viewport}: ${distinct.join(" | ")}`).toBe(
+          `${name}@${viewport}: ${distinct[0]}`,
+        );
+      });
+    });
+  });
+
+  it("reproduces the reported -67px when the trigger anchor is left uncorrected", async () => {
+    // The mutation check, run from inside the suite: with the ≤640px
+    // correction gone the MCP popover reverts to `right: 0` against its own
+    // trigger, and THAT is where the off-screen left edge comes from.
+    // Without this the assertions above could pass by describing a viewport
+    // that was never in trouble.
+    //
+    // The row is laid out by #571's model, so the trigger's x-range is the
+    // one that section already established rather than a fresh invention.
+    const view = await renderComposer();
+    const pop = await openPopover(view, ".mcp-pill");
+    const anchor = pop.closest(".pop-anchor");
+    expect(anchor).not.toBeNull();
+
+    const offscreen = [];
+    MCP_WIDTHS.forEach((mcp) => {
+      MODEL_WIDTHS.forEach((model) => {
+        const cb = triggerRect(anchor, 393, "bottom-composer", { mcp, model });
+        // `right: 0` against the trigger, at the floor `.pop` still declares.
+        const popRule = bodiesForClass("pop", 393);
+        const width = lengthPx(effectiveDecl(popRule, "min-width"), 393);
+        const left = cb.right - width;
+        if (left < 0) offscreen.push(Math.round(left));
+      });
+    });
+
+    expect(offscreen.length).toBe(MCP_WIDTHS.length * MODEL_WIDTHS.length);
+    // Not merely negative — negative by roughly the margin the report
+    // describes. The exact figure moves with the modelled pill width; the
+    // reported one sits inside this range.
+    expect(Math.max(...offscreen)).toBeLessThanOrEqual(-30);
+    expect(Math.min(...offscreen)).toBeGreaterThanOrEqual(-200);
+  });
+
+  it("refuses to place a popover whose anchoring it cannot resolve", () => {
+    // The #505 guard's teeth, both halves.
+    const unknown = document.createElement("div");
+    unknown.className = "pop pop-above pop-somewhere-new";
+    expect(() => popHorizontal(unknown, 393)).toThrow(
+      /unrecognised `\.pop` class `pop-somewhere-new`/,
+    );
+
+    // An inline anchor is the exact shape #582 removed: it outranks the
+    // stylesheet, so the ≤640px correction cannot reach it.
+    const inlineAnchored = document.createElement("div");
+    inlineAnchored.className = "pop pop-above";
+    inlineAnchored.style.right = "0";
+    expect(() => popHorizontal(inlineAnchored, 393)).toThrow(
+      /declares horizontal anchoring inline/,
+    );
+
+    // …and one with no anchor at all is not silently laid out at its
+    // static position.
+    const unanchored = document.createElement("div");
+    unanchored.className = "pop pop-above";
+    expect(() => popHorizontal(unanchored, 393)).toThrow(
+      /carries no horizontal anchor at all/,
+    );
+  });
+
+  it("refuses to classify an ancestor app.css says nothing about", () => {
+    // The containing-block walk is where a re-parented popover would change
+    // meaning silently, so an ancestor the stylesheet does not describe is
+    // an error rather than an assumed `static`.
+    const stranger = document.createElement("div");
+    stranger.className = "some-new-shell";
+    expect(() => effectivePosition(stranger, 393)).toThrow(
+      /no rule in app.css matches any class of/,
+    );
+
+    const classless = document.createElement("div");
+    expect(() => effectivePosition(classless, 393)).toThrow(
+      /has no class, so the #582 model cannot tell/,
+    );
+  });
+
+  it("refuses to evaluate a length it does not implement", () => {
+    // The stylesheet side of the same discipline: a bound computed from a
+    // value the model guessed at would be worse than no bound.
+    expect(() => lengthPx("3rem", 393)).toThrow(/cannot evaluate/);
+    expect(() => lengthPx("42", 393)).toThrow(/unitless non-zero length/);
+    // …and the shapes it does implement, so the guard above is not the only
+    // thing exercising this function.
+    expect(lengthPx("min(280px, calc(100vw - 16px))", 393)).toBe(280);
+    expect(lengthPx("min(280px, calc(100vw - 16px))", 200)).toBe(184);
+    expect(lengthPx("calc(12px + env(safe-area-inset-left))", 393)).toBe(12);
+    expect(lengthPx("max(4px, 8px)", 393)).toBe(8);
+    expect(lengthPx("min(84vw, 300px)", 393)).toBe(300);
+    expect(lengthPx("0", 393)).toBe(0);
   });
 });

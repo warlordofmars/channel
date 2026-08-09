@@ -414,6 +414,23 @@ html.is-electron-mac .sb-top {
 }
 
 /* ---------- popover ---------- */
+/* A popover is never wider than the screen it is drawn on (#582).
+   `max-width` alone cannot deliver that while `min-width` sits above it:
+   a floor larger than the cap wins, and the box overflows anyway — so the
+   280px floor yields to the same clamp rather than fighting it.
+
+   `100vw` is safe here in a way it is not on `.stage` (see the #467 note
+   there): this is a ceiling, not a width, and it binds only when the box
+   would otherwise exceed the viewport — which is never correct at any
+   breakpoint. The app layer is `position: fixed; inset: 0` and never
+   scrolls the document, so there is no scrollbar gutter for `100vw` to
+   over-count either.
+
+   The clamp is a floor under the whole family, not the fix for the MCP
+   picker being drawn off the left edge: a 280px box anchored `right: 0`
+   to a trigger 213px from the left starts at -67px whatever its width is
+   capped at. That one is fixed by the anchoring rules below plus the
+   ≤640px override at the foot of this file. */
 .pop {
   position: absolute;
   background: var(--raised);
@@ -422,8 +439,31 @@ html.is-electron-mac .sb-top {
   box-shadow: var(--shadow-lg);
   padding: 6px;
   z-index: 50;
-  min-width: 280px;
+  min-width: min(280px, calc(100vw - 16px));
+  max-width: calc(100vw - 16px);
 }
+
+/* Anchoring lives in classes, never in an inline `style` (#582).
+   This is the load-bearing half of that fix: an inline `right: 0` outranks
+   every stylesheet rule short of `!important`, so while the anchor was
+   inline no media query could correct it — the mobile override below would
+   have been unreachable no matter how it was written.
+
+   `.pop-anchor` is the trigger wrapper that gives the popover its
+   containing block. It was an inline `position: relative` on each
+   consumer for the same reason and moves here for the same reason: the
+   ≤640px block re-points the popover at the composer by making this
+   `static`, which an inline value would have blocked.
+
+   The three modifiers reproduce exactly the values they replaced, so at
+   ≥641px every popover renders where it always did. */
+.pop-anchor { position: relative; }
+.pop.pop-above { bottom: calc(100% + 8px); }
+.pop.pop-start { left: 0; }
+.pop.pop-end { right: 0; }
+/* AttachMenu's shorter floor — one short menu row, no server names to fit.
+   Clamped the same way as the base floor, for the same reason. */
+.pop.pop-compact { min-width: min(240px, calc(100vw - 16px)); }
 .pop-h { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--ink-faint); padding: 8px 10px 5px; font-family: var(--font-mono); }
 .opt {
   display: flex; align-items: flex-start; gap: 10px;
@@ -1661,6 +1701,37 @@ html.is-electron-mac .sb-top {
   .cbtn.round { width: 40px; height: 40px; }
   /* ≥40px too — the model picker is a primary composer control. */
   .model-pick { height: 40px; }
+
+  /* ----- composer popovers: pinned to the composer, not to the trigger -----
+
+     Reported from a real device (#582): the MCP picker's popover was
+     drawn off the LEFT edge — the header read "VERS FOR THIS CHAT". It is
+     the only right-anchored popover in the row, its trigger sits mid-row
+     (right edge ~213px at 393px wide), and `.pop`'s floor is 280px, so it
+     started at roughly -67px.
+
+     Making `.pop-anchor` static hands the popover's containing block up to
+     `.composer-wrap` — the box the composer already fills — and pinning
+     both edges to it with the floor released makes the popover exactly
+     that wide. Both bounds then hold structurally: the left edge is the
+     composer's, the right edge is the composer's, and `.composer-wrap` is
+     inside the viewport by construction (`.bottom-composer` / `.home`
+     gutters). `bottom: calc(100% + 8px)` follows the same containing block
+     and lands the sheet just above the composer instead of just above the
+     pill.
+
+     This is AccountPopover's shape — `left: 0; right: 0; min-width: 0` —
+     which is the one popover in the app that never had this bug, applied
+     to the other three.
+
+     NOT a flip of the right anchor to the left: that fixes the edge that
+     is currently broken and leaves the other one a function of trigger
+     position and content width, so a longer server name, a narrower
+     device or one more control in the row silently re-breaks it — the
+     same pressure that already wraps this row (#571). Pinning both edges
+     makes neither bound depend on either. */
+  .composer-row .pop-anchor { position: static; }
+  .composer-row .pop { left: 0; right: 0; min-width: 0; }
 
   /* ----- quick actions (already wrap; tighten spacing) ----- */
   .quick { gap: 8px; margin-top: 16px; }

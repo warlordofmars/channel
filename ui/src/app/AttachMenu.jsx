@@ -49,7 +49,7 @@ export default function AttachMenu({ onFiles }) {
   }
 
   return (
-    <div style={{ position: "relative" }}>
+    <div className="pop-anchor">
       <button
         type="button"
         className="cbtn round"
@@ -71,7 +71,7 @@ export default function AttachMenu({ onFiles }) {
       {open && (
         <>
           <div className="backdrop" onClick={() => setOpen(false)} />
-          <div className="pop" style={{ bottom: "calc(100% + 8px)", left: 0, minWidth: 240 }}>
+          <div className="pop pop-above pop-start pop-compact">
             <div className="opt" onClick={openPicker} role="button" tabIndex={0}>
               <span style={{ color: "var(--ink-soft)" }}>
                 <Icon name="file" size={18} />
