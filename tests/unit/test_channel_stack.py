@@ -1438,7 +1438,7 @@ def test_gate_stops_paginating_at_the_page_cap():
     sns = _StubSns([_page({"SubscriptionArn": "PendingConfirmation"}, next_token="t")])
     with pytest.raises(AlarmSubscriptionError):
         require_confirmed_alarm_subscription("prod", _TOPIC, _factory(sns))
-    assert len(sns.calls) == 20
+    assert len(sns.calls) == channel_stack._MAX_SUBSCRIPTION_PAGES
 
 
 @pytest.mark.parametrize(
