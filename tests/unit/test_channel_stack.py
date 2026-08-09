@@ -1353,13 +1353,23 @@ def test_refresh_reuse_alarm_treats_missing_data_as_not_breaching(dev_template):
 def test_refresh_reuse_alarm_publishes_to_the_shared_alarm_topic(prod_template):
     """Same destination as the #111 alarms — not a second topic.
 
-    #537 enforces a *confirmed* subscriber on exactly one prod topic. An
-    alarm routed anywhere else inherits none of that guarantee and fires
-    into a void. The expected actions are read off a sibling alarm rather
-    than restated, so this cannot pass by matching a wrong ref twice.
+    #537 enforces a *confirmed* subscriber on exactly one prod topic, so
+    an alarm routed anywhere else inherits none of that guarantee and
+    fires into a void — the failure #537 exists to prevent, reintroduced
+    by one new alarm. The expected actions are derived from every *other*
+    prod alarm rather than restated as a literal, so this cannot pass by
+    spelling the same wrong ref twice, and it does not break when whichever
+    sibling alarm was named here is renamed or removed.
     """
-    expected = _alarms(prod_template)["Channel-prod-BedrockThrottles"]["AlarmActions"]
+    alarms = _alarms(prod_template)
     alarm = _reuse_alarm(prod_template, "prod")
+    siblings = {
+        json.dumps(props["AlarmActions"], sort_keys=True)
+        for name, props in alarms.items()
+        if name != alarm["AlarmName"]
+    }
+    assert len(siblings) == 1, f"prod alarms do not share one destination: {siblings}"
+    expected = json.loads(next(iter(siblings)))
     assert alarm["AlarmActions"] == expected
     assert alarm["OKActions"] == expected
     assert len(prod_template.find_resources("AWS::SNS::Topic")) == 1
