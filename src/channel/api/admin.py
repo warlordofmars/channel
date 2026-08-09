@@ -88,6 +88,16 @@ _METRIC_ALLOWLIST = (
     "MemoryWriteFailures",
     "RecallSuccesses",
     "RecallFailures",
+    # Prompt-injection observability (#558): how often the recall
+    # formatter had to neutralise forged block structure (#465 headings,
+    # #526 session boundaries, #534 fence delimiters, #544 turn bullets).
+    # One increment per turn, never per marker. It answers "is this
+    # surface being probed?" and deliberately not "with what" — the
+    # per-marker detail an attacker selects is exactly what a counter must
+    # not carry, and a log line on this per-turn path is a flooding
+    # vector. Allowlisted in the same change that starts emitting it,
+    # which is the #551 lesson.
+    "RecallForgeryDefused",
     # Tool-driven memory (#400): agent-callable remember/recall counters,
     # kept separate from the hook counters above so the dashboard's
     # hook-health signal stays isolated from tool usage.

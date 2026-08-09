@@ -102,6 +102,33 @@ def test_record_recall_empty_takes_no_parameters_at_all():
     assert list(inspect.signature(record_recall_empty).parameters) == []
 
 
+@pytest.mark.asyncio
+async def test_record_recall_forgery_defused_emits_the_counter():
+    from channel.metrics import record_recall_forgery_defused
+
+    with patch("channel.metrics.emit_metric", new=AsyncMock()) as mock_emit:
+        await record_recall_forgery_defused()
+
+    mock_emit.assert_awaited_once_with("RecallForgeryDefused")
+
+
+def test_record_recall_forgery_defused_signature_locks_out_dimensions():
+    """Counter-only (#558): the signature accepts NO arguments.
+
+    Every cut a caller would reach for on this path is unbounded or
+    hostile. Per-actor and per-session are the cardinality blowup the
+    module is built to prevent; the marker *kind* was ruled out too, and
+    that one is the interesting refusal — it looks bounded (four families)
+    but it is attacker-SELECTED, so admitting it would let one crafted
+    input fan a single counter into a family of series. The detail stays
+    out of CloudWatch entirely rather than moving to a log line, which on
+    this per-turn path would be a flooding vector.
+    """
+    from channel.metrics import record_recall_forgery_defused
+
+    assert list(inspect.signature(record_recall_forgery_defused).parameters) == []
+
+
 # ----------------------------------------------------------------
 # Memory TOOL counters (#400) — agent-driven remember/recall, kept
 # distinct from the hook counters above so hook health stays isolated.
