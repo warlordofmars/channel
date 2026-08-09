@@ -218,6 +218,19 @@ _FORGED_SETEXT_UNDERLINE_RE = re.compile(r"^[ \t]*[=-]{2,}[ \t]*$", re.MULTILINE
 # Still one linear pass, still deletion-only, and now genuinely stable —
 # ``g(g(s)) == g(s)`` for every input, because the result carries no
 # trailing ``\n`` for a second application to find.
+#
+# **It reaches the head-summary seam too, and that is intended.** This
+# helper runs inside :func:`defuse_forged_headings`, whose second caller
+# is ``chat_agent.build_agent``'s ``## Earlier in this conversation``
+# block — the coupling that function's docstring exists to advertise
+# ("Shared by BOTH system-prompt injection sites … so the two cannot
+# drift apart"), and this is the first change to flow through it. The
+# visible effect there is that a summary ending in a run of terminators
+# now keeps none of them rather than all-but-one: deletion-only, at the
+# tail of the system prompt, ahead of nothing. The head-summary site
+# gains the same idempotence guarantee for free, which is the property
+# the shared helper was created to deliver — the two seams staying in
+# step is the design, not a side effect to be tolerated.
 def _normalise_line_terminators(text: str) -> str:
     """Rewrite every terminator ``str.splitlines`` recognises as ``\\n``,
     dropping any trailing run of them.

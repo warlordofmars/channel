@@ -881,6 +881,13 @@ prod never sets the flag (CDK assertion test in
   measures against the normalised input and so read an ordinary turn
   ending in a blank line as a probe. Latent rather than live either
   way: the caller truncates to `_RECALL_EVENT_TEXT_TRUNCATE` first.
+  The fix runs inside `defuse_forged_headings`, so it reaches
+  **both** system-prompt injection sites — the head-summary block
+  (`chat_agent.build_agent`) gains the same guarantee, and a summary
+  ending in a run of terminators now keeps none rather than
+  all-but-one. That is the shared helper working as designed (#465):
+  hardening that belongs at both seams lives in one place precisely
+  so the two cannot drift.
 - **Two caps, because #274 split two jobs.** The **read** cap is the
   candidate pool — `POOL_MAX_SESSIONS = 10` sessions ×
   `POOL_EVENTS_PER_SESSION = 5` events (`memory_ranking.py`), the
