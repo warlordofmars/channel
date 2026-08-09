@@ -432,6 +432,14 @@ async def _withheld_record_count(
     through memory this caller could not be shown to own would be the
     opposite of what withholding is for.
 
+    **It counts every record in a withheld session**, never a filtered
+    subset — there is no ``since`` parameter here even though the bulk
+    forget has one. Narrowing the count to a request's filter would mean
+    reading the timestamps of a session the ownership check could not
+    confirm belongs to this caller, in order to report a *smaller* number;
+    over-reporting is the safe direction for an alarm. See
+    ``forget_memory_records`` for what that means to a caller.
+
     ``event`` names the canary; the three names stay distinct because
     "we declined to show these", "we declined to export these" and "we
     declined to delete these" are different operations, and one shared log
@@ -1272,6 +1280,17 @@ async def forget_memory_records(
       investigation, not a retry, and no amount of retrying will move it.
       A **lower bound**, in the same unit and under the same name
       ``/records`` and the export manifest report.
+
+      **It counts records in withheld sessions, not records this request
+      would have deleted** — the two differ under ``?since=``, where the
+      cutoff narrows what gets deleted but is deliberately NOT applied to
+      the count. Reading an unverifiable session's timestamps closely
+      enough to filter it would be inspecting data the ownership check
+      could not confirm is the caller's, to make an alarm number smaller;
+      over-reporting is the safe direction for "something here is
+      unaccounted for". So under ``?since=`` treat it as "at least this
+      many records sit in sessions we could not verify", not as a
+      would-have-deleted tally.
 
     Until #552 a forget could answer ``complete: true`` having skipped
     records the user asked to lose, telling them the action finished while

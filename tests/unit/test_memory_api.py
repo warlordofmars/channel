@@ -2224,3 +2224,33 @@ def test_the_real_cap_is_far_above_any_plausible_anomaly():
     bite in normal operation — it exists only to bound the pathological
     partition."""
     assert memory_api._MAX_WITHHELD_SESSIONS_COUNTED >= 100
+
+
+def test_a_since_forget_does_not_narrow_the_withheld_count_to_the_cutoff():
+    """The count is "records in withheld sessions", NOT "records this
+    request would have deleted" — the two differ only under ``?since=``.
+
+    Filtering it would mean reading the timestamps of a session the
+    ownership check could not confirm is the caller's, to report a
+    *smaller* number. Over-reporting is the safe direction for an alarm,
+    so the cutoff is deliberately not applied. Pinned as a test because
+    prose in a docstring is not a contract.
+    """
+    old = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    theirs = {
+        "eventId": "e-old",
+        "eventTimestamp": old,
+        "payload": [
+            {"conversational": {"role": "USER", "content": {"text": "ancient secret"}}},
+            {"conversational": {"role": "ASSISTANT", "content": {"text": "ancient reply"}}},
+        ],
+    }
+    events = {"mine": [_event("e1", ("USER", "recent"))], "theirs": [theirs]}
+    fake = _deleting_agentcore(["mine", "theirs"], events)
+
+    body = _forget_call(fake, WITHHELD_CHATS, params={"since": "2026-01-01T00:00:00Z"}).json()
+
+    # Both of the foreign session's records are counted even though both
+    # predate the cutoff and so would never have been deleted.
+    assert body["withheld_record_count"] == 2
+    assert {c.kwargs["sessionId"] for c in fake.delete_event.call_args_list} == {"mine"}
