@@ -148,14 +148,14 @@ uv sync --all-extras --group infra     # matches ci.yml infra jobs; the dev grou
 
 Once issue #333 lands its `inv worktree-setup` task (which wraps exactly these three commands), run `uv run inv worktree-setup` instead of the block above.
 
-**Create this cycle's scratch root here too**, before §3 writes anything:
+**Create this cycle's scratch root here too**, before §3 writes anything — including when the install block above is a no-op because this checkout is already provisioned. A cycle running without a fresh worktree is exactly the case S1's `issue-<number>` component exists for, so it is the one that must least be skipped:
 
 ```bash
 SCRATCH="$(git rev-parse --show-toplevel)/.claude/scratch/issue-<number>"
 mkdir -p "$SCRATCH"
 ```
 
-Every temp file the rest of this cycle writes, reads back, or executes lives under `$SCRATCH` — never the session scratchpad directory, the repo root, or `/tmp`, all of which parallel workers share. Two have already collided there. The rules are S1–S4 in `## Scratch discipline`; read that section now, the same way §2 sends you to `## Push discipline`.
+Shell state does not persist between Bash calls, so re-derive that assignment in each later call that touches scratch (S1) — what stays fixed for the cycle is the path, not a live variable. Every temp file the rest of this cycle writes, reads back, or executes lives under `$SCRATCH` — never the session scratchpad directory, the repo root, or `/tmp`, all of which parallel workers share. Two have already collided there. The rules are S1–S4 in `## Scratch discipline`; read that section now, the same way §2 sends you to `## Push discipline`.
 
 ### 3. Implement
 
@@ -623,16 +623,16 @@ Rules S1–S4 are mechanical path checks against the file paths a command names 
 
 ### S1 — One scratch root, derived from the worktree
 
-Compute the scratch root exactly once, at §2.5, and use it for everything after:
+One scratch root serves the whole cycle: its **value** is fixed at §2.5 and never changes afterwards. Derive it with:
 
 ```bash
 SCRATCH="$(git rev-parse --show-toplevel)/.claude/scratch/issue-<number>"
 mkdir -p "$SCRATCH"
 ```
 
-`git rev-parse --show-toplevel` resolves to the **linked worktree's own root** when the cycle runs in one (`…/.claude/worktrees/issue-<number>`), so a worker with a worktree inherits the isolation the worktree already provides. **Not every cycle gets a worktree** — when it runs in the main checkout, `--show-toplevel` is that checkout and the `issue-<number>` component is the only thing keeping two concurrent workers apart. Both components are load-bearing: the worktree half alone fails the no-worktree case, and the issue half alone puts every worker's files in one shared tree.
+**That assignment is a derivation recipe, not a variable that persists.** Shell state does not survive between Bash tool calls, so re-run the assignment at the top of every later call that touches scratch, or interpolate the resolved absolute path literally. "Fixed for the cycle" is a claim about the path it resolves to, never about a live shell variable — and every later reference to `$SCRATCH` in this file means that value.
 
-**`$SCRATCH` is a value to keep constant, not a variable that persists.** Shell state does not survive between Bash tool calls, so the assignment above is a *derivation recipe*: re-run it at the top of any call that touches scratch, or interpolate the resolved absolute path literally. What must not change across the cycle is the path it resolves to — every later reference to `$SCRATCH` in this file means that value.
+`git rev-parse --show-toplevel` resolves to the **linked worktree's own root** when the cycle runs in one (`…/.claude/worktrees/issue-<number>`), so a worker with a worktree inherits the isolation the worktree already provides. **Not every cycle gets a worktree** — when it runs in the main checkout, `--show-toplevel` is that checkout and the `issue-<number>` component is the only thing keeping two concurrent workers apart. Both components are load-bearing: the worktree half alone fails the no-worktree case, and the issue half alone puts every worker's files in one shared tree.
 
 **Mechanical check:** `$SCRATCH` must be absolute, must start with the output of `git rev-parse --show-toplevel`, and must end with `/.claude/scratch/issue-<number>` where `<number>` is the issue this cycle is working. Never hardcode the prefix — derive it, so a cycle that turns out to have no worktree still lands somewhere correct.
 
@@ -640,19 +640,26 @@ mkdir -p "$SCRATCH"
 
 ### S2 — Everything this cycle writes goes under `$SCRATCH`
 
-Gate logs, harness and mutation scripts, generated fixtures, captured API responses, downloaded CI logs — everything, with no "just this once" exception for a file that feels too small to matter. Three forbidden destinations, each implicated above:
+**"Scratch" means a file this cycle creates for its own use** — gate logs, harness and mutation scripts, generated fixtures, captured API responses, downloaded CI logs. It does **not** mean the repository changes §3 exists to make: source, tests and docs are governed by the issue's own scope rules and belong where the project keeps them. Inside that meaning there is no "just this once" exception for a file that feels too small to matter. Three forbidden destinations, each implicated above:
 
 - **The session scratchpad directory from the agent's environment** — shared by every worker one dispatching session spawns. Both incidents happened here.
 - **The repo root or any tracked directory** — shared by every worker without a worktree, and the leftovers surface as untracked files in the *next* cycle's `git status` (an untracked `scratchpad-prepush.log` was sitting in the main checkout from exactly this).
 - **`/tmp` or any other fixed system path** — same collision, and no namespace at all.
 
-**Mechanical check:** every path a write names must begin with `$SCRATCH/`. Build paths by interpolating `$SCRATCH`, never as a bare relative filename — the Bash tool resets cwd between calls, so a relative path resolves against whatever directory the *next* call happens to start in, which is how a file lands somewhere shared without anyone choosing that.
+**Mechanical check:** every path a *scratch* write names must begin with `$SCRATCH/`. Two exemptions, both decidable without judgement:
+
+- **A path tracked in git** (`git ls-files --error-unmatch <path>` exits 0) is repository content, not scratch — that is the §3 diff, and the issue's `## Files to touch` already bounds it.
+- **`.autonomous-progress`**, the repo-root batch ledger §"Issue cycle" mandates. It is deliberately shared across cycles — a resumed batch exists to read what earlier ones wrote — so it is the one file this section's isolation must not apply to.
+
+Build scratch paths by interpolating `$SCRATCH`, never as a bare relative filename — the Bash tool resets cwd between calls, so a relative path resolves against whatever directory the *next* call happens to start in, which is how a file lands somewhere shared without anyone choosing that.
 
 ### S3 — Never execute or read back a file this cycle did not write
 
 A correctly-written script is still the wrong script when a sibling wrote it. Before running, `source`ing, or reading results out of any file, confirm its path is `$SCRATCH`-prefixed. If something you expect is missing, it is not yours — regenerate it. Never reach for the copy you can see under another path.
 
-**Mechanical check:** for any `python <path>`, `bash <path>`, `sh <path>`, `source <path>`, `./<path>`, or read-back of a result/log file, `<path>` must begin with `$SCRATCH/`. A path under `.claude/scratch/issue-<other-number>/`, under another worktree, or under the session scratchpad directory fails the check — do not execute it, and do not open it "just to look first", since reading a sibling's results is incident 1.
+**Mechanical check:** for any `python <path>`, `bash <path>`, `sh <path>`, `source <path>`, `./<path>`, or read-back of a result/log file, `<path>` must **either** begin with `$SCRATCH/` **or** carry one of S2's two exemptions — tracked in git, or `.autonomous-progress`. The repo's own committed tooling (`scripts/reset_dev_table.py` before §5, `scripts/check_agent_safe_scope.py` under §7.3) is reviewed code under version control, which is what makes it safe to run and a sibling's untracked harness not. Everything else fails the check: a path under `.claude/scratch/issue-<other-number>/`, under another worktree, or under the session scratchpad directory — do not execute it, and do not open it "just to look first", since reading a sibling's results is incident 1.
+
+If you discover you already ran one, that is a `## Stop and ask` halt: a foreign script's side effects are outside this cycle's knowledge, and unlike a tainted *read* — which you fix yourself by re-running the command and taking the fresh exit code — you cannot bound them from here.
 
 **Corollary — a gate result is yours only if you watched the command that produced it exit.** Take the verdict from the run's own exit code (`uv run inv pre-push; echo "exit=$?"`), never from the contents of a log file: a log can be a sibling's, an exit code you captured cannot.
 
@@ -878,6 +885,7 @@ Halt **only** in these situations:
 - A change requires modifying `infra/stacks/channel_stack.py` in a way that could affect production resources
 - The same CI check has failed 3 times without a clear fix
 - A release milestone drains to zero open non-epic issues
+- A script under a path that was **not** this cycle's `$SCRATCH` was executed (S3 in `## Scratch discipline`) — sentinel: `HUMAN_INPUT_REQUIRED: executed a foreign script <path> on #NNN — side effects unbounded from here`. Halt rather than assessing it yourself: the script belongs to another cycle, so what it touched is outside this one's knowledge, and reading it to find out is the same rule violated twice. The other S-rule failures are self-service and do **not** halt — a scratch write to a shared path is fixed by rewriting it under `$SCRATCH`, and a result read back from a foreign log is fixed by re-running the command and taking the fresh exit code.
 - **Any of the W1–W7 push-discipline checks fails** (see `## Push discipline`). W5 fires on `push.default = matching`; W7 fires on protected-shadow-branch divergence after the W4 fast-forward attempt. These halts surface a sentinel and stop; they do not retry. Other W-rule violations (W1/W2/W3/W6) indicate a malformed push command and should be reformulated by the agent before retrying — but if the malformed shape persists across two attempts, halt with `HUMAN_INPUT_REQUIRED: push command repeatedly violates W1–W7 (see ## Push discipline)`.
 - The §7.3 code-reviewer loop exhausts 3 fix iterations with `FAIL` items remaining (sentinel: `HUMAN_INPUT_REQUIRED: code-reviewer has unresolved blockers on #NNN after 3 fix attempts`)
 - The §7.5 Copilot review loop exhausts 5 iterations with unresolved findings (sentinel: `HUMAN_INPUT_REQUIRED: Copilot loop ended with open findings on #NNN`) or surfaces an ambiguous architecturally-significant finding (sentinel: `HUMAN_INPUT_REQUIRED: Copilot flagged X on #NNN — unclear call`)
