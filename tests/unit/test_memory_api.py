@@ -604,6 +604,7 @@ def _export_call(
     put_audit: Any = None,
     headers: dict[str, str] | None = None,
     params: dict[str, Any] | None = None,
+    client_obj: TestClient | None = None,
 ):
     """Drive ``GET /api/memory/export`` with every AWS seam mocked.
 
@@ -626,7 +627,9 @@ def _export_call(
         patch("channel.storage.get_chat_summary", (summaries or {}).get),
         patch("channel.storage.put_audit_event", put_audit or MagicMock(return_value={})),
     ):
-        return client.get(EXPORT_URL, params=params or {}, headers=headers or _headers())
+        return (client_obj or client).get(
+            EXPORT_URL, params=params or {}, headers=headers or _headers()
+        )
 
 
 # ── auth ──────────────────────────────────────────────────────────────────
@@ -909,9 +912,9 @@ def test_export_withholding_is_logged_as_the_partition_canary(monkeypatch: pytes
 
     _export_call(fake, {"theirs": _chat("theirs", user_id=INTRUDER)})
 
-    fmt, user_hash, sessions = fake_logger.warning.call_args.args
+    fmt, user_hash, sessions, records = fake_logger.warning.call_args.args
     assert fmt.startswith("memory.export_sessions_withheld")
-    assert sessions == 1
+    assert (sessions, records) == (1, 1)
     # The raw sub is an email — fingerprinted, never logged raw.
     assert user_hash == fingerprint_id(OWNER)
 
@@ -1551,7 +1554,7 @@ def test_forgetting_one_chat_deletes_every_event_in_that_session():
     resp = _forget_call(fake, {"chat-a": _chat("chat-a")}, params={"chat_id": "chat-a"})
 
     assert resp.status_code == 200
-    assert resp.json() == {"deleted": 2, "failed": 0, "complete": True}
+    assert resp.json() == {"deleted": 2, "failed": 0, "complete": True, "withheld_record_count": 0}
     assert [c.kwargs["eventId"] for c in fake.delete_event.call_args_list] == ["e1", "e2"]
 
 
@@ -1602,7 +1605,7 @@ def test_forgetting_since_a_timestamp_spares_older_records():
 
     resp = _forget_call(fake, {"chat-a": _chat("chat-a")}, params={"since": "2026-07-30T00:00:00Z"})
 
-    assert resp.json() == {"deleted": 1, "failed": 0, "complete": True}
+    assert resp.json() == {"deleted": 1, "failed": 0, "complete": True, "withheld_record_count": 0}
     assert [c.kwargs["eventId"] for c in fake.delete_event.call_args_list] == ["new"]
 
 
@@ -1619,7 +1622,7 @@ def test_forgetting_everything_walks_every_owned_session():
         fake, {"chat-a": _chat("chat-a"), "chat-b": _chat("chat-b")}, params={"all": "true"}
     )
 
-    assert resp.json() == {"deleted": 2, "failed": 0, "complete": True}
+    assert resp.json() == {"deleted": 2, "failed": 0, "complete": True, "withheld_record_count": 0}
     assert {c.kwargs["sessionId"] for c in fake.delete_event.call_args_list} == {"chat-a", "chat-b"}
 
 
@@ -1655,7 +1658,7 @@ def test_forgetting_everything_for_a_user_with_no_memory_partition_is_a_no_op_su
     resp = _forget_call(fake, {}, params={"all": "true"})
 
     assert resp.status_code == 200
-    assert resp.json() == {"deleted": 0, "failed": 0, "complete": True}
+    assert resp.json() == {"deleted": 0, "failed": 0, "complete": True, "withheld_record_count": 0}
 
 
 @pytest.mark.parametrize("code", ["ThrottlingException", "AccessDeniedException"])
@@ -1697,7 +1700,7 @@ def test_one_refused_delete_does_not_abandon_the_batch():
     resp = _forget_call(fake, {"chat-a": _chat("chat-a")}, params={"chat_id": "chat-a"})
 
     assert resp.status_code == 200
-    assert resp.json() == {"deleted": 1, "failed": 1, "complete": True}
+    assert resp.json() == {"deleted": 1, "failed": 1, "complete": True, "withheld_record_count": 0}
 
 
 def test_a_partially_failed_batch_counts_as_a_failure_even_though_it_answers_200():
@@ -1746,7 +1749,7 @@ def test_an_already_absent_event_counts_as_neither_deleted_nor_failed():
 
     resp = _forget_call(fake, {"chat-a": _chat("chat-a")}, params={"chat_id": "chat-a"})
 
-    assert resp.json() == {"deleted": 0, "failed": 0, "complete": True}
+    assert resp.json() == {"deleted": 0, "failed": 0, "complete": True, "withheld_record_count": 0}
 
 
 def test_a_bulk_forget_that_hit_the_page_ceiling_says_so_in_the_body(
@@ -1765,7 +1768,7 @@ def test_a_bulk_forget_that_hit_the_page_ceiling_says_so_in_the_body(
 
     resp = _forget_call(fake, {"chat-a": _chat("chat-a")}, params={"chat_id": "chat-a"})
 
-    assert resp.json() == {"deleted": 1, "failed": 0, "complete": False}
+    assert resp.json() == {"deleted": 1, "failed": 0, "complete": False, "withheld_record_count": 0}
 
 
 def test_an_incomplete_bulk_forget_counts_as_a_failure(monkeypatch: pytest.MonkeyPatch):
@@ -1811,7 +1814,13 @@ def test_every_bulk_forget_audits_counts_and_filters_only(
     kwargs = put_audit.call_args.kwargs
     assert kwargs["event_type"] == event_type
     assert kwargs["actor_id"] == OWNER
-    assert kwargs["details"] == {**extra, "deleted": 1, "failed": 0, "complete": True}
+    assert kwargs["details"] == {
+        **extra,
+        "deleted": 1,
+        "failed": 0,
+        "complete": True,
+        "withheld_record_count": 0,
+    }
     assert secret not in json.dumps(kwargs["details"])
 
 
@@ -1827,3 +1836,421 @@ def test_a_bulk_forget_whose_audit_write_fails_still_reports_its_counts():
 
     assert resp.status_code == 200
     assert resp.json()["deleted"] == 1
+
+
+# ── withheld reporting, on every surface, in one unit (#552) ──────────────
+#
+# ``complete`` on ``/export``'s manifest and on the bulk forget answers only
+# "did every walk finish". Neither reflected WITHHELD sessions, so an export
+# could claim completeness while omitting records and a forget could report
+# finished while something remained. Both now carry
+# ``withheld_record_count`` alongside ``complete`` — the same name, unit and
+# lower-bound semantics ``/records`` has reported since #475.
+#
+# Every test below constructs a genuinely WITHHELD session (a foreign or
+# orphaned one in the caller's actor partition). A test that only drove the
+# page-cap path would have passed before this change and proved nothing —
+# which is exactly how the gap survived two PRs.
+
+WITHHELD_EVENTS = {
+    "mine": [_event("e1", ("USER", "my message"))],
+    # Two payload entries → two records from ONE session, which is what
+    # makes "records, not sessions" an assertion rather than a coincidence.
+    "theirs": [_event("e2", ("USER", "their secret"), ("ASSISTANT", "their reply"))],
+}
+WITHHELD_CHATS = {"mine": _chat("mine"), "theirs": _chat("theirs", user_id=INTRUDER)}
+
+
+def _records_withheld_count(**kw: Any) -> int:
+    fake = _agentcore(["mine", "theirs"], WITHHELD_EVENTS)
+    return _call(fake, WITHHELD_CHATS, **kw).json()["withheld_record_count"]
+
+
+def _export_withheld_manifest(**kw: Any) -> dict[str, Any]:
+    fake = _export_agentcore([(["mine", "theirs"], None)], WITHHELD_EVENTS)
+    body = _export_call(
+        fake, WITHHELD_CHATS, list_chats=MagicMock(return_value=([], None)), **kw
+    ).json()
+    return body["manifest"]
+
+
+def _forget_withheld_body(**kw: Any) -> dict[str, Any]:
+    fake = _deleting_agentcore(["mine", "theirs"], WITHHELD_EVENTS)
+    return _forget_call(fake, WITHHELD_CHATS, params={"all": "true"}, **kw).json()
+
+
+def test_export_manifest_reports_the_records_the_ownership_gate_withheld():
+    manifest = _export_withheld_manifest()
+
+    assert manifest["withheld_record_count"] == 2
+
+
+def test_a_bulk_forget_reports_the_records_the_ownership_gate_declined_to_delete():
+    body = _forget_withheld_body()
+
+    assert body["withheld_record_count"] == 2
+
+
+def test_all_three_surfaces_report_the_same_withheld_count_for_the_same_partition():
+    """The reason #552 had to change both endpoints at once.
+
+    One actor partition, one withheld session, three surfaces. If the field
+    ever means "sessions" on one and "records" on another — or is absent
+    from one — a caller comparing the settings panel against a download
+    against a forget receipt gets three different answers about the same
+    data. Asserting a shared literal is what makes that drift a test
+    failure rather than a support ticket.
+    """
+    expected = 2
+
+    assert _records_withheld_count() == expected
+    assert _export_withheld_manifest()["withheld_record_count"] == expected
+    assert _forget_withheld_body()["withheld_record_count"] == expected
+
+
+def test_withholding_does_not_flip_complete_on_either_endpoint():
+    """``complete`` keeps its narrow meaning — "no walk was truncated".
+
+    The rejected alternative was widening it. Two conditions stay
+    distinguishable because they call for different responses: a truncated
+    walk is a retry, an unverifiable session is an investigation.
+    """
+    assert _export_withheld_manifest()["complete"] is True
+    assert _forget_withheld_body()["complete"] is True
+
+
+def test_neither_endpoint_names_what_it_withheld():
+    """Count only, never identity. Naming an unverifiable session id would
+    leak the existence of a row the ownership check could not confirm —
+    the conservatism the withholding itself exists to preserve."""
+    manifest = _export_withheld_manifest()
+    body = _forget_withheld_body()
+
+    for payload in (manifest, body):
+        serialized = json.dumps(payload)
+        assert "theirs" not in serialized
+        assert "their secret" not in serialized
+        assert "their reply" not in serialized
+
+
+def test_a_forget_still_never_deletes_the_session_it_reports_as_withheld():
+    """#552 changed REPORTING, not what gets withheld. The blast radius must
+    be identical to before: the foreign session is counted and skipped, and
+    ``delete_event`` is never called for it."""
+    fake = _deleting_agentcore(["mine", "theirs"], WITHHELD_EVENTS)
+
+    resp = _forget_call(fake, WITHHELD_CHATS, params={"all": "true"})
+
+    assert resp.json() == {
+        "deleted": 1,
+        "failed": 0,
+        "complete": True,
+        "withheld_record_count": 2,
+    }
+    assert {c.kwargs["sessionId"] for c in fake.delete_event.call_args_list} == {"mine"}
+
+
+def test_an_orphaned_session_is_reported_as_withheld_by_export_and_forget():
+    """The condition most likely to be seen in production: a session whose
+    chat row is gone, which a failed ``chats._wipe_agentcore_session``
+    leaves behind. It fails the gate exactly like a foreign one."""
+    events = {"orphan": [_event("e1", ("USER", "ghost"))]}
+
+    export = _export_call(
+        _export_agentcore([(["orphan"], None)], events),
+        {},
+        list_chats=MagicMock(return_value=([], None)),
+    ).json()
+    forget = _forget_call(
+        _deleting_agentcore(["orphan"], events), {}, params={"all": "true"}
+    ).json()
+
+    assert export["manifest"]["withheld_record_count"] == 1
+    assert forget["withheld_record_count"] == 1
+    assert export["memory_records"] == []
+
+
+def test_a_clean_partition_reports_zero_withheld_on_both_endpoints():
+    events = {"mine": [_event("e1", ("USER", "hi"))]}
+    owned = {"mine": _chat("mine")}
+
+    export = _export_call(_export_agentcore([(["mine"], None)], events), owned).json()
+    forget = _forget_call(
+        _deleting_agentcore(["mine"], events), owned, params={"all": "true"}
+    ).json()
+
+    assert export["manifest"]["withheld_record_count"] == 0
+    assert forget["withheld_record_count"] == 0
+
+
+def test_a_chat_id_forget_reports_zero_withheld_because_nothing_can_be():
+    """``_load_owned_chat`` has already passed on the only session in scope,
+    so a 404 is the sole alternative — the field is structurally 0, not
+    merely observed to be."""
+    fake = _deleting_agentcore([], {"chat-a": [_event("e1", ("USER", "a"))]})
+
+    body = _forget_call(fake, {"chat-a": _chat("chat-a")}, params={"chat_id": "chat-a"}).json()
+
+    assert body["withheld_record_count"] == 0
+    fake.list_sessions.assert_not_called()
+
+
+def test_withholding_is_not_counted_as_a_failed_forget():
+    """The counter answers "is forget working?", and the gate declining an
+    unverifiable session IS forget working. The signals for that condition
+    are the ``memory.forget_sessions_withheld`` warning and the response
+    field — not the health metric."""
+    fake = _deleting_agentcore(["mine", "theirs"], WITHHELD_EVENTS)
+
+    with patch.object(memory_api, "record_memory_bulk_forget_outcome", new=AsyncMock()) as counter:
+        _forget_call(fake, WITHHELD_CHATS, params={"all": "true"})
+
+    counter.assert_awaited_once_with(success=True)
+
+
+def test_a_bulk_forget_audits_the_withheld_count():
+    """The compliance trail records what was declined as well as what was
+    deleted — a count, never the withheld text (which is not even read into
+    a record: ``count_session_records`` returns an int and nothing else)."""
+    put_audit = MagicMock(return_value={})
+    fake = _deleting_agentcore(["mine", "theirs"], WITHHELD_EVENTS)
+
+    _forget_call(fake, WITHHELD_CHATS, params={"all": "true"}, put_audit=put_audit)
+
+    details = put_audit.call_args.kwargs["details"]
+    assert details["withheld_record_count"] == 2
+    assert "their secret" not in json.dumps(details)
+
+
+def test_forget_withholding_logs_the_partition_canary_with_both_units(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    fake_logger = MagicMock()
+    monkeypatch.setattr(memory_api, "logger", fake_logger)
+    fake = _deleting_agentcore(["mine", "theirs"], WITHHELD_EVENTS)
+
+    _forget_call(fake, WITHHELD_CHATS, params={"all": "true"})
+
+    fmt, user_hash, sessions, records = fake_logger.warning.call_args.args
+    # Three distinct event names, deliberately: "we declined to SHOW these",
+    # "…to EXPORT these" and "…to DELETE these" are different operations,
+    # and one shared name covering all three is what makes a canary useless.
+    assert fmt.startswith("memory.forget_sessions_withheld")
+    assert (sessions, records) == (1, 2)
+    assert user_hash == fingerprint_id(OWNER)
+
+
+def test_the_withheld_count_is_records_not_sessions():
+    """Two withheld sessions holding three records between them read as 3.
+
+    Distinguishes the shipped shape from the cheaper one both endpoints
+    could have used — ``len(session_ids) - len(owned)``, which is what they
+    already computed for their log lines and which would have read 2.
+    """
+    events = {
+        "theirs-a": [_event("e1", ("USER", "s1"), ("ASSISTANT", "s2"))],
+        "theirs-b": [_event("e2", ("USER", "s3"))],
+    }
+    foreign = {
+        "theirs-a": _chat("theirs-a", user_id=INTRUDER),
+        "theirs-b": _chat("theirs-b", user_id=INTRUDER),
+    }
+
+    export = _export_call(
+        _export_agentcore([(["theirs-a", "theirs-b"], None)], events),
+        foreign,
+        list_chats=MagicMock(return_value=([], None)),
+    ).json()
+    forget = _forget_call(
+        _deleting_agentcore(["theirs-a", "theirs-b"], events), foreign, params={"all": "true"}
+    ).json()
+
+    assert export["manifest"]["withheld_record_count"] == 3
+    assert forget["withheld_record_count"] == 3
+
+
+def test_a_withheld_count_costs_nothing_on_a_clean_partition():
+    """The per-withheld-session ``ListEvents`` is only paid when the gate
+    actually withholds something. ``/export`` declined to pay it at all
+    before #552; the reason that trade changed is that the number is now
+    part of a claim made to the user, not only an alarm — but it must still
+    cost nothing in the normal case, where nothing is withheld."""
+    fake = _export_agentcore([(["mine"], None)], {"mine": [_event("e1", ("USER", "hi"))]})
+
+    _export_call(fake, {"mine": _chat("mine")})
+
+    assert {c.kwargs["sessionId"] for c in fake.list_events.call_args_list} == {"mine"}
+
+
+# ── #552 × #527: a caller with no memory partition ────────────────────────
+#
+# The regression this repo has shipped TWICE. An actor partition is created
+# lazily by the first memory write, so a user who has never chatted has none
+# and ``ListSessions`` raises ``ResourceNotFoundException``. The mocks below
+# RAISE — a mock returning an empty page cannot tell "no actor" from "empty
+# actor", which is precisely why unit tests missed it both times and only a
+# smoke test against the deployed environment caught it.
+
+
+def test_export_of_a_partitionless_user_reports_zero_withheld_not_an_error():
+    resp = _export_call(_agentcore_raising(NO_PARTITION), {})
+
+    assert resp.status_code == 200
+    manifest = resp.json()["manifest"]
+    # Nothing reaches the ownership gate, so nothing can be withheld — and
+    # the walks genuinely did finish, so ``complete`` stays true.
+    assert manifest["withheld_record_count"] == 0
+    assert manifest["complete"] is True
+
+
+def test_a_forget_for_a_partitionless_user_reports_zero_withheld_not_an_error():
+    resp = _forget_call(_agentcore_raising(NO_PARTITION), {}, params={"all": "true"})
+
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "deleted": 0,
+        "failed": 0,
+        "complete": True,
+        "withheld_record_count": 0,
+    }
+
+
+@pytest.mark.parametrize("code", ["ThrottlingException", "AccessDeniedException"])
+def test_neither_endpoint_reports_zero_withheld_when_agentcore_merely_fails(code: str):
+    """The pairing that keeps the absorption narrow. Only
+    ``ResourceNotFoundException`` may read as "no partition"; a throttle or
+    a denial must stay a visible 5xx, because ``withheld_record_count: 0``
+    during an outage is a claim about the user's own data neither endpoint
+    has any basis to make."""
+    fake = _agentcore_raising(code)
+
+    assert _export_call(fake, {}, client_obj=error_client).status_code == 500
+    assert (
+        _forget_call(fake, {}, params={"all": "true"}, client_obj=error_client).status_code == 500
+    )
+
+
+def test_a_withheld_session_whose_events_are_unreadable_counts_zero_not_a_500():
+    """A session listed but whose ``ListEvents`` reports it absent — the
+    orphan race, where a chat-delete wipe removes the events between the two
+    calls. Zero is the honest answer: no records were withheld from this
+    export, because there were none to withhold. The session count in the
+    log line is what still records that the gate fired."""
+    fake = _export_agentcore([(["orphan"], None)], {})
+    fake.list_events.side_effect = ClientError(
+        {"Error": {"Code": NO_PARTITION, "Message": "Session not found"}}, "ListEvents"
+    )
+
+    resp = _export_call(fake, {}, list_chats=MagicMock(return_value=([], None)))
+
+    assert resp.status_code == 200
+    assert resp.json()["manifest"]["withheld_record_count"] == 0
+
+
+# ── the withheld count's fan-out is bounded ───────────────────────────────
+#
+# Counting costs one ``ListEvents`` per withheld session, and the walks
+# feeding ``/export`` and the bulk forget are DRAINED, not paged — so an
+# uncapped loop turns a badly collided partition into a burnt Lambda timeout
+# on the two endpoints least able to afford one. Raised independently by
+# both reviewers on #583.
+
+
+def _many_foreign(n: int) -> tuple[list[str], dict[str, list[dict[str, Any]]], dict[str, Chat]]:
+    ids = [f"theirs-{i}" for i in range(n)]
+    events = {sid: [_event(f"e{i}", ("USER", "secret"))] for i, sid in enumerate(ids)}
+    return ids, events, {sid: _chat(sid, user_id=INTRUDER) for sid in ids}
+
+
+def test_the_withheld_fan_out_is_capped_on_both_endpoints(monkeypatch: pytest.MonkeyPatch):
+    """One ``ListEvents`` per withheld session, up to the cap and no
+    further. The cap is monkeypatched small; the real one is far above any
+    plausible anomaly."""
+    monkeypatch.setattr(memory_api, "_MAX_WITHHELD_SESSIONS_COUNTED", 2)
+    ids, events, foreign = _many_foreign(5)
+
+    export_fake = _export_agentcore([(ids, None)], events)
+    export = _export_call(
+        export_fake, foreign, list_chats=MagicMock(return_value=([], None))
+    ).json()
+    forget_fake = _deleting_agentcore(ids, events)
+    forget = _forget_call(forget_fake, foreign, params={"all": "true"}).json()
+
+    # Truncated, and truncated identically on both — the count stays a lower
+    # bound (2 of 5), which is what makes capping it free.
+    assert export["manifest"]["withheld_record_count"] == 2
+    assert forget["withheld_record_count"] == 2
+    assert len(export_fake.list_events.call_args_list) == 2
+    assert len(forget_fake.list_events.call_args_list) == 2
+
+
+def test_hitting_the_withheld_cap_gets_its_own_canary(monkeypatch: pytest.MonkeyPatch):
+    """A distinct event, because "we withheld more than we were willing to
+    count" means the reported magnitude is truncated — an operator must read
+    that from the log, not infer it from the cap constant."""
+    monkeypatch.setattr(memory_api, "_MAX_WITHHELD_SESSIONS_COUNTED", 2)
+    fake_logger = MagicMock()
+    monkeypatch.setattr(memory_api, "logger", fake_logger)
+    ids, events, foreign = _many_foreign(5)
+
+    _forget_call(_deleting_agentcore(ids, events), foreign, params={"all": "true"})
+
+    events_logged = [c.args[0] for c in fake_logger.warning.call_args_list]
+    assert any(e.startswith("memory.forget_sessions_withheld") for e in events_logged)
+    capped = next(c for c in fake_logger.warning.call_args_list if "capped" in c.args[0])
+    user_hash, sessions, counted = capped.args[1:]
+    # Every withheld session is still DETECTED — the tally is free set
+    # arithmetic; only the per-session record count is skipped.
+    assert (sessions, counted) == (5, 2)
+    assert user_hash == fingerprint_id(OWNER)
+
+
+def test_no_cap_canary_when_the_withheld_count_is_exact(monkeypatch: pytest.MonkeyPatch):
+    """Boundary: withheld == cap is fully counted, so nothing is truncated
+    and the second canary must stay silent."""
+    monkeypatch.setattr(memory_api, "_MAX_WITHHELD_SESSIONS_COUNTED", 2)
+    fake_logger = MagicMock()
+    monkeypatch.setattr(memory_api, "logger", fake_logger)
+    ids, events, foreign = _many_foreign(2)
+
+    body = _forget_call(_deleting_agentcore(ids, events), foreign, params={"all": "true"}).json()
+
+    assert body["withheld_record_count"] == 2
+    assert not [c for c in fake_logger.warning.call_args_list if "capped" in c.args[0]]
+
+
+def test_the_real_cap_is_far_above_any_plausible_anomaly():
+    """Post-#485 the expected withheld count is 0, so the cap must never
+    bite in normal operation — it exists only to bound the pathological
+    partition."""
+    assert memory_api._MAX_WITHHELD_SESSIONS_COUNTED >= 100
+
+
+def test_a_since_forget_does_not_narrow_the_withheld_count_to_the_cutoff():
+    """The count is "records in withheld sessions", NOT "records this
+    request would have deleted" — the two differ only under ``?since=``.
+
+    Filtering it would mean reading the timestamps of a session the
+    ownership check could not confirm is the caller's, to report a
+    *smaller* number. Over-reporting is the safe direction for an alarm,
+    so the cutoff is deliberately not applied. Pinned as a test because
+    prose in a docstring is not a contract.
+    """
+    old = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    theirs = {
+        "eventId": "e-old",
+        "eventTimestamp": old,
+        "payload": [
+            {"conversational": {"role": "USER", "content": {"text": "ancient secret"}}},
+            {"conversational": {"role": "ASSISTANT", "content": {"text": "ancient reply"}}},
+        ],
+    }
+    events = {"mine": [_event("e1", ("USER", "recent"))], "theirs": [theirs]}
+    fake = _deleting_agentcore(["mine", "theirs"], events)
+
+    body = _forget_call(fake, WITHHELD_CHATS, params={"since": "2026-01-01T00:00:00Z"}).json()
+
+    # Both of the foreign session's records are counted even though both
+    # predate the cutoff and so would never have been deleted.
+    assert body["withheld_record_count"] == 2
+    assert {c.kwargs["sessionId"] for c in fake.delete_event.call_args_list} == {"mine"}
