@@ -104,7 +104,20 @@ export default function Sessions() {
     };
   }, []);
 
-  const load = useCallback(function load() {
+  /**
+   * Read the list. `isInitial` decides what a failure MEANS, which is the
+   * whole reason the flag exists.
+   *
+   * On the first load there is nothing on screen, so a failure is the view's
+   * entire state and the error panel is the honest rendering. On the re-read
+   * that follows a revoke there is: the revoke already succeeded server-side,
+   * and the list from a moment ago is still broadly true. Flipping to the
+   * error panel there would tear down the success notice along with the list
+   * and report a completed sign-out as a failure — the one reading that is
+   * definitely wrong. So that failure keeps the view and admits, separately,
+   * that the list may now be stale.
+   */
+  const load = useCallback(function load(isInitial) {
     return listSessions()
       .then(function onSessions(rows) {
         if (!mountedRef.current) return;
@@ -113,13 +126,19 @@ export default function Sessions() {
       })
       .catch(function onSessionsError() {
         if (!mountedRef.current) return;
-        setStatus("error");
+        if (isInitial) {
+          setStatus("error");
+          return;
+        }
+        setActionError(
+          "That went through, but the list couldn't be refreshed — it may be out of date.",
+        );
       });
   }, []);
 
   useEffect(
     function loadOnMount() {
-      load();
+      load(true);
     },
     [load],
   );
@@ -160,7 +179,7 @@ export default function Sessions() {
     // before touching state — and before spending a re-read no one will see.
     if (!mountedRef.current) return;
     setNotice(message);
-    await load();
+    await load(false);
   }
 
   async function revokeEveryDevice() {

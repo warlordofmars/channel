@@ -207,6 +207,26 @@ describe("Sessions — per-device revoke", () => {
     expect(api.listSessions).toHaveBeenCalledTimes(2);
   });
 
+  it("keeps the success notice when only the re-read fails", async () => {
+    // The revoke landed server-side. Flipping to the error panel here would
+    // tear down the notice with the list and report a completed sign-out as
+    // a failure — so the view stays, and says the list may be stale.
+    await renderReady([session({ device_id: "aaaa1111-bbbb" })]);
+    api.revokeSession.mockResolvedValue(undefined);
+    api.listSessions.mockRejectedValue(new Error("refresh blew up"));
+
+    fireEvent.click(screen.getByRole("button", { name: "Sign out Device aaaa1111" }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
+    });
+
+    expect(screen.getByText("Device aaaa1111 signed out.")).toBeTruthy();
+    expect(screen.getByText(/may be out of date/)).toBeTruthy();
+    // Not the full-view error panel, and the stale list is still on screen.
+    expect(screen.queryByText(/Couldn't load your signed-in devices/)).toBeNull();
+    expect(screen.getByText("Device aaaa1111")).toBeTruthy();
+  });
+
   it("surfaces a non-404 failure and keeps the row", async () => {
     await renderReady([session({ device_id: "aaaa1111-bbbb" })]);
     const boom = Object.assign(new Error("revokeSession failed: 500"), { status: 500 });
