@@ -1257,11 +1257,26 @@ subset of `BedrockErrors`:
 - **`RefreshReuseDetected`** — the RFC 9700 §4.14.2 breach signal (a
   rotated token was re-presented, so the device family was revoked). The
   one counter here worth alarming on; it is kept out of the general
-  failure counter so a routine expiry can't drown it. **No CDK alarm
-  watches it yet.** #294 deliberately stayed out of
-  `infra/stacks/channel_stack.py`; wiring the alarm is unfiled follow-up
-  work, so until an issue exists this paragraph is the only record that
-  the breach signal is emitted but unwatched.
+  failure counter so a routine expiry can't drown it. **Alarmed since
+  #496** — `Channel-{env}-RefreshReuseDetected`, on the same
+  `AlarmTopic` as every other alarm, so it inherits #537's confirmed-
+  subscriber gate on prod and #537's accepted dev silence everywhere
+  else.
+  Its thresholds are the only ones in `channel_stack.py` that are not a
+  rate: `> 0` over **one** 5-minute period, one datapoint. Every other
+  alarm there watches a percentage or waits for two consecutive periods,
+  because one 5xx is noise; a single replayed credential is the whole
+  event, so there is nothing to tune. `NOT_BREACHING` is correct here
+  despite being what sank the three #111 alarms — those masked names
+  nothing could emit, whereas this metric is sparse *by design* and its
+  emitting path is pinned live from both ends
+  (`test_every_channel_namespace_alarm_references_an_emitted_metric` for
+  the name, `tests/unit/test_auth_refresh.py` for the branch). The
+  alternatives are worse: `BREACHING` alarms permanently on an idle
+  service, `MISSING` parks it in INSUFFICIENT_DATA between events —
+  indistinguishable from a broken alarm — and neither returns to OK, so
+  a *second* theft would be swallowed by a latched state. Response
+  runbook: `docs-site/ops/alarms.md`.
 - **`RefreshRateLimited`** — the limiter shed a request. Without it the
   limiter is invisible and "did my rate limit just sign everyone out?"
   has no answer, which is what makes the ceiling tunable from evidence.
@@ -1271,10 +1286,23 @@ full `RefreshConsumeOutcome` taxonomy and `metrics.py` decides which
 values earn a subset counter, so the taxonomy can grow without
 multiplying series. Dimensions are `{Environment}` only — this endpoint's
 obvious dimension candidates (`user_id`, `device_id`, client IP) are
-precisely the unbounded ones, and one of them is PII. None of the four
-are on the `/api/admin/metrics/*` allowlist yet (that endpoint queries
-every allowlisted name on each dashboard load, so adding them is a
-dashboard change, not a metrics one).
+precisely the unbounded ones, and one of them is PII.
+
+**None of the four are on the `/api/admin/metrics/*` allowlist, and #496
+decided to keep it that way.** Allowlisting alone buys nothing visible:
+the summary endpoint would return the key and no tile would read it,
+which is exactly the fetchable-but-invisible state #551 existed to fix,
+and the timeseries route only ever charts the two names hardcoded in
+`Dashboard.jsx`. Making it visible means a tile, and a breach indicator
+is a poor fit for a browse surface — its baseline is zero, nobody
+discovers a theft by browsing, and a permanently-zero tile beside the
+health rates teaches the eye to skip it. The alarm above is the control;
+CloudWatch and the `auth.refresh rejected` log lines are the triage
+surface. Reversible: if prod operations later want the count in-app, the
+change is allowlist **and** tile in one PR (the #558 shape), never half
+of it. Note the cost either way — the summary endpoint queries every
+allowlisted name once per rollup window, three windows per dashboard
+load, whether or not anyone reads that number.
 
 ### Alarms must reference metrics we emit
 
@@ -1285,6 +1313,23 @@ nothing ever emitted (`ToolErrors`, `StorageLatencyMs`,
 `TokenValidationFailures`); with `treat_missing_data=NOT_BREACHING` they
 sat permanently green, advertising coverage that did not exist. Adding an
 alarm for a metric you have not wired up now fails at `inv pre-push`.
+
+**The converse is not mechanically enforced** — a security-relevant
+counter that no alarm references still ships silently, which is how
+`RefreshReuseDetected` went unwatched from #294 to #496. That one is now
+pinned by name in `tests/unit/test_channel_stack.py`. A general
+must-be-alarmed registry in `metrics.py` is the right long-term shape and
+was deliberately not invented in #496: it needs a design pass over which
+counters qualify (`CSPViolations` and `RecallForgeryDefused` are both
+plausible and both currently unalarmed), and half a taxonomy is worse
+than none.
+
+**`infra/` sits outside both the mypy gate and the coverage source**
+(`mypy src/channel`, `coverage source = ["src/channel"]` — #588), so CI
+does **not** catch a type error or an uncovered branch in CDK code. When
+touching `infra/`, run those checks by hand and say so; `uv run inv synth`
+plus the `tests/unit/test_channel_stack.py` template assertions are the
+only automatic signal there.
 
 ## Management UI
 

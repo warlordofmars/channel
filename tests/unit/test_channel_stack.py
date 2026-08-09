@@ -21,6 +21,7 @@ configuration that the agent-safe checklist + spec Risk #5 require:
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -1281,10 +1282,143 @@ def test_channel_alarms_select_only_the_aggregate_dimension_set(dev_template):
 
 
 # ---------------------------------------------------------------------------
+# Refresh-token breach alarm (#496)
+# ---------------------------------------------------------------------------
+#
+# #294 wired ``RefreshReuseDetected`` — the RFC 9700 §4.14.2 signal that a
+# refresh credential was replayed, i.e. stolen — and nothing watched it. The
+# strongest signal the auth system produces was detected, auto-responded to,
+# recorded, and surfaced to nobody. That is the inverse of the #111 failure
+# and the worse half of it: there the watcher existed and the metric did not.
+#
+# These tests pin the alarm's *shape*, not merely its existence, because a
+# breach alarm degrades silently. An alarm re-tuned to the two-consecutive-
+# periods shape every rate alarm in this file uses would still be listed in
+# the console, still be green, and would no longer fire on the single
+# occurrence that is the entire event.
+
+_REUSE_ALARM = "RefreshReuseDetected"
+
+
+def _reuse_alarm(template: assertions.Template, env: str) -> dict:
+    alarms = _alarms(template)
+    name = f"Channel-{env}-{_REUSE_ALARM}"
+    assert name in alarms, f"no {name} alarm — the breach signal reaches nobody again (#496)"
+    return alarms[name]
+
+
+def test_refresh_reuse_alarm_watches_the_breach_counter(dev_template):
+    """The alarm watches that counter and only that counter.
+
+    Derived from the template via the same extractor the #111 guard uses,
+    so a metric renamed on one side and not the other fails here.
+    """
+    assert _channel_metric_names(_reuse_alarm(dev_template, "dev")) == {"RefreshReuseDetected"}
+
+
+def test_refresh_reuse_alarm_fires_on_a_single_occurrence(dev_template):
+    """One replayed token is the event — not a rate to be exceeded.
+
+    ``> 0`` over one 5-minute period with one breaching datapoint. Every
+    other Channel alarm either watches a percentage or waits for two
+    consecutive periods; relaxing this one to match them would mean a
+    lone token theft never pages anyone, while the alarm still reads as
+    healthy coverage.
+    """
+    alarm = _reuse_alarm(dev_template, "dev")
+    assert alarm["Threshold"] == 0
+    assert alarm["ComparisonOperator"] == "GreaterThanThreshold"
+    assert alarm["EvaluationPeriods"] == 1
+    assert alarm["DatapointsToAlarm"] == 1
+    assert alarm["Statistic"] == "Sum"
+    assert alarm["Period"] == 300
+
+
+def test_refresh_reuse_alarm_treats_missing_data_as_not_breaching(dev_template):
+    """Sparse-by-design is not the #111 dead-metric shape.
+
+    ``NOT_BREACHING`` was what let three alarms watching unemitted names
+    sit permanently green, so it deserves an explicit pin *and* a reason.
+    Here a period with no datapoint genuinely means "no breach", and the
+    emitting path is proven live by the #111 guard plus
+    ``tests/unit/test_auth_refresh.py``. ``BREACHING`` would alarm forever
+    on an idle service; ``MISSING`` would park it in INSUFFICIENT_DATA
+    between events, which looks exactly like a broken alarm. NOT_BREACHING
+    also returns the alarm to OK, so a second theft re-notifies instead of
+    being swallowed by a latched ALARM state.
+    """
+    assert _reuse_alarm(dev_template, "dev")["TreatMissingData"] == "notBreaching"
+
+
+def test_refresh_reuse_alarm_publishes_to_the_shared_alarm_topic(prod_template):
+    """Same destination as the #111 alarms — not a second topic.
+
+    #537 enforces a *confirmed* subscriber on exactly one prod topic, so
+    an alarm routed anywhere else inherits none of that guarantee and
+    fires into a void — the failure #537 exists to prevent, reintroduced
+    by one new alarm. The expected actions are derived from every *other*
+    prod alarm rather than restated as a literal, so this cannot pass by
+    spelling the same wrong ref twice, and it does not break when whichever
+    sibling alarm was named here is renamed or removed.
+    """
+    alarms = _alarms(prod_template)
+    alarm = _reuse_alarm(prod_template, "prod")
+    siblings = {
+        json.dumps(props["AlarmActions"], sort_keys=True)
+        for name, props in alarms.items()
+        if name != alarm["AlarmName"]
+    }
+    assert len(siblings) == 1, f"prod alarms do not share one destination: {siblings}"
+    expected = json.loads(next(iter(siblings)))
+    assert alarm["AlarmActions"] == expected
+    assert alarm["OKActions"] == expected
+    assert len(prod_template.find_resources("AWS::SNS::Topic")) == 1
+
+
+def test_refresh_reuse_alarm_is_silent_on_dev_like_every_other_alarm(dev_template):
+    """dev and personal stacks notify nobody — a recorded decision (#537).
+
+    Pinned so this alarm's security weight is never quietly used to argue
+    an exception: the posture is uniform, and dev silence is documented in
+    ``docs-site/ops/alarms.md`` rather than being an oversight here.
+    """
+    alarm = _reuse_alarm(dev_template, "dev")
+    assert "AlarmActions" not in alarm
+    assert "OKActions" not in alarm
+
+
+_ALARMS_DOC = Path(__file__).resolve().parents[2] / "docs-site" / "ops" / "alarms.md"
+_DOC_ALARM_COUNT_RE = re.compile(r"creates (\d+) CloudWatch alarms")
+
+
+def test_ops_doc_alarm_count_matches_the_synthesised_stack(dev_template, prod_template):
+    """The number in the ops runbook is checked, not asserted in prose.
+
+    ``docs-site/ops/alarms.md`` opens with how many alarms the stack
+    creates, and an operator reading "the stack creates N alarms" against
+    a console showing fewer has to work out which claim is wrong. That
+    number said 24 against a stack of 14 within a day of being written
+    (#585) — a small drift, but the same family as every other control
+    this repo has removed for advertising coverage it did not have. It is
+    derived from the template here so it cannot silently drift again.
+
+    Both envs are asserted because the count is env-independent by
+    construction (``_notify`` gates the *actions*, never the alarms), and
+    a change that made prod carry alarms dev does not would make the
+    single documented number meaningless.
+    """
+    text = _ALARMS_DOC.read_text(encoding="utf-8")
+    match = _DOC_ALARM_COUNT_RE.search(text)
+    assert match, f"{_ALARMS_DOC.name} no longer states an alarm count in the expected shape"
+    documented = int(match.group(1))
+    assert documented == len(_alarms(dev_template)) == len(_alarms(prod_template))
+
+
+# ---------------------------------------------------------------------------
 # Prod confirmed-alarm-subscription gate (#537)
 # ---------------------------------------------------------------------------
 #
-# 24 alarms fire into a topic nobody is subscribed to. The product
+# Every alarm fires into a topic nobody is subscribed to. The product
 # decision (2026-08-08) enforces a CONFIRMED subscription for prod only;
 # dev and jc stay deliberately silent.
 #

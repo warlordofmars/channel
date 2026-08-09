@@ -2033,6 +2033,63 @@ function handler(event) {
         )
         _notify(bedrock_throttle_alarm)
 
+        # ----------------------------------------------------------------
+        # Refresh-token breach signal (#294 emits it, #496 watches it)
+        # ----------------------------------------------------------------
+        # ``RefreshReuseDetected`` is the RFC 9700 §4.14.2 signal: a
+        # rotated refresh token was presented a second time, so
+        # ``consume_refresh_token`` revoked the whole device family. In
+        # practice a replayed refresh credential means a stolen one. #290
+        # already responds automatically and records it; this alarm is the
+        # only thing that tells a *human* it happened.
+        #
+        # The thresholds differ from every other alarm in this file on
+        # purpose. The rest watch **rates**, because one 5xx or one
+        # throttle is noise and only a sustained level means anything. This
+        # one is a **breach indicator**: a single occurrence is the whole
+        # event. ``threshold=0`` with ``GREATER_THAN`` is "at least one in
+        # a 5-minute period", and ``evaluation_periods=1`` /
+        # ``datapoints_to_alarm=1`` refuse to wait for a second one. There
+        # is no sensitivity to tune here — contrast ``BedrockThrottles``
+        # directly above, which deliberately wants two consecutive periods.
+        #
+        # ``NOT_BREACHING`` is correct here for the same reason it was
+        # wrong on the three alarms it sank in #111. There it masked
+        # metrics that nothing could ever emit, so permanent green
+        # advertised coverage that did not exist. Here the metric is sparse
+        # **by design** — a period with no datapoint means no breach, which
+        # is genuinely not-breaching — and both halves of the chain are
+        # pinned by tests rather than asserted in prose:
+        # ``channel.metrics.record_refresh_outcome`` publishes the name
+        # (``test_every_channel_namespace_alarm_references_an_emitted_metric``)
+        # and ``POST /auth/refresh`` reaches that branch
+        # (``tests/unit/test_auth_refresh.py``). Both alternatives are
+        # worse: ``BREACHING`` would sit in ALARM permanently on an idle
+        # service, and ``MISSING`` parks the alarm in INSUFFICIENT_DATA
+        # between events — visually indistinguishable from a broken alarm,
+        # which is the perception failure this whole family is about.
+        # NOT_BREACHING also returns the alarm to OK after an incident, so
+        # a *second* theft re-notifies instead of being swallowed by an
+        # already-latched ALARM state.
+        refresh_reuse_alarm = cw.Alarm(
+            self,
+            "RefreshReuseDetectedAlarm",
+            alarm_name=f"Channel-{env_name}-RefreshReuseDetected",
+            metric=_channel_metric("RefreshReuseDetected"),
+            threshold=0,
+            evaluation_periods=1,
+            datapoints_to_alarm=1,
+            comparison_operator=cw.ComparisonOperator.GREATER_THAN_THRESHOLD,
+            treat_missing_data=cw.TreatMissingData.NOT_BREACHING,
+            alarm_description=(
+                f"Channel refresh-token reuse detected ({env_name}) — a rotated refresh "
+                "token was replayed and its whole device family was revoked (RFC 9700 "
+                "4.14.2). Treat as credential theft and investigate; this is a security "
+                "signal, not a health metric, so any non-zero value is the event."
+            ),
+        )
+        _notify(refresh_reuse_alarm)
+
         # Lambda throttles — any throttled invocation is a capacity issue to
         # investigate immediately; no tolerance.
         def _throttle_alarm(construct_id: str, fn: lambda_.Function, label: str) -> cw.Alarm:
