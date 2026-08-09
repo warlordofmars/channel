@@ -506,6 +506,20 @@ describe("chats wrappers", () => {
       mockOk(body);
       await expect(listSessions()).resolves.toEqual([]);
     });
+
+    it("propagates a non-JSON body instead of reporting zero sessions", async () => {
+      // The shape that produces this on the deployed domain is CloudFront
+      // rewriting a 403 to a 200 index.html — an auth failure. Coercing it to
+      // `[]` would render "no signed-in devices", a claim about the user's
+      // account security we'd have no basis for. The view's error panel is
+      // the honest outcome.
+      fetchMock.mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: () => Promise.reject(new SyntaxError("Unexpected token <")),
+      });
+      await expect(listSessions()).rejects.toThrow(SyntaxError);
+    });
   });
 
   describe("revokeSession", () => {

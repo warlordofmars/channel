@@ -855,11 +855,17 @@ export async function listSessions() {
   if (!res.ok) throw new ApiError("listSessions failed:", res.status);
   const body = await res.json();
   // Our own FastAPI pins this to `list[Session]` through the response model,
-  // so the coercion is about what sits BETWEEN us and it: on the deployed
-  // domain CloudFront already rewrites some API responses (403 → a 200
-  // index.html — see `adminJson` above). A non-array reaching the view would
-  // crash it at `sessions.length`, turning a proxy hiccup into a blank page,
-  // so an unrecognisable body reads as "no sessions" instead.
+  // so this guards what sits BETWEEN us and it. A non-array reaching the view
+  // would crash it at `sessions.length`, turning a proxy hiccup into a blank
+  // page — so a well-formed JSON body we don't recognise reads as "no
+  // sessions".
+  //
+  // A body that isn't JSON at all is deliberately NOT caught here: the line
+  // above throws, the view shows its error panel, and that is the honest
+  // outcome. The shape that produces it on the deployed domain is CloudFront
+  // rewriting a 403 to a 200 index.html (see `adminJson`) — i.e. an auth
+  // failure. Coercing that to `[]` would render "no signed-in devices", which
+  // is a claim about the user's account security we would have no basis for.
   return Array.isArray(body?.sessions) ? body.sessions : [];
 }
 
