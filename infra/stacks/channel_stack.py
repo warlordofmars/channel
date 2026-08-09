@@ -19,8 +19,11 @@ Multi-environment usage:
 
 from __future__ import annotations
 
+import argparse
 import os
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
+from typing import Any
 
 import aws_cdk as cdk
 from aws_cdk import aws_certificatemanager as acm
@@ -193,6 +196,163 @@ def _build_csp_header(
         "report-uri /api/csp-report; "
         "report-to default;"
     )
+
+
+# ---------------------------------------------------------------------------
+# Post-deploy assertion: prod alarms must be able to reach a human (#537)
+# ---------------------------------------------------------------------------
+#
+# Every CloudWatch alarm below publishes to ``AlarmTopic``. None of that
+# is worth anything if the topic has no subscriber able to receive a
+# message — the state #537 found on both deployed stacks, where 24
+# alarms existed and not one of them could notify anybody.
+#
+# **Prod only.** The product decision on #537 (2026-08-08) accepts
+# ``dev`` and the personal ``jc`` stack as deliberately silent, so this
+# never runs for them. The per-cold-start ``alarm-email`` placeholder
+# WARNING stays a reminder and is explicitly *not* a control.
+#
+# **Why this is a post-deploy check and not a synth-time template
+# assertion.** Confirmation state does not exist at synth time. A
+# CloudFormation template can declare a subscription; it cannot say
+# whether the recipient ever clicked the link, and an unconfirmed email
+# subscription delivers nothing. ``PendingConfirmation`` is visible only
+# by querying live SNS, so a synth-time assertion is structurally
+# incapable of making the assertion that matters. See
+# ``confirmed_subscription_arns``.
+
+PROD_ENV_NAME = "prod"
+
+#: CloudFormation output name the CI job reads to discover the topic.
+ALARM_TOPIC_ARN_OUTPUT = "AlarmTopicArn"
+
+#: Upper bound on ``ListSubscriptionsByTopic`` pages walked. SNS returns
+#: up to 100 subscriptions per page and supplies the continuation token
+#: itself; the cap exists so a misbehaving pagination response cannot
+#: hang a deploy pipeline, not because 2 000 subscriptions is plausible
+#: on an alarm topic. The walk also stops at the first confirmed
+#: subscription, so truncation can never turn a pass into a failure.
+_MAX_SUBSCRIPTION_PAGES = 20
+
+
+class AlarmSubscriptionError(RuntimeError):
+    """The prod alarm topic cannot deliver a notification to anybody."""
+
+
+def confirmed_subscription_arns(
+    subscriptions: Iterable[Mapping[str, Any]],
+) -> list[str]:
+    """Return the subscription ARNs that can actually deliver.
+
+    ``SubscriptionArn`` is the only field carrying confirmation state.
+    For a subscription whose recipient has not clicked through, SNS
+    returns the literal string ``PendingConfirmation`` there instead of
+    an ARN; ``Deleted`` appears the same way for one torn down while the
+    page was being assembled. Both are subscription *records* that
+    deliver nothing.
+
+    The test is therefore an allowlist — "is this a real ARN" — and
+    deliberately **not** a denylist of the known sentinel strings. A
+    denylist would admit ``Deleted``, and would admit whatever sentinel
+    SNS adds next, letting the check pass in exactly the
+    delivers-nothing state it exists to catch (#537).
+    """
+    confirmed: list[str] = []
+    for subscription in subscriptions:
+        arn = subscription.get("SubscriptionArn")
+        if isinstance(arn, str) and arn.startswith("arn:"):
+            confirmed.append(arn)
+    return confirmed
+
+
+def require_confirmed_alarm_subscription(
+    env_name: str,
+    topic_arn: str,
+    client_factory: Callable[[], Any],
+) -> str:
+    """Assert *topic_arn* has at least one confirmed subscription.
+
+    Returns a one-line human-readable result on success. Raises
+    ``AlarmSubscriptionError`` when prod's alarm topic cannot reach
+    anybody.
+
+    Non-prod is a no-op that touches AWS not at all — *client_factory*
+    is never called, so no credentials are needed and no API error can
+    be raised on a stack the decision has accepted as silent. Keeping
+    the environment gate here rather than at the call site means there
+    is exactly one of it.
+    """
+    if env_name != PROD_ENV_NAME:
+        return (
+            f"env={env_name!r} is not {PROD_ENV_NAME!r} — skipping the "
+            "confirmed-alarm-subscription check (accepted as silent, #537)"
+        )
+
+    sns_client = client_factory()
+    scanned = 0
+    confirmed: list[str] = []
+    next_token: str | None = None
+
+    for _ in range(_MAX_SUBSCRIPTION_PAGES):
+        kwargs: dict[str, Any] = {"TopicArn": topic_arn}
+        if next_token:
+            kwargs["NextToken"] = next_token
+        page = sns_client.list_subscriptions_by_topic(**kwargs)
+        subscriptions = page.get("Subscriptions") or []
+        scanned += len(subscriptions)
+        confirmed = confirmed_subscription_arns(subscriptions)
+        if confirmed:
+            break
+        next_token = page.get("NextToken")
+        if not next_token:
+            break
+
+    if not confirmed:
+        raise AlarmSubscriptionError(
+            f"Alarm topic {topic_arn} has NO confirmed subscription "
+            f"({scanned} subscription record(s) scanned, 0 confirmed). Every "
+            "CloudWatch alarm on this stack would fire into a void. Subscribe "
+            "an address and CONFIRM it from the recipient's inbox — a record "
+            "left at PendingConfirmation delivers nothing. Runbook: "
+            "docs-site/ops/alarms.md (#537)."
+        )
+
+    return (
+        f"Alarm topic {topic_arn} has {len(confirmed)} confirmed "
+        f"subscription(s) among the {scanned} record(s) scanned."
+    )
+
+
+def _default_sns_client() -> Any:
+    """Build a real SNS client.
+
+    Imported lazily so a plain ``cdk synth`` never pays for boto3.
+    """
+    import boto3
+
+    return boto3.client("sns")
+
+
+def _main(argv: list[str] | None = None) -> int:
+    """CLI entry point for the CI post-deploy step. Returns an exit code."""
+    parser = argparse.ArgumentParser(
+        prog="python -m stacks.channel_stack",
+        description=(
+            "Fail unless the given SNS alarm topic has at least one CONFIRMED "
+            "subscription. Prod only — see #537."
+        ),
+    )
+    parser.add_argument("--env", required=True, help="Deployment environment name")
+    parser.add_argument("--topic-arn", required=True, help="Alarm SNS topic ARN")
+    args = parser.parse_args(argv)
+
+    try:
+        print(require_confirmed_alarm_subscription(args.env, args.topic_arn, _default_sns_client))
+    except AlarmSubscriptionError as exc:
+        # ``::error::`` renders as a job annotation on GitHub Actions.
+        print(f"::error::{exc}")
+        return 1
+    return 0
 
 
 class ChannelStack(cdk.Stack):
@@ -1619,6 +1779,10 @@ function handler(event) {
         # SNS topic for alarm notifications — prod only gets an email subscription
         # (subscription address lives in SSM /channel/{env}/alarm-email; set it
         # post-deploy, then run `aws sns subscribe --protocol email ...`).
+        # On prod that subscription is not optional: the post-deploy gate in
+        # ci.yml asserts at least one CONFIRMED subscription on this topic
+        # (#537). dev and jc are accepted as silent — see the
+        # "Post-deploy assertion" section above ``class ChannelStack``.
         alarm_topic = sns.Topic(
             self,
             "AlarmTopic",
@@ -2273,6 +2437,15 @@ function handler(event) {
         )
         cdk.CfnOutput(
             self,
+            ALARM_TOPIC_ARN_OUTPUT,
+            value=alarm_topic.topic_arn,
+            description=(
+                f"SNS topic every CloudWatch alarm publishes to ({env_name}). "
+                "Read by the prod confirmed-subscription gate in ci.yml (#537)."
+            ),
+        )
+        cdk.CfnOutput(
+            self,
             "DashboardUrl",
             value=f"https://{self.region}.console.aws.amazon.com/cloudwatch/home#dashboards:name={dashboard_name}",
             description="CloudWatch dashboard URL",
@@ -2370,3 +2543,10 @@ function handler(event) {
                 ),
             ],
         )
+
+
+# Entry point for the prod post-deploy alarm-subscription gate (#537).
+# The implementation lives just above ``class ChannelStack`` — see the
+# "Post-deploy assertion" section there.
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(_main())

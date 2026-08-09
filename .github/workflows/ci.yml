@@ -1436,6 +1436,90 @@ jobs:
               }]
             }
 
+  # Prod alarms must be able to reach a human (#537). 24 CloudWatch alarms
+  # publish to the stack's SNS alarm topic; a topic with no CONFIRMED
+  # subscription makes every one of them decorative. The product decision
+  # (2026-08-08) enforces this for prod only — dev and jc are accepted as
+  # deliberately silent and never reach this job.
+  #
+  # This runs post-deploy, not at synth, because confirmation state does
+  # not exist in a CloudFormation template. An unconfirmed email
+  # subscription is a subscription *record* that delivers nothing, and SNS
+  # reports it only in live state (``SubscriptionArn`` reads the literal
+  # ``PendingConfirmation``). A synth-time assertion cannot see it, so it
+  # could only assert that a subscription was declared — passing in exactly
+  # the broken state the issue documents.
+  #
+  # Deliberately NOT in ``back-merge``'s ``needs``: a missing alarm
+  # subscription must turn the release red and page Slack, but stranding
+  # the main → development sync on a notification-config problem would add
+  # a branch-divergence problem on top of it.
+  verify-prod-alarm-subscription:
+    name: Verify prod alarm subscription
+    needs: deploy-prod
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "latest"
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Install Python dependencies
+        # The check lives in ``infra/stacks/channel_stack.py``, which
+        # imports aws_cdk at module scope — hence the infra group.
+        # `--no-build` is not applicable here — see the package-install
+        # hardening note at the top of this file.
+        run: uv sync --group dev --group infra
+
+      - name: Require a confirmed subscription on the prod alarm topic
+        working-directory: infra
+        run: |
+          # Same discovery path as "Export stack URLs" in deploy-prod.
+          TOPIC_ARN=$(aws cloudformation describe-stacks --stack-name ChannelStack \
+            --region us-east-1 \
+            --query "Stacks[0].Outputs[?OutputKey=='AlarmTopicArn'].OutputValue" \
+            --output text)
+          # An empty result means the output is missing from the deployed
+          # stack, not that the topic has no subscribers. Fail loudly on
+          # the distinct cause rather than handing the checker an empty
+          # ARN and reporting a confusing SNS validation error.
+          if [ -z "$TOPIC_ARN" ] || [ "$TOPIC_ARN" = "None" ]; then
+            echo "::error::ChannelStack has no AlarmTopicArn output — cannot verify alarm delivery"
+            exit 1
+          fi
+          echo "Alarm topic: $TOPIC_ARN"
+          uv run --locked --no-sync --no-build python -m stacks.channel_stack \
+            --env prod --topic-arn "$TOPIC_ARN"
+
+      - name: Notify Slack — prod alarms notify nobody
+        if: failure() && env.SLACK_WEBHOOK_URL != ''
+        uses: slackapi/slack-github-action@dcb1066f776dd043e64d0e8ba94ca15cc7e1875d # v4.0.0
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "text": ":rotating_light: Prod alarm topic has no *confirmed* subscription — every CloudWatch alarm is decorative",
+              "attachments": [{
+                "color": "danger",
+                "text": "Subscribe an address and confirm it from the inbox (a record left at PendingConfirmation delivers nothing). Runbook: docs-site/ops/alarms.md · Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+              }]
+            }
+
   e2e-prod:
     name: E2E Tests (prod)
     needs: deploy-prod
