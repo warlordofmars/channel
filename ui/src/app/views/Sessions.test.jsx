@@ -12,9 +12,14 @@ vi.mock("../../api.js", () => ({
 import * as api from "../../api.js";
 import Sessions, { deviceLabel } from "./Sessions.jsx";
 
-// A session as `GET /api/me/sessions` projects it — every field the server's
-// `Session` model carries, so a test that leans on one is leaning on the real
-// shape rather than a convenient subset.
+// A session as `GET /api/me/sessions` projects it. The defaults carry every
+// field the server's `Session` model declares, so a test that leans on one is
+// leaning on the real shape rather than a convenient subset.
+//
+// Individual tests DO override a timestamp with `null` or `""`, which the
+// server's model — where these are required strings — would never emit. That
+// is deliberate: those cases pin the view's behaviour against a malformed or
+// truncated payload, which is what a client actually has to survive.
 function session(over = {}) {
   return {
     device_id: "5f2a9c31-0d44-4b7e-9a11-2c3d4e5f6071",
