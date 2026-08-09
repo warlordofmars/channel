@@ -158,13 +158,24 @@ API_LAMBDA_BUNDLING_STEPS = [
 ]
 
 
+# Path the violation reports POST to — ``src/channel/api/csp.py``, which logs
+# each report and emits the ``CSPViolations`` EMF metric.
+#
+# ``report-uri`` is the ONLY reporting transport this policy carries, and that
+# is a measured decision rather than an oversight — see the "reporting" section
+# of ``_build_csp_header``'s docstring. Do not "modernise" it by adding a
+# ``report-to`` directive alongside: doing so is what silenced reporting
+# entirely from #196 until #598.
+CSP_REPORT_PATH = "/api/csp-report"
+
+
 def _build_csp_header(
     *,
     custom_domain: str,
     attachments_bucket_name: str,
     region: str,
 ) -> str:
-    """Compose the CloudFront Content-Security-Policy header (#196).
+    """Compose the CloudFront Content-Security-Policy header (#196, #598).
 
     The browser SPA needs ``connect-src`` to cover:
       * its own API origin (``https://{custom_domain}``) so the fetch
@@ -177,6 +188,83 @@ def _build_csp_header(
     the SDK can hand back either form depending on the resolution path.
     Replaces the prior ``https://channel.example.com`` placeholder
     that was never substituted per-env.
+
+    **Still served Report-Only.** #598 measured what enforcing this policy
+    would actually block, by driving the deployed dev stack with Chromium and
+    reading the ``securitypolicyviolation`` DOM events (Report-Only fires the
+    same events as enforcing, with ``disposition: "report"``). Three of the
+    four violation classes it found are fixed here, each by naming exactly one
+    additional source — no wildcard, no ``'unsafe-inline'``:
+
+    * ``font-src`` — the Google Fonts ``@import`` in
+      ``ui/src/styles/channel.css`` and ``docs-site/.vitepress/theme/style.css``
+      pulls ~2 750 woff2 files from ``fonts.gstatic.com`` per drive. The
+      directive was absent entirely, so it fell back to ``default-src 'self'``
+      and every font on every page was a violation.
+    * ``style-src-elem`` — the stylesheet those ``@import``s fetch, from
+      ``fonts.googleapis.com``.
+    * ``img-src`` — ``blob:``. ``useAssetContent`` renders image assets
+      (#279 generated images, code-exec output) through a same-origin
+      ``URL.createObjectURL`` blob, which ``data:`` does not cover.
+
+    The fourth class, ``script-src-elem`` / ``inline``, is why the header is
+    NOT flipped to enforcing in this change. It has three independent sources
+    and none of them can be narrowed from here:
+
+    * ``ui/index.html`` — the GA4 consent gate and the theme pre-paint script.
+      Hashable in principle, but the GA block embeds a build-substituted
+      measurement id, so the hash differs per environment and CDK cannot know
+      it at synth time. The fix is to externalise both scripts.
+    * the VitePress docs pages — three generated inline scripts per page, one
+      of which embeds ``__VP_HASH_MAP__`` (per-page content hashes). No static
+      hash list survives a docs edit, and VitePress exposes no nonce hook.
+    * ``auth/mgmt_auth.py``'s login-completion page — an inline script whose
+      body IS the freshly minted JWT, so it is unhashable by construction.
+      Enforcing ``script-src 'self'`` blocks it and **breaks sign-in
+      outright**.
+
+    Closing those needs changes in ``ui/``, in the auth token-handoff path,
+    and a separate response-headers policy for the ``/docs*`` behaviour —
+    outside this issue's scope, and the auth half wants a human design call
+    before an agent rewrites how the mgmt JWT reaches ``localStorage``.
+    Everything else measured clean: no ``connect-src`` violation (including
+    the presigned S3 PUT), no ``'unsafe-eval'`` requirement (mermaid renders
+    without it), and no ``form-action`` / ``base-uri`` / ``frame-ancestors``
+    hits across ~3 500 events.
+
+    **Reporting: ``report-uri`` only, and the missing ``report-to`` is the
+    point.** From #196 until #598 this policy ended
+    ``report-uri /api/csp-report; report-to default;`` — and delivered
+    nothing, ever. ``CSPViolations`` had never been emitted once: the metric
+    did not exist in the ``Channel`` namespace at all, and 30 days of dev API
+    logs contained no report. Two faults compounded:
+
+    * no ``Reporting-Endpoints`` (or legacy ``Report-To``) header was served,
+      so the group ``report-to default`` named did not exist; and
+    * **Chromium suppresses ``report-uri`` whenever a ``report-to`` is
+      present**, so the working transport was disabled by the broken one.
+
+    Measured directly, serving one violating page under five header combos to
+    Chromium (headless and headed, 75s delivery window, delivery counted
+    server-side):
+
+    ==================================================  ========
+    header combination                                  reports
+    ==================================================  ========
+    ``report-uri`` only                                 **1**
+    ``report-to`` + ``Reporting-Endpoints``             0
+    ``report-uri`` + ``report-to`` + ``Reporting-Endpoints``  0
+    ``report-uri`` + ``report-to``, group undeclared    0
+    ``report-to`` + legacy ``Report-To``                0
+    ==================================================  ========
+
+    Declaring the endpoint group was tried first and deployed to the personal
+    ``jc`` stack over HTTPS on its real domain: a full 21-surface drive still
+    produced zero reports server-side. So the fix is to drop ``report-to``,
+    not to declare it — carrying a Reporting-API directive that delivers
+    nothing while disabling the one that works is strictly worse than not
+    carrying it. Re-adding it needs evidence that delivery works, not a
+    deprecation notice.
     """
 
     api_origin = f"https://{custom_domain}"
@@ -188,13 +276,19 @@ def _build_csp_header(
         "script-src 'self' https://www.googletagmanager.com; "
         "connect-src 'self' https://www.google-analytics.com "
         f"{api_origin} {bucket_legacy} {bucket_regional}; "
-        "img-src 'self' data: https://www.google-analytics.com; "
-        "style-src 'self' 'unsafe-inline'; "
+        # blob: — same-origin object URLs only; it grants no third-party
+        # origin. See the docstring for the asset-render path that needs it.
+        "img-src 'self' data: blob: https://www.google-analytics.com; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+        "font-src 'self' https://fonts.gstatic.com; "
         "frame-ancestors 'none'; "
         "base-uri 'self'; "
         "form-action 'self'; "
-        "report-uri /api/csp-report; "
-        "report-to default;"
+        # NO `report-to` — see the docstring. Its presence suppresses
+        # `report-uri` in Chromium, and the Reporting API delivered nothing in
+        # its place. `report-uri` is deprecated but is the only transport
+        # measured to actually work.
+        f"report-uri {CSP_REPORT_PATH};"
     )
 
 
@@ -1277,13 +1371,16 @@ class ChannelStack(cdk.Stack):
         # ----------------------------------------------------------------
         # CloudFront response headers — security hardening
         #
-        # CSP ships in Report-Only mode first; browser console surfaces
-        # violations without breaking the site. Flip to enforcing in a
-        # follow-up once logs are clean for ~1 week.
+        # CSP is still Report-Only. #598 measured what enforcing would block
+        # (see `_build_csp_header`): three of the four violation classes are
+        # now allowlisted by exact source, and the fourth — inline `<script>`
+        # on the SPA shell, the VitePress docs pages, and the login-completion
+        # page — cannot be narrowed from this file. Enforcing today breaks
+        # sign-in. Do NOT flip this header without first closing that class.
         # ----------------------------------------------------------------
         # Violations POST to /api/csp-report on the same origin; the endpoint
-        # is unauthenticated + per-IP rate-limited. `report-uri` is the legacy
-        # directive; `report-to default` targets the modern Reporting API.
+        # is unauthenticated + per-IP rate-limited. `report-uri` is the only
+        # transport, deliberately — see `_build_csp_header`.
         csp_report_only = _build_csp_header(
             custom_domain=custom_domain,
             attachments_bucket_name=attachments_bucket.bucket_name,
