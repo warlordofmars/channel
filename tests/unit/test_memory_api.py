@@ -2145,3 +2145,82 @@ def test_a_withheld_session_whose_events_are_unreadable_counts_zero_not_a_500():
 
     assert resp.status_code == 200
     assert resp.json()["manifest"]["withheld_record_count"] == 0
+
+
+# ── the withheld count's fan-out is bounded ───────────────────────────────
+#
+# Counting costs one ``ListEvents`` per withheld session, and the walks
+# feeding ``/export`` and the bulk forget are DRAINED, not paged — so an
+# uncapped loop turns a badly collided partition into a burnt Lambda timeout
+# on the two endpoints least able to afford one. Raised independently by
+# both reviewers on #583.
+
+
+def _many_foreign(n: int) -> tuple[list[str], dict[str, list[dict[str, Any]]], dict[str, Chat]]:
+    ids = [f"theirs-{i}" for i in range(n)]
+    events = {sid: [_event(f"e{i}", ("USER", "secret"))] for i, sid in enumerate(ids)}
+    return ids, events, {sid: _chat(sid, user_id=INTRUDER) for sid in ids}
+
+
+def test_the_withheld_fan_out_is_capped_on_both_endpoints(monkeypatch: pytest.MonkeyPatch):
+    """One ``ListEvents`` per withheld session, up to the cap and no
+    further. The cap is monkeypatched small; the real one is far above any
+    plausible anomaly."""
+    monkeypatch.setattr(memory_api, "_MAX_WITHHELD_SESSIONS_COUNTED", 2)
+    ids, events, foreign = _many_foreign(5)
+
+    export_fake = _export_agentcore([(ids, None)], events)
+    export = _export_call(
+        export_fake, foreign, list_chats=MagicMock(return_value=([], None))
+    ).json()
+    forget_fake = _deleting_agentcore(ids, events)
+    forget = _forget_call(forget_fake, foreign, params={"all": "true"}).json()
+
+    # Truncated, and truncated identically on both — the count stays a lower
+    # bound (2 of 5), which is what makes capping it free.
+    assert export["manifest"]["withheld_record_count"] == 2
+    assert forget["withheld_record_count"] == 2
+    assert len(export_fake.list_events.call_args_list) == 2
+    assert len(forget_fake.list_events.call_args_list) == 2
+
+
+def test_hitting_the_withheld_cap_gets_its_own_canary(monkeypatch: pytest.MonkeyPatch):
+    """A distinct event, because "we withheld more than we were willing to
+    count" means the reported magnitude is truncated — an operator must read
+    that from the log, not infer it from the cap constant."""
+    monkeypatch.setattr(memory_api, "_MAX_WITHHELD_SESSIONS_COUNTED", 2)
+    fake_logger = MagicMock()
+    monkeypatch.setattr(memory_api, "logger", fake_logger)
+    ids, events, foreign = _many_foreign(5)
+
+    _forget_call(_deleting_agentcore(ids, events), foreign, params={"all": "true"})
+
+    events_logged = [c.args[0] for c in fake_logger.warning.call_args_list]
+    assert any(e.startswith("memory.forget_sessions_withheld") for e in events_logged)
+    capped = next(c for c in fake_logger.warning.call_args_list if "capped" in c.args[0])
+    user_hash, sessions, counted = capped.args[1:]
+    # Every withheld session is still DETECTED — the tally is free set
+    # arithmetic; only the per-session record count is skipped.
+    assert (sessions, counted) == (5, 2)
+    assert user_hash == fingerprint_id(OWNER)
+
+
+def test_no_cap_canary_when_the_withheld_count_is_exact(monkeypatch: pytest.MonkeyPatch):
+    """Boundary: withheld == cap is fully counted, so nothing is truncated
+    and the second canary must stay silent."""
+    monkeypatch.setattr(memory_api, "_MAX_WITHHELD_SESSIONS_COUNTED", 2)
+    fake_logger = MagicMock()
+    monkeypatch.setattr(memory_api, "logger", fake_logger)
+    ids, events, foreign = _many_foreign(2)
+
+    body = _forget_call(_deleting_agentcore(ids, events), foreign, params={"all": "true"}).json()
+
+    assert body["withheld_record_count"] == 2
+    assert not [c for c in fake_logger.warning.call_args_list if "capped" in c.args[0]]
+
+
+def test_the_real_cap_is_far_above_any_plausible_anomaly():
+    """Post-#485 the expected withheld count is 0, so the cap must never
+    bite in normal operation — it exists only to bound the pathological
+    partition."""
+    assert memory_api._MAX_WITHHELD_SESSIONS_COUNTED >= 100

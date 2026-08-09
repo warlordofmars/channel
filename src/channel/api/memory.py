@@ -212,6 +212,14 @@ orphaned AgentCore session left behind by a best-effort
 without saying which is un-actionable. Two fields, two conditions, and a
 caller reads both to answer "did I get everything?".
 
+**The count is a lower bound twice over**, and deliberately so:
+``count_session_records`` stops at ``MAX_EVENTS_PER_SESSION`` *within* a
+session, and :data:`_MAX_WITHHELD_SESSIONS_COUNTED` bounds how many withheld
+sessions are counted *at all* — without which the drained ``/export`` and
+forget walks would spend a whole Lambda timeout enumerating records they are
+never going to return. Alert on ``> 0``, never on the magnitude; a capped
+request says so with its own ``memory.withheld_count_capped`` canary.
+
 **What gets withheld did not change, and must not.** Surfacing an
 unverifiable session would show a user data they already asked to delete —
 see §Scoping. This is a reporting change only. For the same reason the
@@ -374,6 +382,25 @@ def _decode_cursor(cursor: str, actor_id: str) -> str:
     return payload["t"]
 
 
+#: Ceiling on how many withheld sessions are actually *counted* per request.
+#: Counting costs one ``ListEvents`` per withheld session, and the walks
+#: feeding ``/export`` and the bulk forget are **drained** rather than paged
+#: (``_EXPORT_MAX_PAGES`` × page size ≈ 10 000 sessions), so a badly collided
+#: or corrupted partition would spend the whole Lambda timeout counting
+#: records it is not going to return anyway — turning a reporting field into
+#: an outage on the two endpoints that must not have one.
+#:
+#: Capping is *free* precisely because the number was never exact: it is
+#: already documented as "at least this many" (``count_session_records``
+#: stops at ``MAX_EVENTS_PER_SESSION`` within a single session for the same
+#: reason). Past the cap the answer to "was anything withheld?" is unchanged
+#: and only the magnitude degrades, which is the figure callers are told not
+#: to alert on. Set far above any plausible anomaly — post-#485 the expected
+#: value is 0 — and hitting it gets its own canary, since "we withheld more
+#: than we were willing to count" is a different event from "we withheld".
+_MAX_WITHHELD_SESSIONS_COUNTED = 100
+
+
 async def _withheld_record_count(
     client: Any,
     *,
@@ -416,14 +443,24 @@ async def _withheld_record_count(
     to pay it, on the grounds that an alarm firing at ``> 0`` learns nothing
     from the magnitude. That reasoning held while the count was only an
     alarm; it does not once the number is part of a completeness claim made
-    to the user in the response body.
+    to the user in the response body — but it is why the fan-out is bounded
+    by :data:`_MAX_WITHHELD_SESSIONS_COUNTED` rather than left to follow a
+    drained walk. Sessions past the cap are still *detected* (they count
+    toward the canary's ``sessions=``, which is free set arithmetic); only
+    their records go uncounted.
     """
     withheld_sessions = 0
     withheld_records = 0
+    counted = 0
     for session_id in session_ids:
         if session_id in owned:
             continue
         withheld_sessions += 1
+        if counted >= _MAX_WITHHELD_SESSIONS_COUNTED:
+            # Keep walking — the session tally costs nothing and is what the
+            # canary reports — but stop paying an API call per session.
+            continue
+        counted += 1
         withheld_records += await count_session_records(
             client, memory_id=memory_id, actor_id=actor_id, session_id=session_id
         )
@@ -438,6 +475,17 @@ async def _withheld_record_count(
             fingerprint_id(user_id),
             withheld_sessions,
             withheld_records,
+        )
+    if withheld_sessions > _MAX_WITHHELD_SESSIONS_COUNTED:
+        # A distinct event, not a field on the one above: "we withheld more
+        # than we were willing to count" means the returned magnitude is
+        # truncated, and an operator reading the number needs to know that
+        # from the log rather than inferring it from the cap constant.
+        logger.warning(
+            "memory.withheld_count_capped user_hash=%s sessions=%d counted=%d",
+            fingerprint_id(user_id),
+            withheld_sessions,
+            counted,
         )
     return withheld_records
 
