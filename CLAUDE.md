@@ -860,6 +860,27 @@ prod never sets the flag (CDK assertion test in
   passes. The source marker is the one value *not* defused: its
   alphanumeric allowlist is strictly stronger, since a value that
   cannot contain a structural character cannot forge one.
+  The **role label** is the other exception, and for the opposite
+  reason: it lands in the bullet's own `- {label}: ` prefix rather
+  than in the untrusted body, so the defusal never sees it and
+  *could not help if it did* — that pass strips markers and
+  deliberately preserves line breaks, which is the thing a role must
+  not carry. `_safe_role_label` strips line terminators from it
+  instead (#558). Unreachable today (AgentCore's role is a fixed
+  enum), fixed because the formatter's own structure is exactly what
+  untrusted content must not be able to forge.
+- **`_normalise_line_terminators` is idempotent, and the `rstrip` is
+  what makes that true** (#558). `str.splitlines` drops the
+  terminator in *final* position, so the pre-#558
+  `"\n".join(text.splitlines())` peeled one more off a trailing run
+  on every application. Two things rested on the stability claim:
+  `_defuse_recall_turn`'s "the normalisation can alter the text at
+  most once" cost argument — which bought one O(n) fixpoint pass per
+  trailing terminator, a clean 4x-per-doubling quadratic (6.1 s at
+  8 000 terminators, ~14 ms now) — and #558's defusal counter, which
+  measures against the normalised input and so read an ordinary turn
+  ending in a blank line as a probe. Latent rather than live either
+  way: the caller truncates to `_RECALL_EVENT_TEXT_TRUNCATE` first.
 - **Two caps, because #274 split two jobs.** The **read** cap is the
   candidate pool — `POOL_MAX_SESSIONS = 10` sessions ×
   `POOL_EVENTS_PER_SESSION = 5` events (`memory_ranking.py`), the
@@ -895,6 +916,22 @@ prod never sets the flag (CDK assertion test in
   datapoint — the blind spot #227 had to be reopened to see through.
   Not yet on the `/api/admin/metrics/*` allowlist, so it is not on the
   dashboard.
+- **`RecallForgeryDefused`** (#558) — one increment per turn in which
+  the formatter had to neutralise forged structure, however many
+  markers that turn carried. This seam is the single place
+  attacker-influenceable content meets the system prompt, and #465 /
+  #526 / #534 / #544 all hardened it while emitting nothing, so "is
+  anyone actually trying this?" had no answer. **Counter only, by
+  product decision**: a log line here is a flooding vector (an
+  attacker who controls the input controls the log volume) and
+  per-marker counting is the same problem in a metric, so the counter
+  answers *how often* and deliberately never *what* — not even the
+  marker kind, which is attacker-selected. Dimension-free like every
+  other `record_*`. **On the admin allowlist and the dashboard
+  ("Forgeries defused") in the same change**, which is the #551
+  lesson: a counter that is emitted but not allowlisted is invisible.
+  `preview_addendum` does not count — it computes a block without
+  firing a real turn.
 - **`GET /api/_debug/recall/inspect` takes a `user_message`** (#227,
   extended by #274). Selection is a function of the turn, so a preview
   without one reports an empty block — the honest answer, and what a

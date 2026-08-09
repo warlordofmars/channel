@@ -80,6 +80,9 @@ function metricsBlock(overrides = {}) {
     "MemoryRecordDeleteFailures",
     "MemoryBulkForgetSuccesses",
     "MemoryBulkForgetFailures",
+    // Prompt-injection observability (#558) — how often the recall
+    // formatter had to neutralise forged block structure.
+    "RecallForgeryDefused",
     "AutoTitleSuccesses",
     "AutoTitleFailures",
     "ChatDeleteMemoryWipeSuccesses",
@@ -125,6 +128,9 @@ function summaryFixture() {
         MemoryToolRecallFailures: 2,
         RequestCount: 4821,
         Request5xxCount: 7,
+        // #558 — distinct from every other value on this card so the
+        // assertion below can only be satisfied by the right tile.
+        RecallForgeryDefused: 43,
         // #551 data-rights rates, chosen distinct from each other and from
         // the 90% / 80% above so each getByText below matches exactly one
         // tile. The bulk-forget pair is deliberately half-failing — that is
@@ -247,6 +253,37 @@ describe("Dashboard", () => {
     expect(today.getByText("Tool recall")).toBeTruthy();
     expect(today.getByText("Requests")).toBeTruthy();
     expect(today.getByText("5xx responses")).toBeTruthy();
+  });
+
+  // #558 — the prompt-injection counter. The #551 lesson applied one level
+  // up: allowlisting a name makes it fetchable, and only the SPA reading the
+  // right key makes it visible. `tests/unit/test_admin.py` pins the
+  // name-agreement mechanically from both real artefacts; what it cannot
+  // check is that the tile actually renders the served number, which is the
+  // difference between a tile at 0 because nothing happened and a tile at 0
+  // because the key is misspelled.
+  it("renders the defused-forgery tile with the value the API served", async () => {
+    await act(async () => render(<Dashboard />));
+    const today = within(screen.getByTestId("rollup-today"));
+
+    // A real, non-zero, card-unique value: misspell `m.RecallForgeryDefused`
+    // in Dashboard.jsx and this reads "0" instead.
+    expect(tileValue(today, "Forgeries defused")).toBe("43");
+  });
+
+  // A count, not a rate — the defusal is deterministic and cannot fail, so
+  // there is no failure half to divide by. Zero is its honest baseline and a
+  // move off zero is the whole signal, which is why it must not borrow the
+  // data-rights tiles' em dash.
+  it("renders the defused-forgery tile as a plain zero when nothing was defused", async () => {
+    getAdminMetricsSummary.mockResolvedValue({
+      ...summaryFixture(),
+      today: { active_users: 0, metrics: metricsBlock() },
+    });
+    await act(async () => render(<Dashboard />));
+
+    const today = within(screen.getByTestId("rollup-today"));
+    expect(tileValue(today, "Forgeries defused")).toBe("0");
   });
 
   // #551 — the six #476/#477 counters were emitted but absent from the admin

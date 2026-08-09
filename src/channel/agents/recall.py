@@ -56,7 +56,11 @@ from channel.agents.memory_ranking import (
     rank_candidates,
     role_label,
 )
-from channel.metrics import record_recall_empty, record_recall_outcome
+from channel.metrics import (
+    record_recall_empty,
+    record_recall_forgery_defused,
+    record_recall_outcome,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -175,21 +179,61 @@ _FORGED_SETEXT_UNDERLINE_RE = re.compile(r"^[ \t]*[=-]{2,}[ \t]*$", re.MULTILINE
 # follows.
 #
 # Cost: one pass, no regex, no loop, no fixpoint. It only ever collapses
-# (``\r\n`` → ``\n``) or drops a trailing terminator, so it never grows
-# the text, and it is idempotent — exactly what ``_defuse_recall_turn``'s
+# (``\r\n`` → ``\n``) or drops trailing terminators, so it never grows the
+# text, and it is idempotent — exactly what ``_defuse_recall_turn``'s
 # termination argument needs.
+#
+# --- #558: the ``rstrip`` is what MAKES that idempotence claim true -----
+#
+# Until #558 this was the bare ``"\n".join(text.splitlines())``, and the
+# claim above was simply wrong: ``splitlines`` drops the terminator in
+# FINAL position, so each application peeled one more off a run of them.
+# ``"a\n\n"`` went to ``"a\n"``, then to ``"a"`` — a different value on
+# the second application, which is the definition of not idempotent.
+#
+# It broke two things that both rested on the claim.
+#
+# **A latent quadratic in the fixpoint loop.** Every pass shortened the
+# text, so every pass counted as "changed" and bought another iteration:
+# one O(n) sweep per trailing terminator. Measured on the pre-#558 code:
+# 24 ms at 500 terminators, 96 ms at 1 000, 378 ms at 2 000, 1.5 s at
+# 4 000, 6.1 s at 8 000 — a clean 4x per doubling, and hours at the
+# 500 000-char sizes the other cost guards in this module use. It was
+# **latent rather than live**: ``_format_recall_addendum`` truncates a
+# turn to ``_RECALL_EVENT_TEXT_TRUNCATE`` before defusing it, and the only
+# other value that reaches the loop is an AgentCore date, so nothing on
+# the live path is long enough to notice. That is exactly the "hard bound"
+# ``_defuse_recall_turn`` credits the caller with — but the loop's own
+# cheapness argument was still false, and a future caller reusing the
+# helper on an uncapped value would have inherited the bug.
+#
+# **A false positive on #558's counter.** The defusal flag is measured
+# against the normalised input, so a value the loop kept shortening for
+# purely cosmetic reasons read as a defused forgery. A recalled turn
+# ending in a blank line is ordinary chat text and would have been
+# counted as a probe.
+#
+# The fix computes that fixpoint directly instead of iterating toward it:
+# convert every terminator, then drop the trailing run in one ``rstrip``.
+# Still one linear pass, still deletion-only, and now genuinely stable —
+# ``g(g(s)) == g(s)`` for every input, because the result carries no
+# trailing ``\n`` for a second application to find.
 def _normalise_line_terminators(text: str) -> str:
-    """Rewrite every terminator ``str.splitlines`` recognises as ``\\n``.
+    """Rewrite every terminator ``str.splitlines`` recognises as ``\\n``,
+    dropping any trailing run of them.
 
-    Not a pure one-for-one substitution, and callers should not assume
-    it is: a ``\\r\\n`` pair collapses to a single ``\\n``, and a
-    terminator in final position is dropped rather than kept, so
-    ``"a\\r\\nb\\n"`` becomes ``"a\\nb"``. Both follow from rebuilding the
-    text from ``str.splitlines``, and both are wanted here — the result
-    is never longer than the input, which is what
-    :func:`_defuse_recall_turn`'s termination argument rests on.
+    Not a pure one-for-one substitution, and callers should not assume it
+    is: a ``\\r\\n`` pair collapses to a single ``\\n``, and terminators in
+    final position are dropped rather than kept, so ``"a\\r\\nb\\n\\n"``
+    becomes ``"a\\nb"``. Both follow from rebuilding the text out of
+    ``str.splitlines``, and both are wanted here — the result is never
+    longer than the input, which is what :func:`_defuse_recall_turn`'s
+    termination argument rests on.
+
+    **Idempotent**, which the caller's cost argument needs and which the
+    pre-#558 form only appeared to be — see the rationale block above.
     """
-    return "\n".join(text.splitlines())
+    return "\n".join(text.splitlines()).rstrip("\n")
 
 
 def defuse_forged_headings(text: str) -> str:
@@ -452,7 +496,19 @@ def _defuse_forged_line_openers(text: str) -> str:
 
 
 def _defuse_recall_turn(text: str) -> str:
-    """Run every structural defusal over one recalled turn until stable.
+    """Text-only view of :func:`_defuse_recall_turn_tracked`.
+
+    The overwhelming majority of callers — and every test that predates
+    #558 — want the defused string and nothing else. Keeping this name as
+    the plain-string entry point means the observability work added no
+    churn to any of them.
+    """
+    return _defuse_recall_turn_tracked(text)[0]
+
+
+def _defuse_recall_turn_tracked(text: str) -> tuple[str, bool]:
+    """Run every structural defusal over one recalled turn until stable,
+    reporting whether anything was actually neutralised (#558).
 
     The passes must compose, and one ordered application of them does
     not: stripping a bold wrapper *uncovers* whatever it wrapped, and by
@@ -502,13 +558,52 @@ def _defuse_recall_turn(text: str) -> str:
     Both matter — the second is the hard bound, the first keeps the loop
     cheap for anything that reuses it. Reordering the caller so an
     uncapped turn reaches this is the regression to watch for.
+
+    --- #558: what the returned flag means, and what it deliberately
+    does NOT ---
+
+    The flag is measured against the **terminator-normalised** input, not
+    the raw one, and that is the whole design. Normalisation is hoisted
+    out of the loop here purely to name that baseline, and the hoist is a
+    no-op on the result: it is idempotent, so the pass still inside
+    ``defuse_forged_headings`` changes nothing the second time; and
+    running it ahead of ``_defuse_recall_delimiters`` cannot alter what
+    that pass sees, since normalising only converts or DROPS terminators
+    — and it drops them only in trailing position, where there is nothing
+    left to join, so it can never bring one ``<`` up against another and
+    manufacture a run.
+
+    That idempotence is load-bearing and was **not true before #558** —
+    see the rationale block on :func:`_normalise_line_terminators`, whose
+    missing ``rstrip`` let every pass peel one more terminator off a
+    trailing run. Without that fix this baseline drifts by one terminator
+    per iteration, and an ordinary turn ending in a blank line reads as a
+    forgery.
+
+    Comparing against the RAW input instead would make the counter
+    useless rather than merely noisy. ``_normalise_line_terminators``
+    rebuilds the text from ``str.splitlines``, so it drops a trailing
+    terminator and collapses ``\\r\\n`` — meaning any recalled turn that
+    ends in a newline, or was typed on Windows, would register as a
+    "defusal". Those are the common case in stored chat text, and they
+    would swamp the signal the counter exists to carry.
+
+    Nothing is lost by excluding them, because a terminator on its own
+    forges nothing. Every structure this block has — headings (#465),
+    session boundaries (#526), fence delimiters (#534), turn bullets
+    (#544) — requires a *marker*. An exotic terminator is what lets a
+    marker hide from the ``^``-anchored passes (the #544 vector), but the
+    marker still has to be there, and stripping it is a change the
+    comparison sees.
     """
+    text = _normalise_line_terminators(text)
+    original = text
     while True:
         defused = _defuse_recall_delimiters(text)
         defused = defuse_forged_headings(defused)
         defused = _defuse_forged_line_openers(defused)
         if defused == text:
-            return defused
+            return defused, defused != original
         text = defused
 
 
@@ -576,6 +671,62 @@ _RECALL_SOURCE_MARKER_UNKNOWN = "unknown"
 _NON_MARKER_CHARS_RE = re.compile(r"[^0-9A-Za-z]+")
 
 
+# --- #558: line terminators in the bullet's role prefix ------------------
+#
+# ``role_label`` maps ``USER``/``ASSISTANT`` to ``You``/``Me`` and passes
+# anything else through verbatim — deliberately, so a wire change is
+# visible rather than silently relabelled ``Me``. But the value lands in
+# ``f"- {label}: {text}"``, which is the formatter's OWN structural
+# prefix. A role carrying a line terminator therefore splits the bullet
+# and manufactures a line the formatter never intended: a role of
+# ``"X - You"`` renders two bullets from one record, putting words in
+# the other participant's mouth — precisely the #544 vector, arriving
+# through the one value #544 could not reach.
+#
+# **Defusal would not fix this**, which is why it needs its own step. Every
+# pass in ``_defuse_recall_turn`` runs on the untrusted BODY; the role
+# never passes through it, and could not usefully — ``_defuse_recall_turn``
+# preserves newlines by design (it neutralises markers, not line breaks),
+# so routing the role through it would leave the split intact.
+#
+# **Unreachable today**, and fixed anyway. AgentCore's role is a fixed
+# enum, so nothing on the live path can produce one. The premise of the
+# four preceding PRs is that the formatter's own structure is what
+# untrusted content must not be able to forge; a latent hole in that
+# structure is the same bug class, just not yet reachable — and the
+# ``role_raw`` pass-through is exactly the seam a future wire change would
+# widen.
+#
+# ``str.splitlines`` again, for the reason ``_normalise_line_terminators``
+# gives: CPython's terminator set is wider than any list written from
+# memory (it includes ``\v``, ``\f``, ``\x1c``-``\x1e``, ``U+0085``,
+# ``U+2028``, ``U+2029``), and it is the set a renderer follows. Joined on
+# ``""`` rather than ``" "`` so this is a pure deletion like every other
+# defusal here, which keeps :func:`_fragment_cost_chars` an upper bound by
+# the same argument.
+#
+# The ``or "?"`` mirrors ``role_label``'s own empty-role degradation (and
+# ``_source_marker``'s ``or "unknown"``): a role made ENTIRELY of
+# terminators would otherwise render the bare ``- : text``, dropping the
+# participant label altogether. Applied after the strip, so it catches the
+# case the strip creates.
+#
+# Cost: one linear pass, no regex, no loop. The role is not length-capped
+# upstream, but it is one ``splitlines`` walk over it and a pathological
+# role only inflates :func:`_fragment_cost_chars`, which makes the budget
+# reject the fragment.
+def _safe_role_label(raw_role: Any) -> str:
+    """Display label for a recalled turn, with line terminators removed.
+
+    Wraps ``memory_ranking.role_label`` rather than replacing it: the
+    mapping and the unrecognised-role pass-through are shared with the
+    #273 ``recall`` tool, and only *this* formatter interpolates the
+    result into a structural prefix. The tool returns its label in
+    tool-result text, where a newline forges nothing.
+    """
+    return "".join(role_label(raw_role).splitlines()) or "?"
+
+
 def _source_marker(session_id: Any) -> str:
     """Return the compact source label for one recalled fragment (#535).
 
@@ -616,7 +767,20 @@ _recall_cache: dict[str, CacheEntry] = {}
 
 
 def _format_recall_addendum(records: list[dict[str, Any]]) -> str:
-    """Render aggregated ListEvents output as a Markdown addendum.
+    """Text-only view of :func:`_render_recall_addendum`.
+
+    The addendum string is what almost every caller wants — including
+    :meth:`AgentCoreRecallHook.preview_addendum`, whose contract is
+    ``(text, records)``. Only the live hook needs the defusal flag #558
+    added, so it alone reaches for the two-value form and nothing else had
+    to change.
+    """
+    return _render_recall_addendum(records)[0]
+
+
+def _render_recall_addendum(records: list[dict[str, Any]]) -> tuple[str, bool]:
+    """Render aggregated ListEvents output as a Markdown addendum, plus
+    whether anything in it had to be defused (#558).
 
     Records are grouped by ``sessionId``; each group gets a header
     derived from ``createdAt`` (date only — time-of-day is noise) plus a
@@ -660,9 +824,38 @@ def _format_recall_addendum(records: list[dict[str, Any]]) -> str:
     stronger guarantee, since a marker cannot carry a structural
     character at all. It is a display label, never a trust signal
     (ADR-0011 / #533).
+
+    The role label is the other value the defusal never sees, and for the
+    opposite reason: it lands in the bullet's own prefix rather than in
+    the untrusted body, so :func:`_safe_role_label` strips line
+    terminators from it here instead (#558).
+
+    --- #558: the second return value ---
+
+    ``True`` when ANY value this block interpolated had structure
+    neutralised — one flag for the whole turn, not one per marker. The
+    caller turns that into a single ``RecallForgeryDefused`` increment, so
+    a turn crafted to carry a hundred forgeries moves the counter by one.
+    Counting markers instead would let one input inflate the metric
+    arbitrarily, which is the log-flooding problem #558 declined a log
+    line over, re-expressed as a metric.
+
+    The date counts alongside the quoted turns, deliberately. AgentCore
+    supplies it and it is defused as defence in depth rather than because
+    a hole is open, so on the live path it can only fire if a malformed
+    response carried a marker — which is worth knowing and is the same
+    event ("the formatter had to neutralise a structural value"). Keeping
+    one rule rather than two also means a future value interpolated inside
+    the fence is covered by construction.
+
+    ``preview_addendum`` deliberately does not count: it is a diagnostic
+    that computes a block without firing a real turn (and ignores the
+    kill-switch), so counting it would report probes that never happened.
     """
     if not records:
-        return ""
+        return "", False
+
+    defused_any = False
 
     # Group by sessionId, preserving the order in ``records`` (which is
     # already most-recent first from ListSessions).
@@ -685,7 +878,10 @@ def _format_recall_addendum(records: list[dict[str, Any]]) -> str:
             text = (conv.get("content") or {}).get("text", "")
             if not text:
                 continue
-            label = role_label(role_raw)
+            # #558: terminators stripped here rather than by the defusal
+            # below — this value lands in the bullet's own prefix, which
+            # the defusal never touches. See :func:`_safe_role_label`.
+            label = _safe_role_label(role_raw)
             # Cap BEFORE defusing. #465 ran these the other way round to
             # match the #256 order in ``build_titler_prompt``, noting it
             # was safe either way; once #526 made the defusal iterative
@@ -709,7 +905,8 @@ def _format_recall_addendum(records: list[dict[str, Any]]) -> str:
             # marker in the first place.
             if len(text) > _RECALL_EVENT_TEXT_TRUNCATE:
                 text = text[:_RECALL_EVENT_TEXT_TRUNCATE] + "..."
-            text = _defuse_recall_turn(text)
+            text, turn_defused = _defuse_recall_turn_tracked(text)
+            defused_any = defused_any or turn_defused
             group["bullets"].append(f"- {label}: {text}")
 
     blocks: list[str] = []
@@ -730,7 +927,9 @@ def _format_recall_addendum(records: list[dict[str, Any]]) -> str:
         # path — ``_iso_date`` normalises ``None`` to ``""`` at the API
         # boundary — but this function documents itself as defensive
         # against a malformed AgentCore response, so it stays that way.
-        date = _defuse_recall_turn(str(group["createdAt"] or "")) or "earlier"
+        date, date_defused = _defuse_recall_turn_tracked(str(group["createdAt"] or ""))
+        defused_any = defused_any or date_defused
+        date = date or "earlier"
         # #535: the group key IS the record's ``sessionId``, so the marker
         # is derived from the same value ``preview_addendum`` returns —
         # not from a parallel field that could drift out of step with it.
@@ -738,7 +937,13 @@ def _format_recall_addendum(records: list[dict[str, Any]]) -> str:
         blocks.append(heading + "\n" + "\n".join(group["bullets"]))
 
     if not blocks:
-        return ""
+        # ``defused_any`` rather than a literal ``False``: today it cannot
+        # be true here (a defused turn always appends its bullet, and the
+        # date is only defused for a group that already has bullets), but
+        # asserting that as a constant would bake an argument about the
+        # loops above into the return statement. Reporting what was
+        # actually observed stays correct if either loop changes.
+        return "", defused_any
     # #534: the heading stays OUTSIDE the fence. It is the formatter's
     # own trusted string, it is the anchor DEFAULT_SYSTEM_PROMPT names
     # ("gets injected as a '## What we've talked about before' block"),
@@ -748,7 +953,8 @@ def _format_recall_addendum(records: list[dict[str, Any]]) -> str:
     return (
         f"{_RECALL_HEADING}\n\n"
         f"{_RECALL_DATA_LABEL}\n"
-        f"{_RECALL_BLOCK_OPEN}\n" + "\n\n".join(blocks) + f"\n{_RECALL_BLOCK_CLOSE}"
+        f"{_RECALL_BLOCK_OPEN}\n" + "\n\n".join(blocks) + f"\n{_RECALL_BLOCK_CLOSE}",
+        defused_any,
     )
 
 
@@ -782,7 +988,14 @@ def _fragment_cost_chars(candidate: Candidate) -> int:
     if text_chars > _RECALL_EVENT_TEXT_TRUNCATE:
         text_chars = _RECALL_EVENT_TEXT_TRUNCATE + len("...")
     # "- " + label + ": " + text + "\n"
-    return len("- : \n") + len(role_label(candidate.role)) + text_chars
+    #
+    # #558: the SAME ``_safe_role_label`` the formatter renders, not the
+    # raw ``role_label``. Using the raw one would still be an upper bound
+    # (the strip only deletes), but a cost function that computes a
+    # different label from the one that gets rendered is the shape that
+    # drifts — and here it would over-charge exactly the roles the strip
+    # was added for.
+    return len("- : \n") + len(_safe_role_label(candidate.role)) + text_chars
 
 
 def _group_cost_chars(candidate: Candidate) -> int:
@@ -1040,6 +1253,15 @@ class AgentCoreRecallHook:
         ``RecallSuccesses`` alone would read identically in both worlds.
         That missing signal is precisely why #227 had to be reopened to
         find out what the hook was actually doing.
+
+        **A defused forgery is also counted, once per turn (#558).** This
+        is the one place attacker-influenceable content meets the system
+        prompt, and until now every defusal there was silent — four PRs of
+        hardening with no way to answer "is anyone actually trying this?".
+        ``RecallForgeryDefused`` answers that and nothing else: a log line
+        was declined because an attacker who controls the input controls
+        the log volume, and per-marker counting was declined for the same
+        reason in a different register.
         """
         if os.environ.get("CHANNEL_RECALL_ENABLED", "1") != "1":
             return
@@ -1052,7 +1274,13 @@ class AgentCoreRecallHook:
                 user_message=_extract_user_message(event),
                 exclude_session_id=chat_id,
             )
-            addendum = _format_recall_addendum(records)
+            addendum, defused = _render_recall_addendum(records)
+            # #558: one increment per TURN in which anything was defused,
+            # never one per marker — see ``record_recall_forgery_defused``.
+            # Emitted before the injection so it is recorded whatever the
+            # block turns out to be; the two are independent facts.
+            if defused:
+                await record_recall_forgery_defused()
             if addendum:
                 _append_to_system_prompt(event, addendum)
             else:
