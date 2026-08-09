@@ -43,6 +43,7 @@ channel/
 │           ├── admin.py       # Admin REST — user list/detail (#235) + CloudWatch metrics (#236); every route require_admin-gated
 │           ├── assets.py      # Asset REST surface — per-chat list/get/content/delete + browse
 │           ├── attachments.py # Attachments API (#175) — presigned S3 upload + finalize
+│           ├── audit.py       # GET /api/audit/events — admin-only windowed audit-log query (#601)
 │           ├── chats.py       # Chat CRUD + SSE streaming + regenerate
 │           ├── mcp.py         # MCP-server registry REST (list/register/rename/delete/reauth) + per-chat override + /auth/mcp/callback
 │           ├── memory.py      # Memory panel REST — list/export records, forget, PATCH-correct a [remember] note
@@ -527,7 +528,10 @@ turn throttling into a mass logout.
   (hour-sharded to avoid hot partitions)
 - Audit log items: `PK=AUDIT#{date}#{hour}`, `SK={timestamp}#{event_id}`
   (immutable compliance trail, TTL via `CHANNEL_AUDIT_RETENTION_DAYS`,
-  default 365 days)
+  default 365 days. Read via `storage.query_audit_events` — a windowed,
+  cursor-paginated hour-shard fan-out — which
+  `list_audit_events_for_actor` now delegates to rather than walking the
+  shards a second time. See §"Audit trail" for the query surface.)
 - User items: `PK=USER#{user_id}`, `SK=META`
 - Mgmt state items: `PK=MGMT_STATE#{state}`, `SK=META`
   (TTL enabled, used for the Google OAuth state parameter)
@@ -639,6 +643,56 @@ turn throttling into a mass logout.
     rather than a numbered pair. Per-device narrowing is a
     `FilterExpression` on `device_id`, not a sharper key, so the sort
     key stays time-ordered for the sessions list)
+
+## Audit trail (#151 writers, #601 query + restore verification)
+
+`GET /api/audit/events` (`src/channel/api/audit.py`) is the compliance
+read surface over the `AUDIT#` family: every event in a window, across
+every actor, newest first. Distinct from `api/admin.py`'s user-detail
+view, which shows 25 events for **one** user over 7 days — a UI
+affordance, not evidence.
+
+- **`require_admin` is the entire authorization story**, and it includes
+  other users' email addresses. The endpoint is therefore exactly as
+  strong as whatever decides the admin role — see #600, which moves
+  `is_admin_email` onto a default-deny `/channel/{env}/admin-allowed-emails`
+  SSM parameter. If this endpoint becomes unreachable after #600, the
+  fix is to populate that parameter, never to weaken the gate.
+- **Reading the audit log writes an `audit.read` row, and that write is
+  NOT best-effort.** It happens before the rows are returned and a
+  failure fails the request. Every other `put_audit_event` call is
+  deliberately swallowed because the state change it records has already
+  happened; here nothing has been disclosed yet, so refusing to disclose
+  is still available — and is what "the trail records access to itself"
+  has to mean. The row carries the *question* (window, filters, count),
+  never the rows — the same "never a second copy of the data" rule
+  `api/memory.py` states for its export and forget verbs.
+- **The window is capped at 31 days and the cap is reported**
+  (`window.capped`, plus the echoed `requested_from`). Silently
+  truncating a compliance query is worse than refusing it.
+- **The cursor carries its own window and filters.** Rebinding one to a
+  different query would skip or repeat rows, so a conflicting explicit
+  parameter is a 400. `to` defaults to now, so paging without an echoed
+  bound only works because the cursor pins it.
+- **`storage.query_audit_events` layers two bounds per row on purpose**:
+  a `Key("SK").between` range (cheap, charged before the read, but only
+  second-granular since the SK timestamp is `floor(created_at)`) and an
+  exact `created_at` `FilterExpression`. It stops on either a filled
+  page or a 168-partition per-call budget, and both return the same
+  cursor shape — `SK: None` means "restart at the top of this
+  partition".
+
+**Durability is verified, not assumed.** `.github/workflows/backup-test.yml`
+picks a specific `AUDIT#` row from the production table that predates the
+pinned PITR restore point, then asserts that exact key comes back intact
+from the restored table. It restores to an explicit `--restore-date-time`
+rather than `--use-latest-restorable-time`, because "existed before the
+restore point" needs a fixed instant. It deliberately **writes no canary**
+into prod: seeding a synthetic row would put test data into the very
+compliance trail whose integrity is under test, for 365 days. No witness
+found in the lookback window is a **failure**, not a skip — a run that
+asserts nothing is the coverage-that-does-not-exist shape the rest of that
+workflow already refuses.
 
 ## Asset producers (#326, epic #321)
 

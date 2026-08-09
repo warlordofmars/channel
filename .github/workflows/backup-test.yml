@@ -62,6 +62,13 @@ jobs:
       RESTORE_TABLE: channel-backup-test-${{ github.run_id }}
       SOURCE_TABLE: channel
       AWS_REGION: us-east-1
+      # How far back the audit-witness search walks the hour-sharded
+      # AUDIT#{date}#{hour} partitions (168 = 7 days), newest first. Same
+      # fan-out ceiling `storage._AUDIT_SHARD_WALK_MAX_HOURS` uses, and
+      # the same reason: a targeted Query per hour beats a Scan with a
+      # `begins_with(PK, "AUDIT#")` filter, which would read every
+      # partition in the production table to find one row.
+      AUDIT_LOOKBACK_HOURS: 168
 
     steps:
       # Fail fast, before any checkout or dependency install, when the prod
@@ -126,15 +133,112 @@ jobs:
           fi
           echo "Preflight passed: $SOURCE_TABLE exists with PITR ENABLED."
 
+      # The audit trail is the one row family whose entire purpose is to
+      # be durable, and until #601 nothing here looked at it: the run
+      # could pass with every AUDIT# row missing from the restore. An
+      # item count and a GSI list cannot see that — the count is
+      # dominated by chat rows and the index list says nothing about
+      # contents.
+      #
+      # Proving durability needs a row that demonstrably existed BEFORE
+      # the restore point, so this step pins that instant and picks a
+      # specific witness row from the source below it. Note what it does
+      # NOT do: it never writes a canary into production. Seeding a
+      # synthetic row would put test data in the compliance trail whose
+      # integrity is the thing under test, for 365 days — the assertion
+      # would corrupt its own subject.
+      - name: Capture restore point and pre-restore audit witness
+        id: witness
+        run: |
+          # Pin the restore point explicitly instead of letting the
+          # restore pick "latest" for itself. `--use-latest-restorable-time`
+          # is a moving target, so there would be no instant to say the
+          # witness predates.
+          RESTORE_POINT=$(aws dynamodb describe-continuous-backups \
+            --table-name "$SOURCE_TABLE" \
+            --query 'ContinuousBackupsDescription.PointInTimeRecoveryDescription.LatestRestorableDateTime' \
+            --output text)
+          # AWS CLI v2 renders timestamps as ISO-8601, v1 as a float
+          # epoch. Both are accepted by `--restore-date-time`, so the
+          # value is passed through untouched; only the epoch used for
+          # comparisons below has to be normalised. Flooring a
+          # fractional epoch moves the comparison point *earlier*, which
+          # keeps "witness <= restore point" conservative.
+          case "$RESTORE_POINT" in
+            ''|None)
+              echo "::error::Could not read LatestRestorableDateTime for '$SOURCE_TABLE'."
+              exit 1
+              ;;
+            *[!0-9.]*) RESTORE_EPOCH=$(date -u -d "$RESTORE_POINT" +%s) ;;
+            *) RESTORE_EPOCH=${RESTORE_POINT%%.*} ;;
+          esac
+          case "$RESTORE_EPOCH" in
+            ''|*[!0-9]*)
+              echo "::error::Could not derive a numeric epoch from the restore point '$RESTORE_POINT'."
+              exit 1
+              ;;
+          esac
+          echo "Restore point: $RESTORE_POINT (epoch $RESTORE_EPOCH)"
+          echo "RESTORE_POINT=$RESTORE_POINT" >> "$GITHUB_ENV"
+          echo "RESTORE_EPOCH=$RESTORE_EPOCH" >> "$GITHUB_ENV"
+
+          # Walk AUDIT#{date}#{hour} partitions backwards from the
+          # restore point, newest first, and take the first row whose
+          # sort key ({unix_ts}#{uuid}) is at or below it. Descending
+          # Query + a small --max-items keeps each hop to one cheap
+          # round trip against a single partition.
+          WITNESS_PK=""
+          for OFFSET in $(seq 0 "$((AUDIT_LOOKBACK_HOURS - 1))"); do
+            # Rendered from the epoch rather than a relative-date phrase
+            # — `date -d "<iso> -N hours"` leans on GNU's relative-item
+            # parser, and this needs to be exact, not clever.
+            SHARD="AUDIT#$(date -u -d "@$((RESTORE_EPOCH - OFFSET * 3600))" +'%Y-%m-%d#%H')"
+            ITEMS=$(aws dynamodb query \
+              --table-name "$SOURCE_TABLE" \
+              --key-condition-expression "#pk = :pk" \
+              --expression-attribute-names '{"#pk":"PK"}' \
+              --expression-attribute-values "{\":pk\":{\"S\":\"$SHARD\"}}" \
+              --no-scan-index-forward \
+              --max-items 25 \
+              --output json)
+            WITNESS=$(printf '%s' "$ITEMS" | jq -c --argjson cutoff "$RESTORE_EPOCH" \
+              'first(.Items[]? | select((.SK.S | split("#")[0] | tonumber) <= $cutoff)) // empty')
+            if [ -n "$WITNESS" ]; then
+              WITNESS_PK=$(printf '%s' "$WITNESS" | jq -r '.PK.S')
+              WITNESS_SK=$(printf '%s' "$WITNESS" | jq -r '.SK.S')
+              WITNESS_EVENT_ID=$(printf '%s' "$WITNESS" | jq -r '.event_id.S // ""')
+              WITNESS_EVENT_TYPE=$(printf '%s' "$WITNESS" | jq -r '.event_type.S // ""')
+              echo "Audit witness: $WITNESS_PK / $WITNESS_SK (event_id=$WITNESS_EVENT_ID, type=$WITNESS_EVENT_TYPE), found $OFFSET hour(s) back."
+              break
+            fi
+          done
+
+          # No vacuous pass: without a witness the post-restore assertion
+          # would have nothing to assert, which is the exact shape of
+          # "advertising coverage that does not exist" the GSI guard
+          # below already refuses.
+          if [ -z "$WITNESS_PK" ]; then
+            echo "::error::No AUDIT# row found in '$SOURCE_TABLE' within $AUDIT_LOOKBACK_HOURS hours before the restore point — the audit-durability check cannot run, and passing without it would assert nothing."
+            echo "Two causes, both worth knowing about:"
+            echo "  1. Nothing has written an audit event in that window. Writers are auth.logout, auth.session_revoke[_all], the memory.* verbs, and audit.read (#601). On a freshly cut-over prod this is expected: sign in and out once (or read /api/audit/events), then re-run."
+            echo "  2. The writers are not firing in production at all — a real defect, and the one this check exists to surface."
+            exit 1
+          fi
+          echo "WITNESS_PK=$WITNESS_PK" >> "$GITHUB_ENV"
+          echo "WITNESS_SK=$WITNESS_SK" >> "$GITHUB_ENV"
+          echo "WITNESS_EVENT_ID=$WITNESS_EVENT_ID" >> "$GITHUB_ENV"
+
       - name: Restore DynamoDB table from PITR
         id: restore
         run: |
-          RESTORE_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          echo "Restoring $SOURCE_TABLE → $RESTORE_TABLE at $RESTORE_TIME"
+          # Restore to the instant pinned above, not to "latest": the
+          # audit assertion is "a row that existed before THIS instant
+          # came back", and that sentence needs a fixed instant.
+          echo "Restoring $SOURCE_TABLE → $RESTORE_TABLE at $RESTORE_POINT"
           aws dynamodb restore-table-to-point-in-time \
             --source-table-name "$SOURCE_TABLE" \
             --target-table-name "$RESTORE_TABLE" \
-            --use-latest-restorable-time \
+            --restore-date-time "$RESTORE_POINT" \
             --no-sse-specification-override
 
           # Wait up to 20 minutes for the restore to complete
@@ -230,6 +334,64 @@ jobs:
           echo "GSI parity check passed."
 
           echo "Validation passed: $COUNT items, GSIs match ($SOURCE_GSIS)."
+
+      # The audit-durability assertion (#601). Separate from the step
+      # above because it proves a different claim: not "the restore
+      # produced a table", but "this specific audit row, which existed
+      # before the restore point, is present and intact in the restore".
+      # A row-count check cannot distinguish a restore with the whole
+      # AUDIT# family missing from one without.
+      - name: Validate audit trail survived the restore
+        id: validate_audit
+        run: |
+          # Re-state the property in the log rather than trusting the
+          # capture step: the witness must sit at or below the restore
+          # point, so its presence below is evidence about restored
+          # history and not about anything written since.
+          WITNESS_EPOCH=${WITNESS_SK%%#*}
+          # Reject a non-numeric prefix before comparing. Under `bash -e`
+          # an `if [ "$x" -gt … ]` with a non-numeric operand exits 2,
+          # and `if` conditions are exempt from `set -e`, so the step
+          # would sail past — the same vacuous-pass hole the item-count
+          # guard above closes.
+          case "$WITNESS_EPOCH" in
+            ''|*[!0-9]*)
+              echo "::error::Audit witness sort key '$WITNESS_SK' does not start with a Unix timestamp; the AUDIT# key shape has changed and this check needs updating."
+              exit 1
+              ;;
+          esac
+          if [ "$WITNESS_EPOCH" -gt "$RESTORE_EPOCH" ]; then
+            echo "::error::Audit witness $WITNESS_PK / $WITNESS_SK is dated after the restore point ($WITNESS_EPOCH > $RESTORE_EPOCH); it proves nothing about the restore."
+            exit 1
+          fi
+
+          RESTORED=$(aws dynamodb get-item \
+            --table-name "$RESTORE_TABLE" \
+            --key "{\"PK\":{\"S\":\"$WITNESS_PK\"},\"SK\":{\"S\":\"$WITNESS_SK\"}}" \
+            --consistent-read \
+            --output json)
+          if [ "$(printf '%s' "$RESTORED" | jq -r 'has("Item")')" != "true" ]; then
+            echo "::error::Audit row $WITNESS_PK / $WITNESS_SK existed in '$SOURCE_TABLE' before the restore point but is ABSENT from the restore — the compliance trail is not durable."
+            exit 1
+          fi
+
+          RESTORED_EVENT_ID=$(printf '%s' "$RESTORED" | jq -r '.Item.event_id.S // ""')
+          if [ "$RESTORED_EVENT_ID" != "$WITNESS_EVENT_ID" ]; then
+            echo "::error::Restored audit row $WITNESS_PK / $WITNESS_SK came back with event_id '$RESTORED_EVENT_ID', expected '$WITNESS_EVENT_ID' — the row is present but not intact."
+            exit 1
+          fi
+
+          # Context for the log, not a gate: how much of that partition
+          # came back alongside the witness.
+          PARTITION_COUNT=$(aws dynamodb query \
+            --table-name "$RESTORE_TABLE" \
+            --key-condition-expression "#pk = :pk" \
+            --expression-attribute-names '{"#pk":"PK"}' \
+            --expression-attribute-values "{\":pk\":{\"S\":\"$WITNESS_PK\"}}" \
+            --select COUNT \
+            --query 'Count' \
+            --output text)
+          echo "Audit durability check passed: $WITNESS_PK / $WITNESS_SK (event_id=$WITNESS_EVENT_ID) survived the restore; $PARTITION_COUNT row(s) in that partition."
 
       # Skipped when the restore step never ran (e.g. a preflight failed), so
       # cleanup can't burn the credential-provider chain deleting a table that

@@ -21,6 +21,7 @@ from channel.api._auth import require_admin  # noqa: F401 — re-exported for ro
 from channel.api.admin import router as admin_router
 from channel.api.assets import router as assets_router
 from channel.api.attachments import router as attachments_router
+from channel.api.audit import router as audit_router
 from channel.api.chats import router as chats_router
 from channel.api.csp import router as csp_router
 from channel.api.memory import router as memory_router
@@ -264,6 +265,11 @@ app.include_router(memory_router, prefix="/api")
 
 # Admin user list + detail — requires mgmt JWT with role=admin (#235)
 app.include_router(admin_router, prefix="/api")
+
+# Audit-log query — GET /api/audit/events; requires mgmt JWT with
+# role=admin, and records an ``audit.read`` event for every served
+# request (#601)
+app.include_router(audit_router, prefix="/api")
 
 # User preferences — GET/PUT /api/me/prefs (full paths declared on the
 # router so no prefix needed here)
