@@ -39,7 +39,7 @@ export default function ModelPicker({ model, effort, onModel, onEffort }) {
   }
 
   return (
-    <div style={{ position: "relative" }}>
+    <div className="pop-anchor">
       <button
         type="button"
         className="model-pick"
@@ -52,7 +52,7 @@ export default function ModelPicker({ model, effort, onModel, onEffort }) {
       {open && (
         <>
           <div className="backdrop" onClick={closePopover} />
-          <div className="pop" style={{ bottom: "calc(100% + 8px)", left: 0 }}>
+          <div className="pop pop-above pop-start">
             <div className="pop-h">Model</div>
             {models == null && !error && (
               <div className="opt" data-testid="models-loading">

@@ -9,6 +9,11 @@ import Icon from "../components/Icon.jsx";
  * §"Chat-app popovers"). The caller owns the persistence — this
  * component is dumb about the underlying API.
  *
+ * Anchoring is class-only (`pop-anchor` / `pop-above` / `pop-end`), never
+ * an inline style: this popover is the one that rendered off the left
+ * edge on a phone, and an inline anchor is unreachable from the ≤640px
+ * block that corrects it (#582).
+ *
  * Props:
  *   - servers: [{ server_id, name, tool_prefix, globally_enabled,
  *       auth_status }] — full registered set (from /api/mcp/servers)
@@ -75,7 +80,7 @@ export default function MCPPicker({ servers, mode, explicitIds, onChange }) {
   const label = `${usableActiveCount} tool ${usableActiveCount === 1 ? "server" : "servers"}`;
 
   return (
-    <div style={{ position: "relative" }}>
+    <div className="pop-anchor">
       <button
         type="button"
         className="mcp-pill"
@@ -93,7 +98,7 @@ export default function MCPPicker({ servers, mode, explicitIds, onChange }) {
             onClick={closePopover}
             aria-hidden="true"
           />
-          <div className="pop" style={{ bottom: "calc(100% + 8px)", right: 0 }}>
+          <div className="pop pop-above pop-end">
             <div className="pop-h">MCP servers for this chat</div>
             {(!servers || servers.length === 0) && (
               <div className="opt" data-testid="mcp-empty">
