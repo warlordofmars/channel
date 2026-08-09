@@ -1505,7 +1505,13 @@ jobs:
           uv run --locked --no-sync --no-build python -m stacks.channel_stack \
             --env prod --topic-arn "$TOPIC_ARN"
 
-      - name: Notify Slack — prod alarms notify nobody
+      # `failure()` covers the whole job, not just the assertion — a missing
+      # AlarmTopicArn output, an AccessDenied on ListSubscriptionsByTopic or
+      # a dependency-install failure all land here. The message therefore
+      # names the job that failed and the most likely cause, and sends the
+      # responder to the run log for the actual one; asserting a single root
+      # cause would page somebody with a wrong diagnosis.
+      - name: Notify Slack — prod alarm delivery unverified
         if: failure() && env.SLACK_WEBHOOK_URL != ''
         uses: slackapi/slack-github-action@dcb1066f776dd043e64d0e8ba94ca15cc7e1875d # v4.0.0
         with:
@@ -1513,10 +1519,10 @@ jobs:
           webhook-type: incoming-webhook
           payload: |
             {
-              "text": ":rotating_light: Prod alarm topic has no *confirmed* subscription — every CloudWatch alarm is decorative",
+              "text": ":rotating_light: Prod alarm delivery is UNVERIFIED — the *Verify prod alarm subscription* job failed",
               "attachments": [{
                 "color": "danger",
-                "text": "Subscribe an address and confirm it from the inbox (a record left at PendingConfirmation delivers nothing). Runbook: docs-site/ops/alarms.md · Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                "text": "Until this passes, treat every prod CloudWatch alarm as possibly notifying nobody. Most likely cause: the alarm topic has no *confirmed* subscription (a record left at PendingConfirmation delivers nothing). It can also fail on a missing AlarmTopicArn stack output or an AWS permission error — read the run log for the actual cause. Runbook: docs-site/ops/alarms.md · Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
               }]
             }
 
