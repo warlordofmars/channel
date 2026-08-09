@@ -176,6 +176,16 @@ describe("App routing", () => {
     expect(screen.queryByTestId("app-customize")).toBeNull();
   });
 
+  it("/app/sessions renders the Sessions view (#296)", async () => {
+    storage[TOKEN_KEY] = makeToken();
+    window.history.pushState({}, "", "/app/sessions");
+    await act(async () => render(<App />));
+    // The heading renders regardless of whether the list loaded — these
+    // routing tests run with no network, so the view lands in its error
+    // state, which is itself the point: the route resolves to the view.
+    expect(screen.getByRole("heading", { level: 2, name: "Signed-in devices" })).toBeTruthy();
+  });
+
   it("/app/admin renders AdminHome for an admin-role token (#237)", async () => {
     storage[TOKEN_KEY] = makeToken({ role: "admin" });
     window.history.pushState({}, "", "/app/admin");

@@ -23,6 +23,7 @@ import {
   listMCPServers,
   listMemoryRecords,
   listModels,
+  listSessions,
   logout,
   patchChat,
   patchMCPServer,
@@ -32,6 +33,8 @@ import {
   reauthMCPServer,
   regenerate,
   registerMCPServer,
+  revokeAllSessions,
+  revokeSession,
   sha256Hex,
   streamMessage,
   submitFeedback,
@@ -463,6 +466,104 @@ describe("chats wrappers", () => {
       await expect(putPrefs({ theme: "dark" })).rejects.toMatchObject({
         name: "ApiError",
         status: 401,
+      });
+    });
+  });
+
+  // ---- sessions (#296) ----------------------------------------------------
+
+  describe("listSessions", () => {
+    it("GETs /api/me/sessions and unwraps the envelope", async () => {
+      mockOk({ sessions: [{ device_id: "d-1" }, { device_id: "d-2" }] });
+      const result = await listSessions();
+      expect(result).toEqual([{ device_id: "d-1" }, { device_id: "d-2" }]);
+      expect(fetchMock.mock.calls[0][0]).toBe("/api/me/sessions");
+      expect(fetchMock.mock.calls[0][1].headers.Authorization).toBe("Bearer tok-abc");
+    });
+
+    it("passes cache: 'no-store' so a revoked device can't reappear", async () => {
+      mockOk({ sessions: [] });
+      await listSessions();
+      expect(fetchMock.mock.calls[0][1].cache).toBe("no-store");
+    });
+
+    it("throws an ApiError carrying the status", async () => {
+      mockFail(500);
+      await expect(listSessions()).rejects.toMatchObject({
+        name: "ApiError",
+        status: 500,
+      });
+    });
+
+    it.each([
+      ["a body with no sessions key", {}],
+      ["a null sessions value", { sessions: null }],
+      ["a non-array sessions value", { sessions: "nope" }],
+    ])("coerces %s to an empty list", async (_label, body) => {
+      // A proxy between the SPA and FastAPI can rewrite a response (CloudFront
+      // already turns some 403s into a 200 index.html). Handing the view a
+      // non-array would crash it at `sessions.length`.
+      mockOk(body);
+      await expect(listSessions()).resolves.toEqual([]);
+    });
+
+    it("propagates a non-JSON body instead of reporting zero sessions", async () => {
+      // The shape that produces this on the deployed domain is CloudFront
+      // rewriting a 403 to a 200 index.html — an auth failure. Coercing it to
+      // `[]` would render "no signed-in devices", a claim about the user's
+      // account security we'd have no basis for. The view's error panel is
+      // the honest outcome.
+      fetchMock.mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: () => Promise.reject(new SyntaxError("Unexpected token <")),
+      });
+      await expect(listSessions()).rejects.toThrow(SyntaxError);
+    });
+  });
+
+  describe("revokeSession", () => {
+    it("DELETEs the per-device route with the bearer token", async () => {
+      fetchMock.mockResolvedValue({ ok: true, status: 204 });
+      await revokeSession("dev-1");
+      const [url, opts] = fetchMock.mock.calls[0];
+      expect(url).toBe("/api/me/sessions/dev-1");
+      expect(opts.method).toBe("DELETE");
+      expect(opts.headers.Authorization).toBe("Bearer tok-abc");
+    });
+
+    it("encodes the device id into the path", async () => {
+      fetchMock.mockResolvedValue({ ok: true, status: 204 });
+      await revokeSession("a/b c");
+      expect(fetchMock.mock.calls[0][0]).toBe("/api/me/sessions/a%2Fb%20c");
+    });
+
+    it("carries the 404 status so the caller can read it as already-gone", async () => {
+      // The list walks an eventually-consistent GSI, so revoking a row it just
+      // showed can 404. `Sessions.jsx` branches on exactly this status.
+      mockFail(404);
+      await expect(revokeSession("dev-1")).rejects.toMatchObject({
+        name: "ApiError",
+        status: 404,
+      });
+    });
+  });
+
+  describe("revokeAllSessions", () => {
+    it("DELETEs the collection route", async () => {
+      fetchMock.mockResolvedValue({ ok: true, status: 204 });
+      await revokeAllSessions();
+      const [url, opts] = fetchMock.mock.calls[0];
+      expect(url).toBe("/api/me/sessions");
+      expect(opts.method).toBe("DELETE");
+      expect(opts.headers.Authorization).toBe("Bearer tok-abc");
+    });
+
+    it("throws an ApiError carrying the status", async () => {
+      mockFail(500);
+      await expect(revokeAllSessions()).rejects.toMatchObject({
+        name: "ApiError",
+        status: 500,
       });
     });
   });
