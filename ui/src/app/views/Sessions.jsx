@@ -144,16 +144,22 @@ export default function Sessions() {
   }
 
   async function revokeOneDevice(session) {
+    let message;
     try {
       await revokeSession(session.device_id);
-      setNotice(`${deviceLabel(session.device_id)} signed out.`);
+      message = `${deviceLabel(session.device_id)} signed out.`;
     } catch (error) {
       if (error?.status !== 404) throw error;
       // Already gone — the index had not caught up when the list was read.
       // The user's goal is satisfied, so this is a success with a footnote,
       // not a failure. Falling through re-reads the list either way.
-      setNotice(`${deviceLabel(session.device_id)} was already signed out.`);
+      message = `${deviceLabel(session.device_id)} was already signed out.`;
     }
+    // The revoke has landed server-side either way; what follows is purely
+    // about this view, and the user can navigate away mid-request. Bail
+    // before touching state — and before spending a re-read no one will see.
+    if (!mountedRef.current) return;
+    setNotice(message);
     await load();
   }
 

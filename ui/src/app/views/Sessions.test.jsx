@@ -272,6 +272,26 @@ describe("Sessions — per-device revoke", () => {
     await waitFor(() => expect(screen.queryByText("Sign out this device?")).toBeNull());
   });
 
+  it("drops a SUCCESSFUL revoke that lands after the view unmounts", async () => {
+    // The revoke itself has landed server-side; what's dropped is the notice
+    // and the re-read, both of which belong to a view that no longer exists.
+    const { unmount } = await renderReady([session({ device_id: "aaaa1111-bbbb" })]);
+    const gate = deferred();
+    api.revokeSession.mockReturnValue(gate.promise);
+
+    fireEvent.click(screen.getByRole("button", { name: "Sign out Device aaaa1111" }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
+    });
+    unmount();
+
+    await act(async () => {
+      gate.resolve(undefined);
+    });
+    // One call from the initial load, and no wasted re-read after unmount.
+    expect(api.listSessions).toHaveBeenCalledTimes(1);
+  });
+
   it("drops a revoke failure that lands after the view unmounts", async () => {
     const { unmount } = await renderReady([session({ device_id: "aaaa1111-bbbb" })]);
     const gate = deferred();
