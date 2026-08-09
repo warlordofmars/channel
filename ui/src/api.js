@@ -825,6 +825,69 @@ export async function putPrefs(partial) {
   if (!res.ok) throw new ApiError("putPrefs failed:", res.status);
 }
 
+// ---- Sessions (#293, epic #241) -------------------------------------------
+//
+// A *session is a device*, not a refresh row: hard rotation (#290) burns a
+// chain of rows per device, so the server collapses the live rows by
+// `device_id` and hands back one entry per device, newest first. These three
+// wrappers are the SPA's whole view of that surface.
+//
+// Every one of them builds headers through `authHeader()` rather than reading
+// storage directly, so they inherit the silent-refresh seam (#295). A raw
+// fetch with a hand-rolled `Authorization` header would not, and would start
+// 401ing an hour after sign-in.
+//
+// All three throw `ApiError` rather than a bare `Error` because the caller
+// genuinely has to branch on the status: the reads walk `RefreshByUserIndex`,
+// DynamoDB refuses `ConsistentRead` on a GSI, and so revoking a session that
+// the list showed a moment ago can 404 while the index catches up. That 404 is
+// "already gone", not a failure — see `Sessions.jsx`.
+
+export async function listSessions() {
+  // `cache: "no-store"` alongside the server's own `Cache-Control: no-store`:
+  // Chromium (browser + Electron renderer) heuristic-caches otherwise, and a
+  // device the user just signed out of reappearing in this list is exactly the
+  // bug that would undermine the view.
+  const res = await fetch(`${BASE}/api/me/sessions`, {
+    headers: await authHeader(),
+    cache: "no-store",
+  });
+  if (!res.ok) throw new ApiError("listSessions failed:", res.status);
+  const body = await res.json();
+  return body.sessions;
+}
+
+export async function revokeSession(deviceId) {
+  // 204, no body — deliberately no revoked-row count, since the eventually
+  // consistent index cannot promise one. Nothing to parse or return.
+  const res = await fetch(
+    `${BASE}/api/me/sessions/${encodeURIComponent(deviceId)}`,
+    { method: "DELETE", headers: await authHeader() },
+  );
+  if (!res.ok) throw new ApiError("revokeSession failed:", res.status);
+}
+
+/**
+ * End every session, INCLUDING the caller's own.
+ *
+ * There is no "all except this device" endpoint and there cannot be one yet:
+ * the mgmt JWT carries no `device_id` claim, so the server has no way to tell
+ * which row belongs to the caller. It compensates by denylisting the caller's
+ * own access token in the same request (#240), which is what makes the button
+ * take effect here immediately rather than at that token's `exp`.
+ *
+ * The consequence for the caller is the important part: on success this
+ * session is dead, so the next authenticated request would 401. The caller
+ * must end the session locally rather than returning to an authenticated view.
+ */
+export async function revokeAllSessions() {
+  const res = await fetch(`${BASE}/api/me/sessions`, {
+    method: "DELETE",
+    headers: await authHeader(),
+  });
+  if (!res.ok) throw new ApiError("revokeAllSessions failed:", res.status);
+}
+
 // ---- MCP servers (#207) ---------------------------------------------------
 
 export async function listMCPServers() {
