@@ -55,7 +55,7 @@ jobs:
     name: Scope check (agent-safe PRs)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # `check_agent_safe_scope.py` is stdlib-only, so this job needs an
       # interpreter, not a package manager — and a job that installs no
