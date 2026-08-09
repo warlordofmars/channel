@@ -45,6 +45,7 @@ channel/
 │           ├── attachments.py # Attachments API (#175) — presigned S3 upload + finalize
 │           ├── chats.py       # Chat CRUD + SSE streaming + regenerate
 │           ├── mcp.py         # MCP-server registry REST (list/register/rename/delete/reauth) + per-chat override + /auth/mcp/callback
+│           ├── memory.py      # Memory panel REST — list/export records, forget, PATCH-correct a [remember] note
 │           ├── models.py      # GET /api/models — server allowlist
 │           ├── prefs.py       # User preferences API — GET/PUT /api/me/prefs (single PREFS row)
 │           ├── sessions.py    # Sessions API — GET/DELETE /api/me/sessions[/{device_id}] over refresh rows
@@ -1018,6 +1019,15 @@ infra**.
   spliced into the system-prompt instruction register (that's the
   recall hook's seam, which #299/#95 flag). This is what keeps #273 v1
   off the confused-deputy surface #299 guards.
+- **`_format_remember_text` has two writers since #478** — the tool, and
+  `PATCH /api/memory/records/{id}`, which re-formats a corrected note
+  through the same helper so a correction is byte-shaped exactly like an
+  originally-written note. Not tidiness: `memory_records.classify_kind`
+  keys off the `[remember]` prefix and `recall` matches tags out of the
+  inline `[tags: a, b]` encoding, so a second formatter would silently
+  reclassify a corrected note as an ordinary conversation turn — and
+  therefore as uneditable — and lose its tags. Same reason
+  `_REMEMBER_PREFIX` is imported rather than re-spelled.
 - **Metrics (#400)** — `remember` emits `record_memory_tool_write_outcome`
   (`MemoryToolWriteSuccesses` / `MemoryToolWriteFailures`); `recall` emits
   `record_memory_tool_recall_outcome` (`MemoryToolRecallSuccesses` /
@@ -1953,12 +1963,32 @@ touches any of the following:
 
 ## Pre-PR checklist (required before every push)
 
-Run `uv run inv pre-push` — this runs the same gate as CI:
+Run `uv run inv pre-push` — this runs the same gate as CI, in this order:
 
 1. `inv lint-backend` — ruff lint + format check
 2. `inv typecheck` — mypy
-3. `inv test-unit` — pytest unit tests
-4. `inv test-frontend` — vitest
+3. `inv check-copyright` — `scripts/check_copyright.py`
+4. `inv test-unit` — pytest unit tests
+5. `inv test-combined-coverage` — unit + integration in **one** pytest run,
+   `--cov-fail-under=100` (this is the gate CI actually enforces; the
+   unit-only and frontend-only gates each mask gaps the other fills)
+6. `inv test-frontend` — vitest
+7. `inv desktop-test` — vitest in `desktop/`
+
+**Step 5 needs DynamoDB Local, and silently skips without it.** With
+nothing listening on the port it prints a `WARNING: … skipping
+combined-coverage gate` and passes, so a local green can still fail CI.
+Start it first with `uv run inv dynamo-start`. In a worktree — or any time
+another session may be running integration tests — set
+`CHANNEL_DYNAMO_PORT` first so you get a **private** container:
+`inv dev` force-removes the shared one on startup, which takes an
+in-flight run's tables with it and surfaces as a wall of
+`EndpointConnectionError`s mid-gate (#466).
+
+```bash
+CHANNEL_DYNAMO_PORT=8478 uv run inv dynamo-start
+CHANNEL_DYNAMO_PORT=8478 uv run inv pre-push
+```
 
 This is enforced automatically if you install the git hook:
 `uv run inv install-hooks`

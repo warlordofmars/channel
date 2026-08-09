@@ -111,6 +111,17 @@ def _format_remember_text(content: str, tags: list[str] | None) -> str:
     AgentCore's conversational payload has no native tag field, so tags
     ride inline as ``[tags: a, b]`` — which also makes them
     keyword-searchable by ``recall`` in v1.
+
+    **Two callers since #478**, and the second is why this is a function
+    rather than an f-string at the write site: ``PATCH
+    /api/memory/records/{id}`` (``api/memory.py``) re-formats a corrected
+    note through here so it comes out byte-identical to one this tool wrote
+    itself. That is not tidiness — the ``[remember]`` prefix is what #475's
+    read model classifies on (``memory_records.classify_kind``) and the
+    inline ``[tags: …]`` encoding is what makes tags findable by ``recall``,
+    so a correction formatted a second way would silently reclassify itself
+    as an ordinary conversation turn and lose its tags. Same reasoning as
+    :data:`_REMEMBER_PREFIX` being imported rather than re-spelled.
     """
     text = f"{_REMEMBER_PREFIX} {content.strip()}"
     if tags:

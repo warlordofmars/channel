@@ -77,9 +77,11 @@ __all__ = [
     "MemoryRecord",
     "classify_kind",
     "count_session_records",
+    "create_session_event",
     "decode_record_id",
     "delete_session_event",
     "encode_record_id",
+    "get_session_event",
     "group_created_at",
     "list_forgettable_event_ids",
     "list_session_records",
@@ -818,6 +820,86 @@ async def delete_session_event(
         logger.info("memory.delete_event_absent")
         return False
     return True
+
+
+# ── The AgentCore edit seam (#478) ────────────────────────────────────────
+
+
+async def get_session_event(
+    client: Any,
+    *,
+    memory_id: str,
+    actor_id: str,
+    session_id: str,
+    event_id: str,
+) -> dict[str, Any] | None:
+    """One AgentCore event in full → its raw shape, or ``None`` when absent.
+
+    The read the *edit* surface needs and no other surface does. ``PATCH`` is
+    ``DeleteEvent`` + ``CreateEvent`` (epic #129 decision 8), so it has to
+    reproduce two things an enumerated :class:`MemoryRecord` deliberately
+    drops: the event's raw ``eventTimestamp`` — a ``datetime``, which the
+    replacement re-uses so a corrected record keeps its chronological
+    position instead of jumping to the top of the recall window — and its
+    **whole** ``payload``, so sibling entries survive a delete that is
+    necessarily event-granular (``AgentCoreMemoryHook`` writes a
+    user+assistant pair as one two-entry event; see
+    :func:`encode_record_id`).
+
+    Goes through :func:`_agentcore_read`, so an absent actor partition
+    (#527), session or event all read as ``None`` rather than a 500. The
+    caller turns that into the 404 that "unknown record" already means on
+    the delete path — an id that addresses nothing is exactly what an
+    unknown id is.
+    """
+    resp = await _agentcore_read(
+        client.get_event,
+        what="event",
+        memoryId=memory_id,
+        actorId=actor_id,
+        sessionId=session_id,
+        eventId=event_id,
+    )
+    if resp is None:
+        return None
+    return resp.get("event") or None
+
+
+async def create_session_event(
+    client: Any,
+    *,
+    memory_id: str,
+    actor_id: str,
+    session_id: str,
+    event_timestamp: datetime,
+    payload: list[dict[str, Any]],
+) -> str:
+    """``CreateEvent`` one AgentCore event → the new event id.
+
+    The write half of the edit seam, and deliberately **not** routed through
+    :func:`_agentcore_read`. That helper absorbs the absent-partition code
+    because a read against a partition that does not exist has a truthful
+    empty answer; a *write* to one creates it, so there is nothing to
+    absorb. Nothing is swallowed here at all — every failure reaches the
+    caller, which is what lets ``PATCH`` hand the user back the text it has
+    already deleted rather than report a correction that did not happen.
+
+    ``event`` and its ``eventId`` are both **required** members of the
+    service model's ``CreateEvent`` response, so the subscripts are the
+    vendor contract rather than optimism. A response missing either raises,
+    and the caller already treats that as a failed create — the safe
+    direction, since a new event nobody can address is indistinguishable
+    from one that was never written.
+    """
+    resp = await asyncio.to_thread(
+        client.create_event,
+        memoryId=memory_id,
+        actorId=actor_id,
+        sessionId=session_id,
+        eventTimestamp=event_timestamp,
+        payload=payload,
+    )
+    return str(resp["event"]["eventId"])
 
 
 def group_created_at(chat: Chat) -> str:

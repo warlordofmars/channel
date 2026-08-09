@@ -1121,6 +1121,11 @@ def _agentcore_raising(code: str) -> MagicMock:
     fake = MagicMock()
     fake.list_sessions.side_effect = error
     fake.list_events.side_effect = error
+    # ``GetEvent`` is the edit surface's read (#478) and takes the same
+    # ``_agentcore_read`` seam, so it has to raise here too — a mock that
+    # returned an empty event could not tell an absent actor from an absent
+    # record, which is the distinction that shipped broken twice.
+    fake.get_event.side_effect = error
     return fake
 
 
@@ -2254,3 +2259,619 @@ def test_a_since_forget_does_not_narrow_the_withheld_count_to_the_cutoff():
     # predate the cutoff and so would never have been deleted.
     assert body["withheld_record_count"] == 2
     assert {c.kwargs["sessionId"] for c in fake.delete_event.call_args_list} == {"mine"}
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# PATCH /api/memory/records/{record_id} — correct a stale note (#478)
+# ══════════════════════════════════════════════════════════════════════════
+#
+# Epic #129 decision 8: AgentCore has no ``UpdateEvent``, so PATCH is
+# ``DeleteEvent`` + ``CreateEvent`` re-using the original
+# ``eventTimestamp``, and only ``kind == "remembered"`` may be rewritten.
+# Three properties carry the weight here and each has a test that fails
+# without it: the replacement keeps its chronological position, a
+# non-``remembered`` record is refused BEFORE anything is deleted, and a
+# create that refuses after the delete succeeded hands the original text
+# back rather than losing a note to a "save".
+#
+# The #527 shape is re-proved on this path too. Every "no partition" mock
+# RAISES; a mock returning an empty event could not tell an absent actor
+# from an absent record. Each absorbing assertion is paired with one
+# proving a different ``ClientError`` still produces a 500.
+
+EDIT_URL = "/api/memory/records"
+EDIT_TS = datetime(2026, 7, 30, 12, tzinfo=timezone.utc)
+STALE_NOTE = f"{_REMEMBER_PREFIX} prefers Postgres"
+
+
+def _entry(role: str, text: str) -> dict[str, Any]:
+    return {"conversational": {"role": role, "content": {"text": text}}}
+
+
+def _remember_event(
+    *,
+    event_id: str = "e1",
+    text: str = STALE_NOTE,
+    timestamp: Any = EDIT_TS,
+    payload: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    return {
+        "eventId": event_id,
+        "eventTimestamp": timestamp,
+        "payload": payload if payload is not None else [_entry("ASSISTANT", text)],
+    }
+
+
+def _editing_agentcore(
+    event: dict[str, Any] | None = None,
+    *,
+    session_ids: list[str] | None = None,
+    events: dict[str, list[dict[str, Any]]] | None = None,
+    new_event_id: str = "e-new",
+) -> MagicMock:
+    """A fake AgentCore wired for the whole replace round trip.
+
+    ``event`` is what ``GetEvent`` answers with (``None`` → an empty
+    response, i.e. an unknown record); ``session_ids`` / ``events`` drive
+    the ``used_in_recall`` probes exactly as they do for ``/records``.
+    """
+    fake = _agentcore(session_ids if session_ids is not None else ["chat-a"], events or {})
+    fake.get_event.return_value = {"event": event} if event is not None else {}
+    fake.create_event.return_value = {"event": {"eventId": new_event_id}}
+    return fake
+
+
+def _edit_call(
+    fake: MagicMock,
+    chats: dict[str, Chat],
+    *,
+    record_id: str | None = None,
+    body: Any = None,
+    headers: dict[str, str] | None = None,
+    put_audit: Any = None,
+    client_obj: TestClient | None = None,
+):
+    with (
+        patch.object(memory_api, "_agentcore_client", return_value=fake),
+        patch.object(memory_api, "_memory_id_for_env", return_value="mem-1"),
+        patch("channel.storage.get_chat_by_id", chats.get),
+        patch("channel.storage.put_audit_event", put_audit or MagicMock(return_value={})),
+    ):
+        return (client_obj or client).patch(
+            f"{EDIT_URL}/{record_id if record_id is not None else _record_id()}",
+            json=body if body is not None else {"content": "prefers DynamoDB"},
+            headers=headers or _headers(),
+        )
+
+
+OWNED = {"chat-a": _chat("chat-a")}
+
+
+# ── auth ──────────────────────────────────────────────────────────────────
+
+
+def test_edit_requires_a_mgmt_jwt():
+    assert client.patch(f"{EDIT_URL}/{_record_id()}", json={"content": "x"}).status_code in (
+        401,
+        403,
+    )
+
+
+def test_edit_rejects_a_garbage_bearer_token():
+    resp = client.patch(
+        f"{EDIT_URL}/{_record_id()}",
+        json={"content": "x"},
+        headers={"Authorization": "Bearer not-a-jwt"},
+    )
+    assert resp.status_code == 401
+
+
+# ── the replace itself ────────────────────────────────────────────────────
+
+
+def test_editing_a_remembered_note_deletes_the_old_event_and_creates_a_replacement():
+    fake = _editing_agentcore(_remember_event())
+
+    resp = _edit_call(fake, OWNED)
+
+    assert resp.status_code == 200
+    assert fake.delete_event.call_args.kwargs == {
+        "memoryId": "mem-1",
+        "actorId": memory_api.derive_actor_id(OWNER),
+        "sessionId": "chat-a",
+        "eventId": "e1",
+    }
+    created = fake.create_event.call_args.kwargs
+    assert created["memoryId"] == "mem-1"
+    assert created["actorId"] == memory_api.derive_actor_id(OWNER)
+    assert created["sessionId"] == "chat-a"
+    assert created["payload"] == [_entry("ASSISTANT", f"{_REMEMBER_PREFIX} prefers DynamoDB")]
+
+
+def test_the_delete_happens_before_the_create():
+    """Ordering is specified, not incidental: the reverse order would trade
+    a lost note for a duplicate, which is harder to explain and to clean up."""
+    fake = _editing_agentcore(_remember_event())
+    order: list[str] = []
+    fake.delete_event.side_effect = lambda **kw: order.append("delete")
+    fake.create_event.side_effect = lambda **kw: (
+        order.append("create"),
+        {"event": {"eventId": "e-new"}},
+    )[1]
+
+    assert _edit_call(fake, OWNED).status_code == 200
+    assert order == ["delete", "create"]
+
+
+def test_the_replacement_reuses_the_original_event_timestamp():
+    """The corrected note keeps its chronological position instead of
+    jumping to the top of the recall window."""
+    fake = _editing_agentcore(_remember_event())
+
+    resp = _edit_call(fake, OWNED)
+
+    assert fake.create_event.call_args.kwargs["eventTimestamp"] == EDIT_TS
+    assert resp.json()["created_at"] == EDIT_TS.isoformat()
+
+
+def test_the_response_carries_the_new_record_id_not_the_old_one():
+    fake = _editing_agentcore(_remember_event(), new_event_id="e-fresh")
+
+    body = _edit_call(fake, OWNED).json()
+
+    assert body["record_id"] == _record_id("chat-a", "e-fresh", 0)
+    assert body["record_id"] != _record_id("chat-a", "e1", 0)
+
+
+def test_the_response_is_the_read_models_own_record_shape():
+    """The panel swaps the row in place, so the shape must match what
+    ``/records`` served it."""
+    fake = _editing_agentcore(_remember_event())
+
+    body = _edit_call(fake, OWNED).json()
+
+    assert set(body) == {
+        "record_id",
+        "kind",
+        "role",
+        "text",
+        "created_at",
+        "used_in_recall",
+        "editable",
+    }
+    assert (body["kind"], body["role"], body["editable"]) == ("remembered", "ASSISTANT", True)
+    assert body["text"] == f"{_REMEMBER_PREFIX} prefers DynamoDB"
+
+
+def test_the_stored_text_is_byte_identical_to_what_the_remember_tool_would_write():
+    """Formatted through the tool's own helper, not re-implemented: the
+    ``[remember]`` prefix is what #475's read model classifies on and the
+    inline ``[tags: …]`` encoding is what makes tags findable by ``recall``,
+    so a second formatter would silently reclassify a correction as an
+    ordinary conversation turn."""
+    from channel.agents.tools.memory_tools import _format_remember_text
+
+    fake = _editing_agentcore(_remember_event())
+
+    resp = _edit_call(
+        fake, OWNED, body={"content": "  prefers DynamoDB  ", "tags": ["db", " prefs "]}
+    )
+
+    expected = _format_remember_text("  prefers DynamoDB  ", ["db", " prefs "])
+    assert resp.json()["text"] == expected
+    assert expected == f"{_REMEMBER_PREFIX} prefers DynamoDB [tags: db, prefs]"
+    assert fake.create_event.call_args.kwargs["payload"][0]["conversational"]["content"] == {
+        "text": expected
+    }
+
+
+def test_omitting_tags_clears_them():
+    fake = _editing_agentcore(_remember_event(text=f"{STALE_NOTE} [tags: db]"))
+
+    body = _edit_call(fake, OWNED).json()
+
+    assert "[tags:" not in body["text"]
+
+
+def test_sibling_payload_entries_survive_the_replace():
+    """``DeleteEvent`` is event-granular while a record is one payload
+    entry, so re-creating only the corrected entry would silently drop the
+    rest of the event."""
+    event = _remember_event(
+        payload=[_entry("USER", "what do you know"), _entry("ASSISTANT", STALE_NOTE)]
+    )
+    fake = _editing_agentcore(event)
+
+    resp = _edit_call(fake, OWNED, record_id=_record_id("chat-a", "e1", 1))
+
+    assert resp.status_code == 200
+    assert fake.create_event.call_args.kwargs["payload"] == [
+        _entry("USER", "what do you know"),
+        _entry("ASSISTANT", f"{_REMEMBER_PREFIX} prefers DynamoDB"),
+    ]
+    assert resp.json()["record_id"] == _record_id("chat-a", "e-new", 1)
+
+
+# ── used_in_recall ────────────────────────────────────────────────────────
+
+
+def test_used_in_recall_is_carried_over_from_the_record_being_replaced():
+    """Identical by construction — the replacement re-uses the original
+    timestamp, so the session's events are unchanged in count and order."""
+    event = _remember_event()
+    fake = _editing_agentcore(event, session_ids=["chat-a"], events={"chat-a": [event]})
+
+    assert _edit_call(fake, OWNED).json()["used_in_recall"] is True
+
+
+def test_used_in_recall_is_false_for_a_record_outside_the_enumerable_page():
+    """Exact rather than a fallback: the page holds the newest
+    ``MAX_EVENTS_PER_SESSION`` events and the pool only the newest
+    ``POOL_EVENTS_PER_SESSION``, so anything outside the page is provably
+    outside the pool."""
+    from channel.agents.memory_records import MAX_EVENTS_PER_SESSION
+
+    assert MAX_EVENTS_PER_SESSION > POOL_EVENTS_PER_SESSION
+    fake = _editing_agentcore(_remember_event(), events={"chat-a": []})
+
+    assert _edit_call(fake, OWNED).json()["used_in_recall"] is False
+
+
+def test_the_recall_kill_switch_skips_both_probes(monkeypatch: pytest.MonkeyPatch):
+    """A disabled hook injects nothing, so no record can honestly be
+    flagged and the two extra reads are waste."""
+    monkeypatch.setenv("CHANNEL_RECALL_ENABLED", "0")
+    event = _remember_event()
+    fake = _editing_agentcore(event, events={"chat-a": [event]})
+
+    assert _edit_call(fake, OWNED).json()["used_in_recall"] is False
+    fake.list_sessions.assert_not_called()
+    fake.list_events.assert_not_called()
+
+
+# ── request validation ────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "record_id",
+    [
+        pytest.param("not-base64!!", id="not-base64"),
+        pytest.param("   ", id="whitespace"),
+        pytest.param(base64.urlsafe_b64encode(b"a|b").decode(), id="too-few-fields"),
+        pytest.param(base64.urlsafe_b64encode(b"a|b|x").decode(), id="non-numeric-index"),
+    ],
+)
+def test_a_malformed_record_id_is_a_400_not_a_500(record_id: str):
+    """Decoded locally so a bad id never reaches AgentCore, where it would
+    come back as a ValidationException — a 500 for what is a client error."""
+    resp = _edit_call(_editing_agentcore(_remember_event()), OWNED, record_id=record_id)
+    assert resp.status_code == 400
+
+
+def test_a_malformed_record_id_is_rejected_before_any_agentcore_call():
+    fake = _editing_agentcore(_remember_event())
+
+    assert _edit_call(fake, OWNED, record_id="not-base64!!").status_code == 400
+    fake.get_event.assert_not_called()
+    fake.delete_event.assert_not_called()
+
+
+@pytest.mark.parametrize("content", ["", "   ", "\n\t "])
+def test_empty_content_is_a_400_and_never_a_delete(content: str):
+    """ "Save an empty note" is far more likely to be a slipped keystroke
+    than an erase request, and DELETE is one call away for the case where
+    it isn't."""
+    fake = _editing_agentcore(_remember_event())
+
+    resp = _edit_call(fake, OWNED, body={"content": content})
+
+    assert resp.status_code == 400
+    fake.delete_event.assert_not_called()
+    fake.create_event.assert_not_called()
+
+
+def test_a_body_with_no_content_field_is_a_422():
+    assert _edit_call(_editing_agentcore(_remember_event()), OWNED, body={}).status_code == 422
+
+
+# ── ownership + existence ─────────────────────────────────────────────────
+
+
+def test_a_record_whose_chat_the_caller_does_not_own_is_a_404_not_a_403():
+    fake = _editing_agentcore(_remember_event())
+
+    resp = _edit_call(fake, {"chat-a": _chat("chat-a", user_id=INTRUDER)})
+
+    assert resp.status_code == 404
+    fake.get_event.assert_not_called()
+    fake.delete_event.assert_not_called()
+
+
+def test_a_record_in_an_orphaned_session_is_a_404():
+    """No chat row means nothing to verify ownership against — the same
+    withholding every read surface applies."""
+    fake = _editing_agentcore(_remember_event())
+
+    assert _edit_call(fake, {}).status_code == 404
+
+
+def test_an_unknown_event_is_a_404():
+    fake = _editing_agentcore(None)
+
+    resp = _edit_call(fake, OWNED)
+
+    assert resp.status_code == 404
+    fake.delete_event.assert_not_called()
+
+
+def test_an_event_with_no_entry_at_the_record_index_is_a_404():
+    fake = _editing_agentcore(_remember_event())
+
+    resp = _edit_call(fake, OWNED, record_id=_record_id("chat-a", "e1", 7))
+
+    assert resp.status_code == 404
+    fake.delete_event.assert_not_called()
+
+
+def test_a_text_less_payload_entry_is_a_404():
+    """The read model skips text-less entries, so the panel never showed
+    one and there is nothing to correct."""
+    fake = _editing_agentcore(_remember_event(payload=[{"conversational": {"role": "ASSISTANT"}}]))
+
+    assert _edit_call(fake, OWNED).status_code == 404
+
+
+# ── remembered-only restriction ───────────────────────────────────────────
+
+
+def test_a_conversation_turn_is_a_409_with_a_readable_reason():
+    """Rewriting a conversation turn falsifies the transcript — the user
+    said what they said, and that is a forget-or-keep decision."""
+    fake = _editing_agentcore(_remember_event(text="just a normal reply"))
+
+    resp = _edit_call(fake, OWNED)
+
+    assert resp.status_code == 409
+    assert "forgotten" in resp.json()["detail"] and "rewritten" in resp.json()["detail"]
+    assert "409" not in resp.json()["detail"]
+
+
+def test_a_meta_fact_is_a_409():
+    fake = _editing_agentcore(_remember_event(text=f"{_META_PREFIX} used remember"))
+
+    assert _edit_call(fake, OWNED).status_code == 409
+
+
+def test_a_user_turn_that_starts_with_the_remember_prefix_is_not_editable():
+    """The ASSISTANT-only classification gate, on the write path: a user
+    cannot make their own message masquerade as something Channel chose to
+    remember and then rewrite the transcript through it."""
+    fake = _editing_agentcore(_remember_event(payload=[_entry("USER", STALE_NOTE)]))
+
+    assert _edit_call(fake, OWNED).status_code == 409
+
+
+def test_a_refused_kind_leaves_the_record_completely_untouched():
+    fake = _editing_agentcore(_remember_event(text="just a normal reply"))
+
+    _edit_call(fake, OWNED)
+
+    fake.delete_event.assert_not_called()
+    fake.create_event.assert_not_called()
+
+
+# ── failure semantics ─────────────────────────────────────────────────────
+
+
+def test_an_undatable_event_refuses_before_the_delete():
+    """Preserving chronological position is the whole reason the timestamp
+    is re-used, so an event we cannot date is refused rather than re-created
+    at "now" — which would silently promote a corrected note."""
+    fake = _editing_agentcore(_remember_event(timestamp=None))
+
+    resp = _edit_call(fake, OWNED)
+
+    assert resp.status_code == 500
+    fake.delete_event.assert_not_called()
+    fake.create_event.assert_not_called()
+
+
+def test_a_record_that_vanished_between_the_read_and_the_delete_is_a_404():
+    fake = _editing_agentcore(_remember_event())
+    fake.delete_event.side_effect = ClientError({"Error": {"Code": NO_PARTITION}}, "DeleteEvent")
+
+    resp = _edit_call(fake, OWNED)
+
+    assert resp.status_code == 404
+    fake.create_event.assert_not_called()
+
+
+def test_a_create_failure_after_the_delete_hands_the_original_text_back():
+    """The one failure this ordering admits. Without the original in the
+    body the user loses a note by pressing "save"."""
+    fake = _editing_agentcore(_remember_event())
+    fake.create_event.side_effect = ClientError(
+        {"Error": {"Code": "ThrottlingException"}}, "CreateEvent"
+    )
+
+    resp = _edit_call(fake, OWNED, client_obj=error_client)
+
+    assert resp.status_code == 500
+    detail = resp.json()["detail"]
+    assert detail["original_text"] == STALE_NOTE
+    assert "could not be saved" in detail["message"]
+
+
+def test_a_create_response_missing_its_event_id_is_treated_as_a_failed_create():
+    """``event.eventId`` is a required member of the CreateEvent response,
+    so a missing one is a vendor-contract violation — and a new event nobody
+    can address is indistinguishable from one that was never written."""
+    fake = _editing_agentcore(_remember_event())
+    fake.create_event.return_value = {}
+
+    resp = _edit_call(fake, OWNED, client_obj=error_client)
+
+    assert resp.status_code == 500
+    assert resp.json()["detail"]["original_text"] == STALE_NOTE
+
+
+def test_a_delete_that_fails_for_any_other_reason_surfaces_as_a_500():
+    fake = _editing_agentcore(_remember_event())
+    fake.delete_event.side_effect = ClientError(
+        {"Error": {"Code": "ThrottlingException"}}, "DeleteEvent"
+    )
+
+    resp = _edit_call(fake, OWNED, client_obj=error_client)
+
+    assert resp.status_code == 500
+    fake.create_event.assert_not_called()
+
+
+# ── #527: a caller with no memory partition ───────────────────────────────
+
+
+def test_editing_for_a_user_with_no_memory_partition_is_a_404_not_a_500():
+    """The mock RAISES — one returning an empty event could not tell an
+    absent actor from an absent record, which is how that bug shipped
+    twice. An id that addresses nothing is exactly what "unknown id" means."""
+    fake = _agentcore_raising(NO_PARTITION)
+    fake.create_event.return_value = {"event": {"eventId": "e-new"}}
+
+    resp = _edit_call(fake, OWNED)
+
+    assert resp.status_code == 404
+    fake.delete_event.assert_not_called()
+
+
+@pytest.mark.parametrize("code", ["ThrottlingException", "AccessDeniedException"])
+def test_an_edit_still_500s_when_agentcore_fails_for_any_other_reason(code: str):
+    """Paired with the absorbing test above: reporting "no such record"
+    during an AgentCore outage is a claim about the user's own data that
+    this endpoint has no basis to make."""
+    fake = _agentcore_raising(code)
+
+    resp = _edit_call(fake, OWNED, client_obj=error_client)
+
+    assert resp.status_code == 500
+
+
+# ── metrics + audit ───────────────────────────────────────────────────────
+
+
+def test_a_successful_edit_is_counted_and_audited_with_no_record_text():
+    put_audit = MagicMock(return_value={})
+    fake = _editing_agentcore(_remember_event())
+
+    with patch.object(memory_api, "record_memory_record_edit_outcome", new=AsyncMock()) as counter:
+        resp = _edit_call(fake, OWNED, put_audit=put_audit)
+
+    assert resp.status_code == 200
+    counter.assert_awaited_once_with(success=True)
+    kwargs = put_audit.call_args.kwargs
+    assert kwargs["event_type"] == "memory.record_edited"
+    assert kwargs["actor_id"] == OWNER
+    assert kwargs["details"] == {
+        "chat_id": "chat-a",
+        "record_id": _record_id("chat-a", "e1", 0),
+        "new_record_id": _record_id("chat-a", "e-new", 0),
+        "edited": 1,
+    }
+    # Neither the stale text nor its replacement may reach a 365-day audit
+    # partition — the correction exists to retire the old claim, not to
+    # copy it somewhere it outlives the record.
+    serialised = json.dumps(kwargs["details"])
+    assert "Postgres" not in serialised and "DynamoDB" not in serialised
+
+
+def test_a_create_failure_counts_as_an_edit_failure():
+    fake = _editing_agentcore(_remember_event())
+    fake.create_event.side_effect = ClientError(
+        {"Error": {"Code": "ThrottlingException"}}, "CreateEvent"
+    )
+
+    with patch.object(memory_api, "record_memory_record_edit_outcome", new=AsyncMock()) as counter:
+        _edit_call(fake, OWNED, client_obj=error_client)
+
+    counter.assert_awaited_once_with(success=False)
+
+
+def test_a_raising_agentcore_read_counts_as_an_edit_failure():
+    fake = _agentcore_raising("ThrottlingException")
+
+    with (
+        patch.object(memory_api, "record_memory_record_edit_outcome", new=AsyncMock()) as counter,
+        pytest.raises(ClientError),
+    ):
+        _edit_call(fake, OWNED)
+
+    counter.assert_awaited_once_with(success=False)
+
+
+def test_an_undatable_event_counts_as_an_edit_failure():
+    fake = _editing_agentcore(_remember_event(timestamp=None))
+
+    with patch.object(memory_api, "record_memory_record_edit_outcome", new=AsyncMock()) as counter:
+        _edit_call(fake, OWNED)
+
+    counter.assert_awaited_once_with(success=False)
+
+
+@pytest.mark.parametrize(
+    ("chats", "record_id", "event"),
+    [
+        pytest.param(OWNED, "not-base64!!", _remember_event(), id="malformed-id"),
+        pytest.param({}, None, _remember_event(), id="unowned-chat"),
+        pytest.param(OWNED, None, None, id="unknown-record"),
+        pytest.param(OWNED, None, _remember_event(text="a normal reply"), id="not-remembered"),
+    ],
+)
+def test_a_4xx_counts_neither_success_nor_failure(
+    chats: dict[str, Chat], record_id: str | None, event: dict[str, Any] | None
+):
+    """A 4xx is a statement about the request, not an edit that failed;
+    counting it would put a floor under the failure rate no fix could
+    lower — the rule the per-record forget already follows."""
+    fake = _editing_agentcore(event)
+
+    with patch.object(memory_api, "record_memory_record_edit_outcome", new=AsyncMock()) as counter:
+        resp = _edit_call(fake, chats, record_id=record_id)
+
+    assert 400 <= resp.status_code < 500
+    counter.assert_not_awaited()
+
+
+def test_a_failed_audit_write_does_not_fail_a_completed_edit():
+    """Best-effort, like the forget audit: the correction has already
+    landed, so failing the response would report an edit that did happen as
+    one that did not."""
+    fake = _editing_agentcore(_remember_event())
+
+    resp = _edit_call(fake, OWNED, put_audit=MagicMock(side_effect=RuntimeError("dynamo down")))
+
+    assert resp.status_code == 200
+
+
+# ── wiring ────────────────────────────────────────────────────────────────
+
+
+def test_edit_route_is_mounted_under_the_api_prefix():
+    paths = {
+        (r.path, method)
+        for r in app.routes
+        for method in getattr(r, "methods", set()) or set()
+        if getattr(r, "path", "").startswith("/api/memory")
+    }
+    assert ("/api/memory/records/{record_id}", "PATCH") in paths
+
+
+def test_the_edit_endpoint_takes_no_actor_or_user_parameter():
+    """Scope comes from the token claim ("agents swap tokens to switch
+    context"), so there is nothing to tamper with."""
+    route = next(
+        r
+        for r in app.routes
+        if getattr(r, "path", "") == "/api/memory/records/{record_id}"
+        and "PATCH" in (getattr(r, "methods", set()) or set())
+    )
+    names = {p.name for p in route.dependant.query_params + route.dependant.path_params}
+    assert names == {"record_id"}
