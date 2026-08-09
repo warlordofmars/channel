@@ -343,8 +343,11 @@ accordingly.
 ## Google OAuth
 
 The management UI authenticates human users via Google OAuth 2.0.
-Only emails on the allowlist are admitted, and the same allowlist
-doubles as the admin-role grant list.
+Only emails on the sign-in allowlist are admitted. **The admin role is
+a second, separate allowlist (#600)** — being admitted grants
+`role=user`; reaching `/api/admin/*` additionally requires membership
+of the admin list. Until #600 one list did both jobs, so every user who
+could sign in was an admin.
 
 | Field | Value |
 | --- | --- |
@@ -354,10 +357,14 @@ doubles as the admin-role grant list.
 | Client secret env var | `GOOGLE_CLIENT_SECRET` |
 | Client secret SSM env var | `GOOGLE_CLIENT_SECRET_PARAM` |
 | Client secret SSM path | `/channel/google-client-secret` (prod) or `/channel/<env_name>/google-client-secret` |
-| Allowlist env var | `ALLOWED_EMAILS` (JSON array literal) |
-| Allowlist SSM env var | `ALLOWED_EMAILS_PARAM` |
-| Allowlist SSM path | `/channel/allowed-emails` (prod) or `/channel/<env_name>/allowed-emails` |
-| Allowlist default | `"[]"` — empty list, denies all |
+| Sign-in allowlist env var | `ALLOWED_EMAILS` (JSON array literal) |
+| Sign-in allowlist SSM env var | `ALLOWED_EMAILS_PARAM` |
+| Sign-in allowlist SSM path | `/channel/allowed-emails` (prod) or `/channel/<env_name>/allowed-emails` |
+| Sign-in allowlist default | `"[]"` — empty list, denies all |
+| Admin allowlist env var | `ADMIN_ALLOWED_EMAILS` (JSON array literal) |
+| Admin allowlist SSM env var | `ADMIN_ALLOWED_EMAILS_PARAM` |
+| Admin allowlist SSM path | `/channel/admin-allowed-emails` (prod) or `/channel/<env_name>/admin-allowed-emails` |
+| Admin allowlist default | `"[]"` — empty list, **no admins** (never "everyone") |
 | Redirect URI | `https://<custom_domain>/auth/callback` |
 | Consumer | `src/channel/auth/google.py`; login flow in `src/channel/auth/mgmt_auth.py` |
 
@@ -366,8 +373,13 @@ doubles as the admin-role grant list.
 - The client ID and secret cache on first read
   (`functools.lru_cache`); changing them in SSM requires a Lambda
   bounce.
-- The allowlist is wrapped in a 60-second TTL cache so operators can
-  add or remove emails without forcing a cold start.
+- Each allowlist is wrapped in its own 60-second TTL cache so operators
+  can add or remove emails without forcing a cold start. The two caches
+  are separate slots — neither list can ever serve the other's value.
+- Both lists **fail closed on every path**: unset, empty, malformed
+  JSON, a non-array value, or an SSM read error all yield an empty set.
+  For the admin list that means no admins; a failed read must never be
+  readable as "grant admin to everyone".
 - `_allowed_emails()` **fails closed** on parse or load errors: a
   malformed JSON value or an unreachable SSM call is logged and
   treated as an empty list. No login is admitted.
@@ -525,12 +537,13 @@ denylist (#240) — this is what logout does, and it takes effect on
 the next request. To invalidate *all* outstanding tokens at once,
 rotate the signing secret (see the
 [JWT signing secret](#jwt-signing-secret) section). Remove a user by
-deleting their email from `ALLOWED_EMAILS` so they cannot log in
+deleting their email from `ALLOWED_EMAILS` (and from
+`ADMIN_ALLOWED_EMAILS`, if listed) so they cannot log in
 again; existing sessions then end by per-token denylisting, by a
 signing-secret rotation, or by waiting out the 1-hour access TTL.
 Removing the email does **not** by itself stop a refresh — role is
-recomputed from the allowlist on every refresh, but membership is not
-re-checked — so revoke the user's refresh tokens
+recomputed from the admin allowlist on every refresh, but sign-in
+membership is not re-checked — so revoke the user's refresh tokens
 (`revoke_all_user_refresh_tokens`) to end their sessions for good.
 
 ## Rotation quick reference
@@ -541,6 +554,7 @@ order of operational impact:
 | Secret | Impact | Cold start required | TTL pickup |
 | --- | --- | --- | --- |
 | `ALLOWED_EMAILS` | Adds/removes a user; takes effect within 60s | No | 60 seconds (allowlist cache) |
+| `ADMIN_ALLOWED_EMAILS` | Grants/revokes the admin role; takes effect within 60s | No | 60 seconds (allowlist cache) |
 | Origin-verify secret | Brief CloudFront/Lambda mismatch window | Yes (Lambda) + redeploy (CloudFront) | Immediate after redeploy |
 | Google client secret | Logged-in sessions persist; new logins use new secret | Yes (Lambda) | Immediate after cold start |
 | Google client ID | Effectively a re-registration | Yes (Lambda) | Immediate after cold start |

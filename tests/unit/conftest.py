@@ -13,6 +13,8 @@ that exercise the revoked path override it locally with their own
 The patch target moved from ``channel.api._auth`` to
 ``channel.auth.tokens`` in #291, when revocation moved down into the
 decode path so every mgmt-JWT consumer inherits it.
+
+Unit tests must not touch SSM either — see ``_no_ssm_reads``.
 """
 
 from __future__ import annotations
@@ -26,3 +28,27 @@ def _no_denied_jtis(monkeypatch: pytest.MonkeyPatch) -> None:
     # unconditionally, so if that import is ever removed this stub fails
     # loudly instead of silently letting the real DDB read back in.
     monkeypatch.setattr("channel.auth.tokens.is_jti_denied", lambda _jti: False)
+
+
+@pytest.fixture(autouse=True)
+def _no_ssm_reads(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub the SSM boundary so no unit test makes a network round trip.
+
+    Both email allowlists fall back to an SSM read when their env var is
+    unset (``ALLOWED_EMAILS`` for sign-in, ``ADMIN_ALLOWED_EMAILS`` for
+    the admin role — #600). Those reads fail closed, but only after
+    boto3 times out against fake local credentials: slow, and noise in a
+    suite whose contract is "no AWS deps".
+
+    Raising here reproduces exactly what a missing/unreadable parameter
+    does in production — the caller logs and yields an empty allowlist —
+    so a test that hasn't set its env var still exercises the real
+    default-deny branch rather than a special test-only shortcut. Tests
+    that drive the SSM transport on purpose override this with their own
+    ``monkeypatch.setattr``.
+    """
+
+    def _refuse(name: str) -> str:
+        raise AssertionError(f"unit tests must not read SSM (parameter {name!r})")
+
+    monkeypatch.setattr("channel.auth.google._ssm_param", _refuse)
