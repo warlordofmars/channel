@@ -299,6 +299,37 @@ async def record_memory_bulk_forget_outcome(success: bool) -> None:
     await emit_metric(metric)
 
 
+async def record_memory_record_edit_outcome(success: bool) -> None:
+    """Emit a CloudWatch counter for one ``PATCH /api/memory/records/{id}``
+    (#478, epic #129 decision 13).
+
+    Separate from the two forget counters, and from every hook / tool /
+    export counter, for the reason #400 established: a user-initiated
+    mutation must not move a hook-health line on the admin dashboard.
+    Correcting a stale note is also a different operational event from
+    deleting one — a failed *edit* can leave a record deleted rather than
+    rewritten, which a shared counter would average away.
+
+    ``success=False`` means the edit was **attempted and failed
+    operationally** — anything the caller receives as a 5xx, which on this
+    endpoint includes the one failure worth alarming on: a ``CreateEvent``
+    that refused after its ``DeleteEvent`` succeeded. A request rejected as
+    a 4xx (malformed ``record_id``, empty content, an unowned chat, an id
+    that addresses nothing, a record whose class forbids rewriting) emits
+    NEITHER counter: a 4xx is a statement about the request, and counting it
+    would put a floor under the failure rate that no fix could lower — the
+    same rule :func:`record_memory_record_delete_outcome` follows.
+
+    Counter-only — same cardinality-risk rationale as
+    :func:`record_memory_write_outcome`. No per-actor / per-session
+    dimension, and deliberately no record-identity one either: on an
+    endpoint whose whole subject is the text of one private note, the
+    record's identity is exactly what must not reach CloudWatch.
+    """
+    metric = "MemoryRecordEditSuccesses" if success else "MemoryRecordEditFailures"
+    await emit_metric(metric)
+
+
 async def record_auto_title_outcome(success: bool) -> None:
     """Emit a CloudWatch counter for one auto-title attempt.
 

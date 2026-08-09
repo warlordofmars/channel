@@ -17,6 +17,7 @@ import Customize from "./app/views/Customize.jsx";
 import Login from "./app/Login.jsx";
 import ProjectDetail from "./app/views/ProjectDetail.jsx";
 import Projects from "./app/views/Projects.jsx";
+import Sessions from "./app/views/Sessions.jsx";
 import Shell from "./app/Shell.jsx";
 import UserDetail from "./app/admin/UserDetail.jsx";
 import Users from "./app/admin/Users.jsx";
@@ -118,6 +119,7 @@ export default function App() {
             <Route path="/app/projects/:id"   element={<ProjectDetail />} />
             <Route path="/app/artifacts"      element={<Artifacts />} />
             <Route path="/app/customize"      element={<Customize />} />
+            <Route path="/app/sessions"       element={<Sessions />} />
             {/* Admin — nested under AdminLayout so the role gate runs
                 exactly once for the whole /app/admin/* subtree (#237) */}
             <Route element={<AdminLayout />}>

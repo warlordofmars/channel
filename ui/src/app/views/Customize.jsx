@@ -564,6 +564,31 @@ export default function Customize() {
             </div>
           </div>
         </div>
+        {/*
+          The sessions view is its own route (#296) rather than another
+          section here — this page is already long, and "which devices are
+          signed in to my account" is a security question a user arrives at
+          directly, so it wants a URL of its own. This row is how they find
+          it. `Link`, not `<a>`, per the in-app navigation convention.
+        */}
+        <div className="set-group">
+          <h3>Security</h3>
+          <div className="set-row">
+            <div>
+              <div className="lbl">Signed-in devices</div>
+              <div className="hint">
+                See every device signed in to your account and sign any of them
+                out.
+              </div>
+            </div>
+            <div className="ctl">
+              <Link className="btn-secondary" to="/app/sessions">
+                Manage
+              </Link>
+            </div>
+          </div>
+        </div>
+
         <MemorySection />
 
         <AddMCPServerModal
