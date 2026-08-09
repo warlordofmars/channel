@@ -33,10 +33,14 @@ from aws_cdk import assertions
 _INFRA = Path(__file__).resolve().parents[2] / "infra"
 sys.path.insert(0, str(_INFRA))
 
+from stacks import channel_stack  # noqa: E402
 from stacks.channel_stack import (  # noqa: E402
     API_LAMBDA_BUNDLING_STEPS,
     LAMBDA_ASSET_EXCLUDE,
+    AlarmSubscriptionError,
     ChannelStack,
+    confirmed_subscription_arns,
+    require_confirmed_alarm_subscription,
 )
 
 
@@ -1274,3 +1278,253 @@ def test_channel_alarms_select_only_the_aggregate_dimension_set(dev_template):
                 dimension_sets.append(stat["Metric"].get("Dimensions", []))
         for dims in dimension_sets:
             assert [d["Name"] for d in dims] == ["Environment"], name
+
+
+# ---------------------------------------------------------------------------
+# Prod confirmed-alarm-subscription gate (#537)
+# ---------------------------------------------------------------------------
+#
+# 24 alarms fire into a topic nobody is subscribed to. The product
+# decision (2026-08-08) enforces a CONFIRMED subscription for prod only;
+# dev and jc stay deliberately silent.
+#
+# The crux these tests exist to pin: an UNCONFIRMED email subscription is
+# a subscription *record* that delivers nothing, and SNS reports it by
+# putting the literal string ``PendingConfirmation`` in ``SubscriptionArn``
+# instead of an ARN. A check asserting only that a record exists would
+# pass in exactly the broken state #537 documents, which is the failure
+# family (#494, #530, #568) this repo has spent the week removing. Both
+# directions are asserted below — it fails on pending, passes on
+# confirmed — because a check tested in one direction is not a check.
+
+_TOPIC = "arn:aws:sns:us-east-1:123456789012:ChannelStack-AlarmTopic-ABC"
+_CONFIRMED_ARN = f"{_TOPIC}:11111111-2222-3333-4444-555555555555"
+
+
+class _StubSns:
+    """Minimal ``ListSubscriptionsByTopic`` stand-in.
+
+    Serves ``pages`` in order and records every call, so a test can
+    assert both what was asked and how often.
+    """
+
+    def __init__(self, pages):
+        self.pages = list(pages)
+        self.calls = []
+
+    def list_subscriptions_by_topic(self, **kwargs):
+        self.calls.append(kwargs)
+        return self.pages[min(len(self.calls) - 1, len(self.pages) - 1)]
+
+
+def _factory(client):
+    """Client factory that also records whether it was ever invoked."""
+    calls = []
+
+    def make():
+        calls.append(client)
+        return client
+
+    make.calls = calls
+    return make
+
+
+def _page(*subscriptions, next_token=None):
+    page = {"Subscriptions": list(subscriptions)}
+    if next_token:
+        page["NextToken"] = next_token
+    return page
+
+
+def test_pending_confirmation_is_not_a_confirmed_subscription():
+    """The crux. ``PendingConfirmation`` is a record that delivers nothing."""
+    assert confirmed_subscription_arns([{"SubscriptionArn": "PendingConfirmation"}]) == []
+
+
+def test_deleted_sentinel_is_not_a_confirmed_subscription():
+    """Allowlist, not denylist — a ``!= PendingConfirmation`` test admits this."""
+    assert confirmed_subscription_arns([{"SubscriptionArn": "Deleted"}]) == []
+
+
+def test_a_real_arn_is_a_confirmed_subscription():
+    assert confirmed_subscription_arns([{"SubscriptionArn": _CONFIRMED_ARN}]) == [_CONFIRMED_ARN]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [None, 42, {"nested": "object"}, ""],
+    ids=["missing", "non-string", "object", "empty"],
+)
+def test_a_malformed_subscription_arn_is_never_confirmed(value):
+    """A shape we did not expect must fail closed, never count as delivery."""
+    assert confirmed_subscription_arns([{"SubscriptionArn": value}]) == []
+
+
+def test_confirmed_subscriptions_are_filtered_out_of_a_mixed_page():
+    arns = confirmed_subscription_arns(
+        [
+            {"SubscriptionArn": "PendingConfirmation"},
+            {"SubscriptionArn": _CONFIRMED_ARN},
+            {"SubscriptionArn": "Deleted"},
+        ]
+    )
+    assert arns == [_CONFIRMED_ARN]
+
+
+def test_gate_fails_when_the_only_subscription_is_pending_confirmation():
+    """Direction 1 of 2: the state #537 would otherwise create."""
+    sns = _StubSns([_page({"SubscriptionArn": "PendingConfirmation"})])
+    with pytest.raises(AlarmSubscriptionError) as excinfo:
+        require_confirmed_alarm_subscription("prod", _TOPIC, _factory(sns))
+    message = str(excinfo.value)
+    assert "NO confirmed subscription" in message
+    assert "1 subscription record(s) scanned, 0 confirmed" in message
+    assert _TOPIC in message
+
+
+def test_gate_passes_when_one_subscription_is_confirmed():
+    """Direction 2 of 2."""
+    sns = _StubSns([_page({"SubscriptionArn": _CONFIRMED_ARN})])
+    result = require_confirmed_alarm_subscription("prod", _TOPIC, _factory(sns))
+    assert "1 confirmed subscription(s)" in result
+    assert sns.calls == [{"TopicArn": _TOPIC}]
+
+
+def test_gate_fails_when_the_topic_has_no_subscriptions_at_all():
+    """The literal state found on channel-dev and channel-jc."""
+    sns = _StubSns([_page()])
+    with pytest.raises(AlarmSubscriptionError) as excinfo:
+        require_confirmed_alarm_subscription("prod", _TOPIC, _factory(sns))
+    assert "0 subscription record(s) scanned, 0 confirmed" in str(excinfo.value)
+
+
+def test_gate_passes_when_a_confirmed_subscription_sits_behind_a_pending_one():
+    sns = _StubSns(
+        [
+            _page(
+                {"SubscriptionArn": "PendingConfirmation"},
+                {"SubscriptionArn": _CONFIRMED_ARN},
+            )
+        ]
+    )
+    assert "1 confirmed" in require_confirmed_alarm_subscription("prod", _TOPIC, _factory(sns))
+
+
+def test_gate_follows_pagination_before_declaring_failure():
+    """A confirmed subscription on page 2 must not read as a failure."""
+    sns = _StubSns(
+        [
+            _page({"SubscriptionArn": "PendingConfirmation"}, next_token="tok"),
+            _page({"SubscriptionArn": _CONFIRMED_ARN}),
+        ]
+    )
+    result = require_confirmed_alarm_subscription("prod", _TOPIC, _factory(sns))
+    assert "1 confirmed subscription(s) among the 2 record(s) scanned" in result
+    assert sns.calls == [
+        {"TopicArn": _TOPIC},
+        {"TopicArn": _TOPIC, "NextToken": "tok"},
+    ]
+
+
+def test_gate_stops_at_the_first_page_carrying_a_confirmed_subscription():
+    """Early exit — no reason to page through a topic already proven live."""
+    sns = _StubSns([_page({"SubscriptionArn": _CONFIRMED_ARN}, next_token="tok")])
+    require_confirmed_alarm_subscription("prod", _TOPIC, _factory(sns))
+    assert len(sns.calls) == 1
+
+
+def test_gate_stops_paginating_at_the_page_cap():
+    """A pagination response that never terminates must not hang a deploy."""
+    sns = _StubSns([_page({"SubscriptionArn": "PendingConfirmation"}, next_token="t")])
+    with pytest.raises(AlarmSubscriptionError):
+        require_confirmed_alarm_subscription("prod", _TOPIC, _factory(sns))
+    assert len(sns.calls) == channel_stack._MAX_SUBSCRIPTION_PAGES
+
+
+@pytest.mark.parametrize(
+    "env_name",
+    ["dev", "jc", "staging", "nonprod", "prod-eu", "preprod", "PROD"],
+)
+def test_gate_never_runs_for_a_non_prod_stack(env_name):
+    """dev and jc are accepted as silent — no AWS call, not even a client.
+
+    The environment gate lives inside the check rather than only in the
+    workflow's job condition, so a future caller cannot accidentally
+    enforce it on a stack the decision has exempted. Asserting the
+    factory was never invoked is the strong form: a non-prod run needs
+    no credentials and cannot fail on an SNS API error.
+
+    The names that merely *contain* ``prod`` are the interesting ones:
+    they pin the comparison as exact equality rather than a substring
+    or case-insensitive test. A substring gate would enforce on a
+    ``nonprod`` or ``preprod`` stack — silently reversing the decision
+    for the environments it was made to exempt. Mutation testing found
+    this: every other mutant of this line died, and the substring
+    variant survived until these cases existed.
+    """
+    sns = _StubSns([_page()])
+    factory = _factory(sns)
+    result = require_confirmed_alarm_subscription(env_name, _TOPIC, factory)
+    assert factory.calls == []
+    assert sns.calls == []
+    assert "skipping" in result
+    assert env_name in result
+
+
+def test_cli_returns_zero_when_a_confirmed_subscription_exists(monkeypatch, capsys):
+    sns = _StubSns([_page({"SubscriptionArn": _CONFIRMED_ARN})])
+    monkeypatch.setattr(channel_stack, "_default_sns_client", lambda: sns)
+    assert channel_stack._main(["--env", "prod", "--topic-arn", _TOPIC]) == 0
+    assert "1 confirmed subscription(s)" in capsys.readouterr().out
+
+
+def test_cli_returns_nonzero_and_annotates_when_only_pending(monkeypatch, capsys):
+    sns = _StubSns([_page({"SubscriptionArn": "PendingConfirmation"})])
+    monkeypatch.setattr(channel_stack, "_default_sns_client", lambda: sns)
+    assert channel_stack._main(["--env", "prod", "--topic-arn", _TOPIC]) == 1
+    assert "::error::" in capsys.readouterr().out
+
+
+def test_cli_returns_zero_for_a_non_prod_stack_without_touching_boto3(monkeypatch):
+    def _explode():  # pragma: no cover - asserted never to run
+        raise AssertionError("non-prod must not build an SNS client")
+
+    monkeypatch.setattr(channel_stack, "_default_sns_client", _explode)
+    assert channel_stack._main(["--env", "dev", "--topic-arn", _TOPIC]) == 0
+
+
+def test_default_sns_client_builds_an_sns_client(monkeypatch):
+    """The one line that reaches boto3, pinned so the CLI wiring is covered."""
+    import boto3
+
+    seen = {}
+
+    def _fake_client(service_name, *args, **kwargs):
+        seen["service"] = service_name
+        return "stub-client"
+
+    monkeypatch.setattr(boto3, "client", _fake_client)
+    assert channel_stack._default_sns_client() == "stub-client"
+    assert seen["service"] == "sns"
+
+
+@pytest.mark.parametrize("template_name", ["dev_template", "prod_template"])
+def test_stack_exports_the_alarm_topic_arn_output(template_name, request):
+    """The CI gate discovers the topic through this output.
+
+    Exported on every environment, not just prod: the output is how the
+    ARN is found, and the prod-only decision is enforced by the check,
+    not by hiding the topic's identity.
+    """
+    template = request.getfixturevalue(template_name)
+    outputs = template.to_json()["Outputs"]
+    assert channel_stack.ALARM_TOPIC_ARN_OUTPUT in outputs
+    assert outputs[channel_stack.ALARM_TOPIC_ARN_OUTPUT]["Value"] == {
+        "Ref": _alarm_topic_logical_id(template)
+    }
+
+
+def _alarm_topic_logical_id(template: assertions.Template) -> str:
+    topics = template.find_resources("AWS::SNS::Topic")
+    assert len(topics) == 1, topics
+    return next(iter(topics))
