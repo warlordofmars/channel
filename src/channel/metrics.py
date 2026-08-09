@@ -151,6 +151,45 @@ async def record_recall_empty() -> None:
     await emit_metric("RecallEmpty")
 
 
+async def record_recall_forgery_defused() -> None:
+    """Emit a CloudWatch counter for one recall turn in which the formatter
+    had to neutralise forged block structure (#558).
+
+    Four PRs (#465, #526, #534, #544) hardened the seam where
+    attacker-influenceable recalled text meets the system prompt, and none
+    of them emitted anything — so "is this surface being probed?" had no
+    answer. Each author reached the same conclusion independently and
+    correctly *for the metric*: the defusal is deterministic and has no
+    failure mode, so a counter cannot measure whether it worked. But that
+    reasoning covers **metering**, and the missing signal is
+    **observability**; the two were never separated. This is that
+    separation, decided on #558.
+
+    **A counter and nothing else, deliberately.** A log line on this path
+    was considered and declined: an attacker who controls the input
+    controls the log volume, so a per-turn line here is a flooding vector.
+    One EMF datapoint carries no payload, so its cost is bounded no matter
+    what is fed in — the property that matters on a hot path exposed to
+    hostile input. What it gives up is *what* was tried, which is the half
+    that cannot be afforded here.
+
+    **Counts turns, not markers** — one increment per turn in which
+    anything was defused, however many forgeries that turn carried.
+    Incrementing per marker would let a single crafted turn inflate the
+    metric arbitrarily, which is the flooding problem again in a different
+    register.
+
+    Takes no arguments, mirroring :func:`record_mcp_tools_capped` and
+    :func:`record_recall_empty` — the strongest form of the no-dimensions
+    rule. Every cut a caller would reach for here is unbounded or hostile:
+    per-actor and per-session are the cardinality blowup the module is
+    built to prevent, and even the marker *kind* was ruled out on #558,
+    since it is attacker-selected and would let one input fan a single
+    counter into a family of series.
+    """
+    await emit_metric("RecallForgeryDefused")
+
+
 async def record_memory_tool_write_outcome(success: bool) -> None:
     """Emit a CloudWatch counter for one ``remember`` tool write (#400).
 

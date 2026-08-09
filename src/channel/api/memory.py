@@ -122,12 +122,14 @@ carries the live ``recall_window`` caps and the note that only the
 ``used_in_recall`` slice is ever loaded into a new conversation, so a
 reader can tell stored-but-unused from actually-used without reading this
 repo. It also answers "is this everything?" outright: ``complete`` is false
-whenever any walk stopped short, and ``truncated_chat_ids`` names the chats
+whenever any walk stopped short, ``truncated_chat_ids`` names the chats
 whose AgentCore history exceeded ``MAX_EVENTS_PER_SESSION`` so their oldest
-records are absent. Both live in the *file* rather than only in a log line,
-because a log line does not travel with a download — same principle as
-``records_truncated`` on ``/records``: a partial export presented as
-complete is worse than a partial export that says so.
+records are absent, and ``withheld_record_count`` says how much the
+ownership gate declined to export (§Withheld). All three live in the *file*
+rather than only in a log line, because a log line does not travel with a
+download — same principle as ``records_truncated`` on ``/records``: a
+partial export presented as complete is worse than a partial export that
+says so.
 
 One synchronous JSON response, not a job plus a presigned URL. Current
 volumes fit the Lambda response budget; speculative export infrastructure
@@ -173,8 +175,11 @@ Three properties are load-bearing enough to state outright:
   completed and has nothing to read. See ``list_forgettable_event_ids``.
 - **Bulk deletes are partial-failure tolerant** — one refused
   ``DeleteEvent`` does not abandon the batch, since stopping early forgets
-  *less*. The response carries ``{"deleted", "failed", "complete"}``;
-  ``complete`` is false only if a walk hit its page ceiling. A batch where
+  *less*. The response carries
+  ``{"deleted", "failed", "complete", "withheld_record_count"}``;
+  ``complete`` is false only if a walk hit its page ceiling, and the
+  withheld count is what the ownership gate declined to delete
+  (§Withheld). A batch where
   **nothing** was deleted and something failed is a 5xx rather than a
   cheerful ``{"deleted": 0}``: telling a user their data is gone when it is
   not is the one error this endpoint must never make, and it is exactly
@@ -186,6 +191,41 @@ Three properties are load-bearing enough to state outright:
   ``details`` carries counts, filters and opaque identifiers only; copying
   the text a user just asked to forget into a 365-day immutable audit
   partition would defeat the feature.
+
+## Withheld records — reported on every surface (#552)
+
+All three endpoints drop sessions the ownership gate cannot verify, and all
+three say so, in **one unit under one name**: ``withheld_record_count``, a
+lower bound on the records that gate declined to touch. ``/records`` has
+carried it since #475; #552 added it to ``manifest`` on ``/export`` and to
+the bulk forget response, computed once in :func:`_withheld_record_count`.
+
+**``complete`` deliberately did NOT widen to cover it.** Before #552 both
+endpoints reported only ``complete`` — true whenever no walk was
+truncated — so an export could claim completeness while omitting records,
+and a forget could report finished while something remained. Folding
+withholding into ``complete`` would have been honest about the word and
+useless in practice: "we hit a page ceiling" is a **retry**, "we could not
+verify ownership of these sessions" is an **investigation** (most likely an
+orphaned AgentCore session left behind by a best-effort
+``chats._wipe_agentcore_session``), and one flag saying something is wrong
+without saying which is un-actionable. Two fields, two conditions, and a
+caller reads both to answer "did I get everything?".
+
+**The count is a lower bound twice over**, and deliberately so:
+``count_session_records`` stops at ``MAX_EVENTS_PER_SESSION`` *within* a
+session, and :data:`_MAX_WITHHELD_SESSIONS_COUNTED` bounds how many withheld
+sessions are counted *at all* — without which the drained ``/export`` and
+forget walks would spend a whole Lambda timeout enumerating records they are
+never going to return. Alert on ``> 0``, never on the magnitude; a capped
+request says so with its own ``memory.withheld_count_capped`` canary.
+
+**What gets withheld did not change, and must not.** Surfacing an
+unverifiable session would show a user data they already asked to delete —
+see §Scoping. This is a reporting change only. For the same reason the
+count is a **count**: naming the unverifiable session ids would leak the
+existence of rows the ownership check could not confirm, which is precisely
+the conservatism the withholding exists to preserve.
 
 ## A caller with no memory partition (#527)
 
@@ -215,8 +255,14 @@ or partial result as a complete one.
 answers "did I get everything there is?", not "is there anything?" — the
 walks did finish, and there genuinely was nothing to walk.
 
+``manifest.withheld_record_count`` reads 0 for the same reason, and it is
+not merely defaulted there: no partition means no sessions, so nothing
+reaches the ownership gate to be withheld.
+
 For the forget surface the same condition is a **no-op success**: a bulk
-form answers ``{"deleted": 0, "failed": 0, "complete": true}``, and the
+form answers
+``{"deleted": 0, "failed": 0, "complete": true, "withheld_record_count": 0}``,
+and the
 per-record form answers 404, because an id that addresses nothing is
 exactly what "unknown id" means. Neither is a 500, and neither is reached
 by absorbing anything wider than the one error code.
@@ -230,7 +276,7 @@ import binascii
 import json
 import logging
 import os
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Container
 from datetime import datetime, timezone
 from functools import partial
 from typing import Any, TypeVar
@@ -336,6 +382,122 @@ def _decode_cursor(cursor: str, actor_id: str) -> str:
     return payload["t"]
 
 
+#: Ceiling on how many withheld sessions are actually *counted* per request.
+#: Counting costs one ``ListEvents`` per withheld session, and the walks
+#: feeding ``/export`` and the bulk forget are **drained** rather than paged
+#: (``_EXPORT_MAX_PAGES`` × page size ≈ 10 000 sessions), so a badly collided
+#: or corrupted partition would spend the whole Lambda timeout counting
+#: records it is not going to return anyway — turning a reporting field into
+#: an outage on the two endpoints that must not have one.
+#:
+#: Capping is *free* precisely because the number was never exact: it is
+#: already documented as "at least this many" (``count_session_records``
+#: stops at ``MAX_EVENTS_PER_SESSION`` within a single session for the same
+#: reason). Past the cap the answer to "was anything withheld?" is unchanged
+#: and only the magnitude degrades, which is the figure callers are told not
+#: to alert on. Set far above any plausible anomaly — post-#485 the expected
+#: value is 0 — and hitting it gets its own canary, since "we withheld more
+#: than we were willing to count" is a different event from "we withheld".
+_MAX_WITHHELD_SESSIONS_COUNTED = 100
+
+
+async def _withheld_record_count(
+    client: Any,
+    *,
+    memory_id: str,
+    actor_id: str,
+    session_ids: list[str],
+    owned: Container[str],
+    user_id: str,
+    event: str,
+) -> int:
+    """Records withheld by the ownership gate → the ``withheld_record_count``
+    every one of these endpoints reports, plus the partition-canary log line.
+
+    **One definition for all three surfaces** (#552). ``/records``,
+    ``/export`` and the bulk forget each drop sessions they cannot verify,
+    and each has to say so; computing that in three places is how the field
+    would come to mean three things — the precise failure this function
+    exists to make impossible, and a smaller version of the one #552 fixed
+    (``complete`` meaning "no walk was truncated" while a caller read it as
+    "you got everything").
+
+    The unit is **records, not sessions**, because that is the unit
+    ``/records`` already reports under this name and a caller comparing the
+    panel against a download must not have to know they are different
+    quantities. Same lower-bound caveat, for the same reason:
+    :func:`count_session_records` counts only the first
+    ``MAX_EVENTS_PER_SESSION`` events, so a very large withheld session
+    undercounts. Alert on ``> 0``, never on the magnitude — paging deeper
+    through memory this caller could not be shown to own would be the
+    opposite of what withholding is for.
+
+    **It counts every record in a withheld session**, never a filtered
+    subset — there is no ``since`` parameter here even though the bulk
+    forget has one. Narrowing the count to a request's filter would mean
+    reading the timestamps of a session the ownership check could not
+    confirm belongs to this caller, in order to report a *smaller* number;
+    over-reporting is the safe direction for an alarm. See
+    ``forget_memory_records`` for what that means to a caller.
+
+    ``event`` names the canary; the three names stay distinct because
+    "we declined to show these", "we declined to export these" and "we
+    declined to delete these" are different operations, and one shared log
+    event covering all three is what makes a canary useless (the same
+    lesson ``_paginate``'s ``what`` records).
+
+    Costs one ``ListEvents`` per **withheld** session and nothing at all in
+    the normal case, where there are none. ``/export`` previously declined
+    to pay it, on the grounds that an alarm firing at ``> 0`` learns nothing
+    from the magnitude. That reasoning held while the count was only an
+    alarm; it does not once the number is part of a completeness claim made
+    to the user in the response body — but it is why the fan-out is bounded
+    by :data:`_MAX_WITHHELD_SESSIONS_COUNTED` rather than left to follow a
+    drained walk. Sessions past the cap are still *detected* (they count
+    toward the canary's ``sessions=``, which is free set arithmetic); only
+    their records go uncounted.
+    """
+    withheld_sessions = 0
+    withheld_records = 0
+    counted = 0
+    for session_id in session_ids:
+        if session_id in owned:
+            continue
+        withheld_sessions += 1
+        if counted >= _MAX_WITHHELD_SESSIONS_COUNTED:
+            # Keep walking — the session tally costs nothing and is what the
+            # canary reports — but stop paying an API call per session.
+            continue
+        counted += 1
+        withheld_records += await count_session_records(
+            client, memory_id=memory_id, actor_id=actor_id, session_id=session_id
+        )
+    if withheld_sessions:
+        # The standing partition canary. A non-zero count means this actor
+        # partition holds a session whose chat this caller does not own — an
+        # actor-id collision (#474, repaired by #485) or an orphan left by a
+        # failed chat-delete wipe. Either way it is worth an alert; the raw
+        # sub is an email, so it is fingerprinted.
+        logger.warning(
+            event + " user_hash=%s sessions=%d records=%d",
+            fingerprint_id(user_id),
+            withheld_sessions,
+            withheld_records,
+        )
+    if withheld_sessions > _MAX_WITHHELD_SESSIONS_COUNTED:
+        # A distinct event, not a field on the one above: "we withheld more
+        # than we were willing to count" means the returned magnitude is
+        # truncated, and an operator reading the number needs to know that
+        # from the log rather than inferring it from the cap constant.
+        logger.warning(
+            "memory.withheld_count_capped user_hash=%s sessions=%d counted=%d",
+            fingerprint_id(user_id),
+            withheld_sessions,
+            counted,
+        )
+    return withheld_records
+
+
 async def _summaries_for(chats: list[Chat]) -> list[dict[str, Any]]:
     """#245 head summaries for the page's verified chats, in page order.
 
@@ -423,15 +585,15 @@ async def list_memory_records(
         # the enumeration below.
         owned = await asyncio.to_thread(resolve_owned_chats, session_ids, user_id=user_id)
 
-    withheld_records = 0
-    withheld_sessions = 0
-    for session_id in session_ids:
-        if session_id in owned:
-            continue
-        withheld_sessions += 1
-        withheld_records += await count_session_records(
-            client, memory_id=memory_id, actor_id=actor_id, session_id=session_id
-        )
+    withheld_records = await _withheld_record_count(
+        client,
+        memory_id=memory_id,
+        actor_id=actor_id,
+        session_ids=session_ids,
+        owned=owned,
+        user_id=user_id,
+        event="memory.records_withheld",
+    )
 
     # Newest chat first, matching the sidebar's Recents ordering and the
     # recency order the recall *pool* is drawn in (what the hook then does
@@ -470,19 +632,6 @@ async def list_memory_records(
                 # exactly the silent lie this surface exists to stop (#227).
                 "records_truncated": truncated,
             }
-        )
-
-    if withheld_sessions:
-        # The read-boundary canary. A non-zero count means this actor
-        # partition holds a session whose chat this caller does not own —
-        # an actor-id collision (#474, repaired by #485) or an orphan left
-        # by a failed chat-delete wipe. Either way it is worth an alert;
-        # the raw sub is an email, so it is fingerprinted.
-        logger.warning(
-            "memory.records_withheld user_hash=%s sessions=%d records=%d",
-            fingerprint_id(user_id),
-            withheld_sessions,
-            withheld_records,
         )
 
     return {
@@ -573,8 +722,8 @@ async def _export_memory_records(
     actor_id: str,
     user_id: str,
     window: set[str],
-) -> tuple[list[dict[str, Any]], list[str], bool]:
-    """Owned memory records → ``(records, truncated, drained)``.
+) -> tuple[list[dict[str, Any]], list[str], bool, int]:
+    """Owned memory records → ``(records, truncated, drained, withheld)``.
 
     The same enumeration ``/records`` serves, drained across every
     ``ListSessions`` page instead of one, and flattened: the export is a
@@ -586,9 +735,10 @@ async def _export_memory_records(
     The ownership gate is the same one §Scoping describes, and it matters
     more here than on ``/records``: this response is a downloadable file, so
     a foreign session leaking into it leaks into wherever that file ends up.
-    Withheld sessions are logged (the standing partition canary) but not
-    counted per-record — that would cost one ``ListEvents`` per foreign
-    session to enrich an alarm that fires on ``> 0`` either way.
+    ``withheld`` is what that gate cost this export, in records
+    (:func:`_withheld_record_count`) — reported in the manifest since #552,
+    because an export that omitted records while calling itself complete is
+    the same silent lie the rest of this module exists to stop.
     """
     session_summaries, drained = await _paginate(
         lambda tok: list_sessions_page(
@@ -621,14 +771,16 @@ async def _export_memory_records(
             truncated_chat_ids.append(session_id)
         records.extend({**record.to_dict(), "chat_id": session_id} for record in session_records)
 
-    withheld = len(session_ids) - len(owned)
-    if withheld:
-        logger.warning(
-            "memory.export_sessions_withheld user_hash=%s sessions=%d",
-            fingerprint_id(user_id),
-            withheld,
-        )
-    return records, truncated_chat_ids, drained
+    withheld = await _withheld_record_count(
+        client,
+        memory_id=memory_id,
+        actor_id=actor_id,
+        session_ids=session_ids,
+        owned=owned,
+        user_id=user_id,
+        event="memory.export_sessions_withheld",
+    )
+    return records, truncated_chat_ids, drained, withheld
 
 
 def _message_page(chat_id: str, token: Any) -> Awaitable[tuple[list[Message], Any]]:
@@ -732,7 +884,7 @@ async def _build_export(user_id: str) -> tuple[dict[str, Any], str]:
         else set()
     )
 
-    records, truncated_chat_ids, records_drained = await _export_memory_records(
+    records, truncated_chat_ids, records_drained, withheld_records = await _export_memory_records(
         client,
         memory_id=memory_id,
         actor_id=actor_id,
@@ -748,13 +900,26 @@ async def _build_export(user_id: str) -> tuple[dict[str, Any], str]:
             "actor_id": actor_id,
             "schema_version": _EXPORT_SCHEMA_VERSION,
             "recall_window": recall_window(enabled=recall_enabled),
-            # The single answer to "is this everything?", because a log line
-            # does not travel with a downloaded file. False when a walk hit
-            # the page ceiling OR a chat's memory history exceeded the
-            # per-session cap; ``truncated_chat_ids`` says which chats, and
-            # the page-cap case additionally logs ``memory.page_cap_hit``.
+            # "Did every walk finish?" — narrowly that and nothing more.
+            # False when a walk hit the page ceiling OR a chat's memory
+            # history exceeded the per-session cap; ``truncated_chat_ids``
+            # says which chats, and the page-cap case additionally logs
+            # ``memory.page_cap_hit``. In the file rather than only in a log
+            # line, because a log line does not travel with a download.
             "complete": records_drained and chats_drained and not truncated_chat_ids,
             "truncated_chat_ids": truncated_chat_ids,
+            # The other half of "is this everything?" (#552), and the reason
+            # ``complete`` above is safe to keep narrow. Records the
+            # ownership gate declined to export, in the same unit and under
+            # the same name ``/records`` reports — a **lower bound**, so
+            # alert on ``> 0`` rather than on the magnitude. Kept separate
+            # from ``complete`` rather than folded into it because the two
+            # conditions call for different responses: a truncated walk is a
+            # retry, an unverifiable session is an investigation (most
+            # likely an orphan left by a best-effort chat-delete wipe), and
+            # one flag saying "something is wrong" without saying which is
+            # un-actionable.
+            "withheld_record_count": withheld_records,
             "note": _EXPORT_NOTE,
         },
         "memory_records": records,
@@ -889,8 +1054,8 @@ async def _owned_forget_session_ids(
     memory_id: str,
     actor_id: str,
     user_id: str,
-) -> tuple[list[str], bool]:
-    """Sessions the caller owns, across every ``ListSessions`` page.
+) -> tuple[list[str], bool, int]:
+    """Sessions the caller owns → ``(session_ids, drained, withheld)``.
 
     The ownership gate from §Scoping, applied before anything is deleted:
     a session whose chat row this caller does not own is dropped, never
@@ -902,7 +1067,9 @@ async def _owned_forget_session_ids(
 
     Drained rather than paged, and the drain flag is returned: a "forget
     everything" that stopped at page one would be the silent lie this
-    module exists to stop.
+    module exists to stop. So is the withheld count (#552) — the user is
+    told the forget finished, and without it nothing in the response says
+    that records they asked to lose are still there.
     """
     session_summaries, drained = await _paginate(
         lambda tok: list_sessions_page(
@@ -918,16 +1085,18 @@ async def _owned_forget_session_ids(
         dict.fromkeys(s["sessionId"] for s in session_summaries if s.get("sessionId"))
     )
     owned = await asyncio.to_thread(resolve_owned_chats, session_ids, user_id=user_id)
-    withheld = len(session_ids) - len(owned)
-    if withheld:
-        # The same partition canary ``/records`` and ``/export`` log, and
-        # the one place it means "we declined to delete these".
-        logger.warning(
-            "memory.forget_sessions_withheld user_hash=%s sessions=%d",
-            fingerprint_id(user_id),
-            withheld,
-        )
-    return [sid for sid in session_ids if sid in owned], drained
+    # The same partition canary ``/records`` and ``/export`` log, and the one
+    # place it means "we declined to DELETE these".
+    withheld = await _withheld_record_count(
+        client,
+        memory_id=memory_id,
+        actor_id=actor_id,
+        session_ids=session_ids,
+        owned=owned,
+        user_id=user_id,
+        event="memory.forget_sessions_withheld",
+    )
+    return [sid for sid in session_ids if sid in owned], drained, withheld
 
 
 async def _forget_sessions(
@@ -1097,14 +1266,42 @@ async def forget_memory_records(
     That falls out of the same rule rather than being a special case: the
     filter is *``all=true``*, and anything else is its absence.
 
-    Returns ``{"deleted", "failed", "complete"}``. ``complete`` is false
-    only when an event walk hit its page ceiling, so some records were never
-    even considered — reported in the body rather than only in a log line,
-    because a log line is not visible to the person who just asked for their
-    data to be gone. A batch that deleted nothing while something failed is
-    a 5xx instead: ``{"deleted": 0}`` with a 200 reads as "there was nothing
-    to forget", which during an AgentCore outage is a claim about the user's
-    own data that this endpoint has no basis to make.
+    Returns ``{"deleted", "failed", "complete", "withheld_record_count"}``.
+    Both of the last two are reported in the body rather than only in a log
+    line, because a log line is not visible to the person who just asked for
+    their data to be gone — and they answer **different** questions, which
+    is why #552 added a field instead of widening ``complete``:
+
+    - ``complete`` is false only when an event walk hit its page ceiling, so
+      some records were never even considered. That is a retry.
+    - ``withheld_record_count`` is what the ownership gate declined to touch
+      — a session with no verifiable owning chat row, most likely an orphan
+      left by a best-effort ``chats._wipe_agentcore_session``. That is an
+      investigation, not a retry, and no amount of retrying will move it.
+      A **lower bound**, in the same unit and under the same name
+      ``/records`` and the export manifest report.
+
+      **It counts records in withheld sessions, not records this request
+      would have deleted** — the two differ under ``?since=``, where the
+      cutoff narrows what gets deleted but is deliberately NOT applied to
+      the count. Reading an unverifiable session's timestamps closely
+      enough to filter it would be inspecting data the ownership check
+      could not confirm is the caller's, to make an alarm number smaller;
+      over-reporting is the safe direction for "something here is
+      unaccounted for". So under ``?since=`` treat it as "at least this
+      many records sit in sessions we could not verify", not as a
+      would-have-deleted tally.
+
+    Until #552 a forget could answer ``complete: true`` having skipped
+    records the user asked to lose, telling them the action finished while
+    something remained.
+
+    A batch that deleted nothing while something failed is a 5xx instead:
+    ``{"deleted": 0}`` with a 200 reads as "there was nothing to forget",
+    which during an AgentCore outage is a claim about the user's own data
+    that this endpoint has no basis to make. Withholding is deliberately
+    *not* that case — nothing failed, and surfacing the withheld session
+    itself would show the user data they already asked to delete.
     """
     user_id = claims["sub"]
     filters = [chat_id is not None, since is not None, forget_all]
@@ -1124,10 +1321,12 @@ async def forget_memory_records(
             # Ownership first, and by the same 404-not-403 gate the rest of
             # the chat surface uses.
             await _load_owned_chat(chat_id, user_id)
-            session_ids, sessions_drained = [chat_id], True
+            # Nothing can be withheld here: the gate has already passed on
+            # the one session in scope, so a 404 is the only other outcome.
+            session_ids, sessions_drained, withheld_records = [chat_id], True, 0
             event_type, details = _AUDIT_BULK_FORGET, {"filter": "chat_id", "chat_id": chat_id}
         else:
-            session_ids, sessions_drained = await _owned_forget_session_ids(
+            session_ids, sessions_drained, withheld_records = await _owned_forget_session_ids(
                 client, memory_id=memory_id, actor_id=actor_id, user_id=user_id
             )
             event_type, details = (
@@ -1153,10 +1352,28 @@ async def forget_memory_records(
         raise
 
     complete = sessions_drained and events_drained
+    # Withholding is deliberately NOT a metric failure: this counter answers
+    # "is forget working?", and the ownership gate declining an unverifiable
+    # session is forget working exactly as designed. The operator signal for
+    # that condition is the ``memory.forget_sessions_withheld`` warning, and
+    # the user-visible one is the field below.
     await record_memory_bulk_forget_outcome(success=(failed == 0 and complete))
     await _write_forget_audit(
-        event_type, user_id, {**details, "deleted": deleted, "failed": failed, "complete": complete}
+        event_type,
+        user_id,
+        {
+            **details,
+            "deleted": deleted,
+            "failed": failed,
+            "complete": complete,
+            "withheld_record_count": withheld_records,
+        },
     )
     if deleted == 0 and failed:
         raise HTTPException(status_code=500, detail="no records could be forgotten")
-    return {"deleted": deleted, "failed": failed, "complete": complete}
+    return {
+        "deleted": deleted,
+        "failed": failed,
+        "complete": complete,
+        "withheld_record_count": withheld_records,
+    }

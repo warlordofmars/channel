@@ -245,15 +245,24 @@ export function fmtTooltipLabel(iso) {
 }
 
 /**
- * The eleven stat tiles for one rollup window. `active_users` is a top-level
+ * The twelve stat tiles for one rollup window. `active_users` is a top-level
  * section field; the rest read named counters from `section.metrics` (all
  * allowlisted names are always present per the #236 contract, so no
  * missing-key guards). The first four are hook-health signals; the next two
  * (#400) isolate the agent-driven `remember` / `recall` tools so their usage
- * never dilutes the hook counters above; then two (#111) request-level SLIs,
- * so the card answers "is the service healthy" and not only "are the memory
- * hooks firing"; and last the three memory data-rights rates (#476 / #477,
- * surfaced by #551) covering export and the two forget shapes.
+ * never dilutes the hook counters above; then the #558 prompt-injection
+ * signal; then two (#111) request-level SLIs, so the card answers "is the
+ * service healthy" and not only "are the memory hooks firing"; and last the
+ * three memory data-rights rates (#476 / #477, surfaced by #551) covering
+ * export and the two forget shapes.
+ *
+ * "Forgeries defused" (#558) is a raw count rather than a rate, unlike the
+ * data-rights tiles below it, because it has no failure half to divide by:
+ * the defusal is deterministic and cannot fail, so the only question is how
+ * often it fired. Its baseline genuinely is zero, and a move off zero is the
+ * whole signal — someone is shaping recalled text to forge this block's
+ * structure. Counting turns rather than markers is what keeps the number
+ * readable: one crafted turn carrying a hundred forgeries moves it by one.
  *
  * Every name read here must be on `_METRIC_ALLOWLIST` in
  * `src/channel/api/admin.py` — the summary endpoint returns only allowlisted
@@ -269,6 +278,7 @@ function tilesFor(section) {
     { key: "titles", label: "Auto-titles", icon: "sparkle", value: formatCount(m.AutoTitleSuccesses) },
     { key: "toolSave", label: "Tool saves", icon: "pin", value: formatCount(m.MemoryToolWriteSuccesses) },
     { key: "toolRecall", label: "Tool recall", icon: "search", value: formatRate(m.MemoryToolRecallSuccesses, m.MemoryToolRecallFailures) },
+    { key: "forgeries", label: "Forgeries defused", icon: "shield", value: formatCount(m.RecallForgeryDefused) },
     { key: "requests", label: "Requests", icon: "globe", value: formatCount(m.RequestCount) },
     { key: "requestErrors", label: "5xx responses", icon: "shield", value: formatCount(m.Request5xxCount) },
     { key: "export", label: "Export success", icon: "download", value: formatRate(m.MemoryExportSuccesses, m.MemoryExportFailures) },
