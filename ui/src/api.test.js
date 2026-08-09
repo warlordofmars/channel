@@ -494,6 +494,18 @@ describe("chats wrappers", () => {
         status: 500,
       });
     });
+
+    it.each([
+      ["a body with no sessions key", {}],
+      ["a null sessions value", { sessions: null }],
+      ["a non-array sessions value", { sessions: "nope" }],
+    ])("coerces %s to an empty list", async (_label, body) => {
+      // A proxy between the SPA and FastAPI can rewrite a response (CloudFront
+      // already turns some 403s into a 200 index.html). Handing the view a
+      // non-array would crash it at `sessions.length`.
+      mockOk(body);
+      await expect(listSessions()).resolves.toEqual([]);
+    });
   });
 
   describe("revokeSession", () => {

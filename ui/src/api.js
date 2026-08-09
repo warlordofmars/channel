@@ -854,7 +854,13 @@ export async function listSessions() {
   });
   if (!res.ok) throw new ApiError("listSessions failed:", res.status);
   const body = await res.json();
-  return body.sessions;
+  // Our own FastAPI pins this to `list[Session]` through the response model,
+  // so the coercion is about what sits BETWEEN us and it: on the deployed
+  // domain CloudFront already rewrites some API responses (403 → a 200
+  // index.html — see `adminJson` above). A non-array reaching the view would
+  // crash it at `sessions.length`, turning a proxy hiccup into a blank page,
+  // so an unrecognisable body reads as "no sessions" instead.
+  return Array.isArray(body?.sessions) ? body.sessions : [];
 }
 
 export async function revokeSession(deviceId) {
