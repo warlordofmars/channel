@@ -155,7 +155,7 @@ SCRATCH="$(git rev-parse --show-toplevel)/.claude/scratch/issue-<number>"
 mkdir -p "$SCRATCH"
 ```
 
-Shell state does not persist between Bash calls, so re-derive that assignment in each later call that touches scratch (S1) — what stays fixed for the cycle is the path, not a live variable. Every temp file the rest of this cycle writes, reads back, or executes lives under `$SCRATCH` — never the session scratchpad directory, the repo root, or `/tmp`, all of which parallel workers share. Two have already collided there. The rules are S1–S4 in `## Scratch discipline`; read that section now, the same way §2 sends you to `## Push discipline`.
+Shell state does not persist between Bash calls, so re-derive that assignment in each later call that touches scratch (S1) — what stays fixed for the cycle is the path, not a live variable. Every **scratch** file the rest of this cycle writes, reads back, or executes lives under `$SCRATCH` — never the session scratchpad directory, the repo root, or `/tmp`, all of which parallel workers share. Two have already collided there. Scratch means files this cycle makes for itself; the §3 diff and the repo's own tracked tooling are not scratch, and S2 states those exemptions exactly. The rules are S1–S4 in `## Scratch discipline`; read that section now, the same way §2 sends you to `## Push discipline`.
 
 ### 3. Implement
 
@@ -636,7 +636,7 @@ mkdir -p "$SCRATCH"
 
 **Mechanical check:** `$SCRATCH` must be absolute, must start with the output of `git rev-parse --show-toplevel`, and must end with `/.claude/scratch/issue-<number>` where `<number>` is the issue this cycle is working. Never hardcode the prefix — derive it, so a cycle that turns out to have no worktree still lands somewhere correct.
 
-`.gitignore` already carries `.claude/*` (with `!.claude/agents` / `!.claude/skills` re-including the tracked ones), so `$SCRATCH` needs no gitignore change, can never enter a diff or a `git add -A`, and is swept when the worktree is removed.
+`.gitignore` already carries `.claude/*` (with `!.claude/agents` / `!.claude/skills` re-including the tracked ones), so `$SCRATCH` needs no gitignore change and a `git add -A` cannot pick it up. Removing the worktree sweeps it — but a cycle running in the main checkout has no such sweep, so rely on neither its survival nor its removal: S3 already says to regenerate anything missing rather than go looking for it elsewhere.
 
 ### S2 — Everything this cycle writes goes under `$SCRATCH`
 
@@ -655,7 +655,7 @@ Build scratch paths by interpolating `$SCRATCH`, never as a bare relative filena
 
 ### S3 — Never execute or read back a file this cycle did not write
 
-A correctly-written script is still the wrong script when a sibling wrote it. Before running, `source`ing, or reading results out of any file, confirm its path is `$SCRATCH`-prefixed. If something you expect is missing, it is not yours — regenerate it. Never reach for the copy you can see under another path.
+A correctly-written script is still the wrong script when a sibling wrote it. Before running, `source`ing, or reading results out of a scratch file, confirm its path is `$SCRATCH`-prefixed — the mechanical check below carves out the repo's own tracked tooling, which is the only other thing a cycle legitimately executes. If something you expect is missing, it is not yours — regenerate it. Never reach for the copy you can see under another path.
 
 **Mechanical check:** for any `python <path>`, `bash <path>`, `sh <path>`, `source <path>`, `./<path>`, or read-back of a result/log file, `<path>` must **either** begin with `$SCRATCH/` **or** carry one of S2's two exemptions — tracked in git, or `.autonomous-progress`. The repo's own committed tooling (`scripts/reset_dev_table.py` before §5, `scripts/check_agent_safe_scope.py` under §7.3) is reviewed code under version control, which is what makes it safe to run and a sibling's untracked harness not. Everything else fails the check: a path under `.claude/scratch/issue-<other-number>/`, under another worktree, or under the session scratchpad directory — do not execute it, and do not open it "just to look first", since reading a sibling's results is incident 1.
 
