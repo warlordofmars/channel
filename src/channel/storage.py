@@ -2816,9 +2816,11 @@ def query_audit_events(
             kwargs: dict[str, Any] = {
                 "KeyConditionExpression": Key("PK").eq(_audit_shard_pk(shard_hour)) & sk_range,
                 "FilterExpression": filter_expr,
-                # Newest first within the shard. Lexicographic SK order is
-                # chronological because the ``{unix_ts}#{uuid}`` prefix stays
-                # fixed-width (10 digits) until year 2286.
+                # Newest first within the shard: lexicographic SK order
+                # is chronological under the same digit-count condition
+                # the docstring sets out, not because the prefix is
+                # fixed-width — it is unpadded, and only incidentally
+                # 10 digits in this era.
                 "ScanIndexForward": False,
                 "Limit": _ADMIN_SCAN_PAGE_LIMIT,
             }

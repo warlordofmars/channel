@@ -187,6 +187,15 @@ jobs:
           # sort key ({unix_ts}#{uuid}) is at or below it. Descending
           # Query + a small --max-items keeps each hop to one cheap
           # round trip against a single partition.
+          #
+          # A candidate must also carry a non-empty `event_id`, because
+          # that attribute is what the post-restore step compares. Without
+          # this the selection could pick a row that has none, and the
+          # "row is intact" assertion would quietly degrade to comparing
+          # "" against "" — passing for a restore that returned a
+          # different row, or a hollow one. Every row `put_audit_event`
+          # writes has the attribute; the filter is here so the assertion
+          # cannot be weakened by one that somehow doesn't.
           WITNESS_PK=""
           for OFFSET in $(seq 0 "$((AUDIT_LOOKBACK_HOURS - 1))"); do
             # Rendered from the epoch rather than a relative-date phrase
@@ -202,11 +211,15 @@ jobs:
               --max-items 25 \
               --output json)
             WITNESS=$(printf '%s' "$ITEMS" | jq -c --argjson cutoff "$RESTORE_EPOCH" \
-              'first(.Items[]? | select((.SK.S | split("#")[0] | tonumber) <= $cutoff)) // empty')
+              'first(.Items[]? | select(
+                 ((.SK.S | split("#")[0] | tonumber) <= $cutoff)
+                 and ((.event_id.S // "") != "")
+               )) // empty')
             if [ -n "$WITNESS" ]; then
               WITNESS_PK=$(printf '%s' "$WITNESS" | jq -r '.PK.S')
               WITNESS_SK=$(printf '%s' "$WITNESS" | jq -r '.SK.S')
-              WITNESS_EVENT_ID=$(printf '%s' "$WITNESS" | jq -r '.event_id.S // ""')
+              # Guaranteed non-empty by the selection filter above.
+              WITNESS_EVENT_ID=$(printf '%s' "$WITNESS" | jq -r '.event_id.S')
               WITNESS_EVENT_TYPE=$(printf '%s' "$WITNESS" | jq -r '.event_type.S // ""')
               echo "Audit witness: $WITNESS_PK / $WITNESS_SK (event_id=$WITNESS_EVENT_ID, type=$WITNESS_EVENT_TYPE), found $OFFSET hour(s) back."
               break
@@ -218,10 +231,11 @@ jobs:
           # "advertising coverage that does not exist" the GSI guard
           # below already refuses.
           if [ -z "$WITNESS_PK" ]; then
-            echo "::error::No AUDIT# row found in '$SOURCE_TABLE' within $AUDIT_LOOKBACK_HOURS hours before the restore point — the audit-durability check cannot run, and passing without it would assert nothing."
-            echo "Two causes, both worth knowing about:"
+            echo "::error::No usable AUDIT# row found in '$SOURCE_TABLE' within $AUDIT_LOOKBACK_HOURS hours before the restore point — the audit-durability check cannot run, and passing without it would assert nothing."
+            echo "Three causes, all worth knowing about:"
             echo "  1. Nothing has written an audit event in that window. Writers are auth.logout, auth.session_revoke[_all], the memory.* verbs, and audit.read (#601). On a freshly cut-over prod this is expected: sign in and out once (or read /api/audit/events), then re-run."
             echo "  2. The writers are not firing in production at all — a real defect, and the one this check exists to surface."
+            echo "  3. Rows exist in that window but none carries an event_id, so none can serve as a witness — also a real defect, since put_audit_event always writes one."
             exit 1
           fi
           echo "WITNESS_PK=$WITNESS_PK" >> "$GITHUB_ENV"
