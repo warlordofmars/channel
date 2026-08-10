@@ -28,6 +28,7 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
+from botocore.exceptions import ClientError
 from fastapi.testclient import TestClient
 
 os.environ.setdefault("CHANNEL_JWT_SECRET", "test-secret-for-unit-tests")
@@ -82,9 +83,21 @@ class _Storage:
         self.next_cursor: dict[str, Any] | None = None
         self.audit_events: list[dict[str, Any]] = []
         self.audit_raises = False
+        self.query_error_code: str | None = None
 
     def query_audit_events(self, **kwargs: Any) -> tuple[list[dict[str, Any]], Any]:
         self.calls.append(kwargs)
+        if self.query_error_code is not None:
+            raise ClientError(
+                {
+                    "Error": {
+                        "Code": self.query_error_code,
+                        "Message": "The provided starting key does not match "
+                        "the range key predicate",
+                    }
+                },
+                "Query",
+            )
         return self.rows, self.next_cursor
 
     def put_audit_event(
@@ -676,3 +689,45 @@ def test_a_rejected_request_writes_no_audit_row(store: _Storage) -> None:
     client.get("/api/audit/events", params={"from": "nonsense"}, headers=_admin_headers())
 
     assert store.audit_events == []
+
+
+def test_a_cursor_dynamodb_rejects_as_a_start_key_is_a_400(store: _Storage) -> None:
+    """The last way a forged cursor could still 500.
+
+    A well-typed ``sk`` outside the window's sort-key range is not a
+    valid ``ExclusiveStartKey`` for that Query, and DynamoDB answers
+    ``ValidationException``. Reproduced against DynamoDB Local before
+    this was fixed: HTTP 500. Whether an ``sk`` is in range depends on
+    the window, so it cannot be settled in ``_decode_cursor``.
+    """
+
+    store.query_error_code = "ValidationException"
+
+    r = client.get("/api/audit/events", params={"cursor": _cursor()}, headers=_admin_headers())
+
+    assert r.status_code == 400
+    assert r.json()["detail"] == "invalid cursor"
+    # Nothing was disclosed, so nothing is recorded.
+    assert store.audit_events == []
+
+
+def test_a_genuine_storage_fault_on_a_cursored_read_still_surfaces(
+    store: _Storage,
+) -> None:
+    """Only ValidationException is the caller's fault; the rest is ours."""
+
+    store.query_error_code = "ProvisionedThroughputExceededException"
+
+    with pytest.raises(ClientError):
+        client.get("/api/audit/events", params={"cursor": _cursor()}, headers=_admin_headers())
+
+
+def test_a_validation_error_without_a_cursor_is_not_blamed_on_the_client(
+    store: _Storage,
+) -> None:
+    """No cursor means no client-supplied key, so this one is a real fault."""
+
+    store.query_error_code = "ValidationException"
+
+    with pytest.raises(ClientError):
+        client.get("/api/audit/events", headers=_admin_headers())

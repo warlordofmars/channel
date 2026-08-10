@@ -59,6 +59,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
+from botocore.exceptions import ClientError
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -345,14 +346,33 @@ def read_audit_events(
     capped = requested_from_dt < earliest
     from_dt = earliest if capped else requested_from_dt
 
-    events, next_key = storage.query_audit_events(
-        from_iso=from_dt.isoformat(),
-        to_iso=to_dt.isoformat(),
-        actor_id=actor,
-        event_type=event_type,
-        limit=limit,
-        cursor=None if resume is None else {"PK": resume["pk"], "SK": resume["sk"]},
-    )
+    try:
+        events, next_key = storage.query_audit_events(
+            from_iso=from_dt.isoformat(),
+            to_iso=to_dt.isoformat(),
+            actor_id=actor,
+            event_type=event_type,
+            limit=limit,
+            cursor=None if resume is None else {"PK": resume["pk"], "SK": resume["sk"]},
+        )
+    except ClientError as exc:
+        # The last way a forged cursor could still 500. A well-typed
+        # ``sk`` that is not a valid resume position for *this* window —
+        # anything outside the sort-key range the window derives — makes
+        # DynamoDB answer "The provided starting key does not match the
+        # range key predicate", and that is a client error by the same
+        # reasoning as every other check in ``_decode_cursor``. It can't
+        # be settled there: whether an ``sk`` is in range is a function
+        # of the window, which is resolved here.
+        #
+        # Narrow on both axes deliberately. Only when a cursor was
+        # supplied — nothing else on this path can produce an invalid
+        # start key — and only for ``ValidationException``, so a genuine
+        # storage fault still surfaces as the 500 it is rather than
+        # being reported to the caller as their fault.
+        if resume is None or exc.response.get("Error", {}).get("Code") != "ValidationException":
+            raise
+        raise HTTPException(status_code=400, detail="invalid cursor") from exc
 
     # Recorded before the rows are returned, and allowed to fail the
     # request — see the module docstring. ``details`` carries the shape

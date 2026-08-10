@@ -202,11 +202,24 @@ jobs:
             # — `date -d "<iso> -N hours"` leans on GNU's relative-item
             # parser, and this needs to be exact, not clever.
             SHARD="AUDIT#$(date -u -d "@$((RESTORE_EPOCH - OFFSET * 3600))" +'%Y-%m-%d#%H')"
+            # The sort-key bound is part of the KEY CONDITION, not just
+            # the jq filter below, so `--max-items` caps *eligible* rows
+            # rather than all rows. Without it, a restore-point hour
+            # holding more than 25 rows newer than the cutoff (PITR lags
+            # "now" by a few minutes, so recent writes are all post-
+            # cutoff) would return 25 ineligible rows and report no
+            # witness in that partition. Same cheap-key-range /
+            # exact-filter layering `storage.query_audit_events` uses.
+            #
+            # `{RESTORE_EPOCH + 1}` as a strict upper bound admits every
+            # SK in the cutoff second: "{cutoff}#{uuid}" < "{cutoff+1}"
+            # because the digit before the "#" differs. Same unpadded
+            # 10-digit-era assumption as the rest of the AUDIT# readers.
             ITEMS=$(aws dynamodb query \
               --table-name "$SOURCE_TABLE" \
-              --key-condition-expression "#pk = :pk" \
-              --expression-attribute-names '{"#pk":"PK"}' \
-              --expression-attribute-values "{\":pk\":{\"S\":\"$SHARD\"}}" \
+              --key-condition-expression "#pk = :pk AND #sk < :cut" \
+              --expression-attribute-names '{"#pk":"PK","#sk":"SK"}' \
+              --expression-attribute-values "{\":pk\":{\"S\":\"$SHARD\"},\":cut\":{\"S\":\"$((RESTORE_EPOCH + 1))\"}}" \
               --no-scan-index-forward \
               --max-items 25 \
               --output json)
