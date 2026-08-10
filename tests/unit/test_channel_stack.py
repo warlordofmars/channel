@@ -513,9 +513,145 @@ def test_csp_header_preserves_existing_directives():
         "base-uri 'self'",
         "form-action 'self'",
         "report-uri /api/csp-report",
-        "report-to default",
     ):
         assert directive in header, f"missing CSP directive: {directive!r}"
+
+
+# ----------------------------------------------------------------
+# CSP: the violations a live drive of the deployed stack actually found (#598)
+#
+# Each test below pins one finding measured against deployed dev with
+# Chromium. They are named for the *source* rather than the directive so a
+# future reader can tell what breaks if the allowance is dropped, rather than
+# only which directive changed.
+# ----------------------------------------------------------------
+
+
+def test_csp_allows_the_google_fonts_stylesheet_and_font_files():
+    """``ui/src/styles/channel.css`` and the VitePress theme both ``@import``
+    Google Fonts. That is two hops: the stylesheet from ``fonts.googleapis.com``
+    (``style-src``) and the woff2 files it references from ``fonts.gstatic.com``
+    (``font-src``).
+
+    Before #598 ``font-src`` was not declared at all, so it fell back to
+    ``default-src 'self'`` — every font on every page was a violation, ~2 750
+    events in a single scripted drive over 21 surfaces. Exactly one host is
+    named per directive; neither is a wildcard."""
+
+    from stacks.channel_stack import _build_csp_header  # noqa: E402
+
+    header = _build_csp_header(
+        custom_domain="channel-dev.warlordofmars.net",
+        attachments_bucket_name="bucket-xyz",
+        region="us-east-1",
+    )
+    assert "font-src 'self' https://fonts.gstatic.com" in header
+    assert "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com" in header
+
+
+def test_csp_allows_blob_images_for_the_asset_render_path():
+    """``useAssetContent`` renders image assets (#279 generated images,
+    code-exec output) through a same-origin ``URL.createObjectURL`` blob.
+    ``data:`` does not cover ``blob:``, so the generated-image turn and the
+    asset panel both violated ``img-src`` on deployed dev.
+
+    ``blob:`` grants no third-party origin — a blob URL is always same-origin
+    with the document that created it."""
+
+    from stacks.channel_stack import _build_csp_header  # noqa: E402
+
+    header = _build_csp_header(
+        custom_domain="channel-dev.warlordofmars.net",
+        attachments_bucket_name="bucket-xyz",
+        region="us-east-1",
+    )
+    assert "img-src 'self' data: blob: https://www.google-analytics.com" in header
+
+
+def test_csp_carries_report_uri_and_no_report_to(dev_template):
+    """``report-uri`` is the only reporting transport, and the absence of
+    ``report-to`` is load-bearing rather than an oversight.
+
+    From #196 until #598 the policy ended ``report-uri /api/csp-report;
+    report-to default;`` and delivered **nothing, ever** — ``CSPViolations``
+    had never once been emitted, in either deployed environment. Two faults
+    compounded: no ``Reporting-Endpoints`` header declared the group
+    ``report-to`` named, and Chromium suppresses ``report-uri`` whenever a
+    ``report-to`` is present, so the broken transport disabled the working one.
+
+    Measured by serving one violating page to Chromium (headless and headed,
+    75s delivery window, reports counted server-side): ``report-uri`` alone
+    delivers; ``report-to`` delivers nothing whether the group is declared via
+    ``Reporting-Endpoints``, declared via legacy ``Report-To``, or left
+    dangling; and the two together deliver nothing. Declaring the group was
+    additionally tried on a live HTTPS stack and still produced zero reports.
+
+    So this test guards against a well-meant "modernise the deprecated
+    directive" change: re-adding ``report-to`` needs evidence that delivery
+    works, because on this evidence it silently disables reporting."""
+
+    from stacks.channel_stack import _build_csp_header  # noqa: E402
+
+    header = _build_csp_header(
+        custom_domain="channel-dev.warlordofmars.net",
+        attachments_bucket_name="bucket-xyz",
+        region="us-east-1",
+    )
+    assert "report-uri /api/csp-report" in header
+    assert "report-to" not in header, (
+        "a report-to directive suppresses report-uri in Chromium and delivered "
+        "nothing in its place — see #598 before re-adding it"
+    )
+
+    # And the same holds for what actually synthesises: no Reporting-Endpoints
+    # header, because with no report-to directive it would configure nothing.
+    policies = dev_template.find_resources("AWS::CloudFront::ResponseHeadersPolicy")
+    # Count-assert before picking: the follow-up work adds a second policy for
+    # the /docs* behaviour, and `next(iter(...))` would then silently inspect an
+    # arbitrary one. Failing here is the intended prompt to select by name.
+    assert len(policies) == 1, f"expected one response-headers policy, got {list(policies)}"
+    policy = next(iter(policies.values()))
+    items = policy["Properties"]["ResponseHeadersPolicyConfig"]["CustomHeadersConfig"]["Items"]
+    headers = {h["Header"].lower() for h in items}
+    assert "reporting-endpoints" not in headers
+    csp = _flatten_intrinsic(
+        next(h for h in items if h["Header"].lower() == "content-security-policy-report-only")[
+            "Value"
+        ]
+    )
+    assert csp.rstrip().endswith("report-uri /api/csp-report;"), csp
+
+
+def test_csp_is_still_report_only_until_inline_scripts_are_removed(dev_template):
+    """#598's deliberate outcome, pinned so it is a decision rather than a
+    drift.
+
+    The enforcing flip is blocked by one measured violation class —
+    ``script-src-elem`` / ``inline`` — with three independent sources: the SPA
+    shell's GA4 and theme pre-paint scripts, three VitePress-generated scripts
+    per docs page (one embedding per-page content hashes), and the
+    login-completion page's inline script whose body *is* the freshly minted
+    JWT. The last of those is unhashable by construction, so enforcing
+    ``script-src 'self'`` breaks sign-in outright.
+
+    When that class is closed, this test is the one to delete — replace it
+    with the inverse assertion on ``Content-Security-Policy``."""
+
+    policies = dev_template.find_resources("AWS::CloudFront::ResponseHeadersPolicy")
+    # See the sibling test: count-assert before picking, so adding the /docs*
+    # policy fails loudly here rather than quietly pinning the wrong resource.
+    assert len(policies) == 1, f"expected one response-headers policy, got {list(policies)}"
+    policy = next(iter(policies.values()))
+    headers = {
+        h["Header"].lower()
+        for h in policy["Properties"]["ResponseHeadersPolicyConfig"]["CustomHeadersConfig"]["Items"]
+    }
+    assert "content-security-policy-report-only" in headers
+    assert "content-security-policy" not in headers, (
+        "CSP was flipped to enforcing — confirm the inline-<script> class is "
+        "closed on the SPA shell, the VitePress docs pages AND the "
+        "login-completion page first (see #598), then replace this test."
+    )
 
 
 def _flatten_intrinsic(value):

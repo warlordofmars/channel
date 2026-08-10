@@ -1358,6 +1358,76 @@ of it. Note the cost either way — the summary endpoint queries every
 allowlisted name once per rollup window, three windows per dashboard
 load, whether or not anyone reads that number.
 
+### CSP: still Report-Only, and what it takes to flip (#196, #598)
+
+CloudFront serves **`Content-Security-Policy-Report-Only`** — never the
+enforcing header. `_build_csp_header` (`infra/stacks/channel_stack.py`)
+composes the policy; `src/channel/api/csp.py` receives the reports and
+emits `CSPViolations`.
+
+**Two separate failures were live here, and the second hid the first.**
+
+1. **The reporting pipeline delivered nothing, ever — and `report-to` was
+   the cause.** The policy ended `report-uri /api/csp-report; report-to
+   default;`. No `Reporting-Endpoints` (or legacy `Report-To`) header was
+   served, so the group `report-to` named did not exist; and **Chromium
+   suppresses `report-uri` whenever a `report-to` is present**, so the
+   broken transport disabled the working one. Measured on deployed dev: a
+   scripted Chromium drive over 21 surfaces produced **~3 500**
+   browser-side violations and **zero** `CSPViolations` datapoints — the
+   metric did not exist in the namespace at all — while one hand-rolled
+   `curl` POST to the same endpoint produced it within a minute. The
+   endpoint and the metric were healthy the whole time.
+
+   Serving one violating page to Chromium under five header combos
+   (headless *and* headed, 75s delivery window, reports counted
+   server-side): `report-uri` alone delivers; `report-to` delivers
+   nothing whether its group is declared via `Reporting-Endpoints`,
+   declared via legacy `Report-To`, or left dangling; and the two
+   together deliver nothing. Declaring the group was tried first and
+   deployed to the live `jc` stack over HTTPS — still zero. **So #598
+   dropped `report-to` rather than declaring it**;
+   `test_csp_carries_report_uri_and_no_report_to` guards against a
+   well-meant "modernise the deprecated directive" change. Re-adding it
+   needs evidence that delivery works, not a deprecation notice.
+
+   **Corollary — an empty `CSPViolations` is not evidence of a clean
+   policy.** Read violations from the browser
+   (`securitypolicyviolation` DOM events fire identically in Report-Only,
+   with `disposition: "report"`), not only from the metric.
+2. **The policy blocked real traffic.** Three of the four measured
+   violation classes are now allowlisted by exact source, one host or
+   scheme each: `font-src` → `fonts.gstatic.com`, `style-src` →
+   `fonts.googleapis.com` (both from the Google Fonts `@import` in
+   `ui/src/styles/channel.css` and the VitePress theme), and `img-src` →
+   `blob:` (the `useAssetContent` object-URL render path for generated
+   and code-exec images).
+
+**The flip is blocked on one remaining class: `script-src-elem` /
+`inline`**, with three independent sources, none narrowable from
+`infra/`:
+
+- `ui/index.html` — GA4 consent gate + theme pre-paint. The GA block
+  embeds a build-substituted measurement id, so its hash differs per
+  environment and CDK cannot know it at synth time. Fix: externalise both.
+- the VitePress docs pages — three generated scripts per page, one
+  embedding per-page content hashes (`__VP_HASH_MAP__`). No static hash
+  list survives a docs edit and VitePress has no nonce hook, so `/docs*`
+  needs its own response-headers policy.
+- `auth/mgmt_auth.py`'s login-completion page — an inline script whose
+  body **is** the freshly minted JWT, so it is unhashable by
+  construction. Enforcing `script-src 'self'` breaks sign-in outright.
+  This one wants a human design call, not an agent rewrite of the token
+  handoff.
+
+Everything else measured clean across ~3 500 events: no `connect-src`
+violation (including the presigned S3 PUT), no `'unsafe-eval'`
+requirement (mermaid renders without it), no `form-action` / `base-uri` /
+`frame-ancestors` hits.
+`test_csp_is_still_report_only_until_inline_scripts_are_removed` pins the
+Report-Only state so it stays a decision rather than drift — delete it
+and assert the inverse when the inline class is closed.
+
 ### Alarms must reference metrics we emit
 
 `tests/unit/test_channel_stack.py::test_every_channel_namespace_alarm_references_an_emitted_metric`
