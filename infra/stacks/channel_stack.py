@@ -194,7 +194,11 @@ def _build_csp_header(
     reading the ``securitypolicyviolation`` DOM events (Report-Only fires the
     same events as enforcing, with ``disposition: "report"``). Three of the
     four violation classes it found are fixed here, each by naming exactly one
-    additional source — no wildcard, no ``'unsafe-inline'``:
+    additional source — no wildcard, and no *new* ``'unsafe-inline'``. (The
+    one already in ``style-src`` predates this and is untouched: it came in
+    with #196 and is load-bearing for the ``<style>`` blocks Vite injects.
+    Removing it is separate work needing its own evidence, and it is a much
+    weaker grant than the ``script-src`` one this change refuses to add.)
 
     * ``font-src`` — the Google Fonts ``@import`` in
       ``ui/src/styles/channel.css`` and ``docs-site/.vitepress/theme/style.css``
