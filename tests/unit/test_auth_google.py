@@ -7,8 +7,11 @@ os.environ.setdefault("GOOGLE_CLIENT_ID", "test-client-id")
 os.environ.setdefault("GOOGLE_CLIENT_SECRET", "test-client-secret")
 os.environ.setdefault("ALLOWED_EMAILS", '["admin@test.com"]')
 
+from unittest.mock import MagicMock  # noqa: E402
+
 import pytest  # noqa: E402
 
+from channel.auth import google as google_module  # noqa: E402
 from channel.auth.google import (  # noqa: E402
     _admin_allowed_emails,
     _allowed_emails,
@@ -187,6 +190,78 @@ def test_admin_allowlist_unhashable_members_deny_everyone(monkeypatch):
 
     assert _admin_allowed_emails() == frozenset()
     assert is_admin_email("admin@test.com") is False
+
+
+def _spy_logger(monkeypatch):
+    """Mock the module logger rather than using ``caplog``.
+
+    The ``channel`` logger sets ``propagate = False`` in
+    ``logging_config``, so records never reach the root handler
+    ``caplog`` attaches to — and whether that config has run yet depends
+    on suite ordering, which made a ``caplog`` assertion pass alone and
+    fail in a full run. Same approach as ``test_chats_api_mcp.py``.
+    """
+    spy = MagicMock()
+    monkeypatch.setattr(google_module, "logger", spy)
+    return spy
+
+
+def _warning_text(spy) -> str:
+    """Render the spy's warning calls with their %-args interpolated."""
+    return "\n".join(
+        str(call.args[0]) % tuple(call.args[1:]) for call in spy.warning.call_args_list
+    )
+
+
+def test_admin_allowlist_non_string_members_are_dropped_and_warned(monkeypatch):
+    """Non-strings can't grant anything; they must not do so *silently*.
+
+    A `str` lookup never matches an int/float/bool/None, so these entries
+    were already inert — but a bare `frozenset(parsed)` kept them, so a
+    misconfigured list looked populated while granting nobody. Drop them
+    and say so.
+    """
+    monkeypatch.setenv("ADMIN_ALLOWED_EMAILS", "[123, null, true]")
+    spy = _spy_logger(monkeypatch)
+
+    assert _admin_allowed_emails() == frozenset()
+    assert "non-string" in _warning_text(spy)
+    assert is_admin_email("admin@test.com") is False
+
+
+def test_allowlist_keeps_valid_emails_alongside_dropped_non_strings(monkeypatch):
+    """Dropping the junk must not take the real entries with it.
+
+    Rejecting the whole list would be a genuine behaviour change on the
+    sign-in gate — one stray `null` would lock every user out — for no
+    security gain, since the junk could never have matched anyway.
+    """
+    monkeypatch.setenv("ALLOWED_EMAILS", '["alice@example.com", 123, null]')
+    spy = _spy_logger(monkeypatch)
+
+    assert _allowed_emails() == frozenset({"alice@example.com"})
+    text = _warning_text(spy)
+    assert "2 non-string entries" in text
+    assert "int" in text and "NoneType" in text
+    assert is_email_allowed("alice@example.com") is True
+
+
+def test_allowlist_singular_wording_for_one_non_string(monkeypatch):
+    """One bad entry reads 'entry', not 'entries'."""
+    monkeypatch.setenv("ALLOWED_EMAILS", '["alice@example.com", 7]')
+    spy = _spy_logger(monkeypatch)
+
+    assert _allowed_emails() == frozenset({"alice@example.com"})
+    assert "1 non-string entry" in _warning_text(spy)
+
+
+def test_allowlist_all_strings_logs_no_warning(monkeypatch):
+    """A well-formed list must stay silent — no warning fatigue."""
+    monkeypatch.setenv("ALLOWED_EMAILS", '["alice@example.com","bob@example.com"]')
+    spy = _spy_logger(monkeypatch)
+
+    assert _allowed_emails() == frozenset({"alice@example.com", "bob@example.com"})
+    spy.warning.assert_not_called()
 
 
 def test_admin_allowlist_from_ssm_parameter(monkeypatch):

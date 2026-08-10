@@ -84,11 +84,38 @@ def _parse_allowlist(raw: str, label: str) -> frozenset[str]:
 
     Every raise here is a fail-closed signal — the caller turns it into an
     empty set, never into a permissive default.
+
+    Non-string members are **dropped with a warning** rather than rejecting
+    the whole list. They can never grant anything — a ``str`` lookup cannot
+    match an ``int``, ``float``, ``bool`` or ``None`` — so dropping them is
+    access-equivalent to leaving them in, and strictly more legible than
+    the silent near-miss a bare ``frozenset(parsed)`` produced. Rejecting
+    the list outright would instead be a real behaviour change on the
+    sign-in gate: one stray ``null`` in the JSON would lock every user out
+    of the application, for no security gain. (An *unhashable* member —
+    a nested object or array — still raises out of ``frozenset`` and fails
+    the whole list closed, which is correct: that shape is not a
+    typo in an email, it is a different schema.)
     """
     parsed = json.loads(raw)
     if not isinstance(parsed, list):
         raise ValueError(f"{label} must be a JSON array")
-    return frozenset(parsed)
+    # Build the set first, so an unhashable member still raises exactly as
+    # it did before — that path denies the whole list, and relaxing it
+    # would *widen* access on the sign-in gate rather than narrow it.
+    distinct = frozenset(parsed)
+    emails = frozenset(item for item in distinct if isinstance(item, str))
+    dropped = distinct - emails
+    if dropped:
+        logger.warning(
+            "%s contains %d non-string entr%s (%s); ignoring them. "
+            "Expected a JSON array of email strings.",
+            label,
+            len(dropped),
+            "y" if len(dropped) == 1 else "ies",
+            ", ".join(sorted({type(item).__name__ for item in dropped})),
+        )
+    return emails
 
 
 def _load_email_allowlist(
