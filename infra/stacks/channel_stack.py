@@ -524,6 +524,22 @@ class ChannelStack(cdk.Stack):
         )
         allowed_emails_param.apply_removal_policy(cdk.RemovalPolicy.RETAIN)
 
+        # Admin role has its OWN allowlist (#600). Until this split, the role
+        # check read `allowed_emails_param`, so every user who could sign in
+        # was an admin — invisible only while the sign-in list stayed tiny.
+        # Ships empty, like the sign-in list: an unpopulated parameter means
+        # NO admins (never "everyone"), so `/api/admin/*` is unreachable until
+        # a deployer populates it. That is the intended post-deploy step.
+        admin_allowed_emails_param = ssm.StringParameter(
+            self,
+            "AdminAllowedEmails",
+            parameter_name=_ssm_path("admin-allowed-emails"),
+            string_value="[]",
+            description=f"JSON array of email addresses granted the admin role in Channel ({env_name}); empty = no admins (must be populated post-deploy)",
+            tier=ssm.ParameterTier.STANDARD,
+        )
+        admin_allowed_emails_param.apply_removal_policy(cdk.RemovalPolicy.RETAIN)
+
         # OriginVerifySecret is intentionally Type=String, NOT SecureString.
         # CfnDynamicReferenceService.SSM (used to inject the value into
         # CloudFront's origin custom headers) cannot resolve SecureString
@@ -616,6 +632,9 @@ class ChannelStack(cdk.Stack):
             "GOOGLE_CLIENT_ID_PARAM": google_client_id_param.parameter_name,
             "GOOGLE_CLIENT_SECRET_PARAM": google_client_secret_param.parameter_name,
             "ALLOWED_EMAILS_PARAM": allowed_emails_param.parameter_name,
+            # Separate source for the admin role (#600) — see the parameter
+            # declaration above for why this is not ALLOWED_EMAILS_PARAM.
+            "ADMIN_ALLOWED_EMAILS_PARAM": admin_allowed_emails_param.parameter_name,
             "CHANNEL_ORIGIN_VERIFY_PARAM": origin_verify_param.parameter_name,
             # Operational SSM parameter — soft-warn check at startup logs if
             # still set to the CHANGE_ME_ON_FIRST_DEPLOY placeholder.
@@ -648,6 +667,7 @@ class ChannelStack(cdk.Stack):
         google_client_id_param.grant_read(api_role)
         google_client_secret_param.grant_read(api_role)
         allowed_emails_param.grant_read(api_role)
+        admin_allowed_emails_param.grant_read(api_role)
         origin_verify_param.grant_read(api_role)
         # Soft-warn startup check needs to read the alarm-email parameter to
         # detect the CHANGE_ME_ON_FIRST_DEPLOY placeholder.
