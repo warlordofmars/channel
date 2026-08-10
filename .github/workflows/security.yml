@@ -1,11 +1,36 @@
 # Copyright (c) 2026 John Carter. All rights reserved.
-# Weekly Trivy security scan — catches newly disclosed CVEs against the
-# current codebase even when no PRs are open.
-name: Security Scan (weekly)
+# Two security jobs with different cadences:
+#
+#   trivy-weekly     — weekly Trivy scan; catches newly disclosed CVEs
+#                      against the current codebase even when no PRs are open.
+#   action-pin-drift — verifies every SHA-pinned action matches the tag in
+#                      its trailing comment (#592).
+#
+# Trigger surface (the pin check runs on all four; Trivy only on the
+# scheduled / manual ones, since it opens issues and that is not PR
+# behaviour):
+#   - Weekly cron       — the backstop; catches drift that merged without
+#                         anyone reading the PR check, including a
+#                         Dependabot grouped bump that auto-merged.
+#   - Push to development, and PRs, both filtered to the paths that can
+#                         introduce pin drift — turns "within a week" into
+#                         "within minutes" / "before merge".
+#   - workflow_dispatch — manual re-check.
+name: Security Scan
 
 on:
   schedule:
     - cron: "0 6 * * 1" # Every Monday at 06:00 UTC
+  push:
+    branches:
+      - development
+    paths:
+      - ".github/workflows/**"
+      - "scripts/check_action_pins.py"
+  pull_request:
+    paths:
+      - ".github/workflows/**"
+      - "scripts/check_action_pins.py"
   workflow_dispatch: # Allow manual trigger
 
 permissions:
@@ -16,6 +41,9 @@ permissions:
 jobs:
   trivy-weekly:
     name: Trivy Full Scan
+    # The scan uploads SARIF and files/updates a `security` issue on
+    # findings — appropriate on a schedule, not on every PR.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -81,3 +109,39 @@ jobs:
                 body: `Weekly scan still detecting **${count}** finding(s). [Run](${run_url})`,
               });
             }
+
+  # Issue #592. CLAUDE.md's convention is `uses: owner/repo@<sha> # <tag>`:
+  # the SHA is the security control, the comment is the only human-legible
+  # record of what actually runs. Nothing verified the two agreed, and #587
+  # found 22 `actions/checkout` pins commented `# v4` whose SHA was v7.0.1 —
+  # introduced by a Dependabot grouped bump that rewrote 6 of 7 comments and
+  # missed the seventh. Detection, not prevention: cause-agnostic, so it
+  # catches a manual bump or a bad copy-paste just the same.
+  action-pin-drift:
+    name: Action Pin Drift
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # narrower than the workflow default; this job reads public tags
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # `check_action_pins.py` is stdlib + `gh` only, so this job needs an
+      # interpreter, not a package manager (same reasoning as
+      # protection-drift.yml). `gh` is preinstalled on GitHub-hosted runners.
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version-file: .python-version
+
+      # A checker is only worth its green tick if it can be shown to go red.
+      # This runs the detector against a known-bad fixture (offline) and
+      # fails if it does NOT report drift — so "present, green, evaluating
+      # nothing" cannot happen silently.
+      - name: Self-test the detector
+        run: python scripts/check_action_pins.py --self-test
+
+      # Exit 1 = drift. Exit 2 = could not check (network / auth / rate
+      # limit / nothing found). Both fail the job; the report says which.
+      - name: Verify action pins match their version comments
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python scripts/check_action_pins.py

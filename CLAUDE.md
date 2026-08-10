@@ -43,6 +43,7 @@ channel/
 │           ├── admin.py       # Admin REST — user list/detail (#235) + CloudWatch metrics (#236); every route require_admin-gated
 │           ├── assets.py      # Asset REST surface — per-chat list/get/content/delete + browse
 │           ├── attachments.py # Attachments API (#175) — presigned S3 upload + finalize
+│           ├── audit.py       # GET /api/audit/events — admin-only windowed audit-log query (#601)
 │           ├── chats.py       # Chat CRUD + SSE streaming + regenerate
 │           ├── mcp.py         # MCP-server registry REST (list/register/rename/delete/reauth) + per-chat override + /auth/mcp/callback
 │           ├── memory.py      # Memory panel REST — list/export records, forget, PATCH-correct a [remember] note
@@ -527,7 +528,10 @@ turn throttling into a mass logout.
   (hour-sharded to avoid hot partitions)
 - Audit log items: `PK=AUDIT#{date}#{hour}`, `SK={timestamp}#{event_id}`
   (immutable compliance trail, TTL via `CHANNEL_AUDIT_RETENTION_DAYS`,
-  default 365 days)
+  default 365 days. Read via `storage.query_audit_events` — a windowed,
+  cursor-paginated hour-shard fan-out — which
+  `list_audit_events_for_actor` now delegates to rather than walking the
+  shards a second time. See §"Audit trail" for the query surface.)
 - User items: `PK=USER#{user_id}`, `SK=META`
 - Mgmt state items: `PK=MGMT_STATE#{state}`, `SK=META`
   (TTL enabled, used for the Google OAuth state parameter)
@@ -639,6 +643,56 @@ turn throttling into a mass logout.
     rather than a numbered pair. Per-device narrowing is a
     `FilterExpression` on `device_id`, not a sharper key, so the sort
     key stays time-ordered for the sessions list)
+
+## Audit trail (#151 writers, #601 query + restore verification)
+
+`GET /api/audit/events` (`src/channel/api/audit.py`) is the compliance
+read surface over the `AUDIT#` family: every event in a window, across
+every actor, newest first. Distinct from `api/admin.py`'s user-detail
+view, which shows 25 events for **one** user over 7 days — a UI
+affordance, not evidence.
+
+- **`require_admin` is the entire authorization story**, and it includes
+  other users' email addresses. The endpoint is therefore exactly as
+  strong as whatever decides the admin role — see #600, which moves
+  `is_admin_email` onto a default-deny `/channel/{env}/admin-allowed-emails`
+  SSM parameter. If this endpoint becomes unreachable after #600, the
+  fix is to populate that parameter, never to weaken the gate.
+- **Reading the audit log writes an `audit.read` row, and that write is
+  NOT best-effort.** It happens before the rows are returned and a
+  failure fails the request. Every other `put_audit_event` call is
+  deliberately swallowed because the state change it records has already
+  happened; here nothing has been disclosed yet, so refusing to disclose
+  is still available — and is what "the trail records access to itself"
+  has to mean. The row carries the *question* (window, filters, count),
+  never the rows — the same "never a second copy of the data" rule
+  `api/memory.py` states for its export and forget verbs.
+- **The window is capped at 31 days and the cap is reported**
+  (`window.capped`, plus the echoed `requested_from`). Silently
+  truncating a compliance query is worse than refusing it.
+- **The cursor carries its own window and filters.** Rebinding one to a
+  different query would skip or repeat rows, so a conflicting explicit
+  parameter is a 400. `to` defaults to now, so paging without an echoed
+  bound only works because the cursor pins it.
+- **`storage.query_audit_events` layers two bounds per row on purpose**:
+  a `Key("SK").between` range (cheap, charged before the read, but only
+  second-granular since the SK timestamp is `floor(created_at)`) and an
+  exact `created_at` `FilterExpression`. It stops on either a filled
+  page or a 168-partition per-call budget, and both return the same
+  cursor shape — `SK: None` means "restart at the top of this
+  partition".
+
+**Durability is verified, not assumed.** `.github/workflows/backup-test.yml`
+picks a specific `AUDIT#` row from the production table that predates the
+pinned PITR restore point, then asserts that exact key comes back intact
+from the restored table. It restores to an explicit `--restore-date-time`
+rather than `--use-latest-restorable-time`, because "existed before the
+restore point" needs a fixed instant. It deliberately **writes no canary**
+into prod: seeding a synthetic row would put test data into the very
+compliance trail whose integrity is under test, for 365 days. No witness
+found in the lookback window is a **failure**, not a skip — a run that
+asserts nothing is the coverage-that-does-not-exist shape the rest of that
+workflow already refuses.
 
 ## Asset producers (#326, epic #321)
 
@@ -1993,25 +2047,45 @@ demo data.
 
 ### Admin-role tokens in local dev
 
-The `?test_email=` bypass mints an **admin**-role JWT only when the email
-is listed in `ALLOWED_EMAILS` — a JSON array the login path reads via
-`is_admin_email()` (`src/channel/auth/google.py`). Unlisted emails still
-log in via the bypass, just downgraded to `role=user`. **Malformed JSON
-fails closed to an empty allowlist**, so every `?test_email=` login drops
-to `role=user` (the bypass runs only the role check, never the allowlist
-*gate*); the real Google sign-in flow, which does run that gate, denies an
-unlisted or malformed-config login outright (HTTP 403). `inv dev` spreads
-the shell environment into the API process, so exporting before launch is
-the whole recipe (when the env var is unset the allowlist falls back to
-the `ALLOWED_EMAILS_PARAM` SSM param, default `/channel/allowed-emails`;
-either source is cached in-process for ~60s):
+**Admin is its own allowlist (#600).** `ADMIN_ALLOWED_EMAILS` /
+`ADMIN_ALLOWED_EMAILS_PARAM` (SSM default `/channel/admin-allowed-emails`,
+wired by CDK to `/channel/{env}/admin-allowed-emails`) decides who gets
+`role=admin`; `ALLOWED_EMAILS` / `ALLOWED_EMAILS_PARAM` still decides who
+may sign in **at all**, and nothing else. Until the split, `is_admin_email`
+read the sign-in list, so every user who could log in was an admin — masked
+only by that list being tiny, and one invited user or demo account away
+from handing `/api/admin/*` to everyone. **Setting only `ALLOWED_EMAILS`
+now yields `role=user`.**
+
+The `?test_email=` bypass mints an **admin**-role JWT only when the email is
+listed in `ADMIN_ALLOWED_EMAILS` — a JSON array the login path reads via
+`is_admin_email()` (`src/channel/auth/google.py`). Unlisted emails still log
+in via the bypass, just downgraded to `role=user`.
+
+**Both lists fail closed on every path** — unset, empty, malformed JSON, or
+an SSM read error all yield an empty set. For the admin list that means *no
+admins*, never "everyone"; for the sign-in list it means the real Google
+flow (which runs the gate the bypass skips) denies the login outright with
+HTTP 403. The bypass runs only the role check, so a misconfigured admin list
+simply drops `?test_email=` logins to `role=user`.
+
+`inv dev` spreads the shell environment into the API process, so exporting
+before launch is the whole recipe. Each list is cached in-process for ~60s,
+in its own cache slot:
 
 ```bash
-export ALLOWED_EMAILS='["admin@channel.local"]'
+export ALLOWED_EMAILS='["admin@channel.local"]'        # may sign in
+export ADMIN_ALLOWED_EMAILS='["admin@channel.local"]'  # gets role=admin
 uv run inv dev
 # /auth/login?test_email=admin@channel.local → role=admin token
-# any email NOT in the list → role=user token
+# any email NOT in ADMIN_ALLOWED_EMAILS      → role=user token
 ```
+
+**Deployed stacks need the parameter populated as a deploy step.** CDK
+creates `/channel/{env}/admin-allowed-emails` holding `[]`, so between the
+deploy that lands #600 and that step **nobody** can reach `/api/admin/*` —
+including the admin dashboard. Emails that were getting admin implicitly
+from the sign-in list lose it until they are named in the new parameter.
 
 ### Running UI e2e tests locally
 

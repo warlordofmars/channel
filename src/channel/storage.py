@@ -2685,61 +2685,142 @@ def derive_users_from_chat_index(
     return rows, next_cursor
 
 
-def list_audit_events_for_actor(
-    actor_id: str,
+def _audit_shard_pk(shard_hour: datetime) -> str:
+    """Render the ``AUDIT#{date}#{hour}`` partition key for an hour."""
+
+    return f"AUDIT#{shard_hour:%Y-%m-%d}#{shard_hour:%H}"
+
+
+def _audit_shard_hour(pk: str) -> datetime:
+    """Parse an ``AUDIT#{date}#{hour}`` partition key back to its UTC hour.
+
+    The inverse of :func:`_audit_shard_pk`, used to resume a shard walk
+    from a caller-supplied cursor. Raises ``ValueError`` on anything
+    that is not an audit shard key, so a forged cursor surfaces as a
+    client error at the API layer rather than a malformed Query.
+    """
+
+    prefix, _, rest = pk.partition("#")
+    if prefix != "AUDIT" or not rest:
+        raise ValueError(f"not an audit shard key: {pk!r}")
+    return datetime.strptime(rest, "%Y-%m-%d#%H").replace(tzinfo=timezone.utc)
+
+
+def query_audit_events(
     *,
+    from_iso: str,
+    to_iso: str,
+    actor_id: str | None = None,
     event_type: str | None = None,
-    since_iso: str | None = None,
     limit: int = _ADMIN_DEFAULT_PAGE,
-) -> list[dict[str, Any]]:
-    """Read audit events for one actor, newest first (#234).
+    cursor: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    """Read audit events in a time window, newest first, with a cursor (#601).
 
-    Walks the hour-sharded ``AUDIT#{date}#{hour}`` partitions from the
-    current hour backwards — one Query per shard, per the fan-out rule
-    in the dynamodb-item skill §4 — capped at
-    ``_AUDIT_SHARD_WALK_MAX_HOURS`` (168 = 7 days). ``actor_id`` and
-    the optional ``event_type`` / ``since_iso`` filters are applied
-    server-side via ``FilterExpression``; each shard's Query loop
-    follows ``LastEvaluatedKey`` so a filter-thinned page can't
-    truncate results. Returns raw item dicts, newest first, at most
-    ``limit`` (clamped to ``[1, _ADMIN_PAGE_MAX]``).
+    The general read primitive over the ``AUDIT#{date}#{hour}`` family:
+    the compliance question is "every audit event in this window", which
+    no per-user helper can answer. :func:`list_audit_events_for_actor`
+    is a thin caller of this function rather than a second shard walker,
+    so the two cannot drift.
 
-    ``since_iso`` bounds both the row filter (``created_at >= since``)
-    and the shard walk itself — pass it whenever the caller has a
-    window (e.g. #236's ``last_login_at`` derivation), because an
-    unbounded miss (actor with no events) costs 168 empty Queries.
+    **Fan-out, not Scan.** A window maps to a bounded set of hourly
+    partitions, so this issues one Query per hour from ``to_iso``
+    backwards — the rule in the dynamodb-item skill §4. A
+    ``begins_with(PK, "AUDIT#2026-08-09")`` Scan would read every
+    partition in the table and defeat the shard.
+
+    **Two bounds per row, deliberately layered.** The sort-key range
+    over ``{unix_ts}#{uuid}`` is a *cheap superset* applied before read
+    capacity is charged; it is only second-accurate, because the SK
+    timestamp is the floor of ``created_at``. The exact bound is the
+    ``created_at`` pair in the ``FilterExpression``. Dropping either one
+    would be wrong in a different direction: no key range means paying
+    to read whole boundary partitions, no filter means a window whose
+    edges are fuzzy by up to a second.
+
+    The range is lexicographic, so it is chronological only while every
+    timestamp involved has the **same number of digits**. ``unix_ts`` is
+    written unpadded and happens to be 10 digits from 2001-09-09 until
+    it gains an 11th on 2286-11-20 — a property of the era we are in,
+    not of the format, and the same assumption every ``AUDIT#`` reader
+    has always made. A window straddling that instant would order
+    wrongly (``"9999999999#" > "10000000001"``), so the fix, if this
+    outlives us, is to zero-pad both the stored sort key and these
+    bounds together — never one without the other.
+
+    **Two reasons a call stops early, one cursor shape.** Either the
+    page filled (``limit``, clamped to ``[1, _ADMIN_PAGE_MAX]``) or the
+    per-call shard budget ran out (``_AUDIT_SHARD_WALK_MAX_HOURS``
+    partitions — the same 7-day fan-out ceiling the per-actor helper
+    has always had). Both return a ``{"PK": ..., "SK": ...}`` resume
+    token; ``SK`` is ``None`` when the budget stopped the walk at a
+    shard boundary, meaning "restart at the top of this partition".
+    The budget is what keeps a 31-day window from becoming 744
+    sequential Queries in one request.
+
+    Returns ``(events, next_cursor)``. A ``None`` cursor means the
+    window is exhausted; a non-``None`` one means "ask again", **not**
+    "more rows definitely exist" — a page that fills exactly on the
+    window's last event still yields a cursor, and following it returns
+    an empty page. Deciding otherwise would mean a lookahead read on
+    every call to save one round trip on the rare exact-fit boundary.
+    A cursor whose partition falls outside the window yields
+    ``([], None)`` — it can only come from a forged or mismatched token,
+    and answering nothing is safer than resuming a walk against a
+    different window than the one that issued it.
     """
 
     limit = _clamp_admin_limit(limit)
     table = _get_table()
-    now = datetime.now(timezone.utc)
-    oldest = now - timedelta(hours=_AUDIT_SHARD_WALK_MAX_HOURS - 1)
-    since_norm: str | None = None
-    if since_iso is not None:
-        since_dt = _parse_iso_utc(since_iso)
-        since_norm = since_dt.isoformat(timespec="microseconds")
-        oldest = max(oldest, since_dt)
+    from_dt = _parse_iso_utc(from_iso)
+    to_dt = _parse_iso_utc(to_iso)
+    if from_dt > to_dt:
+        return [], None
 
-    filter_expr: ConditionBase = Attr("actor_id").eq(actor_id)
+    filter_expr: ConditionBase = Attr("created_at").gte(
+        from_dt.isoformat(timespec="microseconds")
+    ) & Attr("created_at").lte(to_dt.isoformat(timespec="microseconds"))
+    if actor_id is not None:
+        filter_expr = filter_expr & Attr("actor_id").eq(actor_id)
     if event_type is not None:
         filter_expr = filter_expr & Attr("event_type").eq(event_type)
-    if since_norm is not None:
-        filter_expr = filter_expr & Attr("created_at").gte(since_norm)
+
+    # ``{from_ts}#`` is a strict prefix of every SK in that second, so it
+    # sorts below all of them; ``{to_ts + 1}`` sorts above every SK in
+    # second ``to_ts`` (the digit differs before the ``#``) and below the
+    # first SK of the next second. Inclusive-both-ends ``between`` over
+    # that pair is therefore a superset of the requested window by at
+    # most one second at each edge, which the ``created_at`` filter
+    # trims back to exact.
+    sk_range = Key("SK").between(f"{int(from_dt.timestamp())}#", str(int(to_dt.timestamp()) + 1))
+
+    newest_hour = to_dt.replace(minute=0, second=0, microsecond=0)
+    oldest_hour = from_dt.replace(minute=0, second=0, microsecond=0)
+
+    shard_hour = newest_hour
+    start_key: dict[str, Any] | None = None
+    if cursor is not None:
+        shard_hour = _audit_shard_hour(str(cursor["PK"]))
+        if not oldest_hour <= shard_hour <= newest_hour:
+            return [], None
+        if cursor.get("SK") is not None:
+            start_key = {"PK": cursor["PK"], "SK": cursor["SK"]}
 
     events: list[dict[str, Any]] = []
-    shard_hour = now.replace(minute=0, second=0, microsecond=0)
-    oldest_hour = oldest.replace(minute=0, second=0, microsecond=0)
+    shards_walked = 0
     while shard_hour >= oldest_hour:
-        start_key: dict[str, Any] | None = None
+        if shards_walked >= _AUDIT_SHARD_WALK_MAX_HOURS:
+            return events, {"PK": _audit_shard_pk(shard_hour), "SK": None}
+        shards_walked += 1
         while True:
             kwargs: dict[str, Any] = {
-                "KeyConditionExpression": Key("PK").eq(
-                    f"AUDIT#{shard_hour:%Y-%m-%d}#{shard_hour:%H}"
-                ),
+                "KeyConditionExpression": Key("PK").eq(_audit_shard_pk(shard_hour)) & sk_range,
                 "FilterExpression": filter_expr,
-                # Newest first within the shard. Lexicographic SK order is
-                # chronological because the ``{unix_ts}#{uuid}`` prefix stays
-                # fixed-width (10 digits) until year 2286.
+                # Newest first within the shard: lexicographic SK order
+                # is chronological under the same digit-count condition
+                # the docstring sets out, not because the prefix is
+                # fixed-width — it is unpadded, and only incidentally
+                # 10 digits in this era.
                 "ScanIndexForward": False,
                 "Limit": _ADMIN_SCAN_PAGE_LIMIT,
             }
@@ -2749,11 +2830,59 @@ def list_audit_events_for_actor(
             for item in page.get("Items") or []:
                 events.append(item)
                 if len(events) == limit:
-                    return events
+                    return events, {"PK": item["PK"], "SK": item["SK"]}
+            # Falsy here means the shard is exhausted, which is also what
+            # resets the resume key before the next (older) partition.
             start_key = page.get("LastEvaluatedKey")
             if not start_key:
                 break
         shard_hour -= timedelta(hours=1)
+    return events, None
+
+
+def list_audit_events_for_actor(
+    actor_id: str,
+    *,
+    event_type: str | None = None,
+    since_iso: str | None = None,
+    limit: int = _ADMIN_DEFAULT_PAGE,
+) -> list[dict[str, Any]]:
+    """Read audit events for one actor, newest first (#234).
+
+    A window query over :func:`query_audit_events` with the actor
+    pinned: from ``since_iso`` (or the 168-hour fan-out ceiling,
+    whichever is later) up to now, first page only. Returns raw item
+    dicts, newest first, at most ``limit`` (clamped to
+    ``[1, _ADMIN_PAGE_MAX]``).
+
+    One behaviour tightened when this became a window query (#601): the
+    upper bound is now ``now`` rather than "the end of the current
+    partition", so a row stamped in the future — which nothing should
+    write — is no longer returned early. It reappears once the clock
+    reaches it.
+
+    ``since_iso`` bounds both the row filter (``created_at >= since``)
+    and the shard walk itself — pass it whenever the caller has a
+    window (e.g. #236's ``last_login_at`` derivation), because an
+    unbounded miss (actor with no events) costs 168 empty Queries.
+
+    The cursor is deliberately dropped rather than plumbed through:
+    this helper's callers (#235's user-detail view) show a fixed recent
+    slice, and the compliance surface that does need paging asks
+    :func:`query_audit_events` directly.
+    """
+
+    now = datetime.now(timezone.utc)
+    oldest = now - timedelta(hours=_AUDIT_SHARD_WALK_MAX_HOURS - 1)
+    if since_iso is not None:
+        oldest = max(oldest, _parse_iso_utc(since_iso))
+    events, _ = query_audit_events(
+        from_iso=oldest.isoformat(timespec="microseconds"),
+        to_iso=now.isoformat(timespec="microseconds"),
+        actor_id=actor_id,
+        event_type=event_type,
+        limit=limit,
+    )
     return events
 
 

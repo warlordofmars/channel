@@ -24,6 +24,7 @@ from boto3.dynamodb.conditions import (
     ConditionBase,
     Equals,
     GreaterThanEquals,
+    LessThanEquals,
     Or,
 )
 from botocore.exceptions import ClientError
@@ -131,6 +132,13 @@ def _evaluate_filter(expr: ConditionBase | None, item: dict[str, Any]) -> bool:
         attr, value = expr._values
         actual = item.get(attr.name)
         return actual is not None and actual >= value
+    if isinstance(expr, LessThanEquals):
+        # ``query_audit_events`` (#601) bounds a window from both ends;
+        # the upper ``created_at`` bound is what makes the window exact
+        # rather than second-granular like the SK key range.
+        attr, value = expr._values
+        actual = item.get(attr.name)
+        return actual is not None and actual <= value
     raise NotImplementedError(f"FakeTable filter does not understand {type(expr).__name__}")
 
 
@@ -2197,13 +2205,18 @@ def test_list_audit_events_follows_query_pagination_within_shard(
 
     monkeypatch.setattr(storage, "_ADMIN_SCAN_PAGE_LIMIT", 1)
     now = datetime.now(timezone.utc)
-    shard_base = now.replace(minute=30, second=0, microsecond=0)
+    # Backdated a minute rather than pinned to :30 — since #601 the
+    # helper's window closes at "now", so a row stamped later in the
+    # current hour (which ``replace(minute=30)`` produces for most of
+    # the hour) is legitimately outside it. All three still land in one
+    # partition, which is what this test is about.
+    shard_base = (now - timedelta(minutes=1)).replace(microsecond=0)
     for i in range(3):
         _put_audit_row(
             table,
             actor_id="me@example.com",
             event_type="auth.login",
-            at=shard_base.replace(second=i),
+            at=shard_base + timedelta(milliseconds=i),
             event_id=f"evt-{i}",
         )
     events = list_audit_events_for_actor("me@example.com")
@@ -2232,6 +2245,352 @@ def test_parse_iso_utc_converts_offsets_to_utc() -> None:
     dt = _parse_iso_utc("2026-07-12T12:00:00+02:00")
     assert dt.tzinfo == timezone.utc
     assert dt.hour == 10
+
+
+# ----------------------------------------------------------------
+# query_audit_events (#601) — the windowed, paginated read primitive
+# ----------------------------------------------------------------
+
+
+def _audit_iso(dt: datetime) -> str:
+    """Absolute ISO timestamp in the shape audit rows store."""
+
+    return dt.isoformat(timespec="microseconds")
+
+
+def test_query_audit_events_window_excludes_rows_outside_it(table: FakeTable) -> None:
+    from channel import storage
+
+    now = datetime.now(timezone.utc)
+    inside = _put_audit_row(
+        table,
+        actor_id="a@example.com",
+        event_type="auth.login",
+        at=now - timedelta(hours=2),
+        event_id="evt-inside",
+    )
+    _put_audit_row(
+        table,
+        actor_id="a@example.com",
+        event_type="auth.login",
+        at=now - timedelta(hours=10),
+        event_id="evt-too-old",
+    )
+
+    events, cursor = storage.query_audit_events(
+        from_iso=_audit_iso(now - timedelta(hours=4)), to_iso=_audit_iso(now)
+    )
+
+    assert [e["event_id"] for e in events] == [inside["event_id"]]
+    assert cursor is None
+
+
+def test_query_audit_events_upper_bound_is_exact_not_second_granular(
+    table: FakeTable,
+) -> None:
+    """The SK key range is a one-second superset; ``created_at`` trims it.
+
+    Both rows share an SK second, so a key-range-only implementation
+    would return the one written after the bound.
+    """
+
+    from channel import storage
+
+    base = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(hours=1)
+    keep = _put_audit_row(
+        table,
+        actor_id="a@example.com",
+        event_type="auth.login",
+        at=base + timedelta(microseconds=100_000),
+        event_id="evt-before",
+    )
+    _put_audit_row(
+        table,
+        actor_id="a@example.com",
+        event_type="auth.login",
+        at=base + timedelta(microseconds=900_000),
+        event_id="evt-after",
+    )
+
+    events, _ = storage.query_audit_events(
+        from_iso=_audit_iso(base),
+        to_iso=_audit_iso(base + timedelta(microseconds=500_000)),
+    )
+
+    assert [e["event_id"] for e in events] == [keep["event_id"]]
+
+
+def test_query_audit_events_lower_bound_is_exact_too(table: FakeTable) -> None:
+    from channel import storage
+
+    base = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(hours=1)
+    _put_audit_row(
+        table,
+        actor_id="a@example.com",
+        event_type="auth.login",
+        at=base + timedelta(microseconds=100_000),
+        event_id="evt-before",
+    )
+    keep = _put_audit_row(
+        table,
+        actor_id="a@example.com",
+        event_type="auth.login",
+        at=base + timedelta(microseconds=900_000),
+        event_id="evt-after",
+    )
+
+    events, _ = storage.query_audit_events(
+        from_iso=_audit_iso(base + timedelta(microseconds=500_000)),
+        to_iso=_audit_iso(base + timedelta(seconds=1)),
+    )
+
+    assert [e["event_id"] for e in events] == [keep["event_id"]]
+
+
+def test_query_audit_events_spans_actors_unless_filtered(table: FakeTable) -> None:
+    """The compliance question is "everything", not "this user"."""
+
+    from channel import storage
+
+    now = datetime.now(timezone.utc)
+    for i, actor in enumerate(("a@example.com", "b@example.com")):
+        _put_audit_row(
+            table,
+            actor_id=actor,
+            event_type="auth.logout",
+            at=now - timedelta(minutes=i + 1),
+            event_id=f"evt-{actor}",
+        )
+
+    events, _ = storage.query_audit_events(
+        from_iso=_audit_iso(now - timedelta(hours=1)), to_iso=_audit_iso(now)
+    )
+    assert {e["actor_id"] for e in events} == {"a@example.com", "b@example.com"}
+
+    only_a, _ = storage.query_audit_events(
+        from_iso=_audit_iso(now - timedelta(hours=1)),
+        to_iso=_audit_iso(now),
+        actor_id="a@example.com",
+    )
+    assert {e["actor_id"] for e in only_a} == {"a@example.com"}
+
+
+def test_query_audit_events_event_type_filter(table: FakeTable) -> None:
+    from channel import storage
+
+    now = datetime.now(timezone.utc)
+    login = _put_audit_row(
+        table,
+        actor_id="a@example.com",
+        event_type="auth.login",
+        at=now - timedelta(minutes=1),
+        event_id="evt-login",
+    )
+    _put_audit_row(
+        table,
+        actor_id="a@example.com",
+        event_type="auth.logout",
+        at=now - timedelta(minutes=2),
+        event_id="evt-logout",
+    )
+
+    events, _ = storage.query_audit_events(
+        from_iso=_audit_iso(now - timedelta(hours=1)),
+        to_iso=_audit_iso(now),
+        event_type="auth.login",
+    )
+    assert [e["event_id"] for e in events] == [login["event_id"]]
+
+
+def test_query_audit_events_limit_returns_a_resume_cursor(table: FakeTable) -> None:
+    from channel import storage
+
+    now = datetime.now(timezone.utc)
+    for i in range(3):
+        _put_audit_row(
+            table,
+            actor_id="a@example.com",
+            event_type="auth.login",
+            at=now - timedelta(minutes=i + 1),
+            event_id=f"evt-{i}",
+        )
+
+    page1, cursor = storage.query_audit_events(
+        from_iso=_audit_iso(now - timedelta(hours=1)), to_iso=_audit_iso(now), limit=2
+    )
+    assert [e["event_id"] for e in page1] == ["evt-0", "evt-1"]
+    assert cursor is not None
+
+    page2, cursor2 = storage.query_audit_events(
+        from_iso=_audit_iso(now - timedelta(hours=1)),
+        to_iso=_audit_iso(now),
+        limit=2,
+        cursor=cursor,
+    )
+    assert [e["event_id"] for e in page2] == ["evt-2"]
+    assert cursor2 is None
+
+
+def test_query_audit_events_cursor_resumes_across_shards(table: FakeTable) -> None:
+    """A resume key drops its own row and keeps walking older partitions."""
+
+    from channel import storage
+
+    now = datetime.now(timezone.utc)
+    for i in range(3):
+        _put_audit_row(
+            table,
+            actor_id="a@example.com",
+            event_type="auth.login",
+            at=now - timedelta(hours=i + 1),
+            event_id=f"evt-{i}",
+        )
+
+    page1, cursor = storage.query_audit_events(
+        from_iso=_audit_iso(now - timedelta(hours=6)), to_iso=_audit_iso(now), limit=1
+    )
+    assert [e["event_id"] for e in page1] == ["evt-0"]
+
+    page2, _ = storage.query_audit_events(
+        from_iso=_audit_iso(now - timedelta(hours=6)),
+        to_iso=_audit_iso(now),
+        limit=5,
+        cursor=cursor,
+    )
+    assert [e["event_id"] for e in page2] == ["evt-1", "evt-2"]
+
+
+def test_query_audit_events_shard_budget_yields_a_boundary_cursor(
+    table: FakeTable,
+) -> None:
+    """A window wider than the 168-hour fan-out pages, never truncates.
+
+    The budget cursor carries no sort key — it means "restart at the top
+    of this partition" — which is what distinguishes it from the
+    page-filled cursor above.
+    """
+
+    from channel import storage
+
+    now = datetime.now(timezone.utc)
+    old = _put_audit_row(
+        table,
+        actor_id="a@example.com",
+        event_type="auth.login",
+        at=now - timedelta(hours=200),
+        event_id="evt-ancient",
+    )
+
+    page1, cursor = storage.query_audit_events(
+        from_iso=_audit_iso(now - timedelta(hours=300)), to_iso=_audit_iso(now)
+    )
+    assert page1 == []
+    assert cursor is not None
+    assert cursor["SK"] is None
+
+    page2, _ = storage.query_audit_events(
+        from_iso=_audit_iso(now - timedelta(hours=300)), to_iso=_audit_iso(now), cursor=cursor
+    )
+    assert [e["event_id"] for e in page2] == [old["event_id"]]
+
+
+def test_query_audit_events_cursor_outside_the_window_yields_nothing(
+    table: FakeTable,
+) -> None:
+    """A forged or rebound cursor answers empty rather than mis-walking."""
+
+    from channel import storage
+
+    now = datetime.now(timezone.utc)
+    _put_audit_row(
+        table,
+        actor_id="a@example.com",
+        event_type="auth.login",
+        at=now - timedelta(minutes=1),
+        event_id="evt-0",
+    )
+    stale = now - timedelta(days=40)
+
+    events, cursor = storage.query_audit_events(
+        from_iso=_audit_iso(now - timedelta(hours=1)),
+        to_iso=_audit_iso(now),
+        cursor={"PK": f"AUDIT#{stale:%Y-%m-%d}#{stale:%H}", "SK": None},
+    )
+    assert events == []
+    assert cursor is None
+
+
+def test_query_audit_events_rejects_a_non_audit_cursor_partition(
+    table: FakeTable,
+) -> None:
+    from channel import storage
+
+    now = datetime.now(timezone.utc)
+    with pytest.raises(ValueError, match="not an audit shard key"):
+        storage.query_audit_events(
+            from_iso=_audit_iso(now - timedelta(hours=1)),
+            to_iso=_audit_iso(now),
+            cursor={"PK": "USER#someone", "SK": None},
+        )
+
+
+def test_query_audit_events_inverted_window_is_empty(table: FakeTable) -> None:
+    from channel import storage
+
+    now = datetime.now(timezone.utc)
+    _put_audit_row(
+        table,
+        actor_id="a@example.com",
+        event_type="auth.login",
+        at=now - timedelta(minutes=1),
+        event_id="evt-0",
+    )
+
+    assert storage.query_audit_events(
+        from_iso=_audit_iso(now), to_iso=_audit_iso(now - timedelta(hours=1))
+    ) == ([], None)
+
+
+def test_query_audit_events_follows_query_pagination_within_a_shard(
+    table: FakeTable, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A filter-thinned page must not truncate the partition read."""
+
+    from channel import storage
+
+    monkeypatch.setattr(storage, "_ADMIN_SCAN_PAGE_LIMIT", 1)
+    now = datetime.now(timezone.utc)
+    shard_base = now.replace(minute=30, second=0, microsecond=0) - timedelta(hours=1)
+    for i in range(3):
+        _put_audit_row(
+            table,
+            actor_id="a@example.com",
+            event_type="auth.login",
+            at=shard_base.replace(second=i),
+            event_id=f"evt-{i}",
+        )
+
+    events, _ = storage.query_audit_events(
+        from_iso=_audit_iso(now - timedelta(hours=3)), to_iso=_audit_iso(now), limit=10
+    )
+    assert sorted(e["event_id"] for e in events) == ["evt-0", "evt-1", "evt-2"]
+
+
+def test_audit_shard_pk_and_hour_round_trip() -> None:
+    from channel import storage
+
+    hour = datetime(2026, 8, 9, 14, tzinfo=timezone.utc)
+    pk = storage._audit_shard_pk(hour)
+    assert pk == "AUDIT#2026-08-09#14"
+    assert storage._audit_shard_hour(pk) == hour
+
+
+@pytest.mark.parametrize("pk", ["AUDIT", "AUDIT#", "USER#x", "AUDIT#not-a-date#99"])
+def test_audit_shard_hour_rejects_a_malformed_key(pk: str) -> None:
+    from channel import storage
+
+    with pytest.raises(ValueError):
+        storage._audit_shard_hour(pk)
 
 
 def test_count_active_users_empty_table(table: FakeTable) -> None:
