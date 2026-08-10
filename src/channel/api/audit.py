@@ -227,12 +227,24 @@ def _decode_cursor(token: str) -> dict[str, Any]:
     A corrupt, truncated or hand-rolled token is a client error, never a
     500 — and never a silently different query.
 
-    That covers **shape as well as type**: ``pk`` being a string is not
-    enough, because ``storage._audit_shard_hour`` raises ``ValueError``
-    on a string that is not an ``AUDIT#{date}#{hour}`` key, and nothing
-    downstream would translate that into a status code. Parsing it here,
-    beside the other cursor checks, is what makes the docstring above
-    true rather than aspirational.
+    That covers **shape as well as type, and presence as well as
+    shape** — three separate ways a hand-rolled token used to reach an
+    unhandled exception instead of a status code:
+
+    * ``pk`` being a string is not enough; ``storage._audit_shard_hour``
+      raises ``ValueError`` on anything that is not an
+      ``AUDIT#{date}#{hour}`` key.
+    * ``from`` / ``to`` being strings is not enough either; the caller
+      parses them, and a well-typed non-date raises ``ValueError``.
+    * ``sk`` / ``actor`` / ``event_type`` are *optional in value* but
+      **required in presence** once past this point, because the caller
+      indexes them. ``_optional_str`` cannot tell "absent" from "null",
+      so absent is normalised to ``None`` here rather than left to
+      surface as a ``KeyError`` two frames later.
+
+    Nothing downstream would translate any of those into a status code,
+    so validating all three here is what makes the docstring above true
+    rather than aspirational.
     """
 
     try:
@@ -252,8 +264,12 @@ def _decode_cursor(token: str) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="invalid cursor")
     try:
         _audit_shard_hour(payload["pk"])
+        _parse_iso_utc(payload["from"])
+        _parse_iso_utc(payload["to"])
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="invalid cursor") from exc
+    for optional in ("sk", "actor", "event_type"):
+        payload.setdefault(optional, None)
     return payload
 
 

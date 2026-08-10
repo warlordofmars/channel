@@ -109,7 +109,15 @@ def store(monkeypatch: pytest.MonkeyPatch) -> _Storage:
     return fake
 
 
-def _cursor(**overrides: Any) -> str:
+def _cursor(*, drop: tuple[str, ...] = (), **overrides: Any) -> str:
+    """A valid cursor envelope, optionally corrupted for a negative test.
+
+    ``drop`` removes a key entirely, which is a distinct failure shape
+    from setting it to a wrong type: an absent key satisfies every
+    ``payload.get(...)`` check and only blows up later, at the point
+    something indexes it.
+    """
+
     payload: dict[str, Any] = {
         "v": _CURSOR_VERSION,
         "pk": "AUDIT#2026-08-09#12",
@@ -120,6 +128,8 @@ def _cursor(**overrides: Any) -> str:
         "event_type": None,
     }
     payload.update(overrides)
+    for key in drop:
+        payload.pop(key, None)
     return base64.urlsafe_b64encode(
         json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
     ).decode()
@@ -546,6 +556,53 @@ def test_a_well_typed_but_malformed_partition_is_still_a_400(store: _Storage, pk
     assert r.status_code == 400
     assert r.json()["detail"] == "invalid cursor"
     assert store.calls == []
+
+
+@pytest.mark.parametrize("field", ["from", "to"])
+def test_a_well_typed_but_unparseable_cursor_bound_is_still_a_400(
+    store: _Storage, field: str
+) -> None:
+    """The handler parses these; a non-date string must not reach it."""
+
+    r = client.get(
+        "/api/audit/events",
+        params={"cursor": _cursor(**{field: "yesterday"})},
+        headers=_admin_headers(),
+    )
+
+    assert r.status_code == 400
+    assert r.json()["detail"] == "invalid cursor"
+    assert store.calls == []
+
+
+@pytest.mark.parametrize(
+    ("missing", "expected"),
+    [
+        ("sk", ("cursor", {"PK": "AUDIT#2026-08-09#12", "SK": None})),
+        ("actor", ("actor_id", None)),
+        ("event_type", ("event_type", None)),
+    ],
+)
+def test_an_absent_optional_cursor_key_is_read_as_null_not_a_500(
+    store: _Storage, missing: str, expected: tuple[str, Any]
+) -> None:
+    """Absent and null mean the same thing, and neither may crash.
+
+    ``_optional_str`` passes an absent key — both shapes mean "no
+    value" — so without normalisation the handler's later indexing
+    raised ``KeyError`` and the client got a 500 for a merely-terse
+    token.
+    """
+
+    r = client.get(
+        "/api/audit/events",
+        params={"cursor": _cursor(drop=(missing,))},
+        headers=_admin_headers(),
+    )
+
+    assert r.status_code == 200
+    key, value = expected
+    assert store.calls[0][key] == value
 
 
 # ----------------------------------------------------------------
