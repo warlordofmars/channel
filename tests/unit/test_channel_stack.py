@@ -520,10 +520,10 @@ def test_csp_header_preserves_existing_directives():
 # ----------------------------------------------------------------
 # CSP: the violations a live drive of the deployed stack actually found (#598)
 #
-# Each of the three tests below pins one violation class measured against
-# deployed dev with Chromium. They are named for the *source* rather than the
-# directive so a future reader can tell what breaks if the allowance is
-# dropped, rather than only which directive changed.
+# Each test below pins one finding measured against deployed dev with
+# Chromium. They are named for the *source* rather than the directive so a
+# future reader can tell what breaks if the allowance is dropped, rather than
+# only which directive changed.
 # ----------------------------------------------------------------
 
 
@@ -606,6 +606,10 @@ def test_csp_carries_report_uri_and_no_report_to(dev_template):
     # And the same holds for what actually synthesises: no Reporting-Endpoints
     # header, because with no report-to directive it would configure nothing.
     policies = dev_template.find_resources("AWS::CloudFront::ResponseHeadersPolicy")
+    # Count-assert before picking: the follow-up work adds a second policy for
+    # the /docs* behaviour, and `next(iter(...))` would then silently inspect an
+    # arbitrary one. Failing here is the intended prompt to select by name.
+    assert len(policies) == 1, f"expected one response-headers policy, got {list(policies)}"
     policy = next(iter(policies.values()))
     items = policy["Properties"]["ResponseHeadersPolicyConfig"]["CustomHeadersConfig"]["Items"]
     headers = {h["Header"].lower() for h in items}
@@ -634,6 +638,9 @@ def test_csp_is_still_report_only_until_inline_scripts_are_removed(dev_template)
     with the inverse assertion on ``Content-Security-Policy``."""
 
     policies = dev_template.find_resources("AWS::CloudFront::ResponseHeadersPolicy")
+    # See the sibling test: count-assert before picking, so adding the /docs*
+    # policy fails loudly here rather than quietly pinning the wrong resource.
+    assert len(policies) == 1, f"expected one response-headers policy, got {list(policies)}"
     policy = next(iter(policies.values()))
     headers = {
         h["Header"].lower()

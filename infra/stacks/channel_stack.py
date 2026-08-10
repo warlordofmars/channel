@@ -248,15 +248,15 @@ def _build_csp_header(
     Chromium (headless and headed, 75s delivery window, delivery counted
     server-side):
 
-    ==================================================  ========
-    header combination                                  reports
-    ==================================================  ========
-    ``report-uri`` only                                 **1**
-    ``report-to`` + ``Reporting-Endpoints``             0
-    ``report-uri`` + ``report-to`` + ``Reporting-Endpoints``  0
-    ``report-uri`` + ``report-to``, group undeclared    0
-    ``report-to`` + legacy ``Report-To``                0
-    ==================================================  ========
+    =======================================================  =======
+    header combination                                       reports
+    =======================================================  =======
+    ``report-uri`` only                                      **1**
+    ``report-to`` + ``Reporting-Endpoints``                  0
+    ``report-uri`` + ``report-to`` + ``Reporting-Endpoints`` 0
+    ``report-uri`` + ``report-to``, group undeclared         0
+    ``report-to`` + legacy ``Report-To``                     0
+    =======================================================  =======
 
     Declaring the endpoint group was tried first and deployed to the personal
     ``jc`` stack over HTTPS on its real domain: a full 21-surface drive still
