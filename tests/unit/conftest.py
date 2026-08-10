@@ -14,7 +14,8 @@ The patch target moved from ``channel.api._auth`` to
 ``channel.auth.tokens`` in #291, when revocation moved down into the
 decode path so every mgmt-JWT consumer inherits it.
 
-Unit tests must not touch SSM either — see ``_no_ssm_reads``.
+Unit tests must not read the email allowlists from SSM either — see
+``_no_ssm_allowlist_reads``.
 """
 
 from __future__ import annotations

@@ -121,8 +121,8 @@ def test_admin_allowlist_unset_denies_everyone(monkeypatch):
     """Default-deny path 1 — nothing configured at all.
 
     Neither the env var nor a populated parameter exists. The autouse
-    ``_no_ssm_reads`` fixture makes the SSM fallback raise, which is the
-    same shape as a missing parameter in production.
+    ``_no_ssm_allowlist_reads`` fixture makes the SSM fallback raise,
+    which is the same shape as a missing parameter in production.
     """
     monkeypatch.delenv("ADMIN_ALLOWED_EMAILS", raising=False)
     monkeypatch.setenv("ALLOWED_EMAILS", '["admin@test.com"]')

@@ -380,6 +380,15 @@ could sign in was an admin.
   JSON, a non-array value, or an SSM read error all yield an empty set.
   For the admin list that means no admins; a failed read must never be
   readable as "grant admin to everyone".
+- **A CDK update to either parameter resource resets its value.** Both
+  are declared with a literal `string_value` in
+  `infra/stacks/channel_stack.py`, so CloudFormation owns the value:
+  editing anything on that resource — the `description` string is the
+  likeliest — rewrites your populated list back to `[]` on the next
+  deploy. `RETAIN` guards deletion, not update. For the admin list that
+  silently demotes every admin; for the sign-in list it locks everyone
+  out. Re-run the `put-parameter` below after any deploy that touches
+  those declarations.
 - `_allowed_emails()` **fails closed** on parse or load errors: a
   malformed JSON value or an unreachable SSM call is logged and
   treated as an empty list. No login is admitted.
