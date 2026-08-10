@@ -185,8 +185,17 @@ jobs:
           # Walk AUDIT#{date}#{hour} partitions backwards from the
           # restore point, newest first, and take the first row whose
           # sort key ({unix_ts}#{uuid}) is at or below it. Descending
-          # Query + a small --max-items keeps each hop to one cheap
-          # round trip against a single partition.
+          # Query + `--limit 25 --no-paginate` keeps each hop to exactly
+          # one bounded round trip against a single partition.
+          #
+          # The flag pairing is load-bearing and easy to get wrong.
+          # `--limit` is DynamoDB's own Limit (items *evaluated* per
+          # request); `--max-items` is only the CLI paginator's cap on
+          # what it yields, so on its own it still lets one Query read up
+          # to a 1 MB page. `--no-paginate` is what stops the CLI from
+          # following LastEvaluatedKey and walking the whole partition
+          # 25 items at a time — which `--limit` alone would make *more*
+          # likely, not less.
           #
           # A candidate must also carry a non-empty `event_id`, because
           # that attribute is what the post-restore step compares. Without
@@ -203,13 +212,15 @@ jobs:
             # parser, and this needs to be exact, not clever.
             SHARD="AUDIT#$(date -u -d "@$((RESTORE_EPOCH - OFFSET * 3600))" +'%Y-%m-%d#%H')"
             # The sort-key bound is part of the KEY CONDITION, not just
-            # the jq filter below, so `--max-items` caps *eligible* rows
-            # rather than all rows. Without it, a restore-point hour
-            # holding more than 25 rows newer than the cutoff (PITR lags
-            # "now" by a few minutes, so recent writes are all post-
-            # cutoff) would return 25 ineligible rows and report no
-            # witness in that partition. Same cheap-key-range /
-            # exact-filter layering `storage.query_audit_events` uses.
+            # the jq filter below, so the Limit caps *eligible* rows
+            # rather than all rows — a key condition is applied before
+            # Limit, a FilterExpression would not be. Without it, a
+            # restore-point hour holding more than 25 rows newer than
+            # the cutoff (PITR lags "now" by a few minutes, so recent
+            # writes are all post-cutoff) would return 25 ineligible
+            # rows and report no witness in that partition. Same
+            # cheap-key-range / exact-filter layering
+            # `storage.query_audit_events` uses.
             #
             # `{RESTORE_EPOCH + 1}` as a strict upper bound admits every
             # SK in the cutoff second: "{cutoff}#{uuid}" < "{cutoff+1}"
@@ -221,7 +232,8 @@ jobs:
               --expression-attribute-names '{"#pk":"PK","#sk":"SK"}' \
               --expression-attribute-values "{\":pk\":{\"S\":\"$SHARD\"},\":cut\":{\"S\":\"$((RESTORE_EPOCH + 1))\"}}" \
               --no-scan-index-forward \
-              --max-items 25 \
+              --limit 25 \
+              --no-paginate \
               --output json)
             WITNESS=$(printf '%s' "$ITEMS" | jq -c --argjson cutoff "$RESTORE_EPOCH" \
               'first(.Items[]? | select(
