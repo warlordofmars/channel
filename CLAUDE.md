@@ -1977,25 +1977,45 @@ demo data.
 
 ### Admin-role tokens in local dev
 
-The `?test_email=` bypass mints an **admin**-role JWT only when the email
-is listed in `ALLOWED_EMAILS` — a JSON array the login path reads via
-`is_admin_email()` (`src/channel/auth/google.py`). Unlisted emails still
-log in via the bypass, just downgraded to `role=user`. **Malformed JSON
-fails closed to an empty allowlist**, so every `?test_email=` login drops
-to `role=user` (the bypass runs only the role check, never the allowlist
-*gate*); the real Google sign-in flow, which does run that gate, denies an
-unlisted or malformed-config login outright (HTTP 403). `inv dev` spreads
-the shell environment into the API process, so exporting before launch is
-the whole recipe (when the env var is unset the allowlist falls back to
-the `ALLOWED_EMAILS_PARAM` SSM param, default `/channel/allowed-emails`;
-either source is cached in-process for ~60s):
+**Admin is its own allowlist (#600).** `ADMIN_ALLOWED_EMAILS` /
+`ADMIN_ALLOWED_EMAILS_PARAM` (SSM default `/channel/admin-allowed-emails`,
+wired by CDK to `/channel/{env}/admin-allowed-emails`) decides who gets
+`role=admin`; `ALLOWED_EMAILS` / `ALLOWED_EMAILS_PARAM` still decides who
+may sign in **at all**, and nothing else. Until the split, `is_admin_email`
+read the sign-in list, so every user who could log in was an admin — masked
+only by that list being tiny, and one invited user or demo account away
+from handing `/api/admin/*` to everyone. **Setting only `ALLOWED_EMAILS`
+now yields `role=user`.**
+
+The `?test_email=` bypass mints an **admin**-role JWT only when the email is
+listed in `ADMIN_ALLOWED_EMAILS` — a JSON array the login path reads via
+`is_admin_email()` (`src/channel/auth/google.py`). Unlisted emails still log
+in via the bypass, just downgraded to `role=user`.
+
+**Both lists fail closed on every path** — unset, empty, malformed JSON, or
+an SSM read error all yield an empty set. For the admin list that means *no
+admins*, never "everyone"; for the sign-in list it means the real Google
+flow (which runs the gate the bypass skips) denies the login outright with
+HTTP 403. The bypass runs only the role check, so a misconfigured admin list
+simply drops `?test_email=` logins to `role=user`.
+
+`inv dev` spreads the shell environment into the API process, so exporting
+before launch is the whole recipe. Each list is cached in-process for ~60s,
+in its own cache slot:
 
 ```bash
-export ALLOWED_EMAILS='["admin@channel.local"]'
+export ALLOWED_EMAILS='["admin@channel.local"]'        # may sign in
+export ADMIN_ALLOWED_EMAILS='["admin@channel.local"]'  # gets role=admin
 uv run inv dev
 # /auth/login?test_email=admin@channel.local → role=admin token
-# any email NOT in the list → role=user token
+# any email NOT in ADMIN_ALLOWED_EMAILS      → role=user token
 ```
+
+**Deployed stacks need the parameter populated as a deploy step.** CDK
+creates `/channel/{env}/admin-allowed-emails` holding `[]`, so between the
+deploy that lands #600 and that step **nobody** can reach `/api/admin/*` —
+including the admin dashboard. Emails that were getting admin implicitly
+from the sign-in list lose it until they are named in the new parameter.
 
 ### Running UI e2e tests locally
 

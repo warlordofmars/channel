@@ -167,6 +167,7 @@ def test_html_redirect_targets_app_not_marketing_root():
 
 def test_make_user_role_user(monkeypatch):
     monkeypatch.setenv("ALLOWED_EMAILS", "[]")
+    monkeypatch.setenv("ADMIN_ALLOWED_EMAILS", "[]")
     user = make_mgmt_user("user@example.com", "Alice")
     assert user["email"] == "user@example.com"
     assert user["display_name"] == "Alice"
@@ -174,9 +175,28 @@ def test_make_user_role_user(monkeypatch):
 
 
 def test_make_user_role_admin(monkeypatch):
-    monkeypatch.setenv("ALLOWED_EMAILS", '["admin@example.com"]')
+    monkeypatch.setenv("ADMIN_ALLOWED_EMAILS", '["admin@example.com"]')
     user = make_mgmt_user("admin@example.com", "Admin")
     assert user["role"] == "admin"
+
+
+def test_make_user_signin_allowlist_does_not_confer_admin(monkeypatch):
+    """Role resolution reads the admin list, never the sign-in list (#600).
+
+    Until the lists were split, being on ``ALLOWED_EMAILS`` — the only
+    way to sign in at all — was sufficient for ``role=admin``, so every
+    user was an admin.
+    """
+    monkeypatch.setenv("ALLOWED_EMAILS", '["someone@example.com"]')
+    monkeypatch.setenv("ADMIN_ALLOWED_EMAILS", "[]")
+    assert make_mgmt_user("someone@example.com", "Someone")["role"] == "user"
+
+
+def test_make_user_admin_allowlist_unset_denies_admin(monkeypatch):
+    """No admin list configured is 'no admins', not 'everyone'."""
+    monkeypatch.setenv("ALLOWED_EMAILS", '["someone@example.com"]')
+    monkeypatch.delenv("ADMIN_ALLOWED_EMAILS", raising=False)
+    assert make_mgmt_user("someone@example.com", "Someone")["role"] == "user"
 
 
 def test_mgmt_login_bypass_issues_html_with_token(monkeypatch):
@@ -290,8 +310,13 @@ def test_mgmt_callback_unlisted_email_with_empty_allowlist_returns_403(monkeypat
 
 
 def test_mgmt_callback_listed_admin_email_returns_admin_role(monkeypatch):
-    """Listed email passes the gate and receives role=admin."""
+    """Listed email passes the gate and receives role=admin.
+
+    Two lists since #600: ``ALLOWED_EMAILS`` opens the gate,
+    ``ADMIN_ALLOWED_EMAILS`` grants the role. This email is on both.
+    """
     monkeypatch.setenv("ALLOWED_EMAILS", '["admin@example.com"]')
+    monkeypatch.setenv("ADMIN_ALLOWED_EMAILS", '["admin@example.com"]')
     state = _create_pending_state()
     with (
         patch(
@@ -317,16 +342,16 @@ def test_mgmt_callback_listed_admin_email_returns_admin_role(monkeypatch):
 
 
 def test_mgmt_callback_listed_non_admin_email_returns_user_role(monkeypatch):
-    """The allowlist gate must not re-derive role; role still flows from
+    """The allowlist gate must not re-derive role; role flows from
     is_admin_email().
 
-    Today both signals read from the same ``ALLOWED_EMAILS`` set, so any
-    listed email is also admin in production. This test mocks
-    ``is_admin_email`` to False to assert that the new gate did not collapse
-    the two checks — if the lists are ever split, role=user becomes a real
-    code path and this test is the regression guard.
+    The lists were split in #600, so this is no longer a hypothetical
+    guarded by a mock: the email below is on the sign-in list and absent
+    from the admin list, which is the ordinary production shape. It
+    drives the real ``is_admin_email`` end to end through the callback.
     """
     monkeypatch.setenv("ALLOWED_EMAILS", '["user@example.com"]')
+    monkeypatch.setenv("ADMIN_ALLOWED_EMAILS", '["someone-else@example.com"]')
     state = _create_pending_state()
     with (
         patch(
@@ -343,7 +368,6 @@ def test_mgmt_callback_listed_non_admin_email_returns_user_role(monkeypatch):
                 }
             ),
         ),
-        patch("channel.auth.mgmt_auth.is_admin_email", return_value=False),
         patch("channel.auth.mgmt_auth.issue_mgmt_jwt") as mock_issue,
     ):
         mock_issue.return_value = "stub-jwt"

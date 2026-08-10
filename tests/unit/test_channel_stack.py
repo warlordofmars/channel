@@ -1662,3 +1662,148 @@ def _alarm_topic_logical_id(template: assertions.Template) -> str:
     topics = template.find_resources("AWS::SNS::Topic")
     assert len(topics) == 1, topics
     return next(iter(topics))
+
+
+# ---------------------------------------------------------------------------
+# #600 — the admin allowlist parameter
+#
+# CI validates none of this: `infra/` is outside both `mypy src/channel` and
+# the coverage source (#588), so these template assertions plus `inv synth`
+# are the only automatic signal. Every check below fails *closed* if it
+# regresses (admin unreachable, never universal), which is the intended
+# direction — but silently, hence the pins.
+# ---------------------------------------------------------------------------
+
+
+def _contains_ref(node, logical_id: str) -> bool:
+    """True if ``{"Ref": logical_id}`` appears anywhere inside ``node``.
+
+    A CDK-created parameter's ARN renders as an ``Fn::Join`` whose last
+    element is that ``Ref``, so this walks the intrinsic rather than
+    grepping the flattened string (where the ``Ref`` collapses to an
+    opaque token and every SSM grant would look alike).
+    """
+    if isinstance(node, dict):
+        if node.get("Ref") == logical_id:
+            return True
+        return any(_contains_ref(v, logical_id) for v in node.values())
+    if isinstance(node, list):
+        return any(_contains_ref(v, logical_id) for v in node)
+    return False
+
+
+def _admin_allowlist_parameter(template: assertions.Template) -> dict:
+    params = template.find_resources("AWS::SSM::Parameter")
+    matches = [
+        r
+        for r in params.values()
+        if str(r["Properties"].get("Name", "")).endswith("admin-allowed-emails")
+    ]
+    assert len(matches) == 1, matches
+    return matches[0]
+
+
+@pytest.mark.parametrize(
+    ("template_name", "expected_path"),
+    [
+        ("prod_template", "/channel/admin-allowed-emails"),
+        ("dev_template", "/channel/dev/admin-allowed-emails"),
+    ],
+)
+def test_admin_allowlist_parameter_path(template_name, expected_path, request):
+    """Per-env path, same `_ssm_path` convention as its sign-in sibling."""
+    param = _admin_allowlist_parameter(request.getfixturevalue(template_name))
+    assert param["Properties"]["Name"] == expected_path
+
+
+@pytest.mark.parametrize("template_name", ["dev_template", "prod_template"])
+def test_admin_allowlist_parameter_ships_empty_and_is_retained(template_name, request):
+    """Ships `[]` — no admins — and survives a stack delete.
+
+    An empty admin list is the whole fail-closed default: populating it
+    is a deploy step. `RETAIN` matches every other credential-ish
+    parameter here, so tearing down a stack never silently drops the
+    operator's admin roster.
+    """
+    param = _admin_allowlist_parameter(request.getfixturevalue(template_name))
+    assert param["Properties"]["Value"] == "[]"
+    assert param["Properties"]["Type"] == "String"
+    assert param.get("DeletionPolicy") == "Retain"
+    assert param.get("UpdateReplacePolicy") == "Retain"
+
+
+@pytest.mark.parametrize("template_name", ["dev_template", "prod_template"])
+def test_api_function_reads_admin_allowlist_from_its_own_parameter(template_name, request):
+    """The env var must carry the parameter NAME, and be its own parameter.
+
+    `Ref` on an `AWS::SSM::Parameter` returns the name, which is what
+    `ADMIN_ALLOWED_EMAILS_PARAM` wants. Wiring it to the value-carrying
+    `ADMIN_ALLOWED_EMAILS` var instead would hand the app a path string,
+    fail `json.loads`, and pin the stack to "no admins" forever — so
+    assert that var is absent. Pointing it at the sign-in parameter
+    would re-create the #600 bug in the infra layer, so assert the two
+    refs differ.
+    """
+    template = request.getfixturevalue(template_name)
+    env_vars = _api_function(template)["Properties"]["Environment"]["Variables"]
+
+    admin_ref = env_vars.get("ADMIN_ALLOWED_EMAILS_PARAM")
+    signin_ref = env_vars.get("ALLOWED_EMAILS_PARAM")
+    assert admin_ref is not None
+    assert signin_ref is not None
+    assert admin_ref != signin_ref
+    assert "ADMIN_ALLOWED_EMAILS" not in env_vars
+
+    params = template.find_resources("AWS::SSM::Parameter")
+    admin_logical_id = next(
+        lid
+        for lid, r in params.items()
+        if str(r["Properties"].get("Name", "")).endswith("admin-allowed-emails")
+    )
+    assert admin_ref == {"Ref": admin_logical_id}
+
+
+def test_api_role_has_ssm_read_on_admin_allowlist(prod_template):
+    """Statement-scoped, in the spirit of the Exa grant test above.
+
+    It matches on the parameter's **logical id** rather than its path,
+    because the two params differ in kind: Exa is imported by literal
+    ARN, so its path appears verbatim in the policy, whereas this one is
+    CDK-created and its ARN renders as an `Fn::Join` ending in a `Ref`
+    that only resolves to `/channel/prod/admin-allowed-emails` at deploy
+    time. Matching the `Ref` is the stronger check anyway — no unrelated
+    SSM grant can satisfy it.
+
+    Without this grant the Lambda's read raises, the loader logs and
+    denies, and `/api/admin/*` is unreachable — with no CI signal, since
+    `infra/` is outside the coverage and mypy gates (#588).
+    """
+    params = prod_template.find_resources("AWS::SSM::Parameter")
+    admin_logical_id = next(
+        lid
+        for lid, r in params.items()
+        if r["Properties"].get("Name") == "/channel/admin-allowed-emails"
+    )
+
+    resources = prod_template.to_json().get("Resources", {})
+    policies = [r for r in resources.values() if r.get("Type") == "AWS::IAM::Policy"]
+    assert policies, "Expected at least one AWS::IAM::Policy in the template"
+
+    matched = []
+    for policy in policies:
+        for stmt in policy["Properties"]["PolicyDocument"]["Statement"]:
+            actions = stmt.get("Action")
+            if isinstance(actions, str):
+                actions = [actions]
+            if "ssm:GetParameter" not in (actions or []):
+                continue
+            resource = stmt.get("Resource")
+            for res in resource if isinstance(resource, list) else [resource]:
+                if _contains_ref(res, admin_logical_id):
+                    matched.append(stmt)
+                    break
+
+    assert matched, (
+        "Expected an IAM statement granting ssm:GetParameter on a resource "
+        f"referencing {admin_logical_id}; found none."
+    )

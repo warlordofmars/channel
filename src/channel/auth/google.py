@@ -8,6 +8,14 @@ Configuration (env vars or SSM parameters):
   GOOGLE_CLIENT_ID / GOOGLE_CLIENT_ID_PARAM
   GOOGLE_CLIENT_SECRET / GOOGLE_CLIENT_SECRET_PARAM
   ALLOWED_EMAILS / ALLOWED_EMAILS_PARAM  (JSON array; empty = deny all)
+  ADMIN_ALLOWED_EMAILS / ADMIN_ALLOWED_EMAILS_PARAM
+      (JSON array; empty = nobody gets the admin role)
+
+The two allowlists are deliberately **separate sources** (#600). Sign-in
+answers "may this person use Channel at all"; admin answers "may this
+person reach ``/api/admin/*``". Reading one list for both made every
+permitted user an admin, which stayed invisible only while the sign-in
+list was tiny.
 """
 
 from __future__ import annotations
@@ -26,11 +34,18 @@ from channel.logging_config import get_logger
 
 logger = get_logger(__name__)
 
-# Short TTL on the allowlist so a single login doesn't double-read SSM
-# (gate + role both fetch) while still letting operators populate the
-# parameter post-deploy without forcing a Lambda cold-start.
+# Short TTL on the allowlists so a single login doesn't double-read SSM
+# (gate + role each fetch their own list) while still letting operators
+# populate a parameter post-deploy without forcing a Lambda cold-start.
 _ALLOWED_EMAILS_TTL_SECONDS = 60
-_allowed_emails_cache: tuple[float, frozenset[str]] | None = None
+
+# One cache slot per allowlist, keyed by the loader's own name. Separate
+# slots are the point: the sign-in list and the admin list must never be
+# able to serve each other's value, which is the #600 bug in miniature.
+_email_allowlist_cache: dict[str, tuple[float, frozenset[str]]] = {}
+
+_SIGNIN_ALLOWLIST = "signin"
+_ADMIN_ALLOWLIST = "admin"
 
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
@@ -64,57 +79,139 @@ def _google_client_secret() -> str:
     )
 
 
-def _allowed_emails() -> frozenset[str]:
-    """Load the allowlist from env or SSM, with a short TTL cache.
+def _parse_allowlist(raw: str, label: str) -> frozenset[str]:
+    """Parse a JSON-array allowlist value, or raise.
 
-    Fails closed (deny-all) on any load or parse error so a misconfigured
-    parameter never silently grants access. Errors are logged so the
-    operator can see why logins are being rejected.
+    Every raise here is a fail-closed signal — the caller turns it into an
+    empty set, never into a permissive default.
+
+    Non-string members are **dropped with a warning** rather than rejecting
+    the whole list. They can never grant anything — a ``str`` lookup cannot
+    match an ``int``, ``float``, ``bool`` or ``None`` — so dropping them is
+    access-equivalent to leaving them in, and strictly more legible than
+    the silent near-miss a bare ``frozenset(parsed)`` produced. Rejecting
+    the list outright would instead be a real behaviour change on the
+    sign-in gate: one stray ``null`` in the JSON would lock every user out
+    of the application, for no security gain. (An *unhashable* member —
+    a nested object or array — still raises out of ``frozenset`` and fails
+    the whole list closed, which is correct: that shape is not a
+    typo in an email, it is a different schema.)
     """
-    global _allowed_emails_cache
+    parsed = json.loads(raw)
+    if not isinstance(parsed, list):
+        raise ValueError(f"{label} must be a JSON array")
+    # Build the set first, so an unhashable member still raises exactly as
+    # it did before — that path denies the whole list, and relaxing it
+    # would *widen* access on the sign-in gate rather than narrow it.
+    distinct = frozenset(parsed)
+    emails = frozenset(item for item in distinct if isinstance(item, str))
+    dropped = distinct - emails
+    if dropped:
+        logger.warning(
+            "%s contains %d non-string entr%s (%s); ignoring them. "
+            "Expected a JSON array of email strings.",
+            label,
+            len(dropped),
+            "y" if len(dropped) == 1 else "ies",
+            ", ".join(sorted({type(item).__name__ for item in dropped})),
+        )
+    return emails
+
+
+def _load_email_allowlist(
+    *,
+    cache_key: str,
+    env_var: str,
+    param_env_var: str,
+    default_param: str,
+    failure_effect: str,
+) -> frozenset[str]:
+    """Load one email allowlist from env or SSM, with a short TTL cache.
+
+    Keyword-only on purpose: five same-typed strings, two of which name
+    the *other* list's parameter if transposed. A positional call site
+    that swapped ``param_env_var`` and ``default_param`` between the two
+    callers would point the sign-in gate at the admin parameter, and
+    every line here would still be covered.
+
+    **Fails closed (empty set) on every path that isn't an explicit, valid
+    list**: env var unset with no readable parameter, an SSM read error,
+    malformed JSON, a non-array JSON value, or an array holding unhashable
+    values. A misconfigured parameter must never silently widen access —
+    for the admin list in particular, "we couldn't tell" has to mean "no
+    admins", not "everyone". Errors are logged so an operator can see why
+    the list came back empty.
+
+    ``failure_effect`` names what an empty result means for this list, so
+    the warning reads as a consequence rather than a bare parse error.
+    """
     now = time.monotonic()
-    if _allowed_emails_cache is not None:
-        cached_at, cached = _allowed_emails_cache
+    entry = _email_allowlist_cache.get(cache_key)
+    if entry is not None:
+        cached_at, cached = entry
         if now - cached_at < _ALLOWED_EMAILS_TTL_SECONDS:
             return cached
 
     value: frozenset[str]
-    if val := os.environ.get("ALLOWED_EMAILS"):
+    if val := os.environ.get(env_var):
         try:
-            parsed = json.loads(val)
-            if not isinstance(parsed, list):
-                raise ValueError("ALLOWED_EMAILS must be a JSON array")
-            value = frozenset(parsed)
+            value = _parse_allowlist(val, env_var)
         except Exception as exc:
             logger.warning(
-                "Failed to parse ALLOWED_EMAILS env var (%s); denying all logins. "
-                "Expected a JSON array of email strings.",
+                "Failed to parse %s env var (%s); %s. Expected a JSON array of email strings.",
+                env_var,
                 exc,
+                failure_effect,
             )
             value = frozenset()
     else:
-        try:  # pragma: no cover
-            raw = _ssm_param(os.environ.get("ALLOWED_EMAILS_PARAM", "/channel/allowed-emails"))
-            parsed = json.loads(raw)
-            if not isinstance(parsed, list):
-                raise ValueError("ALLOWED_EMAILS SSM value must be a JSON array")
-            value = frozenset(parsed)
-        except Exception as exc:  # pragma: no cover
+        try:
+            raw = _ssm_param(os.environ.get(param_env_var, default_param))
+            value = _parse_allowlist(raw, f"{env_var} SSM value")
+        except Exception as exc:
             logger.warning(
-                "Failed to load ALLOWED_EMAILS from SSM (%s); denying all logins. "
+                "Failed to load %s from SSM (%s); %s. "
                 "Check the SSM parameter exists and contains a valid JSON array.",
+                env_var,
                 exc,
+                failure_effect,
             )
             value = frozenset()
 
-    _allowed_emails_cache = (now, value)
+    _email_allowlist_cache[cache_key] = (now, value)
     return value
 
 
+def _allowed_emails() -> frozenset[str]:
+    """The sign-in allowlist — who may use Channel at all."""
+    return _load_email_allowlist(
+        cache_key=_SIGNIN_ALLOWLIST,
+        env_var="ALLOWED_EMAILS",
+        param_env_var="ALLOWED_EMAILS_PARAM",
+        default_param="/channel/allowed-emails",
+        failure_effect="denying all logins",
+    )
+
+
+def _admin_allowed_emails() -> frozenset[str]:
+    """The admin allowlist — who additionally gets ``role=admin`` (#600).
+
+    A separate source from :func:`_allowed_emails` on purpose. Populating
+    it is a deploy step: until then the parameter holds ``[]`` and nobody
+    reaches ``/api/admin/*``.
+    """
+    return _load_email_allowlist(
+        cache_key=_ADMIN_ALLOWLIST,
+        env_var="ADMIN_ALLOWED_EMAILS",
+        param_env_var="ADMIN_ALLOWED_EMAILS_PARAM",
+        default_param="/channel/admin-allowed-emails",
+        failure_effect="granting the admin role to nobody",
+    )
+
+
 def _reset_allowed_emails_cache() -> None:
-    """Clear the TTL cache; for use in tests."""
-    global _allowed_emails_cache
-    _allowed_emails_cache = None
+    """Clear both allowlist TTL caches; for use in tests."""
+    _email_allowlist_cache.clear()
 
 
 def google_authorization_url(state: str, callback_uri: str) -> str:
@@ -189,7 +286,14 @@ def is_email_allowed(email: str) -> bool:
 def is_admin_email(email: str) -> bool:
     """Return True if this email gets the admin role.
 
-    Only emails explicitly listed in ALLOWED_EMAILS / ALLOWED_EMAILS_PARAM
-    receive admin.  An empty allowlist means no admins (not 'everyone is admin').
+    Reads ADMIN_ALLOWED_EMAILS / ADMIN_ALLOWED_EMAILS_PARAM — its **own**
+    list, not the sign-in allowlist. Until #600 this read
+    ``_allowed_emails()``, which made every user who could sign in an
+    admin; the failure was masked only by the sign-in list being tiny, and
+    would have surfaced the moment it widened (an invited user, a demo
+    account, a workspace member).
+
+    An empty or unreadable list means *no admins* — never 'everyone'. See
+    :func:`_load_email_allowlist` for the fail-closed contract.
     """
-    return email in _allowed_emails()
+    return email in _admin_allowed_emails()
