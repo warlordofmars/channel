@@ -2730,14 +2730,23 @@ def query_audit_events(
     partition in the table and defeat the shard.
 
     **Two bounds per row, deliberately layered.** The sort-key range
-    (``{unix_ts}#{uuid}``, fixed-width for another ~260 years) is a
-    *cheap superset* applied before read capacity is charged; it is
-    only second-accurate, because the SK timestamp is the floor of
-    ``created_at``. The exact bound is the ``created_at`` pair in the
-    ``FilterExpression``. Dropping either one would be wrong in a
-    different direction: no key range means paying to read whole
-    boundary partitions, no filter means a window whose edges are
-    fuzzy by up to a second.
+    over ``{unix_ts}#{uuid}`` is a *cheap superset* applied before read
+    capacity is charged; it is only second-accurate, because the SK
+    timestamp is the floor of ``created_at``. The exact bound is the
+    ``created_at`` pair in the ``FilterExpression``. Dropping either one
+    would be wrong in a different direction: no key range means paying
+    to read whole boundary partitions, no filter means a window whose
+    edges are fuzzy by up to a second.
+
+    The range is lexicographic, so it is chronological only while every
+    timestamp involved has the **same number of digits**. ``unix_ts`` is
+    written unpadded and happens to be 10 digits from 2001-09-09 until
+    it gains an 11th on 2286-11-20 — a property of the era we are in,
+    not of the format, and the same assumption every ``AUDIT#`` reader
+    has always made. A window straddling that instant would order
+    wrongly (``"9999999999#" > "10000000001"``), so the fix, if this
+    outlives us, is to zero-pad both the stored sort key and these
+    bounds together — never one without the other.
 
     **Two reasons a call stops early, one cursor shape.** Either the
     page filled (``limit``, clamped to ``[1, _ADMIN_PAGE_MAX]``) or the
